@@ -93,6 +93,27 @@ CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
 
+_LOCAL_PATH_RE = re.compile(
+    r"(?<![:/\w])/(?:root|opt|srv|var|etc)(?:/[^\s`'\"<>()\[\]{}，。；;]*)*"
+)
+_LOCAL_FILE_URL_RE = re.compile(r"file://[^\s`'\"<>()\[\]{}，。；;]*", re.IGNORECASE)
+
+
+def _sanitize_user_visible_text(text: Any) -> str:
+    """Scrub local filesystem references before returning API-visible text.
+
+    Prompt guidance handles the normal case, but the gateway is the final
+    boundary for desktop-pet/API replies.  Local paths and local-file URL
+    schemes reveal server layout even when used as "bad examples", so replace
+    them with generic labels.
+    """
+    value = str(text or "")
+    if not value:
+        return value
+    value = _LOCAL_FILE_URL_RE.sub("本地文件链接", value)
+    value = _LOCAL_PATH_RE.sub("本地路径", value)
+    return value
+
 
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
     """Parse a listen port without letting malformed env/config values crash startup."""
@@ -1649,7 +1670,7 @@ class APIServerAdapter(BasePlatformAdapter):
             gateway_session_key=gateway_session_key,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
-        final_response = result.get("final_response", "") if isinstance(result, dict) else ""
+        final_response = _sanitize_user_visible_text(result.get("final_response", "") if isinstance(result, dict) else "")
         headers = {"X-Hermes-Session-Id": effective_session_id or session_id}
         if gateway_session_key:
             headers["X-Hermes-Session-Key"] = gateway_session_key
@@ -1716,7 +1737,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
         def _delta(delta: str) -> None:
             if delta:
-                _enqueue("assistant.delta", {"message_id": message_id, "delta": delta})
+                _enqueue("assistant.delta", {"message_id": message_id, "delta": _sanitize_user_visible_text(delta)})
 
         def _tool_progress(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs) -> None:
             if event_type == "reasoning.available":
@@ -1739,7 +1760,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_progress_callback=_tool_progress,
                     gateway_session_key=gateway_session_key,
                 )
-                final_response = result.get("final_response", "") if isinstance(result, dict) else ""
+                final_response = _sanitize_user_visible_text(result.get("final_response", "") if isinstance(result, dict) else "")
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
                 turn_messages = self._turn_transcript_messages(history, user_message, result) if isinstance(result, dict) else []
                 await queue.put(_event_payload("assistant.completed", {
@@ -1940,7 +1961,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 # the final answer after tool calls.  The SSE loop detects
                 # completion via agent_task.done() instead.
                 if delta is not None:
-                    _stream_q.put(delta)
+                    _stream_q.put(_sanitize_user_visible_text(delta))
 
             # Track which tool_call_ids we've emitted a "running" lifecycle
             # event for, so a "completed" event without a matching "running"
@@ -2051,7 +2072,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=500,
                 )
 
-        final_response = result.get("final_response") or ""
+        final_response = _sanitize_user_visible_text(result.get("final_response") or "")
         is_partial = bool(result.get("partial"))
         is_failed = bool(result.get("failed"))
         completed = bool(result.get("completed", True))
@@ -2478,6 +2499,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 })
 
             async def _emit_text_delta(delta_text: str) -> None:
+                delta_text = _sanitize_user_visible_text(delta_text)
                 await _open_message_item()
                 final_text_parts.append(delta_text)
                 await _write_event("response.output_text.delta", {
@@ -2694,7 +2716,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 # deltas were streamed (e.g. some providers only emit
                 # the full response at the end), emit a single fallback
                 # delta so Responses clients still receive a live text part.
-                agent_final = result.get("final_response", "") if isinstance(result, dict) else ""
+                agent_final = _sanitize_user_visible_text(result.get("final_response", "") if isinstance(result, dict) else "")
                 if agent_final and not final_text_parts:
                     await _emit_text_delta(agent_final)
                 if agent_final and not final_response_text:
@@ -3006,7 +3028,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 # Forwarding would kill the SSE stream prematurely; the
                 # SSE writer detects completion via agent_task.done().
                 if delta is not None:
-                    _stream_q.put(delta)
+                    _stream_q.put(_sanitize_user_visible_text(delta))
 
             def _on_tool_progress(event_type, name, preview, args, **kwargs):
                 """Queue non-start tool progress events if needed in future.
@@ -3105,9 +3127,9 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=500,
                 )
 
-        final_response = result.get("final_response", "")
+        final_response = _sanitize_user_visible_text(result.get("final_response", ""))
         if not final_response:
-            final_response = result.get("error", "(No response generated)")
+            final_response = _sanitize_user_visible_text(result.get("error", "(No response generated)"))
 
         response_id = f"resp_{uuid.uuid4().hex[:28]}"
         created_at = int(time.time())
@@ -3620,9 +3642,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 })
 
         # Final assistant message
-        final = result.get("final_response", "")
+        final = _sanitize_user_visible_text(result.get("final_response", ""))
         if not final:
-            final = result.get("error", "(No response generated)")
+            final = _sanitize_user_visible_text(result.get("error", "(No response generated)"))
 
         items.append({
             "type": "message",
@@ -3937,7 +3959,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     "event": "message.delta",
                     "run_id": run_id,
                     "timestamp": time.time(),
-                    "delta": delta,
+                    "delta": _sanitize_user_visible_text(delta),
                 })
             except Exception:
                 pass
@@ -4054,7 +4076,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         last_event="run.failed",
                     )
                 else:
-                    final_response = result.get("final_response", "") if isinstance(result, dict) else ""
+                    final_response = _sanitize_user_visible_text(result.get("final_response", "") if isinstance(result, dict) else "")
                     q.put_nowait({
                         "event": "run.completed",
                         "run_id": run_id,

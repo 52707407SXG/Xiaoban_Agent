@@ -7,6 +7,7 @@ Jaccard similarity reranking and trust-weighted scoring.
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -66,6 +67,17 @@ class FactRetriever:
         candidates = self._fts_candidates(query, category, min_trust, limit * 3)
 
         if not candidates:
+            fallback = self._substring_candidates(query, category, min_trust, limit)
+            if fallback:
+                return fallback
+            if self.hrr_weight > 0 and hrr._HAS_NUMPY:
+                query_vec = hrr.encode_text(query, self.hrr_dim)
+                return self._score_facts_by_vector(
+                    query_vec,
+                    category=category,
+                    min_trust=min_trust,
+                    limit=limit,
+                )
             return []
 
         # Stage 2: Rerank with Jaccard + trust + optional decay
@@ -445,13 +457,14 @@ class FactRetriever:
         self,
         target_vec: "np.ndarray",
         category: str | None = None,
+        min_trust: float = 0.0,
         limit: int = 10,
     ) -> list[dict]:
         """Score facts by similarity to a target vector."""
         conn = self.store._conn
 
-        where = "WHERE hrr_vector IS NOT NULL"
-        params: list = []
+        where = "WHERE hrr_vector IS NOT NULL AND trust_score >= ?"
+        params: list = [min_trust]
         if category:
             where += " AND category = ?"
             params.append(category)
@@ -473,6 +486,47 @@ class FactRetriever:
             fact_vec = hrr.bytes_to_phases(fact.pop("hrr_vector"))
             sim = hrr.similarity(target_vec, fact_vec)
             fact["score"] = (sim + 1.0) / 2.0 * fact["trust_score"]
+            scored.append(fact)
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored[:limit]
+
+    def _substring_candidates(
+        self,
+        query: str,
+        category: str | None,
+        min_trust: float,
+        limit: int,
+    ) -> list[dict]:
+        """Loose fallback for short CJK/mixed-token queries that FTS5 misses."""
+        terms = self._loose_terms(query)
+        if not terms:
+            return []
+
+        where = "WHERE trust_score >= ?"
+        params: list = [min_trust]
+        if category:
+            where += " AND category = ?"
+            params.append(category)
+
+        rows = self.store._conn.execute(
+            f"""
+            SELECT fact_id, content, category, tags, trust_score,
+                   retrieval_count, helpful_count, created_at, updated_at
+            FROM facts
+            {where}
+            """,
+            params,
+        ).fetchall()
+
+        scored = []
+        for row in rows:
+            fact = dict(row)
+            haystack = f"{fact.get('content', '')} {fact.get('tags', '')}".lower()
+            matched = sum(1 for term in terms if term in haystack)
+            if not matched:
+                continue
+            fact["score"] = (matched / len(terms)) * fact["trust_score"]
             scored.append(fact)
 
         scored.sort(key=lambda x: x["score"], reverse=True)
@@ -540,6 +594,24 @@ class FactRetriever:
             results.append(fact)
 
         return results
+
+    @staticmethod
+    def _loose_terms(text: str) -> list[str]:
+        """Extract terms suitable for substring matching.
+
+        FTS5's default tokenizer is weak for CJK and exact hyphenated markers.
+        This fallback preserves alnum/hyphen markers and short CJK runs so
+        durable facts like regression IDs and Chinese project rules are
+        retrievable even when MATCH returns no rows.
+        """
+        terms: list[str] = []
+        seen: set[str] = set()
+        for term in re.findall(r"[a-z0-9][a-z0-9_-]*|[\u4e00-\u9fff]{2,}", text.lower()):
+            if len(term) < 2 or term in seen:
+                continue
+            seen.add(term)
+            terms.append(term)
+        return terms
 
     @staticmethod
     def _tokenize(text: str) -> set[str]:

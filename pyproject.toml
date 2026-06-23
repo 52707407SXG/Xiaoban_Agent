@@ -121,6 +121,11 @@ dependencies = [
   # install rather than gating it behind an extra + a mid-session lazy install
   # (which deadlocked the CLI under prompt_toolkit — see #40490).
   "Pillow==12.2.0",
+  # Holographic memory's SQLite/FTS5 path works without NumPy, but its HRR
+  # algebra silently degrades when NumPy is absent. Xiaoban ships Holographic
+  # as the native memory provider, so keep the HRR dependency in core instead
+  # of relying on the unrelated voice extra to pull it in.
+  "numpy==2.4.3",
   # Windows log rotation. Stdlib ``RotatingFileHandler.doRollover()`` uses
   # ``os.rename()`` which fails with ``PermissionError [WinError 32]`` on
   # Windows whenever any other process holds an append-mode handle on
@@ -172,7 +177,6 @@ voice = [
   # so keep it out of the base install for source-build packagers like Homebrew.
   "faster-whisper==1.2.1",
   "sounddevice==0.5.5",
-  "numpy==2.4.3",
 ]
 pty = [
   # Kept as a no-op back-compat alias — `ptyprocess` and `pywinpty` are now

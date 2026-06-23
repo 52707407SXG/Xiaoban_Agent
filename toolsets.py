@@ -73,6 +73,11 @@ _XIAOBAN_CORE_TOOLS = [
     "computer_use",
 ]
 
+# Back-compat for inherited Hermes-era modules and tests that still import the
+# old private name. Keep this alias until the full fork is rebranded; changing
+# every import at once is lower value than preserving one canonical tool list.
+_HERMES_CORE_TOOLS = _XIAOBAN_CORE_TOOLS
+
 # Webhook events may originate from untrusted third-party content (for example,
 # public PR titles/comments). Keep the default webhook toolset intentionally
 # constrained to avoid local file/system execution by prompt injection.
