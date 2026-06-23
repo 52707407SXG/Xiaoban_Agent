@@ -1,0 +1,92 @@
+{
+  "contractVersion": "mystand.module-capability.v0.1",
+  "moduleId": "works-processing",
+  "packageName": "@mystand/works-processing",
+  "version": "0.1.0",
+  "displayName": "作品加工",
+  "owner": "official",
+  "category": "content",
+  "capabilities": {
+    "provides": ["works.read", "works.generate", "works.publish_draft"],
+    "requires": ["file.asset.read"]
+  },
+  "permissions": [
+    {
+      "capability": "works.read",
+      "roles": ["owner", "admin", "manager", "staff"],
+      "scopes": ["self", "team", "company"],
+      "defaultGrant": true
+    },
+    {
+      "capability": "works.generate",
+      "roles": ["owner", "admin", "manager", "staff"],
+      "scopes": ["self", "team"],
+      "defaultGrant": false
+    },
+    {
+      "capability": "works.publish_draft",
+      "roles": ["owner", "admin", "manager"],
+      "scopes": ["self", "team"],
+      "defaultGrant": false
+    }
+  ],
+  "dataScopes": [
+    {
+      "namespace": "works_projects",
+      "ownerScope": "company",
+      "recordKeyPattern": "works:{projectId}"
+    }
+  ],
+  "events": {
+    "emits": ["works.draft.created", "works.draft.updated", "works.publish.requested"],
+    "subscribes": ["file.asset.created"]
+  },
+  "agent": {
+    "tools": [
+      {
+        "toolName": "read_project",
+        "description": "读取作品加工项目的授权摘要和当前状态。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "projectId": {"type": "string"}
+          },
+          "required": ["projectId"]
+        },
+        "outputSchema": {"type": "object"},
+        "requiredCapability": "works.read",
+        "idempotency": "none",
+        "sideEffect": "read"
+      },
+      {
+        "toolName": "generate_xiaohongshu_post",
+        "description": "根据授权素材和用户要求生成小红书图文草稿。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "projectId": {"type": "string"},
+            "brief": {"type": "string"},
+            "style": {"type": "string"}
+          },
+          "required": ["projectId", "brief"]
+        },
+        "outputSchema": {"type": "object"},
+        "requiredCapability": "works.generate",
+        "idempotency": "required",
+        "sideEffect": "write"
+      }
+    ],
+    "contextProviders": [
+      {
+        "providerId": "current_project_summary",
+        "description": "当前作品加工项目的用途、素材、约束和输出状态摘要。",
+        "requiredCapability": "works.read"
+      }
+    ]
+  },
+  "migrations": {
+    "hasSchemaMigration": false,
+    "requiresManualApproval": false
+  }
+}
+

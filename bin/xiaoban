@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""
+Xiaoban-Agent CLI launcher.
+
+This wrapper behaves like the installed `xiaoban` command, including
+subcommands such as `gateway`, `cron`, and `doctor`.
+"""
+
+if __name__ == "__main__":
+    from xiaoban.cli import main
+
+    main()
+

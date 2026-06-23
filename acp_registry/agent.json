@@ -1,0 +1,16 @@
+{
+  "id": "xiaoban-agent",
+  "name": "Xiaoban-Agent",
+  "version": "0.17.0",
+  "description": "Self-improving open-source AI agent by Nous Research with ACP editor integration, persistent memory, skills, and rich tool support.",
+  "repository": "https://github.com/52707407SXG/Xiaoban-Agent",
+  "website": "https://github.com/52707407SXG/Xiaoban-Agent/docs/user-guide/features/acp",
+  "authors": ["Nous Research"],
+  "license": "MIT",
+  "distribution": {
+    "uvx": {
+      "package": "xiaoban-agent[acp]==0.17.0",
+      "args": ["hermes-acp"]
+    }
+  }
+}

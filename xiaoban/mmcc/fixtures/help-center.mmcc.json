@@ -1,0 +1,85 @@
+{
+  "contractVersion": "mystand.module-capability.v0.1",
+  "moduleId": "help-center",
+  "packageName": "@mystand/help-center",
+  "version": "0.1.0",
+  "displayName": "帮助中心",
+  "owner": "core",
+  "category": "knowledge",
+  "capabilities": {
+    "provides": ["help.search", "help.read"],
+    "requires": []
+  },
+  "permissions": [
+    {
+      "capability": "help.search",
+      "roles": ["owner", "admin", "manager", "staff", "visitor"],
+      "scopes": ["public", "company"],
+      "defaultGrant": true
+    },
+    {
+      "capability": "help.read",
+      "roles": ["owner", "admin", "manager", "staff", "visitor"],
+      "scopes": ["public", "company"],
+      "defaultGrant": true
+    }
+  ],
+  "dataScopes": [
+    {
+      "namespace": "help_documents",
+      "ownerScope": "site",
+      "recordKeyPattern": "help:{documentId}"
+    }
+  ],
+  "events": {
+    "emits": ["help.article.viewed"],
+    "subscribes": []
+  },
+  "agent": {
+    "tools": [
+      {
+        "toolName": "search",
+        "description": "搜索 My Stand 帮助中心文档，返回和用户问题相关的条目摘要。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10}
+          },
+          "required": ["query"]
+        },
+        "outputSchema": {"type": "object"},
+        "requiredCapability": "help.search",
+        "idempotency": "none",
+        "sideEffect": "read"
+      },
+      {
+        "toolName": "read_article",
+        "description": "读取用户有权限查看的帮助中心文章摘要。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "documentId": {"type": "string"}
+          },
+          "required": ["documentId"]
+        },
+        "outputSchema": {"type": "object"},
+        "requiredCapability": "help.read",
+        "idempotency": "none",
+        "sideEffect": "read"
+      }
+    ],
+    "contextProviders": [
+      {
+        "providerId": "current_page_help",
+        "description": "当前页面或模块相关的帮助中心摘要。",
+        "requiredCapability": "help.read"
+      }
+    ]
+  },
+  "migrations": {
+    "hasSchemaMigration": false,
+    "requiresManualApproval": false
+  }
+}
+

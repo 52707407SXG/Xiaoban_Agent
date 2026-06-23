@@ -1,0 +1,98 @@
+{
+  "contractVersion": "mystand.module-capability.v0.1",
+  "moduleId": "event-center",
+  "packageName": "@mystand/event-center",
+  "version": "0.1.0",
+  "displayName": "事件中心",
+  "owner": "core",
+  "category": "workflow",
+  "capabilities": {
+    "provides": ["event.read", "event.create", "event.update", "event.cancel"],
+    "requires": []
+  },
+  "permissions": [
+    {
+      "capability": "event.read",
+      "roles": ["owner", "admin", "manager", "staff"],
+      "scopes": ["self", "team", "company"],
+      "defaultGrant": true
+    },
+    {
+      "capability": "event.create",
+      "roles": ["owner", "admin", "manager", "staff"],
+      "scopes": ["self", "team"],
+      "defaultGrant": false
+    },
+    {
+      "capability": "event.update",
+      "roles": ["owner", "admin", "manager", "staff"],
+      "scopes": ["self", "team"],
+      "defaultGrant": false
+    },
+    {
+      "capability": "event.cancel",
+      "roles": ["owner", "admin", "manager"],
+      "scopes": ["self", "team"],
+      "defaultGrant": false
+    }
+  ],
+  "dataScopes": [
+    {
+      "namespace": "event_records",
+      "ownerScope": "company",
+      "recordKeyPattern": "event:{eventId}"
+    }
+  ],
+  "events": {
+    "emits": ["event.created", "event.updated", "event.cancelled", "event.due"],
+    "subscribes": ["task.completed", "module.reminder.requested"]
+  },
+  "agent": {
+    "tools": [
+      {
+        "toolName": "read_due_events",
+        "description": "读取当前用户授权范围内的到期事件摘要。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "windowHours": {"type": "integer", "minimum": 1, "maximum": 720}
+          }
+        },
+        "outputSchema": {"type": "object"},
+        "requiredCapability": "event.read",
+        "idempotency": "none",
+        "sideEffect": "read"
+      },
+      {
+        "toolName": "create_event",
+        "description": "创建新的 My Stand 事件或提醒。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {"type": "string"},
+            "dueAt": {"type": "string"},
+            "assigneeUserId": {"type": "string"},
+            "sourceModuleId": {"type": "string"}
+          },
+          "required": ["title", "dueAt"]
+        },
+        "outputSchema": {"type": "object"},
+        "requiredCapability": "event.create",
+        "idempotency": "required",
+        "sideEffect": "write"
+      }
+    ],
+    "contextProviders": [
+      {
+        "providerId": "pending_events_summary",
+        "description": "当前用户授权范围内的待处理事件摘要。",
+        "requiredCapability": "event.read"
+      }
+    ]
+  },
+  "migrations": {
+    "hasSchemaMigration": false,
+    "requiresManualApproval": false
+  }
+}
+
