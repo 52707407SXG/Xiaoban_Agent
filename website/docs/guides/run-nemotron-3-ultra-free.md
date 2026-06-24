@@ -20,11 +20,11 @@ The simplest path: a one-click installer with a guided, point-and-click setup. N
 
 ### 1. Download and install
 
-[Download the Xiaoban Desktop installer](https://github.com/52707407SXG/Xiaoban-Agent/) for macOS or Windows, then open it. On first launch it finishes setting itself up (usually under a minute).
+[Download the Xiaoban Desktop installer](https://github.com/52707407SXG/Xiaoban_Agent/) for macOS or Windows, then open it. On first launch it finishes setting itself up (usually under a minute).
 
 ### 2. Connect Nous Portal
 
-When the app opens, you'll see a "Let's get you set up" screen. Click **Nous Portal** (marked **Recommended**). Your browser opens — create a [Nous Portal](https://portal.nousresearch.com) account (or sign in), choose the **Free** plan, and authorize Hermes. The app connects automatically.
+When the app opens, you'll see a "Let's get you set up" screen. Click **Nous Portal** (marked **Recommended**). Your browser opens — create a [Nous Portal](https://portal.nousresearch.com) account (or sign in), choose the **Free** plan, and authorize Xiaoban. The app connects automatically.
 
 ### 3. Pick the free Nemotron 3 Ultra model
 
@@ -49,16 +49,16 @@ Prefer the terminal?
 On macOS/Linux/WSL2/Android, run
 
 ```bash
-curl -fsSL https://github.com/52707407SXG/Xiaoban-Agent/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/52707407SXG/Xiaoban_Agent/main/scripts/install.sh | bash
 ```
 
 On Windows, run
 
 ```powershell
-iex (irm https://github.com/52707407SXG/Xiaoban-Agent/install.ps1)
+iex (irm https://raw.githubusercontent.com/52707407SXG/Xiaoban_Agent/main/scripts/install.ps1)
 ```
 
-Prefer to review first? Download [`install.sh`](https://github.com/52707407SXG/Xiaoban-Agent/install.sh), inspect it, then run it.
+Prefer to review first? Download [`install.sh`](https://raw.githubusercontent.com/52707407SXG/Xiaoban_Agent/main/scripts/install.sh), inspect it, then run it.
 
 After it finishes, reload your shell:
 
@@ -72,7 +72,7 @@ source ~/.bashrc   # or source ~/.zshrc
 xiaoban setup
 ```
 
-Select **Quick Setup**. Hermes opens a browser tab and waits for you to finish the next steps.
+Select **Quick Setup**. Xiaoban opens a browser tab and waits for you to finish the next steps.
 
 ### 3. Create a Nous Portal account
 
@@ -97,7 +97,7 @@ The `:free` tag is what keeps it on the no-cost tier, so make sure you pick that
 Complete the remaining Quick Setup prompts, then run:
 
 ```bash
-hermes
+xiaoban
 ```
 
 That's it — you're talking to Nemotron 3 Ultra, free.
@@ -111,13 +111,13 @@ Already set up with another model?
 
 ## Troubleshooting
 
-- **Don't see the model in the list?** Make sure you finished the Nous Portal connection and that you're on the **Free** plan. In the CLI, `hermes portal info` confirms you're logged in and routing through Nous.
+- **Don't see the model in the list?** Make sure you finished the Nous Portal connection and that you're on the **Free** plan. In the CLI, `xiaoban portal info` confirms you're logged in and routing through Nous.
 - **Picked the wrong variant?** Re-select `nvidia/nemotron-3-ultra:free` — the `:free` suffix is required to stay on the no-cost tier.
 - **Browser didn't open / you're on a remote host (CLI)?** See [OAuth over SSH / Remote Hosts](/guides/oauth-over-ssh) for port-forwarding and manual-paste workarounds.
 
 ## See also
 
 - **[Desktop App](/user-guide/desktop)** — The native one-click app (macOS, Windows, Linux)
-- **[Run Xiaoban-Agent with Nous Portal](/guides/run-hermes-with-nous-portal)** — Full Portal walkthrough: models, Tool Gateway, and verification
+- **[Run Xiaoban-Agent with Nous Portal](/guides/run-xiaoban-with-nous-portal)** — Full Portal walkthrough: models, Tool Gateway, and verification
 - **[Nous Portal integration](/integrations/nous-portal)** — What's in the subscription
 - **[Quickstart](/getting-started/quickstart)** — Install-to-chat in under 5 minutes

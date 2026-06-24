@@ -16,7 +16,7 @@ Codex emits items with a discriminator field `type`:
   - plan/hookPrompt/collabAgentToolCall → recorded as opaque assistant notes
 
 Each item maps to AT MOST one assistant entry + one tool entry, preserving
-Hermes' message-alternation invariants (system → user → assistant → user/tool
+Xiaoban' message-alternation invariants (system → user → assistant → user/tool
 → assistant → ...). Multiple Codex tool calls within one Codex turn produce
 multiple consecutive (assistant, tool) pairs, which is the same shape Xiaoban
 already produces for parallel tool calls.

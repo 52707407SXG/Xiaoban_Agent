@@ -2,7 +2,7 @@
 
 Renders any content as colored ASCII character video. Audio, video, images, text, or pure math in, MP4/GIF/PNG sequence out. Full RGB color per character cell, 1080p 24fps default. No GPU.
 
-Built for [Xiaoban-Agent](https://github.com/52707407SXG/Xiaoban-Agent). Usable in any coding agent. Canonical source lives here; synced to [`52707407SXG/Xiaoban-Agent/skills/creative/ascii-video`](https://github.com/52707407SXG/Xiaoban-Agent/tree/main/skills/creative/ascii-video) via PR.
+Built for [Xiaoban-Agent](https://github.com/52707407SXG/Xiaoban_Agent). Usable in any coding agent. Canonical source lives here; synced to [`52707407SXG/Xiaoban-Agent/skills/creative/ascii-video`](https://github.com/52707407SXG/Xiaoban_Agent/tree/main/skills/creative/ascii-video) via PR.
 
 ## What this is
 

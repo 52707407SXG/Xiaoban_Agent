@@ -43,27 +43,27 @@ SURFACE_PATHS = [
 FORBIDDEN_PATTERNS = [
     re.compile(pattern)
     for pattern in [
-        r"Hermes Agent",
-        r"Hermes CLI",
-        r"You are Hermes",
-        r"hermes-agent",
-        r"Hermes auto-inject",
-        r"send and receive emails as Hermes",
-        r"hermes-cli",
-        r"hermes-feishu",
-        r"hermes-weixin",
-        r"hermes-wecom",
-        r"hermes-qqbot",
-        r"hermes setup",
-        r"hermes tools",
-        r"hermes model",
-        r"hermes chat",
-        r"hermes gateway",
-        r"hermes update",
+        r"Xiaoban Agent",
+        r"Xiaoban CLI",
+        r"You are Xiaoban",
+        r"xiaoban-agent",
+        r"Xiaoban auto-inject",
+        r"send and receive emails as Xiaoban",
+        r"xiaoban-cli",
+        r"xiaoban-feishu",
+        r"xiaoban-weixin",
+        r"xiaoban-wecom",
+        r"xiaoban-qqbot",
+        r"xiaoban setup",
+        r"xiaoban tools",
+        r"xiaoban model",
+        r"xiaoban chat",
+        r"xiaoban gateway",
+        r"xiaoban update",
     ]
 ]
 
-HERMES_HOME_ALLOWED_PHRASES = (
+XIAOBAN_HOME_ALLOWED_PHRASES = (
     "legacy runtime compatibility",
     "inherited runtime compatibility",
 )
@@ -87,11 +87,11 @@ def main() -> int:
             for pattern in FORBIDDEN_PATTERNS:
                 if pattern.search(text):
                     failures.append(f"{path.relative_to(REPO_ROOT)}: {pattern.pattern}")
-            if "HERMES_HOME" in text and not any(
-                phrase in text for phrase in HERMES_HOME_ALLOWED_PHRASES
+            if "XIAOBAN_HOME" in text and not any(
+                phrase in text for phrase in XIAOBAN_HOME_ALLOWED_PHRASES
             ):
                 failures.append(
-                    f"{path.relative_to(REPO_ROOT)}: HERMES_HOME must be labeled as inherited runtime compatibility"
+                    f"{path.relative_to(REPO_ROOT)}: XIAOBAN_HOME must be labeled as inherited runtime compatibility"
                 )
     if failures:
         print("xiaoban-rebrand-check failed")

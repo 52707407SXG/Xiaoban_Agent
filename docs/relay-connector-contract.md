@@ -5,7 +5,7 @@
 > validated it. Evolution during the experimental phase is **additive-only**,
 > gated by `contract_version`. A breaking change updates both repos in lockstep.
 
-This document is the formal interface between the **Hermes gateway** (Python,
+This document is the formal interface between the **Xiaoban gateway** (Python,
 `gateway/relay/`) and the **connector** (Node/TypeScript,
 `NousResearch/gateway-gateway`). The connector implementer's first action is to
 read this file.
@@ -348,7 +348,7 @@ body (a body-asserted `instanceId` is ignored).
 
 These are connector-owned (the management plane is not part of the gateway's
 agent path); the gateway only calls `POST /relay/policy` (§7.3). The others are
-driven by the managed Portal / `hermes` CLI.
+driven by the managed Portal / `xiaoban` CLI.
 
 ### 7.3 Relevance-policy declaration (the gateway's responsibility)
 

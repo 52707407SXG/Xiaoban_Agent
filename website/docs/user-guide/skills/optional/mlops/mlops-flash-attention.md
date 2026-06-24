@@ -26,7 +26,7 @@ Optimizes transformer attention with Flash Attention for 2-4x speedup and 10-20x
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # Flash Attention - Fast Memory-Efficient Attention
@@ -359,9 +359,9 @@ Flash Attention uses float16/bfloat16 for speed. Float32 not supported.
 
 ## Advanced topics
 
-**Integration with HuggingFace Transformers**: See [references/transformers-integration.md](https://github.com/52707407SXG/Xiaoban-Agent/blob/main/optional-skills/mlops/flash-attention/references/transformers-integration.md) for enabling Flash Attention in BERT, GPT, Llama models.
+**Integration with HuggingFace Transformers**: See [references/transformers-integration.md](https://github.com/52707407SXG/Xiaoban_Agent/blob/main/optional-skills/mlops/flash-attention/references/transformers-integration.md) for enabling Flash Attention in BERT, GPT, Llama models.
 
-**Performance benchmarks**: See [references/benchmarks.md](https://github.com/52707407SXG/Xiaoban-Agent/blob/main/optional-skills/mlops/flash-attention/references/benchmarks.md) for detailed speed and memory comparisons across GPUs and sequence lengths.
+**Performance benchmarks**: See [references/benchmarks.md](https://github.com/52707407SXG/Xiaoban_Agent/blob/main/optional-skills/mlops/flash-attention/references/benchmarks.md) for detailed speed and memory comparisons across GPUs and sequence lengths.
 
 ## Hardware requirements
 

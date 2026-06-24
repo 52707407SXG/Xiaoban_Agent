@@ -26,7 +26,7 @@ ASCII art: pyfiglet, cowsay, boxes, image-to-ascii.
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # ASCII Art Skill
@@ -172,9 +172,9 @@ boxes -l                                       # List all 70+ designs
 ### Combine with pyfiglet or asciified
 
 ```bash
-python3 -m pyfiglet "HERMES" -f slant | boxes -d stone
+python3 -m pyfiglet "XIAOBAN" -f slant | boxes -d stone
 # Or without pyfiglet installed:
-curl -s "https://asciified.thelicato.io/api/v2/ascii?text=HERMES&font=Slant" | boxes -d stone
+curl -s "https://asciified.thelicato.io/api/v2/ascii?text=XIAOBAN&font=Slant" | boxes -d stone
 ```
 
 ## Tool 5: TOIlet (Colored Text Art)

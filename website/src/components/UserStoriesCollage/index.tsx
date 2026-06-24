@@ -176,7 +176,7 @@ export default function UserStoriesCollage(): JSX.Element {
         <p>
           What the Xiaoban-Agent community is actually building. Every tile
           below links to a real post, issue, video, or gist where someone
-          describes how they use Hermes &mdash; scraped from X, GitHub, Reddit,
+          describes how they use Xiaoban &mdash; scraped from X, GitHub, Reddit,
           Hacker News, YouTube, blogs, and podcasts.
         </p>
         <div className={styles.meta}>
@@ -293,9 +293,9 @@ export default function UserStoriesCollage(): JSX.Element {
       )}
 
       <div className={styles.footer}>
-        Built something with Hermes?{' '}
+        Built something with Xiaoban?{' '}
         <a
-          href="https://github.com/52707407SXG/Xiaoban-Agent/edit/main/website/src/data/userStories.json"
+          href="https://github.com/52707407SXG/Xiaoban_Agent/edit/main/website/src/data/userStories.json"
           target="_blank"
           rel="noopener noreferrer"
         >

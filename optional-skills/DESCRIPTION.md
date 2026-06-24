@@ -3,13 +3,13 @@
 Official skills maintained by Nous Research that are **not activated by default**.
 
 These skills ship with the xiaoban-agent repository but are not copied to
-`~/.hermes/skills/` during setup. They are discoverable via the Skills Hub:
+`~/.xiaoban/skills/` during setup. They are discoverable via the Skills Hub:
 
 ```bash
 xiaoban skills browse               # browse all skills, official shown first
 xiaoban skills browse --source official  # browse only official optional skills
 xiaoban skills search <query>       # finds optional skills labeled "official"
-xiaoban skills install <identifier> # copies to ~/.hermes/skills/ and activates
+xiaoban skills install <identifier> # copies to ~/.xiaoban/skills/ and activates
 ```
 
 ## Why optional?

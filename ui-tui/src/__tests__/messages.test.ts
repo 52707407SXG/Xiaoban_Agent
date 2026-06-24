@@ -1,4 +1,4 @@
-import { renderSync } from '@hermes/ink'
+import { renderSync } from '@xiaoban/ink'
 import React from 'react'
 import { PassThrough } from 'stream'
 import { describe, expect, it } from 'vitest'
@@ -23,7 +23,7 @@ describe('toTranscriptMessages', () => {
       ['assistant', 'first answer'],
       ['user', 'second prompt']
     ])
-    expect(toTranscriptMessages(rows)[1]?.tools?.[0]).toContain('Search Files')
+    expect(toTranscriptMessages(rows)[1]?.tools?.[0]).toContain('grep')
   })
 })
 

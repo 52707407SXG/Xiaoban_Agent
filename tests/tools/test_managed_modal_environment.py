@@ -32,26 +32,26 @@ def _restore_tool_and_agent_modules():
     original_modules = {
         name: module
         for name, module in sys.modules.items()
-        if name in {"tools", "agent", "hermes_cli"}
+        if name in {"tools", "agent", "xiaoban_cli"}
         or name.startswith("tools.")
         or name.startswith("agent.")
-        or name.startswith("hermes_cli.")
+        or name.startswith("xiaoban_cli.")
     }
     try:
         yield
     finally:
-        _reset_modules(("tools", "agent", "hermes_cli"))
+        _reset_modules(("tools", "agent", "xiaoban_cli"))
         sys.modules.update(original_modules)
 
 
 def _install_fake_tools_package(*, credential_mounts=None):
-    _reset_modules(("tools", "agent", "hermes_cli"))
+    _reset_modules(("tools", "agent", "xiaoban_cli"))
 
-    hermes_cli = types.ModuleType("hermes_cli")
-    hermes_cli.__path__ = []  # type: ignore[attr-defined]
-    sys.modules["hermes_cli"] = hermes_cli
-    sys.modules["hermes_cli.config"] = types.SimpleNamespace(
-        get_hermes_home=lambda: Path(tempfile.gettempdir()) / "hermes-home",
+    xiaoban_cli = types.ModuleType("xiaoban_cli")
+    xiaoban_cli.__path__ = []  # type: ignore[attr-defined]
+    sys.modules["xiaoban_cli"] = xiaoban_cli
+    sys.modules["xiaoban_cli.config"] = types.SimpleNamespace(
+        get_xiaoban_home=lambda: Path(tempfile.gettempdir()) / "xiaoban-home",
     )
 
     tools_package = types.ModuleType("tools")
@@ -280,7 +280,7 @@ def test_managed_modal_rejects_host_credential_passthrough():
     _install_fake_tools_package(
         credential_mounts=[{
             "host_path": "/tmp/token.json",
-            "container_path": "/root/.hermes/token.json",
+            "container_path": "/root/.xiaoban/token.json",
         }]
     )
     managed_modal = _load_tool_module("tools.environments.managed_modal", "environments/managed_modal.py")

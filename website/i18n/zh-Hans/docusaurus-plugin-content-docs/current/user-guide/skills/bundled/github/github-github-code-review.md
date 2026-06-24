@@ -26,7 +26,7 @@ description: "通过 gh 或 REST 审查 PR：差异对比、行内评论"
 ## 参考：完整 SKILL.md
 
 :::info
-以下是 Hermes 在触发此 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。
+以下是 Xiaoban 在触发此 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。
 :::
 
 # GitHub Code Review
@@ -46,8 +46,8 @@ if command -v gh &>/dev/null && gh auth status &>/dev/null; then
 else
   AUTH="git"
   if [ -z "$GITHUB_TOKEN" ]; then
-    if [ -f ~/.hermes/.env ] && grep -q "^GITHUB_TOKEN=" ~/.hermes/.env; then
-      GITHUB_TOKEN=$(grep "^GITHUB_TOKEN=" ~/.hermes/.env | head -1 | cut -d= -f2 | tr -d '\n\r')
+    if [ -f ~/.xiaoban/.env ] && grep -q "^GITHUB_TOKEN=" ~/.xiaoban/.env; then
+      GITHUB_TOKEN=$(grep "^GITHUB_TOKEN=" ~/.xiaoban/.env | head -1 | cut -d= -f2 | tr -d '\n\r')
     elif grep -q "github.com" ~/.git-credentials 2>/dev/null; then
       GITHUB_TOKEN=$(grep "github.com" ~/.git-credentials 2>/dev/null | head -1 | sed 's|https://[^:]*:\([^@]*\)@.*|\1|')
     fi
@@ -353,7 +353,7 @@ curl -s -X POST \
 ### 第一步：设置环境
 
 ```bash
-source "${HERMES_HOME:-$HOME/.hermes}/skills/github/github-auth/scripts/gh-env.sh"
+source "${XIAOBAN_HOME:-$HOME/.xiaoban}/skills/github/github-auth/scripts/gh-env.sh"
 # 或运行本 skill 顶部的内联设置代码块
 ```
 

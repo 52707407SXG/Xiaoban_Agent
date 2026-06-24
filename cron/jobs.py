@@ -1,8 +1,8 @@
 """
 Cron job storage and management.
 
-Jobs are stored in ~/.hermes/cron/jobs.json
-Output is saved to ~/.hermes/cron/output/{job_id}/{timestamp}.md
+Jobs are stored in ~/.xiaoban/cron/jobs.json
+Output is saved to ~/.xiaoban/cron/output/{job_id}/{timestamp}.md
 """
 
 import contextlib
@@ -31,12 +31,12 @@ except ImportError:  # pragma: no cover - non-Windows
     msvcrt = None
 from datetime import datetime, timedelta
 from pathlib import Path
-from hermes_constants import get_hermes_home
+from xiaoban_constants import get_xiaoban_home
 from typing import Optional, Dict, List, Any, Union
 
 logger = logging.getLogger(__name__)
 
-from hermes_time import now as _hermes_now
+from xiaoban_time import now as _xiaoban_now
 from utils import atomic_replace
 
 try:
@@ -49,11 +49,11 @@ except ImportError:
 # Configuration
 # =============================================================================
 
-HERMES_DIR = get_hermes_home().resolve()
-CRON_DIR = HERMES_DIR / "cron"
+XIAOBAN_DIR = get_xiaoban_home().resolve()
+CRON_DIR = XIAOBAN_DIR / "cron"
 JOBS_FILE = CRON_DIR / "jobs.json"
 # Heartbeat file the in-process ticker touches on every loop iteration. The
-# gateway process and the (separate) ``hermes cron status`` process share it
+# gateway process and the (separate) ``xiaoban cron status`` process share it
 # so status can tell whether the ticker THREAD is alive, not just whether the
 # gateway PROCESS exists — a ticker that dies silently inside a live gateway
 # would otherwise report healthy (#32612, #32895).
@@ -63,7 +63,7 @@ TICKER_HEARTBEAT_FILE = CRON_DIR / "ticker_heartbeat"
 TICKER_SUCCESS_FILE = CRON_DIR / "ticker_last_success"
 # Default ticker loop interval (seconds). The single source of truth shared by
 # the in-process ticker (cron/scheduler_provider.py) and the staleness
-# threshold in `hermes cron status` (hermes_cli/cron.py), so the two never
+# threshold in `xiaoban cron status` (xiaoban_cli/cron.py), so the two never
 # drift apart.
 TICKER_INTERVAL_SECONDS = 60
 
@@ -88,7 +88,7 @@ def _jobs_lock():
     Combines the in-process threading lock (cheap mutual exclusion between
     the gateway's parallel tick threads) with a cross-process advisory file
     lock on ``<cron dir>/.jobs.lock`` (mutual exclusion between the gateway process
-    and standalone ``hermes`` CLI invocations, which previously shared no lock
+    and standalone ``xiaoban`` CLI invocations, which previously shared no lock
     at all — a `cron pause` could be silently clobbered by a concurrent
     gateway write, leaving a "paused" job still firing).
 
@@ -372,7 +372,7 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
     # Duration like "30m", "2h", "1d" → one-shot from now
     try:
         minutes = parse_duration(schedule)
-        run_at = _hermes_now() + timedelta(minutes=minutes)
+        run_at = _xiaoban_now() + timedelta(minutes=minutes)
         return {
             "kind": "once",
             "run_at": run_at.isoformat(),
@@ -391,18 +391,18 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
 
 
 def _ensure_aware(dt: datetime) -> datetime:
-    """Return a timezone-aware datetime in Hermes configured timezone.
+    """Return a timezone-aware datetime in Xiaoban configured timezone.
 
     Backward compatibility:
     - Older stored timestamps may be naive.
     - Naive values are interpreted as *system-local wall time* (the timezone
       `datetime.now()` used when they were created), then converted to the
-      configured Hermes timezone.
+      configured Xiaoban timezone.
 
     This preserves relative ordering for legacy naive timestamps across
     timezone changes and avoids false not-due results.
     """
-    target_tz = _hermes_now().tzinfo
+    target_tz = _xiaoban_now().tzinfo
     if dt.tzinfo is None:
         local_tz = datetime.now().astimezone().tzinfo
         return dt.replace(tzinfo=local_tz).astimezone(target_tz)
@@ -424,7 +424,7 @@ def _timezone_offset_mismatch(stored: datetime, current: datetime) -> bool:
 def _stored_wall_clock_is_future(stored: datetime, current: datetime) -> bool:
     """Return True when the stored local wall-clock time has not arrived yet.
 
-    Cron schedules express local wall-clock intent. If Hermes/system local time
+    Cron schedules express local wall-clock intent. If Xiaoban/system local time
     changes after next_run_at was persisted, an old offset can make a future
     wall-clock run look due at the converted absolute time (for example
     21:00+10 becomes 13:00+02). Comparing naive wall-clock values lets us
@@ -480,7 +480,7 @@ def _compute_grace_seconds(schedule: dict) -> int:
 
     if kind == "cron" and HAS_CRONITER:
         try:
-            now = _hermes_now()
+            now = _xiaoban_now()
             cron = croniter(schedule["expr"], now)
             first = cron.get_next(datetime)
             second = cron.get_next(datetime)
@@ -499,7 +499,7 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 
     Returns ISO timestamp string, or None if no more runs.
     """
-    now = _hermes_now()
+    now = _xiaoban_now()
 
     if schedule["kind"] == "once":
         return _recoverable_oneshot_run_at(schedule, now, last_run_at=last_run_at)
@@ -540,14 +540,14 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 
 
 # =============================================================================
-# Ticker heartbeat (liveness signal for `hermes cron status`)
+# Ticker heartbeat (liveness signal for `xiaoban cron status`)
 # =============================================================================
 
 def _atomic_write_epoch(path: Path) -> None:
     """Atomically write the current epoch time to ``path``.
 
     Uses the same tmpfile + ``atomic_replace`` pattern as ``save_jobs`` so a
-    concurrent reader in another process (``hermes cron status``) never sees a
+    concurrent reader in another process (``xiaoban cron status``) never sees a
     torn/truncated file. Best-effort: failures are swallowed by callers.
     """
     ensure_dirs()
@@ -571,7 +571,7 @@ def record_ticker_heartbeat(success: bool = False) -> None:
 
     The ticker calls this once per loop iteration. ``success=True`` additionally
     bumps the *last successful tick* marker. We track two distinct signals so
-    `hermes cron status` can tell a thread that is merely *alive and looping*
+    `xiaoban cron status` can tell a thread that is merely *alive and looping*
     (heartbeat fresh, success stale) from one that is actually *firing jobs*
     (both fresh) — a ticker stuck failing every tick would otherwise keep the
     plain heartbeat fresh and falsely report healthy (#32612, #32895).
@@ -669,7 +669,7 @@ def _save_jobs_unlocked(jobs: List[Dict[str, Any]]):
     fd, tmp_path = tempfile.mkstemp(dir=str(JOBS_FILE.parent), suffix='.tmp', prefix='.jobs_')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump({"jobs": jobs, "updated_at": _hermes_now().isoformat()}, f, indent=2)
+            json.dump({"jobs": jobs, "updated_at": _xiaoban_now().isoformat()}, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
         atomic_replace(tmp_path, JOBS_FILE)
@@ -760,7 +760,7 @@ def create_job(
                 delivered verbatim. Without ``no_agent``, its stdout is
                 injected into the agent's prompt as context (data-collection /
                 change-detection pattern). Paths resolve under
-                ~/.hermes/scripts/; ``.sh`` / ``.bash`` files run via bash,
+                ~/.xiaoban/scripts/; ``.sh`` / ``.bash`` files run via bash,
                 anything else via Python.
         context_from: Optional job ID (or list of job IDs) whose most recent output
                       is injected into the prompt as context before each run.
@@ -801,7 +801,7 @@ def create_job(
         deliver = "origin" if origin else "local"
 
     job_id = uuid.uuid4().hex[:12]
-    now = _hermes_now().isoformat()
+    now = _xiaoban_now().isoformat()
 
     normalized_skills = _normalize_skill_list(skill, skills)
     normalized_model = str(model).strip() if isinstance(model, str) else None
@@ -1002,7 +1002,7 @@ def pause_job(job_id: str, reason: Optional[str] = None) -> Optional[Dict[str, A
         {
             "enabled": False,
             "state": "paused",
-            "paused_at": _hermes_now().isoformat(),
+            "paused_at": _xiaoban_now().isoformat(),
             "paused_reason": reason,
         },
     )
@@ -1039,7 +1039,7 @@ def trigger_job(job_id: str) -> Optional[Dict[str, Any]]:
             "state": "scheduled",
             "paused_at": None,
             "paused_reason": None,
-            "next_run_at": _hermes_now().isoformat(),
+            "next_run_at": _xiaoban_now().isoformat(),
         },
     )
 
@@ -1082,7 +1082,7 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
         jobs = load_jobs()
         for i, job in enumerate(jobs):
             if job["id"] == job_id:
-                now = _hermes_now().isoformat()
+                now = _xiaoban_now().isoformat()
                 job["last_run_at"] = now
                 job["last_status"] = "ok" if success else "error"
                 job["last_error"] = error if not success else None
@@ -1162,7 +1162,7 @@ def advance_next_run(job_id: str) -> bool:
                 kind = job.get("schedule", {}).get("kind")
                 if kind not in {"cron", "interval"}:
                     return False
-                now = _hermes_now().isoformat()
+                now = _xiaoban_now().isoformat()
                 new_next = compute_next_run(job["schedule"], now)
                 if new_next and new_next != job.get("next_run_at"):
                     job["next_run_at"] = new_next
@@ -1175,10 +1175,10 @@ def advance_next_run(job_id: str) -> bool:
 def _machine_id() -> str:
     """Stable-ish identifier for claim attribution/debugging (NOT correctness).
 
-    Uses ``HERMES_MACHINE_ID`` if set, else hostname + pid. The CAS correctness
+    Uses ``XIAOBAN_MACHINE_ID`` if set, else hostname + pid. The CAS correctness
     comes from the file lock + the fresh-claim check, not from this value.
     """
-    explicit = os.getenv("HERMES_MACHINE_ID", "").strip()
+    explicit = os.getenv("XIAOBAN_MACHINE_ID", "").strip()
     if explicit:
         return explicit
     try:
@@ -1217,7 +1217,7 @@ def claim_job_for_fire(job_id: str, *, claim_ttl_seconds: int = 300) -> bool:
                 continue
             if not job.get("enabled", True) or job.get("state") == "paused":
                 return False
-            now = _hermes_now()
+            now = _xiaoban_now()
             existing = job.get("fire_claim")
             if existing:
                 try:
@@ -1257,7 +1257,7 @@ def get_due_jobs() -> List[Dict[str, Any]]:
 
 def _get_due_jobs_locked() -> List[Dict[str, Any]]:
     """Inner implementation of get_due_jobs(); must be called with _jobs_lock held."""
-    now = _hermes_now()
+    now = _xiaoban_now()
     raw_jobs = load_jobs()
     jobs = [_apply_skill_fields(j) for j in copy.deepcopy(raw_jobs)]
     due = []
@@ -1401,7 +1401,7 @@ def save_job_output(job_id: str, output: str):
     job_output_dir.mkdir(parents=True, exist_ok=True)
     _secure_dir(job_output_dir)
     
-    timestamp = _hermes_now().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp = _xiaoban_now().strftime("%Y-%m-%d_%H-%M-%S")
     output_file = job_output_dir / f"{timestamp}.md"
     
     fd, tmp_path = tempfile.mkstemp(dir=str(job_output_dir), suffix='.tmp', prefix='.output_')

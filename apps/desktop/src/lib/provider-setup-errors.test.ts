@@ -8,8 +8,8 @@ describe('isProviderSetupErrorMessage', () => {
       true
     )
     expect(isProviderSetupErrorMessage('No inference provider is configured.')).toBe(true)
-    expect(isProviderSetupErrorMessage('No Hermes provider is configured.')).toBe(true)
-    expect(isProviderSetupErrorMessage('set an API key (OPENROUTER_API_KEY) in ~/.hermes/.env')).toBe(true)
+    expect(isProviderSetupErrorMessage('No Xiaoban provider is configured.')).toBe(true)
+    expect(isProviderSetupErrorMessage('set an API key (OPENROUTER_API_KEY) in ~/.xiaoban/.env')).toBe(true)
   })
 
   it('does not match non-provider runtime failures', () => {

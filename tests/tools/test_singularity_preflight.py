@@ -3,7 +3,7 @@
 Verifies that a clear error is raised when neither apptainer nor
 singularity is installed, instead of a cryptic FileNotFoundError.
 
-See: https://github.com/52707407SXG/Xiaoban-Agent/issues/1511
+See: https://github.com/52707407SXG/Xiaoban_Agent/issues/1511
 """
 
 import subprocess

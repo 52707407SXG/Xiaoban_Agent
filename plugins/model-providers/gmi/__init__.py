@@ -1,6 +1,6 @@
 """GMI Cloud provider profile."""
 
-from hermes_cli import __version__ as _HERMES_VERSION
+from xiaoban_cli import __version__ as _XIAOBAN_VERSION
 from providers import register_provider
 from providers.base import ProviderProfile
 
@@ -16,7 +16,7 @@ gmi = ProviderProfile(
     # Attribution so GMI can identify traffic from Xiaoban-Agent.
     # The generic profile.default_headers fallback in run_agent.py and
     # agent/auxiliary_client.py picks this up at client construction time.
-    default_headers={"User-Agent": f"XiaobanAgent/{_HERMES_VERSION}"},
+    default_headers={"User-Agent": f"XiaobanAgent/{_XIAOBAN_VERSION}"},
     default_aux_model="google/gemini-3.1-flash-lite-preview",
     fallback_models=(
         "zai-org/GLM-5.1-FP8",

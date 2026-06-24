@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { SessionInfo, SessionMessage } from '@/types/hermes'
+import type { SessionInfo, SessionMessage } from '@/types/xiaoban'
 
 import { collectArtifactsForSession } from './index'
 

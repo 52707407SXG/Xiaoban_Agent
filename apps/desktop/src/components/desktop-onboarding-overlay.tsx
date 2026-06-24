@@ -8,7 +8,7 @@ import { Codicon } from '@/components/ui/codicon'
 import { ErrorIcon } from '@/components/ui/error-state'
 import { Input } from '@/components/ui/input'
 import { Loader } from '@/components/ui/loader'
-import { getGlobalModelOptions } from '@/hermes'
+import { getGlobalModelOptions } from '@/xiaoban'
 import { useI18n } from '@/i18n'
 import {
   Check,
@@ -46,7 +46,7 @@ import {
   startProviderOAuth,
   submitOnboardingCode
 } from '@/store/onboarding'
-import type { ModelOptionProvider, OAuthProvider } from '@/types/hermes'
+import type { ModelOptionProvider, OAuthProvider } from '@/types/xiaoban'
 
 interface DesktopOnboardingOverlayProps {
   enabled: boolean
@@ -93,7 +93,7 @@ const API_KEY_OPTIONS: ApiKeyOption[] = [
     id: 'local',
     name: 'Local / custom endpoint',
     envKey: 'OPENAI_BASE_URL',
-    docsUrl: 'https://github.com/52707407SXG/Xiaoban-Agent#bring-your-own-endpoint',
+    docsUrl: 'https://github.com/52707407SXG/Xiaoban_Agent#bring-your-own-endpoint',
     placeholder: 'http://127.0.0.1:8000/v1'
   }
 ]
@@ -408,7 +408,7 @@ function Header() {
 }
 
 export const FEATURED_ID = 'nous'
-const SHOW_ALL_KEY = 'hermes-onboarding-show-all-v1'
+const SHOW_ALL_KEY = 'xiaoban-onboarding-show-all-v1'
 
 const readShowAll = () => {
   try {

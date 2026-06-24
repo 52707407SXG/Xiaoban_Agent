@@ -26,7 +26,7 @@ State-of-the-art text-to-image generation with Stable Diffusion models via Huggi
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # Stable Diffusion Image Generation
@@ -531,8 +531,8 @@ image = pipe(prompt, num_inference_steps=20).images[0]
 
 ## References
 
-- **[Advanced Usage](https://github.com/52707407SXG/Xiaoban-Agent/blob/main/optional-skills/mlops/stable-diffusion/references/advanced-usage.md)** - Custom pipelines, fine-tuning, deployment
-- **[Troubleshooting](https://github.com/52707407SXG/Xiaoban-Agent/blob/main/optional-skills/mlops/stable-diffusion/references/troubleshooting.md)** - Common issues and solutions
+- **[Advanced Usage](https://github.com/52707407SXG/Xiaoban_Agent/blob/main/optional-skills/mlops/stable-diffusion/references/advanced-usage.md)** - Custom pipelines, fine-tuning, deployment
+- **[Troubleshooting](https://github.com/52707407SXG/Xiaoban_Agent/blob/main/optional-skills/mlops/stable-diffusion/references/troubleshooting.md)** - Common issues and solutions
 
 ## Resources
 

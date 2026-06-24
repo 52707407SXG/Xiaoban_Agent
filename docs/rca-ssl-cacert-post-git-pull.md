@@ -9,15 +9,15 @@ A partial `xiaoban update`, interrupted venv repair, or stale CA-bundle environm
 
 ## Root cause
 
-Hermes uses OpenAI/httpx and requests-based clients for provider calls, model metadata, gateway delivery, and web tools. Those clients inherit CA bundle settings from:
+Xiaoban uses OpenAI/httpx and requests-based clients for provider calls, model metadata, gateway delivery, and web tools. Those clients inherit CA bundle settings from:
 
-- `HERMES_CA_BUNDLE`
+- `XIAOBAN_CA_BUNDLE`
 - `SSL_CERT_FILE`
 - `REQUESTS_CA_BUNDLE`
 - `CURL_CA_BUNDLE`
 - the bundled `certifi` package's `cacert.pem`
 
-When the venv is partially refreshed, or when one of those env vars points at a file that no longer exists, provider client construction can fail before Hermes has enough context to produce a useful message.
+When the venv is partially refreshed, or when one of those env vars points at a file that no longer exists, provider client construction can fail before Xiaoban has enough context to produce a useful message.
 
 ## Fix
 
@@ -29,7 +29,7 @@ When the venv is partially refreshed, or when one of those env vars points at a 
 4. Builds an `ssl.SSLContext` from each checked bundle,
 5. Raises a typed `SSLConfigurationError` with a repair hint before httpx/OpenAI can raise a raw low-level error.
 
-`hermes_cli doctor` exposes the same check under `SSL / CA Certificates`, so users can diagnose the problem without starting a model session.
+`xiaoban_cli doctor` exposes the same check under `SSL / CA Certificates`, so users can diagnose the problem without starting a model session.
 
 ## Recovery
 
@@ -41,14 +41,14 @@ Repair: python -m pip install --force-reinstall certifi openai httpx
 If you configured a custom corporate CA bundle, fix or unset the broken CA bundle environment variable.
 ```
 
-For a normal corrupted Hermes venv, reinstall the affected client dependencies:
+For a normal corrupted Xiaoban venv, reinstall the affected client dependencies:
 
 ```bash
 python -m pip install --force-reinstall certifi openai httpx
 ```
 
-For a custom/corporate CA setup, fix the env var so it points at a real PEM bundle, or unset it if Hermes should use the bundled `certifi` store.
+For a custom/corporate CA setup, fix the env var so it points at a real PEM bundle, or unset it if Xiaoban should use the bundled `certifi` store.
 
 ## Environment escape hatch
 
-Set `HERMES_SKIP_SSL_GUARD=1` to bypass the preflight check. This is intended only for sandboxed or managed-trust environments where the Python CA path looks unusual but downstream clients are known to work.
+Set `XIAOBAN_SKIP_SSL_GUARD=1` to bypass the preflight check. This is intended only for sandboxed or managed-trust environments where the Python CA path looks unusual but downstream clients are known to work.

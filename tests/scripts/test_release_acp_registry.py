@@ -45,7 +45,7 @@ def _write_manifest(root: Path, version: str) -> None:
                 "distribution": {
                     "uvx": {
                         "package": f"xiaoban-agent[acp]=={version}",
-                        "args": ["hermes-acp"],
+                        "args": ["xiaoban-acp"],
                     }
                 },
             },
@@ -68,7 +68,7 @@ def test_update_acp_registry_versions_bumps_manifest_and_pin(monkeypatch, tmp_pa
     assert manifest["version"] == "0.14.0"
     assert manifest["distribution"]["uvx"]["package"] == "xiaoban-agent[acp]==0.14.0"
     # args stay untouched so we don't accidentally rewrite them.
-    assert manifest["distribution"]["uvx"]["args"] == ["hermes-acp"]
+    assert manifest["distribution"]["uvx"]["args"] == ["xiaoban-acp"]
 
 
 def test_update_acp_registry_versions_is_silent_when_manifest_missing(
@@ -90,7 +90,7 @@ def test_update_version_files_bumps_manifest_alongside_pyproject(
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "xiaoban-agent"\nversion = "0.13.0"\n', encoding="utf-8"
     )
-    version_dir = tmp_path / "hermes_cli"
+    version_dir = tmp_path / "xiaoban_cli"
     version_dir.mkdir()
     (version_dir / "__init__.py").write_text(
         '__version__ = "0.13.0"\n__release_date__ = "2026-05-14"\n',

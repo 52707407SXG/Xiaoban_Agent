@@ -5,7 +5,7 @@ import type { SlashCommand } from '../types.js'
 
 export const creditsCommands: SlashCommand[] = [
   {
-    help: 'Show Nous credit balance and top up',
+    help: '查看 Nous 余额并充值',
     name: 'credits',
     run: (_arg, ctx) => {
       ctx.gateway

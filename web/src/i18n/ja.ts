@@ -120,8 +120,8 @@ export const ja: Translations = {
     starting: "起動中",
     startedInBackground: "バックグラウンドで起動しました — 進行状況はログをご確認ください",
     stopped: "停止",
-    updateHermes: "Hermes を更新",
-    updatingHermes: "Hermes を更新しています…",
+    updateXiaoban: "Xiaoban を更新",
+    updatingXiaoban: "Xiaoban を更新しています…",
     waitingForOutput: "出力を待機しています…",
   },
 
@@ -319,7 +319,7 @@ export const ja: Translations = {
     enableRuntime: "有効化",
     forceReinstall: "強制再インストール (既存のフォルダを先に削除)",
     headline:
-      "Hermes プラグインを発見、インストール、有効化、更新します (`hermes plugins` 相当)。",
+      "Xiaoban プラグインを発見、インストール、有効化、更新します (`xiaoban plugins` 相当)。",
     identifierLabel: "Git URL または owner/repo",
     inactive: "非アクティブ",
     installBtn: "インストール",
@@ -336,8 +336,8 @@ export const ja: Translations = {
     providersHint:
       "memory.provider (空 = 組み込み) と context.engine を config.yaml に書き込みます。次のセッションで有効になります。",
     refreshDashboard: "ダッシュボード拡張を再スキャン",
-    removeConfirm: "このプラグインを ~/.hermes/plugins/ から削除しますか？",
-    removeHint: "削除できるのは ~/.hermes/plugins 配下のユーザーがインストールしたプラグインのみです。",
+    removeConfirm: "このプラグインを ~/.xiaoban/plugins/ から削除しますか？",
+    removeHint: "削除できるのは ~/.xiaoban/plugins 配下のユーザーがインストールしたプラグインのみです。",
     rescanHeading: "SPA プラグインレジストリ",
     rescanHint: "ディスクにファイルを追加した後に再スキャンすると、ダッシュボードのサイドバーが新しいマニフェストを認識します。",
     runtimeHeading: "ゲートウェイランタイム (YAML プラグイン)",
@@ -359,7 +359,7 @@ export const ja: Translations = {
     all: "すべて",
     categories: "カテゴリ",
     filters: "フィルター",
-    noSkills: "スキルが見つかりません。スキルは ~/.hermes/skills/ から読み込まれます",
+    noSkills: "スキルが見つかりません。スキルは ~/.xiaoban/skills/ から読み込まれます",
     noSkillsMatch: "検索またはフィルターに一致するスキルはありません。",
     skillCount: "{count} スキル{s}",
     resultCount: "{count} 件の結果{s}",
@@ -373,7 +373,7 @@ export const ja: Translations = {
   },
 
   config: {
-    configPath: "~/.hermes/config.yaml",
+    configPath: "~/.xiaoban/config.yaml",
     filters: "フィルター",
     sections: "セクション",
     exportConfig: "設定を JSON としてエクスポート",
@@ -485,11 +485,11 @@ export const ja: Translations = {
   achievements: {
     hero: {
       kicker: "Agentic Gamerscore",
-      title: "Hermes Achievements",
+      title: "Xiaoban Achievements",
       subtitle:
-        "実際のセッション履歴から獲得できる Hermes のコレクタブル バッジです。既知の未達成の実績は「Discovered」として表示され、Secret 実績は最初の該当する挙動が検出されるまで非表示のままです。",
+        "実際のセッション履歴から獲得できる Xiaoban のコレクタブル バッジです。既知の未達成の実績は「Discovered」として表示され、Secret 実績は最初の該当する挙動が検出されるまで非表示のままです。",
       scan_subtitle:
-        "Hermes のセッション履歴をスキャンしています。履歴が大きい場合、初回スキャンには 5～10 秒かかることがあります。",
+        "Xiaoban のセッション履歴をスキャンしています。履歴が大きい場合、初回スキャンには 5～10 秒かかることがあります。",
     },
     actions: {
       rescan: "再スキャン",
@@ -504,7 +504,7 @@ export const ja: Translations = {
       highest_tier: "最高ティア",
       highest_tier_hint: "Copper → Silver → Gold → Diamond → Olympian",
       latest: "最新",
-      latest_hint_empty: "Hermes をもっと使ってみてください",
+      latest_hint_empty: "Xiaoban をもっと使ってみてください",
       none_yet: "まだありません",
     },
     state: {
@@ -535,10 +535,10 @@ export const ja: Translations = {
       tiers_header: "ティア",
       secret_header: "シークレット実績",
       secret_body:
-        "シークレットはトリガー条件を隠しています。Hermes が関連するシグナルを検出すると、カードは「Discovered」になり、要件が表示されます。",
+        "シークレットはトリガー条件を隠しています。Xiaoban が関連するシグナルを検出すると、カードは「Discovered」になり、要件が表示されます。",
       scan_status_header: "スキャン状況",
       scan_status_body:
-        "Hermes はローカル履歴を一度スキャンし、その後カードが自動的に表示されます。数秒かかってもスタックしているわけではありません。",
+        "Xiaoban はローカル履歴を一度スキャンし、その後カードが自動的に表示されます。数秒かかってもスタックしているわけではありません。",
       what_scanned_header: "スキャン対象",
       what_scanned_body:
         "セッション、ツール呼び出し、モデルのメタデータ、エラー、実績、ローカルの解除状態。",

@@ -1,12 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { MemoryProviderConfig } from '@/types/hermes'
+import type { MemoryProviderConfig } from '@/types/xiaoban'
 
 const getMemoryProviderConfig = vi.fn()
 const saveMemoryProviderConfig = vi.fn()
 
-vi.mock('@/hermes', () => ({
+vi.mock('@/xiaoban', () => ({
   getMemoryProviderConfig: (provider: string) => getMemoryProviderConfig(provider),
   saveMemoryProviderConfig: (provider: string, values: unknown) => saveMemoryProviderConfig(provider, values)
 }))
@@ -23,7 +23,7 @@ function hindsightSchema(overrides: Partial<MemoryProviderConfig['fields'][numbe
       label: 'Mode',
       kind: 'select',
       value: 'cloud',
-      description: 'How Hermes connects to Hindsight.',
+      description: 'How Xiaoban connects to Hindsight.',
       placeholder: '',
       is_set: true,
       options: [
@@ -51,7 +51,7 @@ function hindsightSchema(overrides: Partial<MemoryProviderConfig['fields'][numbe
       is_set: true,
       options: []
     },
-    { key: 'bank_id', label: 'Bank ID', kind: 'text', value: 'hermes', description: '', placeholder: '', is_set: true, options: [] },
+    { key: 'bank_id', label: 'Bank ID', kind: 'text', value: 'xiaoban', description: '', placeholder: '', is_set: true, options: [] },
     {
       key: 'recall_budget',
       label: 'Recall budget',
@@ -96,7 +96,7 @@ describe('ProviderConfigPanel', () => {
     await renderPanel()
 
     expect(await screen.findByDisplayValue('https://api.hindsight.vectorize.io')).toBeTruthy()
-    expect(screen.getByDisplayValue('hermes')).toBeTruthy()
+    expect(screen.getByDisplayValue('xiaoban')).toBeTruthy()
     expect(screen.getByText('Cloud')).toBeTruthy()
     expect(screen.getAllByText('Hindsight Cloud API (lightweight, just needs an API key)').length).toBeGreaterThan(0)
     expect(screen.getByText('mid')).toBeTruthy()

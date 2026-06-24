@@ -13,7 +13,7 @@ OpenRouter 将请求路由到多个 provider（例如 Anthropic、Google、AWS B
 
 ## 配置
 
-在 `~/.hermes/config.yaml` 中添加 `provider_routing` 部分：
+在 `~/.xiaoban/config.yaml` 中添加 `provider_routing` 部分：
 
 ```yaml
 provider_routing:
@@ -165,7 +165,7 @@ provider_routing:
 
 Provider routing 偏好通过每次 API 调用的 `extra_body.provider` 字段传递给 OpenRouter API，适用于以下两种模式：
 
-- **CLI 模式** — 在 `~/.hermes/config.yaml` 中配置，启动时加载
+- **CLI 模式** — 在 `~/.xiaoban/config.yaml` 中配置，启动时加载
 - **Gateway 模式** — 同一配置文件，gateway 启动时加载
 
 路由配置从 `config.yaml` 读取，并在创建 `AIAgent` 时作为参数传入：

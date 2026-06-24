@@ -3,7 +3,7 @@ import type { MutableRefObject } from 'react'
 import { useEffect } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { getSessionMessages } from '@/hermes'
+import { getSessionMessages } from '@/xiaoban'
 import { $activeGatewayProfile, $newChatProfile } from '@/store/profile'
 import { $currentCwd, $messages, $resumeFailedSessionId, setMessages, setResumeFailedSessionId } from '@/store/session'
 
@@ -11,7 +11,7 @@ import type { ClientSessionState } from '../../types'
 
 import { useSessionActions } from './use-session-actions'
 
-vi.mock('@/hermes', async importOriginal => ({
+vi.mock('@/xiaoban', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
   deleteSession: vi.fn(),
   getSessionMessages: vi.fn(),

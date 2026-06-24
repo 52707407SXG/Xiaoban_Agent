@@ -4,7 +4,7 @@ title: "Android / Termux"
 description: "Run Xiaoban-Agent directly on an Android phone with Termux"
 ---
 
-# Hermes on Android with Termux
+# Xiaoban on Android with Termux
 
 This is the tested path for running Xiaoban-Agent directly on an Android phone through [Termux](https://termux.dev/).
 
@@ -37,23 +37,23 @@ A few features still need desktop/server-style dependencies that are not publish
 - Docker-based terminal isolation is not available inside Termux
 - Android may still suspend Termux background jobs, so gateway persistence is best-effort rather than a normal managed service
 
-That does not stop Hermes from working well as a phone-native CLI agent — it just means the recommended mobile install is intentionally narrower than the desktop/server install.
+That does not stop Xiaoban from working well as a phone-native CLI agent — it just means the recommended mobile install is intentionally narrower than the desktop/server install.
 
 ---
 
 ## Option 1: One-line installer
 
-Hermes now ships a Termux-aware installer path:
+Xiaoban now ships a Termux-aware installer path:
 
 ```bash
-curl -fsSL https://github.com/52707407SXG/Xiaoban-Agent/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/52707407SXG/Xiaoban_Agent/main/scripts/install.sh | bash
 ```
 
 On Termux, the installer automatically:
 - uses `pkg` for system packages
 - creates the venv with `python -m venv`
 - attempts the broad `.[termux-all]` extra first and falls back to the smaller `.[termux]` extra (then a base install) — the curl installer matches this order automatically
-- links `hermes` into `$PREFIX/bin` so it stays on your Termux PATH
+- links `xiaoban` into `$PREFIX/bin` so it stays on your Termux PATH
 - skips the untested browser / WhatsApp bootstrap
 
 If you want the explicit commands or need to debug a failed install, use the manual path below.
@@ -77,10 +77,10 @@ Why these packages?
 - `ripgrep` — fast file search
 - `ffmpeg` — media / TTS conversions
 
-### 2. Clone Hermes
+### 2. Clone Xiaoban
 
 ```bash
-git clone https://github.com/52707407SXG/Xiaoban-Agent.git
+git clone https://github.com/52707407SXG/Xiaoban_Agent.git
 cd xiaoban-agent
 ```
 
@@ -107,25 +107,25 @@ If you only want the minimal core agent, this also works:
 python -m pip install -e '.' -c constraints-termux.txt
 ```
 
-### 5. Put `hermes` on your Termux PATH
+### 5. Put `xiaoban` on your Termux PATH
 
 ```bash
-ln -sf "$PWD/venv/bin/hermes" "$PREFIX/bin/hermes"
+ln -sf "$PWD/venv/bin/xiaoban" "$PREFIX/bin/xiaoban"
 ```
 
-`$PREFIX/bin` is already on PATH in Termux, so this makes the `hermes` command persist across new shells without re-activating the venv every time.
+`$PREFIX/bin` is already on PATH in Termux, so this makes the `xiaoban` command persist across new shells without re-activating the venv every time.
 
 ### 6. Verify the install
 
 ```bash
 xiaoban version
-hermes doctor
+xiaoban doctor
 ```
 
-### 7. Start Hermes
+### 7. Start Xiaoban
 
 ```bash
-hermes
+xiaoban
 ```
 
 ---
@@ -138,7 +138,7 @@ hermes
 xiaoban model
 ```
 
-Or set keys directly in `~/.hermes/.env`.
+Or set keys directly in `~/.xiaoban/.env`.
 
 ### Re-run the full interactive setup wizard later
 
@@ -197,7 +197,7 @@ export ANDROID_API_LEVEL="$(getprop ro.build.version.sdk)"
 python -m pip install -e '.[termux]' -c constraints-termux.txt
 ```
 
-### `hermes doctor` says ripgrep or Node is missing
+### `xiaoban doctor` says ripgrep or Node is missing
 
 Install them with Termux packages:
 
@@ -232,5 +232,5 @@ If you hit a new Android-specific issue, please open a GitHub issue with:
 - your Android version
 - `termux-info`
 - `python --version`
-- `hermes doctor`
+- `xiaoban doctor`
 - the exact install command and full error output

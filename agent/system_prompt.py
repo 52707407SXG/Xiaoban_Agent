@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
-    HERMES_AGENT_HELP_GUIDANCE,
+    XIAOBAN_AGENT_HELP_GUIDANCE,
     KANBAN_GUIDANCE,
     MEMORY_GUIDANCE,
     OPENAI_MODEL_EXECUTION_GUIDANCE,
@@ -45,6 +45,11 @@ from agent.prompt_builder import (
     drain_truncation_warnings,
 )
 from agent.runtime_cwd import resolve_context_cwd
+from agent.xiaoban_operating_policy import (
+    XIAOBAN_AGENTIC_WORKFLOW_POLICY,
+    XIAOBAN_DEEPSEEK_EXECUTION_GUIDANCE,
+    XIAOBAN_OPERATING_POLICY,
+)
 
 
 def _ra():
@@ -181,7 +186,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     stable_parts: List[str] = []
 
     # Try SOUL.md as primary identity unless the caller explicitly skipped it.
-    # Some execution modes (cron) still want HERMES_HOME persona while keeping
+    # Some execution modes (cron) still want XIAOBAN_HOME persona while keeping
     # cwd project instructions disabled.
     _soul_loaded = False
     if agent.load_soul_identity or not agent.skip_context_files:
@@ -195,7 +200,14 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
 
     # Pointer to the xiaoban-agent skill + docs for user questions about Xiaoban runtime.
-    stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
+    stable_parts.append(XIAOBAN_AGENT_HELP_GUIDANCE)
+
+    # Xiaoban-specific operating policy.  This is not a generic coding-agent
+    # prompt; it is the My Stand/web/desktop-pet workflow discipline that keeps
+    # short user turns, uploaded files, evidence lookup, and high-risk actions
+    # from being handled as ordinary chat.
+    stable_parts.append(XIAOBAN_OPERATING_POLICY)
+    stable_parts.append(XIAOBAN_AGENTIC_WORKFLOW_POLICY)
 
     # Universal task-completion / no-fabrication guidance.  Applied to ALL
     # models regardless of tool_use_enforcement gating — the failure modes
@@ -227,7 +239,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         tool_guidance.append(SKILLS_GUIDANCE)
     # Kanban worker/orchestrator lifecycle — only present when the
     # dispatcher spawned this process (kanban_show check_fn gates on
-    # HERMES_KANBAN_TASK env var). Normal chat sessions never see
+    # XIAOBAN_KANBAN_TASK env var). Normal chat sessions never see
     # this block. Resolved once at __init__ (see _kanban_worker_guidance).
     _kanban_guidance = getattr(agent, "_kanban_worker_guidance", None)
     if _kanban_guidance:
@@ -289,6 +301,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             # existing tools, replies with plans instead of executing).
             if "gpt" in _model_lower or "codex" in _model_lower or "grok" in _model_lower:
                 stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
+            if any(name in _model_lower for name in ("deepseek", "qwen", "glm")):
+                stable_parts.append(XIAOBAN_DEEPSEEK_EXECUTION_GUIDANCE)
 
     has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
     if has_skills_tools:
@@ -381,8 +395,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             pass
 
     # Active-profile hint — names the Xiaoban profile the agent is running
-    # under so it doesn't conflate ~/.hermes/skills/ (default profile) with
-    # ~/.hermes/profiles/<active>/skills/ (this profile's). Deterministic
+    # under so it doesn't conflate ~/.xiaoban/skills/ (default profile) with
+    # ~/.xiaoban/profiles/<active>/skills/ (this profile's). Deterministic
     # for the lifetime of the agent — profile name doesn't change
     # mid-session, so this doesn't break the prompt cache.
     # See file_safety._resolve_active_profile_name + classify_cross_profile_target
@@ -395,7 +409,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if active_profile == "default":
         stable_parts.append(
             "Active Xiaoban profile: default. Other profiles (if any) live "
-            "under ~/.hermes/profiles/<name>/. Each profile has its own "
+            "under ~/.xiaoban/profiles/<name>/. Each profile has its own "
             "skills/, plugins/, cron/, and memories/ that affect a different "
             "session than this one. Do not modify another profile's "
             "skills/plugins/cron/memories unless the user explicitly directs "
@@ -403,10 +417,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         )
     else:
         stable_parts.append(
-            f"Active Hermes profile: {active_profile}. This session reads "
-            f"and writes ~/.hermes/profiles/{active_profile}/. The default "
-            f"profile's data lives at ~/.hermes/skills/, ~/.hermes/plugins/, "
-            f"~/.hermes/cron/, ~/.hermes/memories/ — those belong to a "
+            f"Active Xiaoban profile: {active_profile}. This session reads "
+            f"and writes ~/.xiaoban/profiles/{active_profile}/. The default "
+            f"profile's data lives at ~/.xiaoban/skills/, ~/.xiaoban/plugins/, "
+            f"~/.xiaoban/cron/, ~/.xiaoban/memories/ — those belong to a "
             f"different session run from a different shell. Do NOT modify "
             f"another profile's skills/plugins/cron/memories unless the user "
             f"explicitly directs you to. The cross-profile write guard will "
@@ -476,8 +490,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         except Exception:
             pass
 
-    from hermes_time import now as _hermes_now
-    now = _hermes_now()
+    from xiaoban_time import now as _xiaoban_now
+    now = _xiaoban_now()
     volatile_parts.append(_build_temporal_context_block(now))
     # Date-only (not minute-precision) so the system prompt is byte-stable
     # for the full day.  Minute-precision changes invalidate prefix-cache KV

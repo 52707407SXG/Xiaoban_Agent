@@ -2,7 +2,7 @@
 
 These helpers define which credential-pool entries are references to borrowed
 runtime secrets and strip raw values before those entries are written to
-``auth.json``.  They intentionally have no dependency on ``hermes_cli.auth`` so
+``auth.json``.  They intentionally have no dependency on ``xiaoban_cli.auth`` so
 both the pool model and the final auth-store write boundary can share the same
 policy without import cycles.
 """
@@ -18,7 +18,7 @@ from typing import Any, Dict, Mapping
 # else with a non-empty source is treated as borrowed/reference-only by default
 # so future external secret providers fail closed at the disk boundary.
 _PERSISTABLE_PROVIDER_SOURCES = frozenset({
-    ("anthropic", "hermes_pkce"),
+    ("anthropic", "xiaoban_pkce"),
     ("minimax-oauth", "oauth"),
     ("nous", "device_code"),
     ("openai-codex", "device_code"),

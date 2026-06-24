@@ -1,8 +1,8 @@
-import { Box, Text, useStdout } from '@hermes/ink'
+import { Box, Text, useStdout } from '@xiaoban/ink'
 import { useEffect, useState } from 'react'
 import unicodeSpinners from 'unicode-animations'
 
-import { artWidth, heroMark, HERO_MARK_WIDTH, logo, LOGO_WIDTH } from '../banner.js'
+import { artWidth, heroMark, HERO_MARK_WIDTH, logo, LOGO_WIDTH, STARTUP_LEFT_WIDTH, STARTUP_MARK_LABEL_START } from '../banner.js'
 import { flat } from '../lib/text.js'
 import type { Theme } from '../theme.js'
 import type { PanelSection, SessionInfo } from '../types.js'
@@ -27,12 +27,15 @@ function InlineLoader({ label, t }: { label: string; t: Theme }) {
   )
 }
 
-export function ArtLines({ lines }: { lines: [string, string][] }) {
+export function ArtLines({ lines, width }: { lines: [string, string][]; width?: number }) {
+  const bodyW = artWidth(lines)
+  const pad = width ? Math.max(0, (width - bodyW) >> 1) : 0
+
   return (
-    <Box flexDirection="column" height={lines.length} opaque width={artWidth(lines)}>
+    <Box flexDirection="column" height={lines.length} opaque width={width ?? bodyW}>
       {lines.map(([c, text], i) => (
         <Text color={c} key={i} wrap="truncate-end">
-          {text}
+          {' '.repeat(pad)}{text}
         </Text>
       ))}
     </Box>
@@ -59,6 +62,53 @@ const centerIn = (s: string, w: number) => {
   const left = slack >> 1
 
   return `${' '.repeat(left)}${f}${' '.repeat(slack - left)}`
+}
+
+type TextSegment = {
+  bold?: boolean
+  color: string
+  text: string
+}
+
+const segmentLength = (segments: TextSegment[]) => segments.reduce((n, segment) => n + segment.text.length, 0)
+
+const padSegments = (segments: TextSegment[], width: number, align: 'center' | 'left' = 'left') => {
+  const len = segmentLength(segments)
+  const slack = Math.max(0, width - len)
+  const left = align === 'center' ? slack >> 1 : 0
+  const right = slack - left
+  const color = segments[0]?.color ?? 'white'
+
+  return [
+    ...(left > 0 ? [{ color, text: ' '.repeat(left) }] : []),
+    ...segments,
+    ...(right > 0 ? [{ color, text: ' '.repeat(right) }] : [])
+  ]
+}
+
+const placeSegments = (segments: TextSegment[], width: number, start: number) => {
+  const len = segmentLength(segments)
+  const left = Math.max(0, Math.min(start, width - len))
+  const right = Math.max(0, width - len - left)
+  const color = segments[0]?.color ?? 'white'
+
+  return [
+    ...(left > 0 ? [{ color, text: ' '.repeat(left) }] : []),
+    ...segments,
+    ...(right > 0 ? [{ color, text: ' '.repeat(right) }] : [])
+  ]
+}
+
+function SegmentText({ segments }: { segments: TextSegment[] }) {
+  return (
+    <>
+      {segments.map((segment, i) => (
+        <Text bold={segment.bold} color={segment.color} key={i}>
+          {segment.text}
+        </Text>
+      ))}
+    </>
+  )
 }
 
 const ruleIn = (label: string, w: number) => {
@@ -161,7 +211,8 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
   const term = useStdout().stdout?.columns ?? 100
   const cols = Math.max(20, Math.min(term, maxWidth ?? term))
   const heroLines = heroMark(t.color, t.bannerHero || undefined)
-  const leftW = Math.min((artWidth(heroLines) || HERO_MARK_WIDTH) + 4, Math.floor(cols * 0.42))
+  const targetLeftW = Math.max(STARTUP_LEFT_WIDTH, (artWidth(heroLines) || HERO_MARK_WIDTH) + 4)
+  const leftW = Math.min(targetLeftW, Math.floor(cols * 0.42))
   const wide = cols >= 82 && leftW + 34 < cols
   const w = Math.max(20, wide ? cols - leftW - 14 : cols - 12)
   const lineBudget = Math.max(12, w - 2)
@@ -225,7 +276,7 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
 
   // MCP headline counts *connected* servers, not configured-but-disabled ones,
   // so it matches the classic CLI banner (`sum(s.connected)` in
-  // hermes_cli/banner.py) and the "connected" label on the collapse toggle.
+  // xiaoban_cli/banner.py) and the "connected" label on the collapse toggle.
   const mcpServers = info.mcp_servers ?? []
   const mcpConnected = mcpServers.filter(s => s.connected).length
 
@@ -290,7 +341,66 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
   }
 
   const modelName = info.model.split('/').pop() ?? info.model
+  const billingLabel = ' · API Usage Billing'
+  const modelLabel = `${modelName}${billingLabel}`
+  const modelPad = ' '.repeat(Math.max(0, (leftW - modelLabel.length) >> 1))
   const title = `${t.brand.name}${info.version ? ` v${info.version}` : ''}`
+
+  if (wide) {
+    const frameW = Math.max(82, cols)
+    const leftCellW = STARTUP_LEFT_WIDTH + 4
+    const rightCellW = Math.max(20, frameW - leftCellW - 3)
+    const topRule = Math.max(0, frameW - title.length - 5)
+    const markRows = heroLines.map(([color, text], i) => ({
+      left: i === 0
+        ? placeSegments([{ color, text: text.trimEnd() }], leftCellW, STARTUP_MARK_LABEL_START)
+        : padSegments([{ color, text: text.trimEnd() }], leftCellW, 'center')
+    }))
+    const leftRows = [
+      { left: padSegments([{ color: t.color.text, text: '' }], leftCellW) },
+      { left: padSegments([{ color: t.color.text, text: 'Welcome back!' }], leftCellW, 'center') },
+      { left: padSegments([{ color: t.color.text, text: '' }], leftCellW) },
+      ...markRows,
+      { left: padSegments([{ color: t.color.text, text: '' }], leftCellW) },
+      {
+        left: padSegments([
+          { color: t.color.accent, text: modelName },
+          { color: t.color.muted, text: billingLabel }
+        ], leftCellW, 'center')
+      },
+      { left: padSegments([{ color: t.color.muted, text: info.cwd || process.cwd() }], leftCellW, 'center') }
+    ]
+    const rightRows = [
+      [{ bold: true, color: t.color.primary, text: '  Tips for getting started' }],
+      [{ color: t.color.text, text: '  Run /help to see Xiaoban commands' }],
+      [{ color: t.color.text, text: '  Run /new to start a clean session' }],
+      [{ color: t.color.border, text: `  ${'─'.repeat(Math.min(64, Math.max(12, rightCellW - 4)))}` }],
+      [{ bold: true, color: t.color.primary, text: '  Recent activity' }],
+      [{ color: t.color.muted, text: '  No recent activity' }]
+    ]
+
+    return (
+      <Box flexDirection="column" marginBottom={1} width={frameW}>
+        <Text wrap="truncate-end">
+          <Text color={t.color.border}>╭─ </Text>
+          <Text bold color={t.color.primary}>{title}</Text>
+          <Text color={t.color.border}> {'─'.repeat(topRule)}╮</Text>
+        </Text>
+
+        {leftRows.map((row, i) => (
+          <Text key={i} wrap="truncate-end">
+            <Text color={t.color.border}>│</Text>
+            <SegmentText segments={row.left} />
+            <Text color={t.color.border}>│</Text>
+            <SegmentText segments={padSegments(rightRows[i] ?? [{ color: t.color.text, text: '' }], rightCellW)} />
+            <Text color={t.color.border}>│</Text>
+          </Text>
+        ))}
+
+        <Text color={t.color.border} wrap="truncate-end">╰{'─'.repeat(frameW - 2)}╯</Text>
+      </Box>
+    )
+  }
 
   return (
     <Box borderColor={t.color.border} borderStyle="round" flexDirection="column" marginBottom={1} paddingX={2} paddingY={1}>
@@ -304,14 +414,14 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
             <Box flexDirection="column" marginRight={2} width={leftW}>
               <Text color={t.color.text}>{centerIn('Welcome back!', leftW)}</Text>
               <Text />
-              <ArtLines lines={heroLines} />
+              <ArtLines lines={heroLines} width={leftW} />
               <Text />
               <Text color={t.color.accent} wrap="truncate-end">
-                {modelName}
-                <Text color={t.color.muted}> · API Usage Billing</Text>
+                {modelPad}{modelName}
+                <Text color={t.color.muted}>{billingLabel}</Text>
               </Text>
               <Text color={t.color.muted} wrap="truncate-end">
-                {info.cwd || process.cwd()}
+                {centerIn(info.cwd || process.cwd(), leftW)}
               </Text>
             </Box>
 

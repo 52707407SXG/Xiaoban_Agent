@@ -194,5 +194,5 @@ Debug logs go to `./logs/image_tools_debug_<session_id>.json` with per-call deta
 
 - **Requires credentials** for the active backend (FAL `FAL_KEY` / Nous Subscription, `OPENAI_API_KEY`, xAI OAuth, `KREA_API_KEY`)
 - **Editing is model-dependent** — image-to-image works only on edit-capable models (see the table above); text-to-image-only models reject image inputs with a clear error
-- **Temporary URLs** — backends return hosted URLs that expire after hours/days; Hermes materializes them to the local cache so delivery still works after expiry
+- **Temporary URLs** — backends return hosted URLs that expire after hours/days; Xiaoban materializes them to the local cache so delivery still works after expiry
 - **Per-model constraints** — some models don't support `seed`, `num_inference_steps`, etc. The `supports` / `edit_supports` filter silently drops unsupported params; this is expected behavior

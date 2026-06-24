@@ -8,15 +8,15 @@ description: "Set up Xiaoban-Agent as a DingTalk chatbot"
 
 Xiaoban-Agent integrates with DingTalk (钉钉) as a chatbot, letting you chat with your AI assistant through direct messages or group chats. The bot connects via DingTalk's Stream Mode — a long-lived WebSocket connection that requires no public URL or webhook server — and replies using markdown-formatted messages through DingTalk's session webhook API.
 
-Before setup, here's the part most people want to know: how Hermes behaves once it's in your DingTalk workspace.
+Before setup, here's the part most people want to know: how Xiaoban behaves once it's in your DingTalk workspace.
 
-## How Hermes Behaves
+## How Xiaoban Behaves
 
 | Context | Behavior |
 |---------|----------|
-| **DMs (1:1 chat)** | Hermes responds to every message. No `@mention` needed. Each DM has its own session. |
-| **Group chats** | Hermes responds when you `@mention` it. Without a mention, Hermes ignores the message. |
-| **Shared groups with multiple users** | By default, Hermes isolates session history per user inside the group. Two people talking in the same group do not share one transcript unless you explicitly disable that. |
+| **DMs (1:1 chat)** | Xiaoban responds to every message. No `@mention` needed. Each DM has its own session. |
+| **Group chats** | Xiaoban responds when you `@mention` it. Without a mention, Xiaoban ignores the message. |
+| **Shared groups with multiple users** | By default, Xiaoban isolates session history per user inside the group. Two people talking in the same group do not share one transcript unless you explicitly disable that. |
 
 ### Session Model in DingTalk
 
@@ -102,16 +102,16 @@ xiaoban gateway setup
 
 Select **DingTalk** when prompted. The setup wizard can authorize via one of two paths:
 
-- **QR-code device flow (recommended).** Scan the QR that prints in your terminal with the DingTalk mobile app — your Client ID and Client Secret are returned automatically and written to `~/.hermes/.env`. No developer-console trip needed.
+- **QR-code device flow (recommended).** Scan the QR that prints in your terminal with the DingTalk mobile app — your Client ID and Client Secret are returned automatically and written to `~/.xiaoban/.env`. No developer-console trip needed.
 - **Manual paste.** If you already have credentials (or QR scanning isn't convenient), paste your Client ID, Client Secret, and allowed user IDs when prompted.
 
 :::note openClaw branding disclosure
-Because DingTalk's `verification_uri_complete` is hardcoded to the openClaw identity at the API layer, the QR currently authorizes under an `openClaw` source string until Alibaba / DingTalk-Real-AI registers a Hermes-specific template server-side. This is purely how DingTalk presents the consent screen — the bot you create is fully yours and private to your tenant.
+Because DingTalk's `verification_uri_complete` is hardcoded to the openClaw identity at the API layer, the QR currently authorizes under an `openClaw` source string until Alibaba / DingTalk-Real-AI registers a Xiaoban-specific template server-side. This is purely how DingTalk presents the consent screen — the bot you create is fully yours and private to your tenant.
 :::
 
 ### Option B: Manual Configuration
 
-Add the following to your `~/.hermes/.env` file:
+Add the following to your `~/.xiaoban/.env` file:
 
 ```bash
 # Required
@@ -132,7 +132,7 @@ DINGTALK_ALLOWED_USERS=user-id-1
 # DINGTALK_ALLOW_ALL_USERS=true
 ```
 
-Optional behavior settings in `~/.hermes/config.yaml`:
+Optional behavior settings in `~/.xiaoban/config.yaml`:
 
 ```yaml
 group_sessions_per_user: true
@@ -174,7 +174,7 @@ You can run `xiaoban gateway` in the background or as a systemd service for pers
 
 ### AI Cards
 
-Hermes can reply using DingTalk AI Cards instead of plain markdown messages. Cards provide a richer, more structured display and support streaming updates as the agent generates its response.
+Xiaoban can reply using DingTalk AI Cards instead of plain markdown messages. Cards provide a richer, more structured display and support streaming updates as the agent generates its response.
 
 To enable AI Cards, configure a card template ID in `config.yaml`:
 
@@ -190,7 +190,7 @@ You can find your card template ID in the DingTalk Developer Console under your 
 
 ### Emoji Reactions
 
-Hermes automatically adds emoji reactions to your messages to show processing status:
+Xiaoban automatically adds emoji reactions to your messages to show processing status:
 
 - 🤔Thinking — added when the bot starts processing your message
 - 🥳Done — added when the response is complete (replaces the Thinking reaction)
@@ -243,7 +243,7 @@ pip install dingtalk-stream httpx
 
 **Cause**: The credentials aren't set in your environment or `.env` file.
 
-**Fix**: Verify `DINGTALK_CLIENT_ID` and `DINGTALK_CLIENT_SECRET` are set correctly in `~/.hermes/.env`. The Client ID is your AppKey, and the Client Secret is your AppSecret from the DingTalk Developer Console.
+**Fix**: Verify `DINGTALK_CLIENT_ID` and `DINGTALK_CLIENT_SECRET` are set correctly in `~/.xiaoban/.env`. The Client ID is your AppKey, and the Client Secret is your AppSecret from the DingTalk Developer Console.
 
 ### Stream disconnects / reconnection loops
 
@@ -253,7 +253,7 @@ pip install dingtalk-stream httpx
 
 ### Bot is offline
 
-**Cause**: The Hermes gateway isn't running, or it failed to connect.
+**Cause**: The Xiaoban gateway isn't running, or it failed to connect.
 
 **Fix**: Check that `xiaoban gateway` is running. Look at the terminal output for error messages. Common issues: wrong credentials, app deactivated, `dingtalk-stream` or `httpx` not installed.
 

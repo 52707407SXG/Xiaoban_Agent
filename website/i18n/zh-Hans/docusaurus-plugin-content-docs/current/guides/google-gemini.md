@@ -6,28 +6,28 @@ description: "将 Xiaoban-Agent 与 Google Gemini 配合使用——原生 AI St
 
 # Google Gemini
 
-Xiaoban-Agent 通过 **Google AI Studio / Gemini API** 原生支持 Google Gemini——而非 OpenAI 兼容端点。这使 Hermes 能够将其内部 OpenAI 格式的消息和工具循环转换为 Gemini 原生的 `generateContent` API，同时保留工具调用、流式传输、多模态输入以及 Gemini 特有的响应元数据。
+Xiaoban-Agent 通过 **Google AI Studio / Gemini API** 原生支持 Google Gemini——而非 OpenAI 兼容端点。这使 Xiaoban 能够将其内部 OpenAI 格式的消息和工具循环转换为 Gemini 原生的 `generateContent` API，同时保留工具调用、流式传输、多模态输入以及 Gemini 特有的响应元数据。
 
 ## 前提条件
 
 - **Google AI Studio API 密钥** — 在 [aistudio.google.com/apikey](https://aistudio.google.com/apikey) 创建
-- **已启用计费的 Google Cloud 项目** — 推荐用于 Agent 场景。Gemini 免费层级对长时间运行的 Agent 会话而言配额过小，因为 Hermes 每次用户交互可能发起多次模型调用。
-- **已安装 Hermes** — 原生 Gemini provider 无需额外安装 Python 包。
+- **已启用计费的 Google Cloud 项目** — 推荐用于 Agent 场景。Gemini 免费层级对长时间运行的 Agent 会话而言配额过小，因为 Xiaoban 每次用户交互可能发起多次模型调用。
+- **已安装 Xiaoban** — 原生 Gemini provider 无需额外安装 Python 包。
 
 :::tip API 密钥路径
-设置 `GOOGLE_API_KEY` 或 `GEMINI_API_KEY`。Hermes 对 `gemini` provider 会同时检查这两个名称。
+设置 `GOOGLE_API_KEY` 或 `GEMINI_API_KEY`。Xiaoban 对 `gemini` provider 会同时检查这两个名称。
 :::
 
 ## 快速开始
 
 ```bash
 # 添加 Gemini API 密钥
-echo "GOOGLE_API_KEY=..." >> ~/.hermes/.env
+echo "GOOGLE_API_KEY=..." >> ~/.xiaoban/.env
 
 # 选择 Gemini 作为 provider
 xiaoban model
 # → 选择 "More providers..." → "Google AI Studio"
-# → Hermes 检查密钥层级并显示 Gemini 模型列表
+# → Xiaoban 检查密钥层级并显示 Gemini 模型列表
 # → 选择一个模型
 
 # 开始对话
@@ -45,7 +45,7 @@ model:
 
 ## 配置
 
-运行 `xiaoban model` 后，`~/.hermes/config.yaml` 将包含：
+运行 `xiaoban model` 后，`~/.xiaoban/config.yaml` 将包含：
 
 ```yaml
 model:
@@ -54,7 +54,7 @@ model:
   base_url: https://generativelanguage.googleapis.com/v1beta
 ```
 
-`~/.hermes/.env` 中：
+`~/.xiaoban/.env` 中：
 
 ```bash
 GOOGLE_API_KEY=...
@@ -68,18 +68,18 @@ GOOGLE_API_KEY=...
 https://generativelanguage.googleapis.com/v1beta
 ```
 
-Hermes 检测到该端点后会创建原生 Gemini 适配器。在内部，Hermes 仍以 OpenAI 格式维护 Agent 循环，然后将每个请求转换为 Gemini 原生 schema：
+Xiaoban 检测到该端点后会创建原生 Gemini 适配器。在内部，Xiaoban 仍以 OpenAI 格式维护 Agent 循环，然后将每个请求转换为 Gemini 原生 schema：
 
 - `messages[]` → Gemini `contents[]`
 - 系统提示（system prompt）→ Gemini `systemInstruction`
 - 工具 schema → Gemini `functionDeclarations`
 - 工具结果 → Gemini `functionResponse` 部分
-- 流式响应 → 供 Hermes 循环使用的 OpenAI 格式流式数据块
+- 流式响应 → 供 Xiaoban 循环使用的 OpenAI 格式流式数据块
 
 :::note Gemini 3 思维签名
-对于 Gemini 3 的工具调用，Hermes 会保留附加在函数调用部分的 `thoughtSignature` 值，并在下一个工具轮次中重放。这覆盖了多步骤 Agent 工作流中验证关键路径的需求。
+对于 Gemini 3 的工具调用，Xiaoban 会保留附加在函数调用部分的 `thoughtSignature` 值，并在下一个工具轮次中重放。这覆盖了多步骤 Agent 工作流中验证关键路径的需求。
 
-Gemini 3 也可能在其他响应部分附加思维签名。Hermes 的原生适配器目前针对 Agent 工具循环进行了优化，尚未以完整的部分级保真度重放所有非工具调用签名。
+Gemini 3 也可能在其他响应部分附加思维签名。Xiaoban 的原生适配器目前针对 Agent 工具循环进行了优化，尚未以完整的部分级保真度重放所有非工具调用签名。
 :::
 
 ### 优先使用原生端点
@@ -90,7 +90,7 @@ Google 还提供了 OpenAI 兼容端点：
 https://generativelanguage.googleapis.com/v1beta/openai/
 ```
 
-对于 Xiaoban-Agent 会话，请优先使用上述原生 Gemini 端点。Hermes 内置原生 Gemini 适配器，可将多轮工具调用、工具调用结果、流式传输、多模态输入以及 Gemini 响应元数据直接映射到 Gemini 的 `generateContent` API。OpenAI 兼容端点在你明确需要 OpenAI API 兼容性时仍然有用。
+对于 Xiaoban-Agent 会话，请优先使用上述原生 Gemini 端点。Xiaoban 内置原生 Gemini 适配器，可将多轮工具调用、工具调用结果、流式传输、多模态输入以及 Gemini 响应元数据直接映射到 Gemini 的 `generateContent` API。OpenAI 兼容端点在你明确需要 OpenAI API 兼容性时仍然有用。
 
 如果你之前将 `GEMINI_BASE_URL` 设置为 `/openai` URL，请将其删除或修改：
 
@@ -100,7 +100,7 @@ GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
 
 ## 可用模型
 
-`xiaoban model` 选择器显示 Hermes provider 注册表中维护的 Gemini 模型。常见选项包括：
+`xiaoban model` 选择器显示 Xiaoban provider 注册表中维护的 Gemini 模型。常见选项包括：
 
 | 模型 | ID | 说明 |
 |------|----|------|
@@ -117,7 +117,7 @@ GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
 
 ### 最新别名
 
-Google 为 Pro 和 Flash Gemini 系列发布了滚动别名。当你希望 Google 自动升级模型而无需修改 Hermes 配置时，`gemini-pro-latest` 和 `gemini-flash-latest` 非常实用。
+Google 为 Pro 和 Flash Gemini 系列发布了滚动别名。当你希望 Google 自动升级模型而无需修改 Xiaoban 配置时，`gemini-pro-latest` 和 `gemini-flash-latest` 非常实用。
 
 | 别名 | 当前指向 | 说明 |
 |------|----------|------|
@@ -135,7 +135,7 @@ model:
 
 ### 通过 Gemini API 使用 Gemma
 
-Google 也通过 Gemini API 提供 Gemma 模型。Hermes 将这些模型识别为 Google 模型，但会在默认模型选择器中隐藏吞吐量极低的 Gemma 条目，以防新用户在长时间运行的 Agent 会话中意外选择评估层级的模型。
+Google 也通过 Gemini API 提供 Gemma 模型。Xiaoban 将这些模型识别为 Google 模型，但会在默认模型选择器中隐藏吞吐量极低的 Gemma 条目，以防新用户在长时间运行的 Agent 会话中意外选择评估层级的模型。
 
 常用评估 ID 包括：
 
@@ -173,7 +173,7 @@ model:
 ## 诊断
 
 ```bash
-hermes doctor
+xiaoban doctor
 ```
 
 doctor 命令检查：
@@ -183,7 +183,7 @@ doctor 命令检查：
 
 ## Gateway（消息平台）
 
-Gemini 可与所有 Hermes gateway 平台配合使用（Telegram、Discord、Slack、WhatsApp、LINE、飞书等）。将 Gemini 配置为你的 provider，然后正常启动 gateway：
+Gemini 可与所有 Xiaoban gateway 平台配合使用（Telegram、Discord、Slack、WhatsApp、LINE、飞书等）。将 Gemini 配置为你的 provider，然后正常启动 gateway：
 
 ```bash
 xiaoban gateway setup
@@ -196,7 +196,7 @@ gateway 读取 `config.yaml` 并使用相同的 Gemini provider 配置。
 
 ### "Gemini native client requires an API key"
 
-Hermes 找不到可用的 API 密钥。请将以下任一项添加到 `~/.hermes/.env`：
+Xiaoban 找不到可用的 API 密钥。请将以下任一项添加到 `~/.xiaoban/.env`：
 
 ```bash
 GOOGLE_API_KEY=...
@@ -208,7 +208,7 @@ GEMINI_API_KEY=...
 
 ### "This Google API key is on the free tier"
 
-Hermes 在设置期间会探测 Gemini API 密钥。由于工具调用、重试、压缩和辅助任务可能需要多次模型调用，免费层级配额在少数几轮 Agent 交互后即可耗尽。
+Xiaoban 在设置期间会探测 Gemini API 密钥。由于工具调用、重试、压缩和辅助任务可能需要多次模型调用，免费层级配额在少数几轮 Agent 交互后即可耗尽。
 
 请为与密钥关联的 Google Cloud 项目启用计费，必要时重新生成密钥，然后运行：
 
@@ -222,7 +222,7 @@ xiaoban model
 
 ### Gemma 模型未显示在 `xiaoban model` 中
 
-Hermes 默认可能会在选择器中隐藏低吞吐量的 Gemma 模型。如果你有意评估某个模型，请直接在 `~/.hermes/config.yaml` 中设置模型 ID。
+Xiaoban 默认可能会在选择器中隐藏低吞吐量的 Gemma 模型。如果你有意评估某个模型，请直接在 `~/.xiaoban/config.yaml` 中设置模型 ID。
 
 ### Gemma 出现 "429 quota exceeded"
 
@@ -230,7 +230,7 @@ Hermes 默认可能会在选择器中隐藏低吞吐量的 Gemma 模型。如果
 
 ### 已配置 OpenAI 兼容端点
 
-检查 `~/.hermes/.env` 中是否存在：
+检查 `~/.xiaoban/.env` 中是否存在：
 
 ```bash
 GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
@@ -244,7 +244,7 @@ GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
 
 ### 工具调用因 schema 错误而失败
 
-升级 Hermes 并重新运行 `xiaoban model`。原生 Gemini 适配器会针对 Gemini 更严格的函数声明格式对工具 schema 进行清理；旧版本或自定义端点可能不支持此功能。
+升级 Xiaoban 并重新运行 `xiaoban model`。原生 Gemini 适配器会针对 Gemini 更严格的函数声明格式对工具 schema 进行清理；旧版本或自定义端点可能不支持此功能。
 
 ## 相关链接
 

@@ -6,7 +6,7 @@ author: Xiaoban-Agent
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
-  hermes:
+  xiaoban:
     tags: [LOC, Code Analysis, pygount, Codebase, Metrics, Repository]
     related_skills: [github-repo-management]
 prerequisites:

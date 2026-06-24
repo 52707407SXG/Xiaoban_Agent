@@ -48,7 +48,7 @@ const LOGO_ART = [
 ]
 
 const MARK_ART = [
-  '    My Stand                ',
+  'My Stand',
   '███╗     ███╗            ',
   '████╗   ████║            ',
   '██╔██╗ ██╔██║            ',
@@ -69,6 +69,8 @@ const colorize = (art: string[], gradient: readonly number[], c: ThemeColors): L
 
 export const LOGO_WIDTH = Math.max(...LOGO_ART.map(line => line.length))
 export const HERO_MARK_WIDTH = Math.max(...MARK_ART.map(line => line.length))
+export const STARTUP_LEFT_WIDTH = 42
+export const STARTUP_MARK_LABEL_START = 18
 
 export const logo = (c: ThemeColors, customLogo?: string): Line[] =>
   customLogo ? parseRichMarkup(customLogo) : colorize(LOGO_ART, LOGO_GRADIENT, c)

@@ -13,7 +13,7 @@ which would be a real regression for users on the existing config keys.
 
 Run from the PR worktree:
 
-    cd ~/.hermes/xiaoban-agent/.worktrees/browser-providers-plugin
+    cd ~/.xiaoban/xiaoban-agent/.worktrees/browser-providers-plugin
     python tests/plugins/browser/check_parity_vs_main.py
 """
 from __future__ import annotations
@@ -29,8 +29,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Pin one path to current main, one to the PR worktree.
 # ``REPO_ROOT`` is ``.../.worktrees/browser-providers-plugin``; the main
-# checkout lives two levels up at ``~/.hermes/xiaoban-agent``.
-MAIN_DIR = REPO_ROOT.parent.parent  # ~/.hermes/xiaoban-agent
+# checkout lives two levels up at ``~/.xiaoban/xiaoban-agent``.
+MAIN_DIR = REPO_ROOT.parent.parent  # ~/.xiaoban/xiaoban-agent
 PR_DIR = REPO_ROOT  # the worktree we're in
 assert (MAIN_DIR / "tools" / "browser_tool.py").exists(), (
     f"MAIN_DIR={MAIN_DIR} doesn't look like a xiaoban-agent checkout"
@@ -46,9 +46,9 @@ SUBPROCESS_SCRIPT = r"""
 import json, os, sys, tempfile
 sys.path.insert(0, sys.argv[1])
 
-# Isolated HERMES_HOME for the config write.
+# Isolated XIAOBAN_HOME for the config write.
 home = tempfile.mkdtemp()
-os.environ["HERMES_HOME"] = home
+os.environ["XIAOBAN_HOME"] = home
 
 # Clear every browser-related env var so is_available() is deterministic.
 for k in (

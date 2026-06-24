@@ -18,10 +18,10 @@ description: "使用内置和用户自定义皮肤定制 Xiaoban CLI 的外观"
 ```bash
 /skin                # show the current skin and list available skins
 /skin ares           # switch to a built-in skin
-/skin mytheme        # switch to a custom skin from ~/.hermes/skins/mytheme.yaml
+/skin mytheme        # switch to a custom skin from ~/.xiaoban/skins/mytheme.yaml
 ```
 
-或在 `~/.hermes/config.yaml` 中设置默认皮肤：
+或在 `~/.xiaoban/config.yaml` 中设置默认皮肤：
 
 ```yaml
 display:
@@ -32,7 +32,7 @@ display:
 
 | 皮肤 | 描述 | Agent 品牌 | 视觉特征 |
 |------|------|-----------|---------|
-| `default` | 经典 Hermes — 金色与 kawaii 风格 | `Xiaoban-Agent` | 暖金色边框，cornsilk 文字，spinner 中的 kawaii 面孔。熟悉的双蛇杖横幅。简洁亲切。 |
+| `default` | 经典 Xiaoban — 金色与 kawaii 风格 | `Xiaoban-Agent` | 暖金色边框，cornsilk 文字，spinner 中的 kawaii 面孔。熟悉的双蛇杖横幅。简洁亲切。 |
 | `ares` | 战神主题 — 深红与青铜 | `Ares Agent` | 深红色边框配青铜点缀。激进的 spinner 动词（"forging"、"marching"、"tempering steel"）。自定义剑盾 ASCII 艺术横幅。 |
 | `mono` | 单色 — 简洁灰度 | `Xiaoban-Agent` | 全灰色，无彩色。边框为 `#555555`，文字为 `#c9d1d9`。适合极简终端或录屏场景。 |
 | `slate` | 冷蓝色 — 面向开发者 | `Xiaoban-Agent` | 皇家蓝边框（`#4169e1`），柔和蓝色文字。沉稳专业。无自定义 spinner，使用默认面孔。 |
@@ -95,7 +95,7 @@ CLI 界面中使用的文字字符串。
 | `agent_name` | 横幅标题和状态显示中的名称 | `Xiaoban-Agent` |
 | `welcome` | CLI 启动时显示的欢迎消息 | `Welcome to Xiaoban-Agent! Type your message or /help for commands.` |
 | `goodbye` | 退出时显示的消息 | `Goodbye! ⚕` |
-| `response_label` | 响应框标题上的标签 | ` ⚕ Hermes ` |
+| `response_label` | 响应框标题上的标签 | ` ⚕ Xiaoban ` |
 | `prompt_symbol` | 用户输入 prompt 前的符号（裸 token，渲染器会在后面添加空格） | `❯` |
 | `help_header` | `/help` 命令输出的标题文字 | `(^_^)? Available Commands` |
 
@@ -105,17 +105,17 @@ CLI 界面中使用的文字字符串。
 |----|------|------|--------|
 | `tool_prefix` | 字符串 | CLI 中工具输出行的前缀字符 | `┊` |
 | `tool_emojis` | 字典 | 各工具的 emoji 覆盖，用于 spinner 和进度显示（`{tool_name: emoji}`） | `{}` |
-| `banner_logo` | 字符串 | Rich 标记 ASCII 艺术 logo（替换默认的 HERMES_AGENT 横幅） | `""` |
+| `banner_logo` | 字符串 | Rich 标记 ASCII 艺术 logo（替换默认的 XIAOBAN_AGENT 横幅） | `""` |
 | `banner_hero` | 字符串 | Rich 标记英雄艺术图（替换默认的双蛇杖图案） | `""` |
 
 ## 自定义皮肤
 
-在 `~/.hermes/skins/` 下创建 YAML 文件。用户皮肤会从内置 `default` 皮肤继承缺失的值，因此只需指定要更改的键。
+在 `~/.xiaoban/skins/` 下创建 YAML 文件。用户皮肤会从内置 `default` 皮肤继承缺失的值，因此只需指定要更改的键。
 
 ### 完整自定义皮肤 YAML 模板
 
 ```yaml
-# ~/.hermes/skins/mytheme.yaml
+# ~/.xiaoban/skins/mytheme.yaml
 # Complete skin template — all keys shown. Delete any you don't need;
 # missing values automatically inherit from the 'default' skin.
 
@@ -212,20 +212,20 @@ branding:
 tool_prefix: "▏"
 ```
 
-## Hermes Mod — 可视化皮肤编辑器
+## Xiaoban Mod — 可视化皮肤编辑器
 
-[Hermes Mod](https://github.com/cocktailpeanut/hermes-mod) 是一个社区构建的 Web UI，用于可视化创建和管理皮肤。无需手写 YAML，提供带实时预览的点击式编辑器。
+[Xiaoban Mod](https://github.com/cocktailpeanut/xiaoban-mod) 是一个社区构建的 Web UI，用于可视化创建和管理皮肤。无需手写 YAML，提供带实时预览的点击式编辑器。
 
-![Hermes Mod skin editor](https://raw.githubusercontent.com/cocktailpeanut/hermes-mod/master/nous.png)
+![Xiaoban Mod skin editor](https://raw.githubusercontent.com/cocktailpeanut/xiaoban-mod/master/nous.png)
 
 **功能说明：**
 
 - 列出所有内置和自定义皮肤
-- 将任意皮肤在可视化编辑器中打开，涵盖所有 Hermes 皮肤字段（颜色、spinner、品牌、工具前缀、工具 emoji）
+- 将任意皮肤在可视化编辑器中打开，涵盖所有 Xiaoban 皮肤字段（颜色、spinner、品牌、工具前缀、工具 emoji）
 - 根据文字 prompt 生成 `banner_logo` 文字艺术
 - 将上传的图片（PNG、JPG、GIF、WEBP）转换为 `banner_hero` ASCII 艺术，支持多种渲染风格（盲文点阵、ASCII 字符渐变、方块、点阵）
-- 直接保存到 `~/.hermes/skins/`
-- 通过更新 `~/.hermes/config.yaml` 激活皮肤
+- 直接保存到 `~/.xiaoban/skins/`
+- 通过更新 `~/.xiaoban/config.yaml` 激活皮肤
 - 显示生成的 YAML 及实时预览
 
 ### 安装
@@ -237,14 +237,14 @@ tool_prefix: "▏"
 **方式二 — npx（终端最快方式）：**
 
 ```bash
-npx -y hermes-mod
+npx -y xiaoban-mod
 ```
 
 **方式三 — 手动安装：**
 
 ```bash
-git clone https://github.com/cocktailpeanut/hermes-mod.git
-cd hermes-mod/app
+git clone https://github.com/cocktailpeanut/xiaoban-mod.git
+cd xiaoban-mod/app
 npm install
 npm start
 ```
@@ -256,16 +256,16 @@ npm start
 3. 选择要编辑的内置或自定义皮肤。
 4. 从文字生成 logo，和/或上传图片作为英雄艺术图。选择渲染风格和宽度。
 5. 编辑颜色、spinner、品牌及其他字段。
-6. 点击 **Save** 将皮肤 YAML 写入 `~/.hermes/skins/`。
+6. 点击 **Save** 将皮肤 YAML 写入 `~/.xiaoban/skins/`。
 7. 点击 **Activate** 将其设为当前皮肤（更新 `config.yaml` 中的 `display.skin`）。
 
-Hermes Mod 遵循 `HERMES_HOME` 环境变量，因此也适用于[配置文件](/user-guide/profiles)。
+Xiaoban Mod 遵循 `XIAOBAN_HOME` 环境变量，因此也适用于[配置文件](/user-guide/profiles)。
 
 ## 操作说明
 
-- 内置皮肤从 `hermes_cli/skin_engine.py` 加载。
+- 内置皮肤从 `xiaoban_cli/skin_engine.py` 加载。
 - 未知皮肤自动回退到 `default`。
 - `/skin` 立即更新当前会话的活动 CLI 主题。
-- `~/.hermes/skins/` 中的用户皮肤优先于同名内置皮肤。
+- `~/.xiaoban/skins/` 中的用户皮肤优先于同名内置皮肤。
 - 通过 `/skin` 切换皮肤仅对当前会话有效。如需永久设为默认皮肤，请在 `config.yaml` 中配置。
 - `banner_logo` 和 `banner_hero` 字段支持 Rich 控制台标记（例如 `[bold #FF0000]text[/]`），可用于彩色 ASCII 艺术。

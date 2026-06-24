@@ -26,7 +26,7 @@ Search personal knowledge bases, notes, docs, and meeting transcripts locally us
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # QMD — Query Markup Documents
@@ -244,7 +244,7 @@ without needing to load this skill.
 
 ### Option A: Stdio Mode (Simple)
 
-Add to `~/.hermes/config.yaml`:
+Add to `~/.xiaoban/config.yaml`:
 
 ```yaml
 mcp_servers:

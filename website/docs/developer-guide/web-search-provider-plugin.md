@@ -9,16 +9,16 @@ description: "How to build a web-search/extract/crawl backend plugin for Xiaoban
 Web-search provider plugins register a backend that services `web_search`, `web_extract`, and (optionally) deep-crawl tool calls. Built-in providers — Firecrawl, SearXNG, Tavily, Exa, Parallel, Brave Search (free tier), xAI, and DDGS — all ship as plugins under `plugins/web/<name>/`. You can add a new one, or override a bundled one, by dropping a directory next to them.
 
 :::tip
-Web search is one of several **backend plugins** Hermes supports. The others (with their own ABCs) are [Image Generation Provider Plugins](/developer-guide/image-gen-provider-plugin), [Video Generation Provider Plugins](/developer-guide/video-gen-provider-plugin), [Memory Provider Plugins](/developer-guide/memory-provider-plugin), [Context Engine Plugins](/developer-guide/context-engine-plugin), and [Model Provider Plugins](/developer-guide/model-provider-plugin). General tool/hook/CLI plugins live in [Build a Hermes Plugin](/guides/build-a-hermes-plugin).
+Web search is one of several **backend plugins** Xiaoban supports. The others (with their own ABCs) are [Image Generation Provider Plugins](/developer-guide/image-gen-provider-plugin), [Video Generation Provider Plugins](/developer-guide/video-gen-provider-plugin), [Memory Provider Plugins](/developer-guide/memory-provider-plugin), [Context Engine Plugins](/developer-guide/context-engine-plugin), and [Model Provider Plugins](/developer-guide/model-provider-plugin). General tool/hook/CLI plugins live in [Build a Xiaoban Plugin](/guides/build-a-xiaoban-plugin).
 :::
 
 ## How discovery works
 
-Hermes scans for web-search backends in three places:
+Xiaoban scans for web-search backends in three places:
 
 1. **Bundled** — `<repo>/plugins/web/<name>/` (auto-loaded with `kind: backend`, always available)
-2. **User** — `~/.hermes/plugins/web/<name>/` (opt-in via `plugins.enabled` or `hermes plugins enable <name>`)
-3. **Pip** — packages declaring a `hermes_agent.plugins` entry point
+2. **User** — `~/.xiaoban/plugins/web/<name>/` (opt-in via `plugins.enabled` or `xiaoban plugins enable <name>`)
+3. **Pip** — packages declaring a `xiaoban_agent.plugins` entry point
 
 Each plugin's `register(ctx)` function calls `ctx.register_web_search_provider(...)` — that puts the instance into the registry in `agent/web_search_registry.py`. The active provider for each capability is picked by config:
 
@@ -28,7 +28,7 @@ Each plugin's `register(ctx)` function calls `ctx.register_web_search_provider(.
 | `web_extract` | `web.extract_backend` | `web.backend` |
 | Deep crawl modes inside `web_extract` | `web.extract_backend` | `web.backend` |
 
-When neither key is set, Hermes auto-detects the backend from whichever API key/URL is present in the environment. `xiaoban tools` walks users through selection.
+When neither key is set, Xiaoban auto-detects the backend from whichever API key/URL is present in the environment. `xiaoban tools` walks users through selection.
 
 ## Directory structure
 
@@ -141,7 +141,7 @@ requires_env:
 |---|---|
 | `kind: backend` | Routes the plugin through the backend-loading path |
 | `provides_web_providers` | List of provider `name`s this plugin registers — used by the loader to advertise the plugin in `xiaoban tools` even before `register()` runs |
-| `requires_env` | Interactive credential prompt during `hermes plugins install` (see [Build a Hermes Plugin](/guides/build-a-hermes-plugin#gate-on-environment-variables) for the rich format) |
+| `requires_env` | Interactive credential prompt during `xiaoban plugins install` (see [Build a Xiaoban Plugin](/guides/build-a-xiaoban-plugin#gate-on-environment-variables) for the rich format) |
 
 ## ABC reference
 
@@ -206,20 +206,20 @@ Both `search()` and `extract()` may be `async def` — the dispatcher detects co
 
 ## Capability flags
 
-Hermes routes calls to the right provider based on the `supports_*` flags. A common multi-provider setup:
+Xiaoban routes calls to the right provider based on the `supports_*` flags. A common multi-provider setup:
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.xiaoban/config.yaml
 web:
   search_backend: "brave-free"     # search-only, fast, free 2k/mo
   extract_backend: "firecrawl"     # extract + crawl, paid quota
 ```
 
-When `web.search_backend` or `web.extract_backend` aren't set, both fall through to `web.backend`. When that's also unset, Hermes picks the first available provider that supports the requested capability based on env-var presence.
+When `web.search_backend` or `web.extract_backend` aren't set, both fall through to `web.backend`. When that's also unset, Xiaoban picks the first available provider that supports the requested capability based on env-var presence.
 
 If your provider only supports one capability, leave the other flags at their default (`False`) and the registry will skip it for that tool — users won't see misleading "provider X failed" errors when they're using X only for search and asking the agent to extract.
 
-## How Hermes wires it into the tools
+## How Xiaoban wires it into the tools
 
 The `web_search` and `web_extract` tools live in `tools/web_tools.py`. At call time they:
 
@@ -233,7 +233,7 @@ Errors surface as the tool result; the LLM decides how to explain them. If no pr
 
 ## Lazy-installing optional dependencies
 
-If your provider wraps a third-party SDK (like DDGS does with the `ddgs` package), don't `import` it at module top level. Use `tools.lazy_deps.ensure(...)` inside `is_available()` or `search()` — Hermes will install the package on first use, gated by `security.allow_lazy_installs`. See [Build a Hermes Plugin → Lazy-install](/guides/build-a-hermes-plugin#lazy-install-optional-python-dependencies) for the security model.
+If your provider wraps a third-party SDK (like DDGS does with the `ddgs` package), don't `import` it at module top level. Use `tools.lazy_deps.ensure(...)` inside `is_available()` or `search()` — Xiaoban will install the package on first use, gated by `security.allow_lazy_installs`. See [Build a Xiaoban Plugin → Lazy-install](/guides/build-a-xiaoban-plugin#lazy-install-optional-python-dependencies) for the security model.
 
 ## Reference implementations
 
@@ -247,14 +247,14 @@ If your provider wraps a third-party SDK (like DDGS does with the `ddgs` package
 
 ```toml
 # pyproject.toml
-[project.entry-points."hermes_agent.plugins"]
+[project.entry-points."xiaoban_agent.plugins"]
 my-backend-web = "my_backend_web_package"
 ```
 
-`my_backend_web_package` must expose a top-level `register` function. See [Distribute via pip](/guides/build-a-hermes-plugin#distribute-via-pip) in the general plugin guide for the full setup.
+`my_backend_web_package` must expose a top-level `register` function. See [Distribute via pip](/guides/build-a-xiaoban-plugin#distribute-via-pip) in the general plugin guide for the full setup.
 
 ## Related pages
 
 - [Web Search](/user-guide/features/web-search) — user-facing feature documentation and per-backend configuration
 - [Plugins overview](/user-guide/features/plugins) — all plugin types at a glance
-- [Build a Hermes Plugin](/guides/build-a-hermes-plugin) — general tools/hooks/slash commands guide
+- [Build a Xiaoban Plugin](/guides/build-a-xiaoban-plugin) — general tools/hooks/slash commands guide

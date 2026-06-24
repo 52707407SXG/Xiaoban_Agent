@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { SessionInfo } from '@/types/hermes'
+import type { SessionInfo } from '@/types/xiaoban'
 
 import { sessionMatchesSearch } from './session-search'
 

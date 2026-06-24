@@ -20,12 +20,12 @@ Usage:
     response = agent.run_conversation("Tell me about the latest Python updates")
 """
 
-# IMPORTANT: hermes_bootstrap must be the very first import — UTF-8 stdio
-# on Windows.  No-op on POSIX.  See hermes_bootstrap.py for full rationale.
+# IMPORTANT: xiaoban_bootstrap must be the very first import — UTF-8 stdio
+# on Windows.  No-op on POSIX.  See xiaoban_bootstrap.py for full rationale.
 try:
-    import hermes_bootstrap  # noqa: F401
+    import xiaoban_bootstrap  # noqa: F401
 except ModuleNotFoundError:
-    # Graceful fallback when hermes_bootstrap isn't registered in the venv
+    # Graceful fallback when xiaoban_bootstrap isn't registered in the venv
     # yet — happens during partial ``xiaoban update`` where git-reset landed
     # new code but ``uv pip install -e .`` didn't finish.  Missing bootstrap
     # means UTF-8 stdio setup is skipped on Windows; POSIX is unaffected.
@@ -62,7 +62,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from hermes_constants import get_hermes_home
+from xiaoban_constants import get_xiaoban_home
 
 
 def _launch_cwd_for_session(source: str) -> Optional[str]:
@@ -93,9 +93,9 @@ def _session_source_for_agent(platform: Optional[str]) -> str:
     try:
         from gateway.session_context import get_session_env
 
-        source = get_session_env("HERMES_SESSION_SOURCE", "")
+        source = get_session_env("XIAOBAN_SESSION_SOURCE", "")
     except Exception:
-        source = os.environ.get("HERMES_SESSION_SOURCE", "")
+        source = os.environ.get("XIAOBAN_SESSION_SOURCE", "")
     source = str(source or "").strip()
     if source:
         return source
@@ -116,15 +116,15 @@ from agent.process_bootstrap import (
 from agent.iteration_budget import IterationBudget
 
 
-from hermes_cli.env_loader import load_hermes_dotenv
-from hermes_cli.timeouts import (
+from xiaoban_cli.env_loader import load_xiaoban_dotenv
+from xiaoban_cli.timeouts import (
     get_provider_request_timeout,
     get_provider_stale_timeout,
 )
 
-_hermes_home = get_hermes_home()
+_xiaoban_home = get_xiaoban_home()
 _project_env = Path(__file__).parent / '.env'
-_loaded_env_paths = load_hermes_dotenv(hermes_home=_hermes_home, project_env=_project_env)
+_loaded_env_paths = load_xiaoban_dotenv(xiaoban_home=_xiaoban_home, project_env=_project_env)
 if _loaded_env_paths:
     for _env_path in _loaded_env_paths:
         logger.info("Loaded environment variables from %s", _env_path)
@@ -236,10 +236,10 @@ _QWEN_CODE_VERSION = "0.14.1"
 
 def _routermint_headers() -> dict:
     """Return the User-Agent RouterMint needs to avoid Cloudflare 1010 blocks."""
-    from hermes_cli import __version__ as _HERMES_VERSION
+    from xiaoban_cli import __version__ as _XIAOBAN_VERSION
 
     return {
-        "User-Agent": f"XiaobanAgent/{_HERMES_VERSION}",
+        "User-Agent": f"XiaobanAgent/{_XIAOBAN_VERSION}",
     }
 
 
@@ -513,7 +513,7 @@ class AIAgent:
         if self._session_db is not None:
             return self._session_db
         try:
-            from hermes_state import SessionDB
+            from xiaoban_state import SessionDB
 
             self._session_db = SessionDB()
             return self._session_db
@@ -674,7 +674,7 @@ class AIAgent:
             return
         try:
             from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
-            from hermes_cli.models import ensure_lmstudio_model_loaded
+            from xiaoban_cli.models import ensure_lmstudio_model_loaded
             if config_context_length is None:
                 config_context_length = getattr(self, "_config_context_length", None)
             target_ctx = max(config_context_length or 0, MINIMUM_CONTEXT_LENGTH)
@@ -1097,19 +1097,19 @@ class AIAgent:
         Priority:
           1. ``providers.<id>.models.<model>.timeout_seconds`` (per-model override)
           2. ``providers.<id>.request_timeout_seconds`` (provider-wide)
-          3. ``HERMES_API_TIMEOUT`` env var (legacy escape hatch)
+          3. ``XIAOBAN_API_TIMEOUT`` env var (legacy escape hatch)
           4. 1800.0s default
 
         Used by OpenAI-wire chat completions (streaming and non-streaming) so
         the per-provider config knob wins over the 1800s default.  Without this
-        helper, the hardcoded ``HERMES_API_TIMEOUT`` fallback would always be
+        helper, the hardcoded ``XIAOBAN_API_TIMEOUT`` fallback would always be
         passed as a per-call ``timeout=`` kwarg, overriding the client-level
         timeout the AIAgent.__init__ path configured.
         """
         cfg = get_provider_request_timeout(self.provider, self.model)
         if cfg is not None:
             return cfg
-        return env_float("HERMES_API_TIMEOUT", 1800.0)
+        return env_float("XIAOBAN_API_TIMEOUT", 1800.0)
 
     def _resolved_api_call_stale_timeout_base(self) -> tuple[float, bool]:
         """Resolve the base non-stream stale timeout and whether it is implicit.
@@ -1117,7 +1117,7 @@ class AIAgent:
         Priority:
           1. ``providers.<id>.models.<model>.stale_timeout_seconds``
           2. ``providers.<id>.stale_timeout_seconds``
-          3. ``HERMES_API_CALL_STALE_TIMEOUT`` env var
+          3. ``XIAOBAN_API_CALL_STALE_TIMEOUT`` env var
           4. 90.0s default (time-to-first-byte for non-streaming / Codex
              internal-streaming requests; lowered from 300s in May 2026 so
              fallback providers kick in faster when upstream providers
@@ -1133,7 +1133,7 @@ class AIAgent:
         if cfg is not None:
             return cfg, False
 
-        env_timeout = os.getenv("HERMES_API_CALL_STALE_TIMEOUT")
+        env_timeout = os.getenv("XIAOBAN_API_CALL_STALE_TIMEOUT")
         if env_timeout is not None:
             return float(env_timeout), False
 
@@ -1257,7 +1257,7 @@ class AIAgent:
             return False
         if normalized_provider == "copilot":
             try:
-                from hermes_cli.models import _should_use_copilot_responses_api
+                from xiaoban_cli.models import _should_use_copilot_responses_api
                 return _should_use_copilot_responses_api(model)
             except Exception:
                 # Fall back to the generic GPT-5 rule if Copilot-specific
@@ -1990,7 +1990,7 @@ class AIAgent:
 
     @staticmethod
     def _hook_payload_max_chars() -> int:
-        raw = os.getenv("HERMES_PLUGIN_PAYLOAD_MAX_CHARS", "50000")
+        raw = os.getenv("XIAOBAN_PLUGIN_PAYLOAD_MAX_CHARS", "50000")
         try:
             return max(1000, int(raw))
         except (TypeError, ValueError):
@@ -2198,11 +2198,11 @@ class AIAgent:
         reason: Optional[str] = None,
     ) -> None:
         # Lazy module import (not from-import) so tests that
-        # ``monkeypatch.setattr("hermes_cli.plugins.has_hook", ...)`` still
+        # ``monkeypatch.setattr("xiaoban_cli.plugins.has_hook", ...)`` still
         # take effect on this call site. After first call the import is a
         # ``sys.modules`` dict lookup, so retries don't repay any real cost.
         try:
-            from hermes_cli import plugins as _plugins
+            from xiaoban_cli import plugins as _plugins
 
             if not _plugins.has_hook("api_request_error"):
                 return
@@ -2267,7 +2267,7 @@ class AIAgent:
         parts. Image / binary parts are left untouched; only text fields are
         passed through ``redact_sensitive_text``.
 
-        Respects ``HERMES_REDACT_SECRETS`` via ``redact_sensitive_text`` —
+        Respects ``XIAOBAN_REDACT_SECRETS`` via ``redact_sensitive_text`` —
         when disabled the helper is effectively a no-op.
         """
         if content is None:
@@ -2292,7 +2292,7 @@ class AIAgent:
 
         Gated by ``sessions.write_json_snapshots`` (default False).  state.db
         is the canonical message store; this writer exists only for users
-        whose external tooling consumes ``~/.hermes/sessions/session_{sid}.json``
+        whose external tooling consumes ``~/.xiaoban/sessions/session_{sid}.json``
         directly.  When the flag is off this is a fast no-op.
 
         When enabled, rewrites the snapshot after every persistence point with
@@ -2325,7 +2325,7 @@ class AIAgent:
                 # Defence-in-depth: redact credentials from every message
                 # content before persistence. Catches PATs / API keys / Bearer
                 # tokens that may have leaked into assistant responses, tool
-                # output, or user paste. Respects HERMES_REDACT_SECRETS via
+                # output, or user paste. Respects XIAOBAN_REDACT_SECRETS via
                 # redact_sensitive_text — no-op when disabled. (#19798, #19845)
                 if "content" in msg:
                     msg = dict(msg)
@@ -2569,19 +2569,19 @@ class AIAgent:
         """Check whether the per-turn file-mutation verifier footer is on.
 
         Config path: ``display.file_mutation_verifier`` (bool, default True).
-        ``HERMES_FILE_MUTATION_VERIFIER`` env var overrides config.  Exposed
+        ``XIAOBAN_FILE_MUTATION_VERIFIER`` env var overrides config.  Exposed
         as a method so tests can patch a single seam without reaching into
         the private ``_turn_failed_file_mutations`` state dict.
         """
         try:
             import os as _os
-            env = _os.environ.get("HERMES_FILE_MUTATION_VERIFIER")
+            env = _os.environ.get("XIAOBAN_FILE_MUTATION_VERIFIER")
             if env is not None:
                 return env.strip().lower() not in {"0", "false", "no", "off"}
             # Read from the persisted config.yaml so gateway and CLI share
             # the same setting.  Import lazily to avoid a startup-time cycle.
             try:
-                from hermes_cli.config import load_config as _load_config
+                from xiaoban_cli.config import load_config as _load_config
                 _cfg = _load_config() or {}
             except Exception:
                 _cfg = {}
@@ -2633,7 +2633,7 @@ class AIAgent:
         path and any path echoed inside the tool's error preview — is
         backtick-wrapped via ``_neutralize_footer_paths`` so the gateway's
         bare-path media extractor can never auto-attach a protected file
-        (e.g. ``~/.hermes/config.yaml``) to a messaging channel (#35584).
+        (e.g. ``~/.xiaoban/config.yaml``) to a messaging channel (#35584).
         """
         if not failed:
             return ""
@@ -2666,19 +2666,19 @@ class AIAgent:
         """Check whether the end-of-turn completion explainer footer is on.
 
         Config path: ``display.turn_completion_explainer`` (bool, default
-        True).  ``HERMES_TURN_COMPLETION_EXPLAINER`` env var overrides
+        True).  ``XIAOBAN_TURN_COMPLETION_EXPLAINER`` env var overrides
         config.  Exposed as a method so tests can patch a single seam,
         mirroring ``_file_mutation_verifier_enabled``.
         """
         try:
             import os as _os
-            env = _os.environ.get("HERMES_TURN_COMPLETION_EXPLAINER")
+            env = _os.environ.get("XIAOBAN_TURN_COMPLETION_EXPLAINER")
             if env is not None:
                 return env.strip().lower() not in {"0", "false", "no", "off"}
             # Read from the persisted config.yaml so gateway and CLI share
             # the same setting.  Import lazily to avoid a startup-time cycle.
             try:
-                from hermes_cli.config import load_config as _load_config
+                from xiaoban_cli.config import load_config as _load_config
                 _cfg = _load_config() or {}
             except Exception:
                 _cfg = {}
@@ -2791,14 +2791,14 @@ class AIAgent:
         """Update the last-activity timestamp and description (thread-safe).
 
         Also bridges to the kanban board's heartbeat fields when this
-        process is a dispatcher-spawned worker (HERMES_KANBAN_TASK set),
+        process is a dispatcher-spawned worker (XIAOBAN_KANBAN_TASK set),
         so the dispatcher watchdog doesn't reclaim an actively-running
         worker as stale (#31752). Bridge is rate-limited (60s) and
         best-effort — it never raises into the agent loop.
         """
         self._last_activity_ts = time.time()
         self._last_activity_desc = desc
-        if os.environ.get("HERMES_KANBAN_TASK"):
+        if os.environ.get("XIAOBAN_KANBAN_TASK"):
             try:
                 from tools.kanban_tools import heartbeat_current_worker_from_env
                 heartbeat_current_worker_from_env()
@@ -2840,7 +2840,7 @@ class AIAgent:
         EVALUATION/EMIT is a SEPARATE block that WARNS on failure (R1-M2): a bug in the
         depletion-notice path must not vanish silently under the parse swallow.
         """
-        # Dev test fixture (HERMES_DEV_CREDITS_FIXTURE): inject a chosen notice state
+        # Dev test fixture (XIAOBAN_DEV_CREDITS_FIXTURE): inject a chosen notice state
         # each turn for repeatable testing, bypassing real headers. Throwaway scaffolding.
         try:
             from agent.credits_tracker import dev_fixture_credits_state
@@ -2857,7 +2857,7 @@ class AIAgent:
             _used = _fixture.used_fraction
             logger.info(
                 "credits ▸ [FIXTURE] remaining=%d (%s) · paid=%s · denom=%s · used=%s "
-                "(real headers bypassed — `echo clear` / unset HERMES_DEV_CREDITS_FIXTURE to restore)",
+                "(real headers bypassed — `echo clear` / unset XIAOBAN_DEV_CREDITS_FIXTURE to restore)",
                 _fixture.remaining_micros,
                 _fixture.remaining_usd or "?",
                 _fixture.paid_access,
@@ -2871,7 +2871,7 @@ class AIAgent:
         headers = getattr(http_response, "headers", None)
         if not headers:
             return
-        _dev = is_truthy_value(os.environ.get("HERMES_DEV_CREDITS"))
+        _dev = is_truthy_value(os.environ.get("XIAOBAN_DEV_CREDITS"))
 
         # ── Parse (fail-open → miss; never overwrite good state with None) ──
         try:
@@ -2893,7 +2893,7 @@ class AIAgent:
         if self._credits_session_start_micros is None:
             self._credits_session_start_micros = state.remaining_micros
         if _dev:
-            # HERMES_DEV_CREDITS: stream each capture to agent.log — watch live with
+            # XIAOBAN_DEV_CREDITS: stream each capture to agent.log — watch live with
             # `xiaoban logs -f` (grep 'credits ▸'). Dev-only; silent for normal users.
             spent = self.get_credits_spent_micros()
             used = state.used_fraction
@@ -2963,7 +2963,7 @@ class AIAgent:
             return cached
         enabled = True
         try:
-            from hermes_cli.config import load_config as _load_config
+            from xiaoban_cli.config import load_config as _load_config
             _cfg = _load_config() or {}
             _display = _cfg.get("display") if isinstance(_cfg, dict) else None
             if isinstance(_display, dict) and "credits_notices" in _display:
@@ -3696,7 +3696,7 @@ class AIAgent:
         return any(_contains_image(item) for item in candidates)
 
     def _copilot_headers_for_request(self, *, is_vision: bool) -> dict:
-        from hermes_cli.copilot_auth import copilot_request_headers
+        from xiaoban_cli.copilot_auth import copilot_request_headers
 
         return copilot_request_headers(is_agent_turn=True, is_vision=is_vision)
 
@@ -3790,13 +3790,13 @@ class AIAgent:
         # MUST only fire when the agent really is on singleton tokens.
         try:
             if self.provider == "openai-codex":
-                from hermes_cli.auth import resolve_codex_runtime_credentials
+                from xiaoban_cli.auth import resolve_codex_runtime_credentials
 
                 singleton_now = resolve_codex_runtime_credentials(
                     refresh_if_expiring=False,
                 )
             else:
-                from hermes_cli.auth import resolve_xai_oauth_runtime_credentials
+                from xiaoban_cli.auth import resolve_xai_oauth_runtime_credentials
 
                 singleton_now = resolve_xai_oauth_runtime_credentials(
                     refresh_if_expiring=False,
@@ -3818,11 +3818,11 @@ class AIAgent:
 
         try:
             if self.provider == "openai-codex":
-                from hermes_cli.auth import resolve_codex_runtime_credentials
+                from xiaoban_cli.auth import resolve_codex_runtime_credentials
 
                 creds = resolve_codex_runtime_credentials(force_refresh=force)
             else:
-                from hermes_cli.auth import resolve_xai_oauth_runtime_credentials
+                from xiaoban_cli.auth import resolve_xai_oauth_runtime_credentials
 
                 creds = resolve_xai_oauth_runtime_credentials(force_refresh=force)
         except Exception as exc:
@@ -3855,10 +3855,10 @@ class AIAgent:
             return False
 
         try:
-            from hermes_cli.auth import resolve_nous_runtime_credentials
+            from xiaoban_cli.auth import resolve_nous_runtime_credentials
 
             creds = resolve_nous_runtime_credentials(
-                timeout_seconds=env_float("HERMES_NOUS_TIMEOUT_SECONDS", 15),
+                timeout_seconds=env_float("XIAOBAN_NOUS_TIMEOUT_SECONDS", 15),
                 force_refresh=force,
             )
         except Exception as exc:
@@ -3896,7 +3896,7 @@ class AIAgent:
             return False
 
         try:
-            from hermes_cli.copilot_auth import resolve_copilot_token
+            from xiaoban_cli.copilot_auth import resolve_copilot_token
 
             new_token, token_source = resolve_copilot_token()
         except Exception as exc:
@@ -3983,7 +3983,7 @@ class AIAgent:
         elif base_url_host_matches(base_url, "api.routermint.com"):
             self._client_kwargs["default_headers"] = _routermint_headers()
         elif base_url_host_matches(base_url, "api.githubcopilot.com"):
-            from hermes_cli.models import copilot_default_headers
+            from xiaoban_cli.models import copilot_default_headers
 
             self._client_kwargs["default_headers"] = copilot_default_headers()
         elif base_url_host_matches(base_url, "api.kimi.com"):
@@ -4455,7 +4455,7 @@ class AIAgent:
         misclassified as non-vision and have their images stripped.
         """
         try:
-            from hermes_cli.config import load_config
+            from xiaoban_cli.config import load_config
             from agent.image_routing import _lookup_supports_vision
             cfg = load_config()
             provider = (getattr(self, "provider", "") or "").strip()
@@ -4871,7 +4871,7 @@ class AIAgent:
             or base_url_host_matches(self._base_url_lower, "api.githubcopilot.com")
         ):
             try:
-                from hermes_cli.models import github_model_reasoning_efforts
+                from xiaoban_cli.models import github_model_reasoning_efforts
 
                 return bool(github_model_reasoning_efforts(self.model))
             except Exception:
@@ -4924,7 +4924,7 @@ class AIAgent:
             if opts or (_time.monotonic() - ts) < 60:
                 return opts
         try:
-            from hermes_cli.models import lmstudio_model_reasoning_options
+            from xiaoban_cli.models import lmstudio_model_reasoning_options
             opts = lmstudio_model_reasoning_options(
                 self.model, self.base_url, getattr(self, "api_key", ""),
             )
@@ -4949,7 +4949,7 @@ class AIAgent:
     def _github_models_reasoning_extra_body(self) -> dict | None:
         """Format reasoning payload for GitHub Models/OpenAI-compatible routes."""
         try:
-            from hermes_cli.models import github_model_reasoning_efforts
+            from xiaoban_cli.models import github_model_reasoning_efforts
         except Exception:
             return None
 

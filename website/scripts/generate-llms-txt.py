@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate llms.txt and llms-full.txt for the Hermes docs site.
+"""Generate llms.txt and llms-full.txt for the Xiaoban docs site.
 
 Outputs:
   website/static/llms.txt        — short curated index of the docs, one link per page,
@@ -9,8 +9,8 @@ Outputs:
                                     comments separating files.
 
 Both publish at:
-  https://github.com/52707407SXG/Xiaoban-Agent/docs/llms.txt
-  https://github.com/52707407SXG/Xiaoban-Agent/docs/llms-full.txt
+  https://github.com/52707407SXG/Xiaoban_Agent/tree/main/website/docs/llms.txt
+  https://github.com/52707407SXG/Xiaoban_Agent/tree/main/website/docs/llms-full.txt
 
 The `/docs/` prefix is not a mistake — Docusaurus serves `website/static/`
 at the `docs/` base path. Clients and IDE plugins that probe the classic
@@ -31,7 +31,7 @@ WEBSITE = SCRIPT_DIR.parent
 DOCS = WEBSITE / "docs"
 STATIC = WEBSITE / "static"
 
-SITE_BASE = "https://github.com/52707407SXG/Xiaoban-Agent/docs"
+SITE_BASE = "https://github.com/52707407SXG/Xiaoban_Agent/tree/main/website/docs"
 
 # Curated sections for llms.txt — mirrors the product story, not the filesystem.
 # Each entry: (docs-relative path without .md, display title, optional short desc).
@@ -45,7 +45,7 @@ SECTIONS: list[tuple[str, list[tuple[str, str, str | None]]]] = [
         ("getting-started/termux", "Termux (Android)", None),
         ("getting-started/nix-setup", "Nix Setup", None),
     ]),
-    ("Using Hermes", [
+    ("Using Xiaoban", [
         ("user-guide/cli", "CLI", None),
         ("user-guide/tui", "TUI (Ink terminal UI)", None),
         ("user-guide/configuration", "Configuration", None),
@@ -117,11 +117,11 @@ SECTIONS: list[tuple[str, list[tuple[str, str, str | None]]]] = [
         ("guides/local-llm-on-mac", "Local LLMs on Mac", None),
         ("guides/daily-briefing-bot", "Daily Briefing Bot", None),
         ("guides/team-telegram-assistant", "Team Telegram Assistant", None),
-        ("guides/python-library", "Use Hermes as a Python Library", None),
-        ("guides/use-mcp-with-hermes", "Use MCP with Hermes", None),
-        ("guides/use-voice-mode-with-hermes", "Use Voice Mode with Hermes", None),
-        ("guides/use-soul-with-hermes", "Use SOUL.md with Hermes", None),
-        ("guides/build-a-hermes-plugin", "Build a Hermes Plugin", None),
+        ("guides/python-library", "Use Xiaoban as a Python Library", None),
+        ("guides/use-mcp-with-xiaoban", "Use MCP with Xiaoban", None),
+        ("guides/use-voice-mode-with-xiaoban", "Use Voice Mode with Xiaoban", None),
+        ("guides/use-soul-with-xiaoban", "Use SOUL.md with Xiaoban", None),
+        ("guides/build-a-xiaoban-plugin", "Build a Xiaoban Plugin", None),
         ("guides/automate-with-cron", "Automate with Cron", None),
         ("guides/work-with-skills", "Work with Skills", None),
         ("guides/delegation-patterns", "Delegation Patterns", None),
@@ -151,7 +151,7 @@ SECTIONS: list[tuple[str, list[tuple[str, str, str | None]]]] = [
         ("reference/toolsets-reference", "Toolsets Reference", None),
         ("reference/mcp-config-reference", "MCP Config Reference", None),
         ("reference/model-catalog", "Model Catalog", None),
-        ("reference/skills-catalog", "Bundled Skills Catalog", "Table of all ~90 skills bundled with Hermes"),
+        ("reference/skills-catalog", "Bundled Skills Catalog", "Table of all ~90 skills bundled with Xiaoban"),
         ("reference/optional-skills-catalog", "Optional Skills Catalog", "Table of ~60 additional installable skills"),
         ("reference/faq", "FAQ & Troubleshooting", None),
     ]),
@@ -215,7 +215,7 @@ def emit_llms_index() -> str:
         "(Linux, macOS, WSL2, Termux)"
     )
     lines.append("")
-    lines.append("Repo: https://github.com/52707407SXG/Xiaoban-Agent")
+    lines.append("Repo: https://github.com/52707407SXG/Xiaoban_Agent")
     lines.append("")
 
     for section, items in SECTIONS:
@@ -245,11 +245,11 @@ def emit_llms_full() -> str:
         (
             "This file is the entire Xiaoban-Agent documentation concatenated for LLM "
             "context ingestion. Section order reflects docs-site navigation: Getting "
-            "Started, Using Hermes, Features, Messaging, Integrations, Guides, "
+            "Started, Using Xiaoban, Features, Messaging, Integrations, Guides, "
             "Developer Guide, Reference, then everything else.\n"
         ),
-        "Canonical site: https://github.com/52707407SXG/Xiaoban-Agent/docs\n",
-        "Short index: https://github.com/52707407SXG/Xiaoban-Agent/docs/llms.txt\n",
+        "Canonical site: https://github.com/52707407SXG/Xiaoban_Agent/tree/main/website/docs\n",
+        "Short index: https://github.com/52707407SXG/Xiaoban_Agent/tree/main/website/docs/llms.txt\n",
         "\n---\n\n",
     ]
 

@@ -223,7 +223,7 @@ class TestInterruptedReplayFiltering:
                         "id": "call_2",
                         "function": {
                             "name": "terminal",
-                            "arguments": '{"command": "systemctl restart hermes"}',
+                            "arguments": '{"command": "systemctl restart xiaoban"}',
                         },
                     },
                 ],

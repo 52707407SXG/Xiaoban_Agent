@@ -10,7 +10,7 @@ const path = require('node:path')
 
 const { isPackagedInstallPath } = require('./workspace-cwd.cjs')
 
-const installRoot = path.resolve('/opt/Hermes')
+const installRoot = path.resolve('/opt/Xiaoban')
 
 test('isPackagedInstallPath returns false when not packaged', () => {
   assert.equal(

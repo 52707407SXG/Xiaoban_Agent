@@ -5,7 +5,7 @@ version: 1.0.0
 description: >
   Matrix gateway adapter for Xiaoban-Agent.
   Connects to a Matrix homeserver via mautrix (with optional E2EE) and relays
-  messages between Matrix rooms/DMs and the Hermes agent. Supports threads,
+  messages between Matrix rooms/DMs and the Xiaoban agent. Supports threads,
   HTML/markdown rendering, native media uploads, mention gating, free-response
   rooms, and per-room allowlists.
 author: NousResearch

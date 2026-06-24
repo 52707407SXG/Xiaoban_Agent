@@ -42,7 +42,7 @@ If you have a paid [Nous Portal](https://portal.nousresearch.com) subscription, 
 To use Browserbase-managed cloud browsers, add:
 
 ```bash
-# Add to ~/.hermes/.env
+# Add to ~/.xiaoban/.env
 BROWSERBASE_API_KEY=***
 BROWSERBASE_PROJECT_ID=your-project-id-here
 ```
@@ -54,7 +54,7 @@ Get your credentials at [browserbase.com](https://browserbase.com).
 To use Browser Use as your cloud browser provider, add:
 
 ```bash
-# Add to ~/.hermes/.env
+# Add to ~/.xiaoban/.env
 BROWSER_USE_API_KEY=***
 ```
 
@@ -65,7 +65,7 @@ Get your API key at [browser-use.com](https://browser-use.com). Browser Use prov
 To use Firecrawl as your cloud browser provider, add:
 
 ```bash
-# Add to ~/.hermes/.env
+# Add to ~/.xiaoban/.env
 FIRECRAWL_API_KEY=fc-***
 ```
 
@@ -88,7 +88,7 @@ FIRECRAWL_BROWSER_TTL=600
 
 ### Hybrid routing: cloud for public URLs, local for LAN/localhost
 
-When a cloud provider is configured, Hermes auto-spawns a **local Chromium sidecar**
+When a cloud provider is configured, Xiaoban auto-spawns a **local Chromium sidecar**
 for URLs that resolve to a private/loopback/LAN address (`localhost`, `127.0.0.1`,
 `192.168.x.x`, `10.x.x.x`, `172.16-31.x.x`, `*.local`, `*.lan`, `*.internal`,
 IPv6 loopback `::1`, link-local `169.254.x.x`). Public URLs continue to use the
@@ -103,7 +103,7 @@ The feature is **on by default**. To disable it (all URLs go to the configured
 cloud provider, as before):
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.xiaoban/config.yaml
 browser:
   cloud_provider: browserbase
   auto_local_for_private_urls: false
@@ -179,7 +179,7 @@ make down
 # then run the custom docker run command above
 ```
 
-Then set in `~/.hermes/.env`:
+Then set in `~/.xiaoban/.env`:
 
 ```bash
 CAMOFOX_URL=http://localhost:9377
@@ -188,7 +188,7 @@ CAMOFOX_URL=http://localhost:9377
 If Camofox is running in Docker and you want it to open web apps served from the host machine, enable loopback rewriting. `CAMOFOX_URL` should still point at the host-published control API, but page URLs such as `http://127.0.0.1:3000` must be opened from inside the container as `http://host.docker.internal:3000`:
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.xiaoban/config.yaml
 browser:
   camofox:
     rewrite_loopback_urls: true
@@ -210,7 +210,7 @@ When `CAMOFOX_URL` is set, all browser tools automatically route through Camofox
 
 #### Persistent browser sessions
 
-By default, each Camofox session gets a random identity — cookies and logins don't survive across agent restarts. To enable persistent browser sessions, add the following to `~/.hermes/config.yaml`:
+By default, each Camofox session gets a random identity — cookies and logins don't survive across agent restarts. To enable persistent browser sessions, add the following to `~/.xiaoban/config.yaml`:
 
 ```yaml
 browser:
@@ -218,53 +218,53 @@ browser:
     managed_persistence: true
 ```
 
-Then fully restart Hermes so the new config is picked up.
+Then fully restart Xiaoban so the new config is picked up.
 
 :::warning Nested path matters
-Hermes reads `browser.camofox.managed_persistence`, **not** a top-level `managed_persistence`. A common mistake is writing:
+Xiaoban reads `browser.camofox.managed_persistence`, **not** a top-level `managed_persistence`. A common mistake is writing:
 
 ```yaml
-# ❌ Wrong — Hermes ignores this
+# ❌ Wrong — Xiaoban ignores this
 managed_persistence: true
 ```
 
-If the flag is placed at the wrong path, Hermes silently falls back to a random ephemeral `userId` and your login state will be lost on every session.
+If the flag is placed at the wrong path, Xiaoban silently falls back to a random ephemeral `userId` and your login state will be lost on every session.
 :::
 
-##### What Hermes does
+##### What Xiaoban does
 - Sends a deterministic profile-scoped `userId` to Camofox so the server can reuse the same Firefox profile across sessions.
 - Skips server-side context destruction on cleanup, so cookies and logins survive between agent tasks.
-- Scopes the `userId` to the active Hermes profile, so different Hermes profiles get different browser profiles (profile isolation).
+- Scopes the `userId` to the active Xiaoban profile, so different Xiaoban profiles get different browser profiles (profile isolation).
 
-##### What Hermes does not do
-- It does not force persistence on the Camofox server. Hermes only sends a stable `userId`; the server must honor it by mapping that `userId` to a persistent Firefox profile directory.
-- If your Camofox server build treats every request as ephemeral (e.g. always calls `browser.newContext()` without loading a stored profile), Hermes cannot make those sessions persist. Make sure you are running a Camofox build that implements userId-based profile persistence.
+##### What Xiaoban does not do
+- It does not force persistence on the Camofox server. Xiaoban only sends a stable `userId`; the server must honor it by mapping that `userId` to a persistent Firefox profile directory.
+- If your Camofox server build treats every request as ephemeral (e.g. always calls `browser.newContext()` without loading a stored profile), Xiaoban cannot make those sessions persist. Make sure you are running a Camofox build that implements userId-based profile persistence.
 
 ##### Verify it's working
 
-1. Start Hermes and your Camofox server.
+1. Start Xiaoban and your Camofox server.
 2. Open Google (or any login site) in a browser task and sign in manually.
 3. End the browser task normally.
 4. Start a new browser task.
 5. Open the same site again — you should still be signed in.
 
-If step 5 logs you out, the Camofox server isn't honoring the stable `userId`. Double-check your config path, confirm you fully restarted Hermes after editing `config.yaml`, and verify your Camofox server version supports persistent per-user profiles.
+If step 5 logs you out, the Camofox server isn't honoring the stable `userId`. Double-check your config path, confirm you fully restarted Xiaoban after editing `config.yaml`, and verify your Camofox server version supports persistent per-user profiles.
 
 ##### Where state lives
 
-Hermes derives the stable `userId` from the profile-scoped directory `~/.hermes/browser_auth/camofox/` (or the equivalent under `$HERMES_HOME` for non-default profiles). The actual browser profile data lives on the Camofox server side, keyed by that `userId`. To fully reset a persistent profile, clear it on the Camofox server and remove the corresponding Hermes profile's state directory.
+Xiaoban derives the stable `userId` from the profile-scoped directory `~/.xiaoban/browser_auth/camofox/` (or the equivalent under `$XIAOBAN_HOME` for non-default profiles). The actual browser profile data lives on the Camofox server side, keyed by that `userId`. To fully reset a persistent profile, clear it on the Camofox server and remove the corresponding Xiaoban profile's state directory.
 
 #### Externally managed Camofox sessions
 
-When another app drives the visible Camofox browser (a desktop assistant, a custom integration, another agent), configure Hermes to operate inside that same identity instead of spawning its own isolated profile.
+When another app drives the visible Camofox browser (a desktop assistant, a custom integration, another agent), configure Xiaoban to operate inside that same identity instead of spawning its own isolated profile.
 
 Three knobs control the behavior:
 
 | Setting | Env var | Effect |
 |---------|---------|--------|
-| `browser.camofox.user_id` | `CAMOFOX_USER_ID` | Camofox `userId` Hermes uses when creating tabs. Setting this opts the session into "externally managed" mode. |
+| `browser.camofox.user_id` | `CAMOFOX_USER_ID` | Camofox `userId` Xiaoban uses when creating tabs. Setting this opts the session into "externally managed" mode. |
 | `browser.camofox.session_key` | `CAMOFOX_SESSION_KEY` | `sessionKey` (a.k.a. `listItemId`) sent on tab creation. Used to match an existing tab during adoption. Defaults to a per-task value if unset. |
-| `browser.camofox.adopt_existing_tab` | `CAMOFOX_ADOPT_EXISTING_TAB` | When true, Hermes calls `GET /tabs?userId=<user_id>` on first use and reuses an existing tab before creating a new one. |
+| `browser.camofox.adopt_existing_tab` | `CAMOFOX_ADOPT_EXISTING_TAB` | When true, Xiaoban calls `GET /tabs?userId=<user_id>` on first use and reuses an existing tab before creating a new one. |
 
 Env vars take precedence over `config.yaml`. Either form works:
 
@@ -284,32 +284,32 @@ CAMOFOX_ADOPT_EXISTING_TAB=true
 
 **What changes when `user_id` is set:**
 
-- Hermes skips destructive cleanup at task end (same as `managed_persistence: true`). The other app's tab/cookies/profile survive.
-- Hermes does **not** call `DELETE /sessions/<user_id>` — that endpoint wipes all user data, so it would nuke the external app's session if it fired.
+- Xiaoban skips destructive cleanup at task end (same as `managed_persistence: true`). The other app's tab/cookies/profile survive.
+- Xiaoban does **not** call `DELETE /sessions/<user_id>` — that endpoint wipes all user data, so it would nuke the external app's session if it fired.
 
 **How tab adoption works (when `adopt_existing_tab: true`):**
 
-1. On the first browser tool call after a process start, Hermes issues `GET /tabs?userId=<user_id>` (5-second timeout).
-2. If any tab in the response has `listItemId == session_key`, Hermes adopts the most recently created one in that group.
-3. Otherwise, Hermes adopts the most recently created tab for the user (any `listItemId`).
-4. If no tabs exist or the request fails, Hermes falls back to creating a new tab on the next operation.
+1. On the first browser tool call after a process start, Xiaoban issues `GET /tabs?userId=<user_id>` (5-second timeout).
+2. If any tab in the response has `listItemId == session_key`, Xiaoban adopts the most recently created one in that group.
+3. Otherwise, Xiaoban adopts the most recently created tab for the user (any `listItemId`).
+4. If no tabs exist or the request fails, Xiaoban falls back to creating a new tab on the next operation.
 
-Adoption only fires until `tab_id` is populated for the session. If the external app closes the adopted tab mid-run, the next browser tool call will surface a Camofox error — Hermes does not re-poll for a fresh tab on every call.
+Adoption only fires until `tab_id` is populated for the session. If the external app closes the adopted tab mid-run, the next browser tool call will surface a Camofox error — Xiaoban does not re-poll for a fresh tab on every call.
 
-**Picking `session_key`:** if you want Hermes to reliably attach to a *specific* existing tab, set `session_key` to the `listItemId` the external app used when creating it. If you leave `session_key` unset and only set `user_id`, Hermes generates a per-task `session_key` (`task_<id>`) — Hermes will share cookies and the profile with the external app, but will open its own tab alongside instead of reusing one.
+**Picking `session_key`:** if you want Xiaoban to reliably attach to a *specific* existing tab, set `session_key` to the `listItemId` the external app used when creating it. If you leave `session_key` unset and only set `user_id`, Xiaoban generates a per-task `session_key` (`task_<id>`) — Xiaoban will share cookies and the profile with the external app, but will open its own tab alongside instead of reusing one.
 
-**Concurrency note:** the external app and Hermes can drive the same Camofox `userId` simultaneously, but Camofox does not coordinate per-tab focus between clients. Coordinate ownership at the application layer (e.g. the external app pauses while Hermes runs).
+**Concurrency note:** the external app and Xiaoban can drive the same Camofox `userId` simultaneously, but Camofox does not coordinate per-tab focus between clients. Coordinate ownership at the application layer (e.g. the external app pauses while Xiaoban runs).
 
 #### VNC live view
 
-When Camofox runs in headed mode (with a visible browser window), it exposes a VNC port in its health check response. Hermes automatically discovers this and includes the VNC URL in navigation responses, so the agent can share a link for you to watch the browser live.
+When Camofox runs in headed mode (with a visible browser window), it exposes a VNC port in its health check response. Xiaoban automatically discovers this and includes the VNC URL in navigation responses, so the agent can share a link for you to watch the browser live.
 
 ### Local Chromium-family browser via CDP (`/browser connect`)
 
-Instead of a cloud provider, you can attach Hermes browser tools to your own running Chrome, Brave, Chromium, or Edge instance via the Chrome DevTools Protocol (CDP). This is useful when you want to see what the agent is doing in real-time, interact with pages that require your own cookies/sessions, or avoid cloud browser costs.
+Instead of a cloud provider, you can attach Xiaoban browser tools to your own running Chrome, Brave, Chromium, or Edge instance via the Chrome DevTools Protocol (CDP). This is useful when you want to see what the agent is doing in real-time, interact with pages that require your own cookies/sessions, or avoid cloud browser costs.
 
 :::note
-`/browser connect` is an **interactive-CLI slash command** — it is not dispatched by the gateway. If you try to run it inside a WebUI, Telegram, Discord, or other gateway chat, the message will be sent to the agent as plain text and the command will not execute. Start Hermes from the terminal (`hermes` or `xiaoban chat`) and issue `/browser connect` there.
+`/browser connect` is an **interactive-CLI slash command** — it is not dispatched by the gateway. If you try to run it inside a WebUI, Telegram, Discord, or other gateway chat, the message will be sent to the agent as plain text and the command will not execute. Start Xiaoban from the terminal (`xiaoban` or `xiaoban chat`) and issue `/browser connect` there.
 :::
 
 In the CLI, use:
@@ -321,7 +321,7 @@ In the CLI, use:
 /browser disconnect              # Detach and return to cloud/local mode
 ```
 
-If a browser isn't already running with remote debugging, Hermes will attempt to auto-launch a supported Chromium-family browser with `--remote-debugging-port=9222`. Detection includes Brave, Google Chrome, Chromium, and Microsoft Edge, with common Linux install paths such as `/opt/brave-bin/brave` and `/snap/bin/brave`.
+If a browser isn't already running with remote debugging, Xiaoban will attempt to auto-launch a supported Chromium-family browser with `--remote-debugging-port=9222`. Detection includes Brave, Google Chrome, Chromium, and Microsoft Edge, with common Linux install paths such as `/opt/brave-bin/brave` and `/snap/bin/brave`.
 
 :::tip
 To start a Chromium-family browser manually with CDP enabled, use a dedicated user-data-dir so the debug port actually comes up even if the browser is already running with your normal profile:
@@ -330,28 +330,28 @@ To start a Chromium-family browser manually with CDP enabled, use a dedicated us
 # Linux — Brave
 brave-browser \
   --remote-debugging-port=9222 \
-  --user-data-dir=$HOME/.hermes/chrome-debug \
+  --user-data-dir=$HOME/.xiaoban/chrome-debug \
   --no-first-run \
   --no-default-browser-check &
 
 # Linux — Google Chrome
 google-chrome \
   --remote-debugging-port=9222 \
-  --user-data-dir=$HOME/.hermes/chrome-debug \
+  --user-data-dir=$HOME/.xiaoban/chrome-debug \
   --no-first-run \
   --no-default-browser-check &
 
 # macOS — Brave
 "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" \
   --remote-debugging-port=9222 \
-  --user-data-dir="$HOME/.hermes/chrome-debug" \
+  --user-data-dir="$HOME/.xiaoban/chrome-debug" \
   --no-first-run \
   --no-default-browser-check &
 
 # macOS — Google Chrome
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
   --remote-debugging-port=9222 \
-  --user-data-dir="$HOME/.hermes/chrome-debug" \
+  --user-data-dir="$HOME/.xiaoban/chrome-debug" \
   --no-first-run \
   --no-default-browser-check &
 ```
@@ -365,23 +365,23 @@ When connected via CDP, all browser tools (`browser_navigate`, `browser_click`, 
 
 ### WSL2 + Windows Chrome: prefer MCP over `/browser connect`
 
-If Hermes runs inside WSL2 but the Chrome window you want to control runs on the Windows host, `/browser connect` is often not the best path.
+If Xiaoban runs inside WSL2 but the Chrome window you want to control runs on the Windows host, `/browser connect` is often not the best path.
 
 Why:
 
-- `/browser connect` expects Hermes itself to reach a usable CDP endpoint
+- `/browser connect` expects Xiaoban itself to reach a usable CDP endpoint
 - modern Chrome live-debugging sessions often expose a host-local endpoint that is not directly reachable from WSL the same way a classic `9222` port is
-- even when Windows Chrome is debuggable, the cleanest integration is often to let a Windows-side browser MCP server attach to Chrome and let Hermes talk to that MCP server
+- even when Windows Chrome is debuggable, the cleanest integration is often to let a Windows-side browser MCP server attach to Chrome and let Xiaoban talk to that MCP server
 
-For that setup, prefer `chrome-devtools-mcp` through Hermes MCP support.
+For that setup, prefer `chrome-devtools-mcp` through Xiaoban MCP support.
 
 See the MCP guide for the practical setup:
 
-- [Use MCP with Hermes](../../guides/use-mcp-with-hermes.md#wsl2-bridge-hermes-in-wsl-to-windows-chrome)
+- [Use MCP with Xiaoban](../../guides/use-mcp-with-xiaoban.md#wsl2-bridge-xiaoban-in-wsl-to-windows-chrome)
 
 ### Local browser mode
 
-If you do **not** set any cloud credentials and don't use `/browser connect`, Hermes can still use the browser tools through a local Chromium install driven by `agent-browser`.
+If you do **not** set any cloud credentials and don't use `/browser connect`, Xiaoban can still use the browser tools through a local Chromium install driven by `agent-browser`.
 
 ### Optional Environment Variables
 
@@ -402,11 +402,11 @@ BROWSERBASE_SESSION_TIMEOUT=1800
 # Inactivity timeout before auto-cleanup in seconds (default: 120)
 BROWSER_INACTIVITY_TIMEOUT=120
 
-# Extra Chromium launch flags (comma- or newline-separated). Hermes auto-injects
+# Extra Chromium launch flags (comma- or newline-separated). Xiaoban auto-injects
 # `--no-sandbox,--disable-dev-shm-usage` when it detects root or AppArmor-restricted
 # unprivileged user namespaces (Ubuntu 23.10+, DGX Spark, many container images),
 # so most users don't need to set this. Set it manually only if you need a flag
-# Hermes doesn't add automatically; setting it disables the auto-injection.
+# Xiaoban doesn't add automatically; setting it disables the auto-injection.
 AGENT_BROWSER_ARGS=--no-sandbox
 ```
 
@@ -419,7 +419,7 @@ npm install
 ```
 
 :::info
-The `browser` toolset must be included in your config's `toolsets` list or enabled via `hermes config set toolsets '["hermes-cli", "browser"]'`.
+The `browser` toolset must be included in your config's `toolsets` list or enabled via `xiaoban config set toolsets '["xiaoban-cli", "browser"]'`.
 :::
 
 ## Available Tools
@@ -458,7 +458,7 @@ Click @e5 to press the "Sign In" button
 Type text into an input field. Clears the field first, then types the new text.
 
 ```
-Type "hermes agent" into the search field @e3
+Type "xiaoban agent" into the search field @e3
 ```
 
 ### `browser_scroll`
@@ -497,7 +497,7 @@ The screenshot is saved persistently and the file path is returned alongside the
 What does the chart on this page show?
 ```
 
-Screenshots are stored in `~/.hermes/cache/screenshots/` and automatically cleaned up after 24 hours.
+Screenshots are stored in `~/.xiaoban/cache/screenshots/` and automatically cleaned up after 24 hours.
 
 ### `browser_console`
 
@@ -627,7 +627,7 @@ browser:
   record_sessions: true  # default: false
 ```
 
-When enabled, recording starts automatically on the first `browser_navigate` and saves to `~/.hermes/browser_recordings/` when the session closes. Works in both local and cloud (Browserbase) modes. Recordings older than 72 hours are automatically cleaned up.
+When enabled, recording starts automatically on the first `browser_navigate` and saves to `~/.xiaoban/browser_recordings/` when the session closes. Works in both local and cloud (Browserbase) modes. Recordings older than 72 hours are automatically cleaned up.
 
 ## Stealth Features
 
@@ -641,7 +641,7 @@ Browserbase provides automatic stealth capabilities:
 | Keep Alive | On | Session reconnection after network hiccups |
 
 :::note
-If paid features aren't available on your plan, Hermes automatically falls back — first disabling `keepAlive`, then proxies — so browsing still works on free plans.
+If paid features aren't available on your plan, Xiaoban automatically falls back — first disabling `keepAlive`, then proxies — so browsing still works on free plans.
 :::
 
 ## Session Management

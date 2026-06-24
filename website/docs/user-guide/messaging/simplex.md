@@ -29,7 +29,7 @@ simplex-chat -p 5225
 
 The daemon listens on WebSocket at `ws://127.0.0.1:5225` by default.
 
-## Configure Hermes
+## Configure Xiaoban
 
 ### Via setup wizard
 
@@ -41,7 +41,7 @@ Select **SimpleX Chat** and follow the prompts.
 
 ### Via environment variables
 
-Add these to `~/.hermes/.env`:
+Add these to `~/.xiaoban/.env`:
 
 ```
 SIMPLEX_WS_URL=ws://127.0.0.1:5225
@@ -58,18 +58,18 @@ SIMPLEX_HOME_CHANNEL=<contact-id>
 | `SIMPLEX_GROUP_ALLOWED` | Optional | Comma-separated group IDs the bot participates in, or `*` for any group. Omit to ignore group messages entirely |
 | `SIMPLEX_HOME_CHANNEL` | Optional | Default contact/group ID for cron job delivery |
 | `SIMPLEX_HOME_CHANNEL_NAME` | Optional | Human label for the home channel |
-| `HERMES_SIMPLEX_TEXT_BATCH_DELAY` | Optional | Quiet-period seconds (default: `0.8`) used to concatenate rapid-fire inbound text messages into one event |
+| `XIAOBAN_SIMPLEX_TEXT_BATCH_DELAY` | Optional | Quiet-period seconds (default: `0.8`) used to concatenate rapid-fire inbound text messages into one event |
 
 ## Find your contact ID or display name
 
-After starting the daemon, open a conversation with your agent contact. The numeric `contactId` appears in session logs or via `hermes send_message action=list`. If you'd rather use the display name shown in the SimpleX UI, that works too — `SIMPLEX_ALLOWED_USERS` accepts either form.
+After starting the daemon, open a conversation with your agent contact. The numeric `contactId` appears in session logs or via `xiaoban send_message action=list`. If you'd rather use the display name shown in the SimpleX UI, that works too — `SIMPLEX_ALLOWED_USERS` accepts either form.
 
 ## Authorization
 
 By default **all contacts are denied**. You must either:
 
 1. Set `SIMPLEX_ALLOWED_USERS` to a comma-separated list of `contactId`s and/or display names (e.g. `SIMPLEX_ALLOWED_USERS=4,alice` matches either contactId 4 or the contact whose display name is "alice"), or
-2. Use **DM pairing** — send any message to the bot and it will reply with a pairing code. Enter that code via `hermes pairing approve simplex <CODE>`.
+2. Use **DM pairing** — send any message to the bot and it will reply with a pairing code. Enter that code via `xiaoban pairing approve simplex <CODE>`.
 
 ## Group chats
 
@@ -122,7 +122,7 @@ send_message(target="simplex:<contact-id>", message="Done!")
 ## Privacy notes
 
 - SimpleX never reveals phone numbers or email addresses — contacts use opaque IDs
-- The connection between Hermes and the daemon is local WebSocket (`ws://127.0.0.1:5225`) — no data leaves your machine
+- The connection between Xiaoban and the daemon is local WebSocket (`ws://127.0.0.1:5225`) — no data leaves your machine
 - Messages are end-to-end encrypted by the SimpleX protocol before reaching the daemon
 
 ## Troubleshooting

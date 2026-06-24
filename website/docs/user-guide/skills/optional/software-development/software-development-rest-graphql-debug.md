@@ -25,12 +25,12 @@ Debug REST/GraphQL APIs: status codes, auth, schemas, repro.
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # API Testing & Debugging
 
-Drive REST and GraphQL diagnosis through Hermes tools — `terminal` for `curl`, `execute_code` for Python `requests`, `web_extract` for vendor docs. Isolate the failing layer before guessing at the fix.
+Drive REST and GraphQL diagnosis through Xiaoban tools — `terminal` for `curl`, `execute_code` for Python `requests`, `web_extract` for vendor docs. Isolate the failing layer before guessing at the fix.
 
 ## When to Use
 
@@ -414,7 +414,7 @@ class TestAPISmoke:
 
 ### Token handling
 - Never log full tokens. Redact: `Bearer <REDACTED>`.
-- Never hardcode tokens in scripts. Read from env (`os.environ["API_TOKEN"]`) or `${HERMES_HOME:-~/.hermes}/.env`.
+- Never hardcode tokens in scripts. Read from env (`os.environ["API_TOKEN"]`) or `${XIAOBAN_HOME:-~/.xiaoban}/.env`.
 - Rotate immediately if a token surfaces in logs, error messages, or git history.
 
 ### Safe logging
@@ -434,7 +434,7 @@ def redact_auth(headers: dict) -> dict:
 - [ ] **Tokens echoed back.** Some APIs include the auth token in error details. Verify they don't.
 - [ ] **Verbose `Server` / `X-Powered-By`.** Stack-info leaks. Note for security review.
 
-## Hermes Tool Patterns
+## Xiaoban Tool Patterns
 
 ### terminal — for curl, dig, openssl
 

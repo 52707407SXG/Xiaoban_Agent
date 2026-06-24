@@ -162,8 +162,8 @@ function circularDistance(a: number, b: number): number {
   return Math.min(distance, 1 - distance)
 }
 
-// Mirrors @hermes/ink's colorize.ts. Keep local: app code compiles from
-// ui-tui/src, while @hermes/ink is bundled separately from packages/.
+// Mirrors @xiaoban/ink's colorize.ts. Keep local: app code compiles from
+// ui-tui/src, while @xiaoban/ink is bundled separately from packages/.
 function richEightBitColorNumber(red: number, green: number, blue: number): number {
   const [, saturation, lightness] = rgbToHsl(red, green, blue)
 
@@ -349,13 +349,13 @@ const FALSE_RE = /^(?:0|false|no|off)$/
 
 // TERM_PROGRAM fallback allow-list for terminals whose default profile is
 // light and which may not expose COLORFGBG. This currently includes Apple
-// Terminal. Explicit XIAOBAN_TUI_THEME/HERMES_TUI_THEME / COLORFGBG signals above still win,
+// Terminal. Explicit XIAOBAN_TUI_THEME/XIAOBAN_TUI_THEME / COLORFGBG signals above still win,
 // so dark Apple Terminal profiles that advertise a dark background stay dark.
 const LIGHT_DEFAULT_TERM_PROGRAMS = new Set<string>(['Apple_Terminal'])
 
 // Best-effort RGB → luminance check.  Currently only accepts a 3- or
 // 6-digit hex value (with or without a leading `#`); the env var name
-// `XIAOBAN_TUI_BACKGROUND` (legacy: `HERMES_TUI_BACKGROUND`) is intentionally generic so a future OSC11
+// `XIAOBAN_TUI_BACKGROUND` (legacy: `XIAOBAN_TUI_BACKGROUND`) is intentionally generic so a future OSC11
 // query helper can cache its answer there too, but additional formats
 // (rgb()/hsl()/named colours) would need explicit parsing here first.
 const LUMA_LIGHT_THRESHOLD = 0.6
@@ -413,7 +413,7 @@ export function detectLightMode(
   // precedence rule even though the production allow-list is empty.
   lightDefaultTermPrograms: ReadonlySet<string> = LIGHT_DEFAULT_TERM_PROGRAMS
 ): boolean {
-  const lightFlag = (env.XIAOBAN_TUI_LIGHT ?? env.HERMES_TUI_LIGHT ?? '').trim().toLowerCase()
+  const lightFlag = (env.XIAOBAN_TUI_LIGHT ?? env.XIAOBAN_TUI_LIGHT ?? '').trim().toLowerCase()
 
   if (TRUE_RE.test(lightFlag)) {
     return true
@@ -423,7 +423,7 @@ export function detectLightMode(
     return false
   }
 
-  const themeFlag = (env.XIAOBAN_TUI_THEME ?? env.HERMES_TUI_THEME ?? '').trim().toLowerCase()
+  const themeFlag = (env.XIAOBAN_TUI_THEME ?? env.XIAOBAN_TUI_THEME ?? '').trim().toLowerCase()
 
   if (themeFlag === 'light') {
     return true
@@ -433,7 +433,7 @@ export function detectLightMode(
     return false
   }
 
-  const bgHint = backgroundLuminance(env.XIAOBAN_TUI_BACKGROUND ?? env.HERMES_TUI_BACKGROUND ?? '')
+  const bgHint = backgroundLuminance(env.XIAOBAN_TUI_BACKGROUND ?? env.XIAOBAN_TUI_BACKGROUND ?? '')
 
   if (bgHint !== null) {
     return bgHint >= LUMA_LIGHT_THRESHOLD

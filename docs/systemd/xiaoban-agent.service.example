@@ -8,8 +8,6 @@ Type=simple
 WorkingDirectory=/opt/xiaoban-agent
 EnvironmentFile=-/etc/xiaoban-agent/xiaoban.env
 Environment=XIAOBAN_HOME=/var/lib/xiaoban-agent
-# HERMES_HOME is inherited runtime compatibility during the Xiaoban migration.
-Environment=HERMES_HOME=/var/lib/xiaoban-agent
 Environment=XIAOBAN_LOG_DIR=/var/log/xiaoban-agent
 ExecStart=/opt/xiaoban-agent/.venv/bin/python -m xiaoban.cli gateway run --replace --accept-hooks
 Restart=on-failure

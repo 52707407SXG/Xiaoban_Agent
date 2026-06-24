@@ -1,12 +1,12 @@
 ---
 sidebar_position: 13
 title: "Webhooks"
-description: "Receive events from GitHub, GitLab, and other services to trigger Hermes agent runs"
+description: "Receive events from GitHub, GitLab, and other services to trigger Xiaoban agent runs"
 ---
 
 # Webhooks
 
-Receive events from external services (GitHub, GitLab, JIRA, Stripe, etc.) and trigger Hermes agent runs automatically. The webhook adapter runs an HTTP server that accepts POST requests, validates HMAC signatures, transforms payloads into agent prompts, and routes responses back to the source or to another configured platform.
+Receive events from external services (GitHub, GitLab, JIRA, Stripe, etc.) and trigger Xiaoban agent runs automatically. The webhook adapter runs an HTTP server that accepts POST requests, validates HMAC signatures, transforms payloads into agent prompts, and routes responses back to the source or to another configured platform.
 
 The agent processes the event and can respond by posting comments on PRs, sending messages to Telegram/Discord, or logging the result.
 
@@ -27,7 +27,7 @@ The agent processes the event and can respond by posting comments on PRs, sendin
 ## Quick Start
 
 1. Enable via `xiaoban gateway setup` or environment variables
-2. Define routes in `config.yaml` **or** create them dynamically with `hermes webhook subscribe`
+2. Define routes in `config.yaml` **or** create them dynamically with `xiaoban webhook subscribe`
 3. Point your service at `http://your-server:8644/webhooks/<route-name>`
 
 ---
@@ -46,7 +46,7 @@ Follow the prompts to enable webhooks, set the port, and set a global HMAC secre
 
 ### Via environment variables
 
-Add to `~/.hermes/.env`:
+Add to `~/.xiaoban/.env`:
 
 ```bash
 WEBHOOK_ENABLED=true
@@ -174,7 +174,7 @@ This walkthrough sets up automatic code review on every pull request.
 
 ### 2. Add the route config
 
-Add the `github-pr` route to your `~/.hermes/config.yaml` as shown in the example above.
+Add the `github-pr` route to your `~/.xiaoban/config.yaml` as shown in the example above.
 
 ### 3. Ensure `gh` CLI is authenticated
 
@@ -186,7 +186,7 @@ gh auth login
 
 ### 4. Test it
 
-Open a pull request on the repository. The webhook fires, Hermes processes the event, and posts a review comment on the PR.
+Open a pull request on the repository. The webhook fires, Xiaoban processes the event, and posts a review comment on the PR.
 
 ---
 
@@ -297,7 +297,7 @@ Your Supabase edge function signs the payload with HMAC-SHA256 and POSTs to `htt
 ### Example: Dynamic subscription via CLI
 
 ```bash
-hermes webhook subscribe antenna-matches \
+xiaoban webhook subscribe antenna-matches \
   --deliver telegram \
   --deliver-chat-id "123456789" \
   --deliver-only \
@@ -329,12 +329,12 @@ hermes webhook subscribe antenna-matches \
 
 ## Dynamic Subscriptions (CLI) {#dynamic-subscriptions}
 
-In addition to static routes in `config.yaml`, you can create webhook subscriptions dynamically using the `hermes webhook` CLI command. This is especially useful when the agent itself needs to set up event-driven triggers.
+In addition to static routes in `config.yaml`, you can create webhook subscriptions dynamically using the `xiaoban webhook` CLI command. This is especially useful when the agent itself needs to set up event-driven triggers.
 
 ### Create a subscription
 
 ```bash
-hermes webhook subscribe github-issues \
+xiaoban webhook subscribe github-issues \
   --events "issues" \
   --prompt "New issue #{issue.number}: {issue.title}\nBy: {issue.user.login}\n\n{issue.body}" \
   --deliver telegram \
@@ -347,25 +347,25 @@ This returns the webhook URL and an auto-generated HMAC secret. Configure your s
 ### List subscriptions
 
 ```bash
-hermes webhook list
+xiaoban webhook list
 ```
 
 ### Remove a subscription
 
 ```bash
-hermes webhook remove github-issues
+xiaoban webhook remove github-issues
 ```
 
 ### Test a subscription
 
 ```bash
-hermes webhook test github-issues
-hermes webhook test github-issues --payload '{"issue": {"number": 42, "title": "Test"}}'
+xiaoban webhook test github-issues
+xiaoban webhook test github-issues --payload '{"issue": {"number": 42, "title": "Test"}}'
 ```
 
 ### How dynamic subscriptions work
 
-- Subscriptions are stored in `~/.hermes/webhook_subscriptions.json`
+- Subscriptions are stored in `~/.xiaoban/webhook_subscriptions.json`
 - The webhook adapter hot-reloads this file on each incoming request (mtime-gated, negligible overhead)
 - Static routes from `config.yaml` always take precedence over dynamic ones with the same name
 - Dynamic subscriptions use the same route format and capabilities as static routes (events, prompt templates, skills, delivery)
@@ -373,7 +373,7 @@ hermes webhook test github-issues --payload '{"issue": {"number": 42, "title": "
 
 ### Agent-driven subscriptions
 
-The agent can create subscriptions via the terminal tool when guided by the `webhook-subscriptions` skill. Ask the agent to "set up a webhook for GitHub issues" and it will run the appropriate `hermes webhook subscribe` command.
+The agent can create subscriptions via the terminal tool when guided by the `webhook-subscriptions` skill. Ask the agent to "set up a webhook for GitHub issues" and it will run the appropriate `xiaoban webhook subscribe` command.
 
 ---
 

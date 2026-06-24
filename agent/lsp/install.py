@@ -2,7 +2,7 @@
 
 Tries to install missing servers using whatever package manager is
 appropriate.  All installs go to a Xiaoban-owned bin staging dir,
-``<HERMES_HOME>/lsp/bin/``, so we don't pollute the user's global
+``<XIAOBAN_HOME>/lsp/bin/``, so we don't pollute the user's global
 toolchain.
 
 Strategies:
@@ -40,7 +40,7 @@ logger = logging.getLogger("agent.lsp.install")
 # Package-name → install-strategy hint registry.  Each entry is a
 # tuple of strategy name + package name + executable name.  When the
 # install completes, we look for the executable in
-# ``<HERMES_HOME>/lsp/bin/`` first, then on PATH.
+# ``<XIAOBAN_HOME>/lsp/bin/`` first, then on PATH.
 #
 # Optional fields:
 #   - ``extra_pkgs``: list of sibling packages to install alongside
@@ -115,11 +115,11 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
-def hermes_lsp_bin_dir() -> Path:
+def xiaoban_lsp_bin_dir() -> Path:
     """Return the Xiaoban-owned bin staging dir for LSP servers."""
-    home = os.environ.get("HERMES_HOME")
+    home = os.environ.get("XIAOBAN_HOME")
     if home is None:
-        home = os.path.join(os.path.expanduser("~"), ".hermes")
+        home = os.path.join(os.path.expanduser("~"), ".xiaoban")
     p = Path(home) / "lsp" / "bin"
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -141,7 +141,7 @@ def _native_binary_candidates(base: Path) -> list[Path]:
 
 def _existing_binary(name: str) -> Optional[str]:
     """Probe the staging dir + PATH for a binary named ``name``."""
-    for staged in _native_binary_candidates(hermes_lsp_bin_dir() / name):
+    for staged in _native_binary_candidates(xiaoban_lsp_bin_dir() / name):
         if staged.exists() and os.access(staged, os.X_OK):
             return str(staged)
     on_path = shutil.which(name)
@@ -248,7 +248,7 @@ def _install_npm(
     if npm is None:
         logger.info("[install] cannot install %s: npm not on PATH", pkg)
         return None
-    staging = hermes_lsp_bin_dir().parent  # <HERMES_HOME>/lsp/
+    staging = xiaoban_lsp_bin_dir().parent  # <XIAOBAN_HOME>/lsp/
     install_targets = [pkg] + list(extra_pkgs or [])
     try:
         logger.info(
@@ -278,7 +278,7 @@ def _install_npm(
     for c in _native_binary_candidates(nm_bin):
         if c.exists():
             # Symlink into our `lsp/bin/` for stable PATH access.
-            link = hermes_lsp_bin_dir() / c.name
+            link = xiaoban_lsp_bin_dir() / c.name
             if not link.exists():
                 try:
                     link.symlink_to(c)
@@ -299,7 +299,7 @@ def _install_go(pkg: str, bin_name: str) -> Optional[str]:
     if go is None:
         logger.info("[install] cannot install %s: go not on PATH", pkg)
         return None
-    staging = hermes_lsp_bin_dir()
+    staging = xiaoban_lsp_bin_dir()
     env = dict(os.environ)
     env["GOBIN"] = str(staging)
     try:
@@ -331,7 +331,7 @@ def _install_go(pkg: str, bin_name: str) -> Optional[str]:
 
 
 def _install_pip(pkg: str, bin_name: str) -> Optional[str]:
-    """Install a Python package into a hermes-owned target dir.
+    """Install a Python package into a xiaoban-owned target dir.
 
     We avoid polluting the user's site-packages by using
     ``pip install --target``.  Bins go into
@@ -339,7 +339,7 @@ def _install_pip(pkg: str, bin_name: str) -> Optional[str]:
     ``<staging>/bin``.  Note: this only works for packages that ship a
     console script.
     """
-    pip_target = hermes_lsp_bin_dir().parent / "python-packages"
+    pip_target = xiaoban_lsp_bin_dir().parent / "python-packages"
     pip_target.mkdir(parents=True, exist_ok=True)
     try:
         logger.info("[install] pip install --target %s %s", pip_target, pkg)
@@ -367,7 +367,7 @@ def _install_pip(pkg: str, bin_name: str) -> Optional[str]:
     for script_dir in script_dirs:
         for bin_path in _native_binary_candidates(script_dir / bin_name):
             if bin_path.exists():
-                link = hermes_lsp_bin_dir() / bin_path.name
+                link = xiaoban_lsp_bin_dir() / bin_path.name
                 if not link.exists():
                     try:
                         link.symlink_to(bin_path)
@@ -399,5 +399,5 @@ __all__ = [
     "INSTALL_RECIPES",
     "try_install",
     "detect_status",
-    "hermes_lsp_bin_dir",
+    "xiaoban_lsp_bin_dir",
 ]

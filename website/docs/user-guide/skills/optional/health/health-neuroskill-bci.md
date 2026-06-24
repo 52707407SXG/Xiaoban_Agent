@@ -25,12 +25,12 @@ Connect to a running NeuroSkill instance and incorporate the user's real-time co
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # NeuroSkill BCI Integration
 
-Connect Hermes to a running [NeuroSkill](https://neuroskill.com/) instance to read
+Connect Xiaoban to a running [NeuroSkill](https://neuroskill.com/) instance to read
 real-time brain and body metrics from a BCI wearable. Use this to give
 cognitively-aware responses, suggest interventions, and track mental performance
 over time.

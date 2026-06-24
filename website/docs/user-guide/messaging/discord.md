@@ -8,35 +8,35 @@ description: "Set up Xiaoban-Agent as a Discord bot"
 
 Xiaoban-Agent integrates with Discord as a bot, letting you chat with your AI assistant through direct messages or server channels. The bot receives your messages, processes them through the Xiaoban-Agent pipeline (including tool use, memory, and reasoning), and responds in real time. It supports text, voice messages, file attachments, and slash commands.
 
-Before setup, here's the part most people want to know: how Hermes behaves once it's in your server.
+Before setup, here's the part most people want to know: how Xiaoban behaves once it's in your server.
 
-## How Hermes Behaves
+## How Xiaoban Behaves
 
 | Context | Behavior |
 |---------|----------|
-| **DMs** | Hermes responds to every message. No `@mention` needed. Each DM has its own session. |
-| **Server channels** | By default, Hermes only responds when you `@mention` it. If you post in a channel without mentioning it, Hermes ignores the message. |
+| **DMs** | Xiaoban responds to every message. No `@mention` needed. Each DM has its own session. |
+| **Server channels** | By default, Xiaoban only responds when you `@mention` it. If you post in a channel without mentioning it, Xiaoban ignores the message. |
 | **Free-response channels** | You can make specific channels mention-free with `DISCORD_FREE_RESPONSE_CHANNELS`, or disable mentions globally with `DISCORD_REQUIRE_MENTION=false`. Messages in these channels are answered inline — auto-threading is skipped so the channel stays a lightweight chat. |
-| **Threads** | Hermes replies in the same thread. Mention rules still apply unless that thread or its parent channel is configured as free-response. Threads stay isolated from the parent channel for session history. |
-| **Shared channels with multiple users** | By default, Hermes isolates session history per user inside the channel for safety and clarity. Two people talking in the same channel do not share one transcript unless you explicitly disable that. |
-| **Messages mentioning other users** | When `DISCORD_IGNORE_NO_MENTION` is `true` (the default), Hermes stays silent if a message @mentions other users but does **not** mention the bot. This prevents the bot from jumping into conversations directed at other people. Set to `false` if you want the bot to respond to all messages regardless of who is mentioned. This only applies in server channels, not DMs. |
+| **Threads** | Xiaoban replies in the same thread. Mention rules still apply unless that thread or its parent channel is configured as free-response. Threads stay isolated from the parent channel for session history. |
+| **Shared channels with multiple users** | By default, Xiaoban isolates session history per user inside the channel for safety and clarity. Two people talking in the same channel do not share one transcript unless you explicitly disable that. |
+| **Messages mentioning other users** | When `DISCORD_IGNORE_NO_MENTION` is `true` (the default), Xiaoban stays silent if a message @mentions other users but does **not** mention the bot. This prevents the bot from jumping into conversations directed at other people. Set to `false` if you want the bot to respond to all messages regardless of who is mentioned. This only applies in server channels, not DMs. |
 
 :::tip
-If you want a normal bot-help channel where people can talk to Hermes without tagging it every time, add that channel to `DISCORD_FREE_RESPONSE_CHANNELS`.
+If you want a normal bot-help channel where people can talk to Xiaoban without tagging it every time, add that channel to `DISCORD_FREE_RESPONSE_CHANNELS`.
 :::
 
 ### Discord Gateway Model
 
-Hermes on Discord is not a webhook that replies statelessly. It runs through the full messaging gateway, which means each incoming message goes through:
+Xiaoban on Discord is not a webhook that replies statelessly. It runs through the full messaging gateway, which means each incoming message goes through:
 
 1. authorization (`DISCORD_ALLOWED_USERS`)
 2. mention / free-response checks
 3. session lookup
 4. session transcript loading
-5. normal Hermes agent execution, including tools, memory, and slash commands
+5. normal Xiaoban agent execution, including tools, memory, and slash commands
 6. response delivery back to Discord
 
-That matters because behavior in a busy server depends on both Discord routing and Hermes session policy.
+That matters because behavior in a busy server depends on both Discord routing and Xiaoban session policy.
 
 ### Session Model in Discord
 
@@ -46,7 +46,7 @@ By default:
 - each server thread gets its own session namespace
 - each user in a shared channel gets their own session inside that channel
 
-So if Alice and Bob both talk to Hermes in `#research`, Hermes treats those as separate conversations by default even though they are using the same visible Discord channel.
+So if Alice and Bob both talk to Xiaoban in `#research`, Xiaoban treats those as separate conversations by default even though they are using the same visible Discord channel.
 
 This is controlled by `config.yaml`:
 
@@ -68,7 +68,7 @@ Shared sessions can be useful for a collaborative room, but they also mean:
 
 ### Interrupts and Concurrency
 
-Hermes tracks running agents by session key.
+Xiaoban tracks running agents by session key.
 
 With the default `group_sessions_per_user: true`:
 
@@ -208,7 +208,7 @@ These are the minimum permissions your bot needs:
 You need the **Manage Server** permission on the Discord server to invite a bot. If you don't see your server in the dropdown, ask a server admin to use the invite link instead.
 :::
 
-After authorizing, the bot will appear in your server's member list (it will show as offline until you start the Hermes gateway).
+After authorizing, the bot will appear in your server's member list (it will show as offline until you start the Xiaoban gateway).
 
 ## Step 7: Find Your Discord User ID
 
@@ -239,7 +239,7 @@ Select **Discord** when prompted, then paste your bot token and user ID when ask
 
 ### Option B: Manual Configuration
 
-Add the following to your `~/.hermes/.env` file:
+Add the following to your `~/.xiaoban/.env` file:
 
 ```bash
 # Required
@@ -264,7 +264,7 @@ You can run `xiaoban gateway` in the background or as a systemd service for pers
 
 ## Configuration Reference
 
-Discord behavior is controlled through two files: **`~/.hermes/.env`** for credentials and env-level toggles, and **`~/.hermes/config.yaml`** for structured settings. Environment variables always take precedence over config.yaml values when both are set.
+Discord behavior is controlled through two files: **`~/.xiaoban/.env`** for credentials and env-level toggles, and **`~/.xiaoban/config.yaml`** for structured settings. Environment variables always take precedence over config.yaml values when both are set.
 
 ### Environment Variables (`.env`)
 
@@ -281,7 +281,7 @@ Discord behavior is controlled through two files: **`~/.hermes/.env`** for crede
 | `DISCORD_FREE_RESPONSE_CHANNELS` | No | — | Comma-separated channel IDs where the bot responds without requiring an `@mention`, even when `DISCORD_REQUIRE_MENTION` is `true`. |
 | `DISCORD_IGNORE_NO_MENTION` | No | `true` | When `true`, the bot stays silent if a message `@mentions` other users but does **not** mention the bot. Prevents the bot from jumping into conversations directed at other people. Only applies in server channels, not DMs. |
 | `DISCORD_AUTO_THREAD` | No | `true` | When `true`, automatically creates a new thread for every `@mention` in a text channel, so each conversation is isolated (similar to Slack behavior). Messages already inside threads or DMs are unaffected. |
-| `DISCORD_ALLOW_BOTS` | No | `"none"` | Controls how the bot handles messages from other Discord bots. `"none"` — ignore all other bots. `"mentions"` — only accept bot messages that `@mention` Hermes. `"all"` — accept all bot messages. |
+| `DISCORD_ALLOW_BOTS` | No | `"none"` | Controls how the bot handles messages from other Discord bots. `"none"` — ignore all other bots. `"mentions"` — only accept bot messages that `@mention` Xiaoban. `"all"` — accept all bot messages. |
 | `DISCORD_REACTIONS` | No | `true` | When `true`, the bot adds emoji reactions to messages during processing (👀 when starting, ✅ on success, ❌ on error). Set to `false` to disable reactions entirely. |
 | `DISCORD_IGNORED_CHANNELS` | No | — | Comma-separated channel IDs where the bot **never** responds, even when `@mentioned`. Takes priority over all other channel settings. |
 | `DISCORD_ALLOWED_CHANNELS` | No | — | Comma-separated channel IDs. When set, the bot **only** responds in these channels (plus DMs if allowed). Overrides `config.yaml` `discord.allowed_channels`. Combine with `DISCORD_IGNORED_CHANNELS` to express allow/deny rules. |
@@ -296,12 +296,12 @@ Discord behavior is controlled through two files: **`~/.hermes/.env`** for crede
 | `DISCORD_PROXY` | No | — | Proxy URL for Discord connections (HTTP, WebSocket, REST). Overrides `HTTPS_PROXY`/`ALL_PROXY`. Supports `http://`, `https://`, and `socks5://` schemes. |
 | `DISCORD_ALLOW_ANY_ATTACHMENT` | No | `false` | When `true`, the bot accepts attachments of any file type (not just the built-in PDF/text/zip/office allowlist). Unknown types are cached to disk and surfaced to the agent as a local path with `application/octet-stream` MIME so it can inspect them with `terminal` / `read_file` / `ffprobe` / etc. |
 | `DISCORD_MAX_ATTACHMENT_BYTES` | No | `33554432` | Maximum bytes per attachment the gateway will download and cache. Default 32 MiB. Set to `0` for no cap (attachments are held in memory while being written, so unlimited carries a real memory cost). |
-| `HERMES_DISCORD_TEXT_BATCH_DELAY_SECONDS` | No | `0.6` | Grace window the adapter waits before flushing a queued text chunk. Useful for smoothing streamed output. |
-| `HERMES_DISCORD_TEXT_BATCH_SPLIT_DELAY_SECONDS` | No | `2.0` | Delay between split chunks when a single message exceeds Discord's length limit. |
+| `XIAOBAN_DISCORD_TEXT_BATCH_DELAY_SECONDS` | No | `0.6` | Grace window the adapter waits before flushing a queued text chunk. Useful for smoothing streamed output. |
+| `XIAOBAN_DISCORD_TEXT_BATCH_SPLIT_DELAY_SECONDS` | No | `2.0` | Delay between split chunks when a single message exceeds Discord's length limit. |
 
 ### Config File (`config.yaml`)
 
-The `discord` section in `~/.hermes/config.yaml` mirrors the env vars above. Config.yaml settings are applied as defaults — if the equivalent env var is already set, the env var wins.
+The `discord` section in `~/.xiaoban/config.yaml` mirrors the env vars above. Config.yaml settings are applied as defaults — if the equivalent env var is already set, the env var wins.
 
 ```yaml
 # Discord-specific settings
@@ -440,7 +440,7 @@ discord:
 
 Behavior:
 - Exact thread/channel ID matches win.
-- If a message arrives inside a thread or forum post and that thread has no explicit entry, Hermes falls back to the parent channel/forum ID.
+- If a message arrives inside a thread or forum post and that thread has no explicit entry, Xiaoban falls back to the parent channel/forum ID.
 - Prompts are applied ephemerally at runtime, so changing them affects future turns immediately without rewriting past session history.
 
 #### `discord.history_backfill`
@@ -490,7 +490,7 @@ discord:
 
 This is a global gateway setting (not Discord-specific) that controls whether users in the same channel get isolated session histories.
 
-When `true`: Alice and Bob talking in `#research` each have their own separate conversation with Hermes. When `false`: the entire channel shares one conversation transcript and one running-agent slot.
+When `true`: Alice and Bob talking in `#research` each have their own separate conversation with Xiaoban. When `false`: the entire channel shares one conversation transcript and one running-agent slot.
 
 ```yaml
 group_sessions_per_user: true
@@ -578,7 +578,7 @@ The picker times out after 120 seconds. Only authorized users (those in `DISCORD
 
 ## Native Slash Commands for Skills
 
-Hermes automatically registers installed skills as **native Discord Application Commands**. This means skills appear in Discord's autocomplete `/` menu alongside built-in commands.
+Xiaoban automatically registers installed skills as **native Discord Application Commands**. This means skills appear in Discord's autocomplete `/` menu alongside built-in commands.
 
 - Each skill becomes a Discord slash command (e.g., `/code-review`, `/ascii-art`)
 - Skills accept an optional `args` string parameter
@@ -589,7 +589,7 @@ No extra configuration is needed — any skill installed via `xiaoban skills ins
 
 ### Disabling Slash Command Registration
 
-If you run multiple Hermes gateways against the same Discord application (e.g. staging + production), only one of them should own the global slash-command registration — otherwise the last startup wins and the registrations flap. Turn slash registration off on the "follower" gateway:
+If you run multiple Xiaoban gateways against the same Discord application (e.g. staging + production), only one of them should own the global slash-command registration — otherwise the last startup wins and the registrations flap. Turn slash registration off on the "follower" gateway:
 
 ```yaml
 gateway:
@@ -613,11 +613,11 @@ The Discord adapter supports native file uploads for every common media type via
 | Audio / Voice | `send_voice` — native voice message when possible, file attachment otherwise |
 | Documents (PDF/ZIP/docx/etc.) | `send_document` — native attachment with download button |
 
-Discord's per-upload size limit depends on the server's boost tier (25 MB free, up to 500 MB). If Hermes gets an HTTP 413, the adapter falls back to a link pointing at the local cache path rather than failing silently.
+Discord's per-upload size limit depends on the server's boost tier (25 MB free, up to 500 MB). If Xiaoban gets an HTTP 413, the adapter falls back to a link pointing at the local cache path rather than failing silently.
 
 ## Receiving Arbitrary File Types
 
-Any file type a user uploads is accepted. Authorization to message the agent is the gate — not the file extension. Every upload is downloaded, cached under `~/.hermes/cache/documents/`, and surfaced to the agent as a `DOCUMENT`-typed message event so it can inspect the file with `terminal` (`ffprobe`, `unzip`, `file`, `strings`, etc.) or `read_file`.
+Any file type a user uploads is accepted. Authorization to message the agent is the gate — not the file extension. Every upload is downloaded, cached under `~/.xiaoban/cache/documents/`, and surfaced to the agent as a `DOCUMENT`-typed message event so it can inspect the file with `terminal` (`ffprobe`, `unzip`, `file`, `strings`, etc.) or `read_file`.
 
 - Known types (PDF, docx/xlsx/pptx, zip, images/audio/video, etc.) keep their precise MIME.
 - Unknown types fall back to the upload's reported content type, or `application/octet-stream` when none is given.
@@ -651,7 +651,7 @@ When the agent calls the `clarify` tool — to ask which approach you prefer, ge
 
 Click a numbered button to answer, or click **Other** to type a free-form response (the next message you send in that channel becomes the answer). Open-ended `clarify` calls (no preset choices) skip the buttons and just capture your next message.
 
-The buttons disable themselves once a choice is made so duplicate clicks don't double-resolve the prompt. Configure the response timeout via `agent.clarify_timeout` in `~/.hermes/config.yaml` (default `600` seconds). If you don't respond within the timeout, the agent unblocks with a sentinel message and adapts rather than hanging.
+The buttons disable themselves once a choice is made so duplicate clicks don't double-resolve the prompt. Configure the response timeout via `agent.clarify_timeout` in `~/.xiaoban/config.yaml` (default `600` seconds). If you don't respond within the timeout, the agent unblocks with a sentinel message and adapts rather than hanging.
 
 ## Home Channel
 
@@ -663,7 +663,7 @@ Type `/sethome` in any Discord channel where the bot is present. That channel be
 
 ### Manual Configuration
 
-Add these to your `~/.hermes/.env`:
+Add these to your `~/.xiaoban/.env`:
 
 ```bash
 DISCORD_HOME_CHANNEL=123456789012345678
@@ -678,17 +678,17 @@ Xiaoban-Agent supports Discord voice messages:
 
 - **Incoming voice messages** are automatically transcribed using the configured STT provider: local `faster-whisper` (no key), Groq Whisper (`GROQ_API_KEY`), or OpenAI Whisper (`VOICE_TOOLS_OPENAI_KEY`).
 - **Text-to-speech**: Use `/voice tts` to have the bot send spoken audio responses alongside text replies.
-- **Discord voice channels**: Hermes can also join a voice channel, listen to users speaking, and talk back in the channel.
+- **Discord voice channels**: Xiaoban can also join a voice channel, listen to users speaking, and talk back in the channel.
 
 For the full setup and operational guide, see:
 - [Voice Mode](/user-guide/features/voice-mode)
-- [Use Voice Mode with Hermes](/guides/use-voice-mode-with-hermes)
+- [Use Voice Mode with Xiaoban](/guides/use-voice-mode-with-xiaoban)
 
 ### Voice Channel Audio Effects (ambient + verbal acks)
 
 When the bot is in a voice channel, you can give it a more conversational feel: a short verbal acknowledgement ("let me look into that") before it starts working, and a subtle ambient "thinking" bed that plays underneath while tools run — the speech ducks the ambient down and swells it back when finished, similar to Grok voice mode.
 
-discord.py plays only one audio stream per connection, so Hermes installs a software mixer on the outgoing stream that sums an ambient loop, acknowledgements, and TTS replies into that single stream — they overlap instead of cutting each other off.
+discord.py plays only one audio stream per connection, so Xiaoban installs a software mixer on the outgoing stream that sums an ambient loop, acknowledgements, and TTS replies into that single stream — they overlap instead of cutting each other off.
 
 This is **off by default**. Enable it in `config.yaml`:
 
@@ -717,7 +717,7 @@ Notes:
 
 ## Forum Channels
 
-Discord forum channels (type 15) don't accept direct messages — every post in a forum must be a thread. Hermes auto-detects forum channels and creates a new thread post whenever it needs to send there, so `send_message`, TTS, images, voice messages, and file attachments all work without special handling from the agent.
+Discord forum channels (type 15) don't accept direct messages — every post in a forum must be a thread. Xiaoban auto-detects forum channels and creates a new thread post whenever it needs to send there, so `send_message`, TTS, images, voice messages, and file attachments all work without special handling from the agent.
 
 - **Thread name** is derived from the first line of the message (markdown heading prefix stripped, capped at 100 chars). When the message is attachment-only, the filename is used as the fallback thread name.
 - **Attachments** ride along on the starter message of the new thread — no separate upload step, no partial sends.
@@ -754,7 +754,7 @@ Refreshing the directory (`/channels refresh` on platforms that expose it, or a 
 
 ### Bot is offline
 
-**Cause**: The Hermes gateway isn't running, or the token is incorrect.
+**Cause**: The Xiaoban gateway isn't running, or the token is incorrect.
 
 **Fix**: Check that `xiaoban gateway` is running. Verify `DISCORD_BOT_TOKEN` in your `.env` file. If you recently reset the token, update it.
 
@@ -762,13 +762,13 @@ Refreshing the directory (`/channels refresh` on platforms that expose it, or a 
 
 **Cause**: Your User ID isn't in `DISCORD_ALLOWED_USERS`.
 
-**Fix**: Add your User ID to `DISCORD_ALLOWED_USERS` in `~/.hermes/.env` and restart the gateway.
+**Fix**: Add your User ID to `DISCORD_ALLOWED_USERS` in `~/.xiaoban/.env` and restart the gateway.
 
 ### People in the same channel are sharing context unexpectedly
 
 **Cause**: `group_sessions_per_user` is disabled, or the platform cannot provide a user ID for the messages in that context.
 
-**Fix**: Set this in `~/.hermes/config.yaml` and restart the gateway:
+**Fix**: Set this in `~/.xiaoban/config.yaml` and restart the gateway:
 
 ```yaml
 group_sessions_per_user: true
@@ -787,7 +787,7 @@ Always set `DISCORD_ALLOWED_USERS` (or `DISCORD_ALLOWED_ROLES`) to restrict who 
 For servers where access is managed by roles instead of individual user lists (moderator teams, support staff, internal tooling), use `DISCORD_ALLOWED_ROLES` — a comma-separated list of role IDs. Any member with one of those roles is authorized.
 
 ```bash
-# ~/.hermes/.env — works alongside or instead of DISCORD_ALLOWED_USERS
+# ~/.xiaoban/.env — works alongside or instead of DISCORD_ALLOWED_USERS
 DISCORD_ALLOWED_ROLES=987654321098765432,876543210987654321
 ```
 
@@ -802,12 +802,12 @@ This is the preferred pattern when the moderation team churns — new moderators
 
 ### Mention Control
 
-By default, Hermes blocks the bot from pinging `@everyone`, `@here`, and role mentions, even if its reply contains those tokens. This prevents a poorly-worded prompt or echoed user content from spamming a whole server. Individual `@user` pings and reply-reference pings (the little "replying to…" chip) stay enabled so normal conversation still works.
+By default, Xiaoban blocks the bot from pinging `@everyone`, `@here`, and role mentions, even if its reply contains those tokens. This prevents a poorly-worded prompt or echoed user content from spamming a whole server. Individual `@user` pings and reply-reference pings (the little "replying to…" chip) stay enabled so normal conversation still works.
 
 You can relax these defaults via either env vars or `config.yaml`:
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.xiaoban/config.yaml
 discord:
   allow_mentions:
     everyone: false      # allow the bot to ping @everyone / @here
@@ -817,7 +817,7 @@ discord:
 ```
 
 ```bash
-# ~/.hermes/.env — env vars win over config.yaml
+# ~/.xiaoban/.env — env vars win over config.yaml
 DISCORD_ALLOW_MENTION_EVERYONE=false
 DISCORD_ALLOW_MENTION_ROLES=false
 DISCORD_ALLOW_MENTION_USERS=true

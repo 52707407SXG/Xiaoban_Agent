@@ -187,8 +187,8 @@ class WeComAdapter(BasePlatformAdapter):
 
         # Text batching: merge rapid successive messages (Telegram-style).
         # WeCom clients split long messages around 4000 chars.
-        self._text_batch_delay_seconds = env_float("HERMES_WECOM_TEXT_BATCH_DELAY_SECONDS", 0.6)
-        self._text_batch_split_delay_seconds = env_float("HERMES_WECOM_TEXT_BATCH_SPLIT_DELAY_SECONDS", 2.0)
+        self._text_batch_delay_seconds = env_float("XIAOBAN_WECOM_TEXT_BATCH_DELAY_SECONDS", 0.6)
+        self._text_batch_split_delay_seconds = env_float("XIAOBAN_WECOM_TEXT_BATCH_SPLIT_DELAY_SECONDS", 2.0)
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
         self._device_id = uuid.uuid4().hex
@@ -1512,7 +1512,7 @@ class WeComAdapter(BasePlatformAdapter):
 
 _QR_GENERATE_URL = "https://work.weixin.qq.com/ai/qc/generate"
 _QR_QUERY_URL = "https://work.weixin.qq.com/ai/qc/query_result"
-_QR_CODE_PAGE = "https://work.weixin.qq.com/ai/qc/gen?source=hermes&scode="
+_QR_CODE_PAGE = "https://work.weixin.qq.com/ai/qc/gen?source=xiaoban&scode="
 _QR_POLL_INTERVAL = 3  # seconds
 _QR_POLL_TIMEOUT = 300  # 5 minutes
 
@@ -1541,7 +1541,7 @@ def qr_scan_for_bot_info(
         logger.error("urllib is required for WeCom QR scan")
         return None
 
-    generate_url = f"{_QR_GENERATE_URL}?source=hermes"
+    generate_url = f"{_QR_GENERATE_URL}?source=xiaoban"
 
     # ── Step 1: Fetch QR code ──
     print("  Connecting to WeCom...", end="", flush=True)
@@ -1644,7 +1644,7 @@ def qr_scan_for_bot_info(
 # plugin. register() exposes BOTH platforms via the registry, replacing the
 # Platform.WECOM / Platform.WECOM_CALLBACK elifs in gateway/run.py, the
 # _PLATFORM_CONNECTED_CHECKERS entries in gateway/config.py, the _setup_wecom
-# wizard + _PLATFORMS["wecom"] static dict in hermes_cli/gateway.py, and the
+# wizard + _PLATFORMS["wecom"] static dict in xiaoban_cli/gateway.py, and the
 # _send_wecom dispatch in tools/send_message_tool.py. Env→PlatformConfig
 # seeding stays in core, same as prior migrations.
 # ──────────────────────────────────────────────────────────────────────────
@@ -1692,12 +1692,12 @@ async def _standalone_send(
 def interactive_setup() -> None:
     """Interactive setup for WeCom — QR scan or manual credential input.
 
-    Replaces hermes_cli/gateway.py::_setup_wecom and the static
+    Replaces xiaoban_cli/gateway.py::_setup_wecom and the static
     _PLATFORMS["wecom"] dict. CLI helpers are lazy-imported.
     """
-    from hermes_cli.config import get_env_value, save_env_value
-    from hermes_cli.setup import prompt_choice
-    from hermes_cli.cli_output import (
+    from xiaoban_cli.config import get_env_value, save_env_value
+    from xiaoban_cli.setup import prompt_choice
+    from xiaoban_cli.cli_output import (
         prompt,
         prompt_yes_no,
         print_header,
@@ -1773,7 +1773,7 @@ def interactive_setup() -> None:
             "How should unauthorized users be handled?",
             [
                 "Enable open access (anyone can message the bot)",
-                "Use DM pairing (unknown users request access, you approve with 'hermes pairing approve')",
+                "Use DM pairing (unknown users request access, you approve with 'xiaoban pairing approve')",
                 "Disable direct messages",
                 "Skip for now (bot will deny all users until configured)",
             ],
@@ -1786,7 +1786,7 @@ def interactive_setup() -> None:
         elif access_idx == 1:
             save_env_value("WECOM_DM_POLICY", "pairing")
             print_success("DM pairing mode — users will receive a code to request access.")
-            print_info("Approve with: hermes pairing approve <platform> <code>")
+            print_info("Approve with: xiaoban pairing approve <platform> <code>")
         elif access_idx == 2:
             save_env_value("WECOM_DM_POLICY", "disabled")
             print_warning("Direct messages disabled.")

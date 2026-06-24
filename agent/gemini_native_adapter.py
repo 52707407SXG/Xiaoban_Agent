@@ -435,7 +435,7 @@ def build_gemini_request(
         # Gemini's native generateContent does NOT treat an omitted
         # maxOutputTokens as "use the model's full output budget" — it applies
         # a low internal default and the model stops early with
-        # finishReason=MAX_TOKENS, truncating tool calls mid-stream (Hermes
+        # finishReason=MAX_TOKENS, truncating tool calls mid-stream (Xiaoban
         # then retries 3× and refuses the incomplete call). Every current
         # Gemini text model (2.5 + 3.x, flash / flash-lite / pro) caps at
         # 65,535 output tokens, so default to that ceiling when the caller
@@ -847,7 +847,7 @@ class GeminiNativeClient:
         if not (api_key or "").strip():
             raise RuntimeError(
                 "Gemini native client requires an API key, but none was provided. "
-                "Set GOOGLE_API_KEY or GEMINI_API_KEY in your environment / ~/.hermes/.env "
+                "Set GOOGLE_API_KEY or GEMINI_API_KEY in your environment / ~/.xiaoban/.env "
                 "(get one at https://aistudio.google.com/app/apikey), or run `xiaoban setup` "
                 "to configure the Google provider."
             )

@@ -26,7 +26,7 @@ description: "通过 Pinggy 实现零安装 SSH localhost 隧道"
 ## 参考：完整 SKILL.md
 
 :::info
-以下是 Hermes 在触发此 skill 时加载的完整 skill 定义。这是 skill 激活时 agent 所看到的指令内容。
+以下是 Xiaoban 在触发此 skill 时加载的完整 skill 定义。这是 skill 激活时 agent 所看到的指令内容。
 :::
 
 # Pinggy Tunnel Skill
@@ -263,7 +263,7 @@ echo "MCP URL: $URL"
 echo "Bearer token: $TOKEN"
 ```
 
-远程客户端使用 `Authorization: Bearer $TOKEN` 连接到 `$URL`。Hermes 原生 MCP 客户端配置：`{"transport": "http", "url": "<URL>", "headers": {"Authorization": "Bearer <TOKEN>"}}`。
+远程客户端使用 `Authorization: Bearer $TOKEN` 连接到 `$URL`。Xiaoban 原生 MCP 客户端配置：`{"transport": "http", "url": "<URL>", "headers": {"Authorization": "Bearer <TOKEN>"}}`。
 
 ### 配方 3——暴露本地 LLM 端点（Ollama / vLLM / llama.cpp）
 

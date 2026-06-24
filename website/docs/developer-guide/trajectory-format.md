@@ -165,7 +165,7 @@ turn with XML-wrapped JSON responses:
 ### System Message
 
 The system message is generated at save time (not taken from the conversation).
-It follows the Hermes function-calling prompt template with:
+It follows the Xiaoban function-calling prompt template with:
 
 - Preamble explaining the function-calling protocol
 - `<tools>` XML block containing the JSON tool definitions

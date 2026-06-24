@@ -6,28 +6,28 @@ description: "Use Xiaoban-Agent with Google Gemini — native AI Studio API, API
 
 # Google Gemini
 
-Xiaoban-Agent supports Google Gemini as a native provider using the **Google AI Studio / Gemini API** — not the OpenAI-compatible endpoint. This lets Hermes translate its internal OpenAI-shaped message and tool loop into Gemini's native `generateContent` API while preserving tool calling, streaming, multimodal inputs, and Gemini-specific response metadata.
+Xiaoban-Agent supports Google Gemini as a native provider using the **Google AI Studio / Gemini API** — not the OpenAI-compatible endpoint. This lets Xiaoban translate its internal OpenAI-shaped message and tool loop into Gemini's native `generateContent` API while preserving tool calling, streaming, multimodal inputs, and Gemini-specific response metadata.
 
 ## Prerequisites
 
 - **Google AI Studio API key** — create one at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
-- **Billing-enabled Google Cloud project** — recommended for agent use. Gemini's free tier is too small for long-running agent sessions because Hermes may make several model calls per user turn.
-- **Hermes installed** — no extra Python package is required for the native Gemini provider.
+- **Billing-enabled Google Cloud project** — recommended for agent use. Gemini's free tier is too small for long-running agent sessions because Xiaoban may make several model calls per user turn.
+- **Xiaoban installed** — no extra Python package is required for the native Gemini provider.
 
 :::tip API key path
-Set `GOOGLE_API_KEY` or `GEMINI_API_KEY`. Hermes checks both names for the `gemini` provider.
+Set `GOOGLE_API_KEY` or `GEMINI_API_KEY`. Xiaoban checks both names for the `gemini` provider.
 :::
 
 ## Quick Start
 
 ```bash
 # Add your Gemini API key
-echo "GOOGLE_API_KEY=..." >> ~/.hermes/.env
+echo "GOOGLE_API_KEY=..." >> ~/.xiaoban/.env
 
 # Select Gemini as your provider
 xiaoban model
 # → Choose "More providers..." → "Google AI Studio"
-# → Hermes checks your key tier and shows Gemini models
+# → Xiaoban checks your key tier and shows Gemini models
 # → Select a model
 
 # Start chatting
@@ -45,7 +45,7 @@ model:
 
 ## Configuration
 
-After running `xiaoban model`, your `~/.hermes/config.yaml` will contain:
+After running `xiaoban model`, your `~/.xiaoban/config.yaml` will contain:
 
 ```yaml
 model:
@@ -54,7 +54,7 @@ model:
   base_url: https://generativelanguage.googleapis.com/v1beta
 ```
 
-And in `~/.hermes/.env`:
+And in `~/.xiaoban/.env`:
 
 ```bash
 GOOGLE_API_KEY=...
@@ -68,18 +68,18 @@ The recommended endpoint is:
 https://generativelanguage.googleapis.com/v1beta
 ```
 
-Hermes detects this endpoint and creates its native Gemini adapter. Internally, Hermes still keeps the agent loop in OpenAI-shaped messages, then translates each request to Gemini's native schema:
+Xiaoban detects this endpoint and creates its native Gemini adapter. Internally, Xiaoban still keeps the agent loop in OpenAI-shaped messages, then translates each request to Gemini's native schema:
 
 - `messages[]` → Gemini `contents[]`
 - system prompts → Gemini `systemInstruction`
 - tool schemas → Gemini `functionDeclarations`
 - tool results → Gemini `functionResponse` parts
-- streaming responses → OpenAI-shaped stream chunks for the Hermes loop
+- streaming responses → OpenAI-shaped stream chunks for the Xiaoban loop
 
 :::note Gemini 3 thought signatures
-For Gemini 3 tool use, Hermes preserves the `thoughtSignature` values attached to function-call parts and replays them on the next tool turn. That covers the validation-critical path for multi-step agent workflows.
+For Gemini 3 tool use, Xiaoban preserves the `thoughtSignature` values attached to function-call parts and replays them on the next tool turn. That covers the validation-critical path for multi-step agent workflows.
 
-Gemini 3 may also attach thought signatures to other response parts. Hermes' native adapter is optimized for agent tool loops today, so it does not yet replay every non-tool-call signature with full part-level fidelity.
+Gemini 3 may also attach thought signatures to other response parts. Xiaoban' native adapter is optimized for agent tool loops today, so it does not yet replay every non-tool-call signature with full part-level fidelity.
 :::
 
 ### Prefer the Native Endpoint
@@ -90,7 +90,7 @@ Google also exposes an OpenAI-compatible endpoint:
 https://generativelanguage.googleapis.com/v1beta/openai/
 ```
 
-For Hermes agent sessions, prefer the native Gemini endpoint above. Hermes includes a native Gemini adapter so it can map multi-turn tool use, tool-call results, streaming, multimodal inputs, and Gemini response metadata directly onto Gemini's `generateContent` API. The OpenAI-compatible endpoint is still useful when you specifically need OpenAI API compatibility.
+For Xiaoban agent sessions, prefer the native Gemini endpoint above. Xiaoban includes a native Gemini adapter so it can map multi-turn tool use, tool-call results, streaming, multimodal inputs, and Gemini response metadata directly onto Gemini's `generateContent` API. The OpenAI-compatible endpoint is still useful when you specifically need OpenAI API compatibility.
 
 If you previously set `GEMINI_BASE_URL` to the `/openai` URL, remove it or change it:
 
@@ -100,7 +100,7 @@ GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
 
 ## Available Models
 
-The `xiaoban model` picker shows Gemini models maintained in Hermes' provider registry. Common choices include:
+The `xiaoban model` picker shows Gemini models maintained in Xiaoban' provider registry. Common choices include:
 
 | Model | ID | Notes |
 |-------|----|-------|
@@ -117,7 +117,7 @@ Use Gemini's native model IDs such as `gemini-3-flash-preview`, not OpenRouter-s
 
 ### Latest Aliases
 
-Google publishes moving aliases for the Pro and Flash Gemini families. `gemini-pro-latest` and `gemini-flash-latest` are useful when you want Google to advance the model automatically without changing your Hermes config.
+Google publishes moving aliases for the Pro and Flash Gemini families. `gemini-pro-latest` and `gemini-flash-latest` are useful when you want Google to advance the model automatically without changing your Xiaoban config.
 
 | Alias | Currently tracks | Notes |
 |-------|------------------|-------|
@@ -135,7 +135,7 @@ If you need strict reproducibility, prefer explicit model IDs such as `gemini-3.
 
 ### Gemma via the Gemini API
 
-Google also exposes Gemma models through the Gemini API. Hermes recognizes these as Google models, but hides very low-throughput Gemma entries from the default model picker so new users do not accidentally select an evaluation-tier model for a long-running agent session.
+Google also exposes Gemma models through the Gemini API. Xiaoban recognizes these as Google models, but hides very low-throughput Gemma entries from the default model picker so new users do not accidentally select an evaluation-tier model for a long-running agent session.
 
 Useful evaluation IDs include:
 
@@ -144,7 +144,7 @@ Useful evaluation IDs include:
 | Gemma 4 31B IT | `gemma-4-31b-it` | Larger Gemma model; useful for compatibility and quality evaluation |
 | Gemma 4 26B A4B IT | `gemma-4-26b-a4b-it` | Smaller active-parameter variant when available |
 
-These models are best treated as evaluation options on Gemini API keys. Google's Gemma API pricing is free-tier-only and the usage caps are low compared with production Gemini models, so sustained Hermes agent use should normally move to a paid Gemini model, a self-hosted deployment, or another provider with appropriate quota.
+These models are best treated as evaluation options on Gemini API keys. Google's Gemma API pricing is free-tier-only and the usage caps are low compared with production Gemini models, so sustained Xiaoban agent use should normally move to a paid Gemini model, a self-hosted deployment, or another provider with appropriate quota.
 
 To use a Gemma model that is hidden from the picker, set it directly:
 
@@ -173,7 +173,7 @@ If you have not configured Gemini yet, exit the session and run `xiaoban model` 
 ## Diagnostics
 
 ```bash
-hermes doctor
+xiaoban doctor
 ```
 
 The doctor checks:
@@ -183,7 +183,7 @@ The doctor checks:
 
 ## Gateway (Messaging Platforms)
 
-Gemini works with all Hermes gateway platforms (Telegram, Discord, Slack, WhatsApp, LINE, Feishu, etc.). Configure Gemini as your provider, then start the gateway normally:
+Gemini works with all Xiaoban gateway platforms (Telegram, Discord, Slack, WhatsApp, LINE, Feishu, etc.). Configure Gemini as your provider, then start the gateway normally:
 
 ```bash
 xiaoban gateway setup
@@ -196,7 +196,7 @@ The gateway reads `config.yaml` and uses the same Gemini provider configuration.
 
 ### "Gemini native client requires an API key"
 
-Hermes could not find a usable API key. Add one of these to `~/.hermes/.env`:
+Xiaoban could not find a usable API key. Add one of these to `~/.xiaoban/.env`:
 
 ```bash
 GOOGLE_API_KEY=...
@@ -208,7 +208,7 @@ Then run `xiaoban model` again.
 
 ### "This Google API key is on the free tier"
 
-Hermes probes Gemini API keys during setup. Free-tier quotas can be exhausted after a handful of agent turns because tool use, retries, compression, and auxiliary tasks may require multiple model calls.
+Xiaoban probes Gemini API keys during setup. Free-tier quotas can be exhausted after a handful of agent turns because tool use, retries, compression, and auxiliary tasks may require multiple model calls.
 
 Enable billing on the Google Cloud project attached to your key, regenerate the key if needed, then run:
 
@@ -222,7 +222,7 @@ The selected model is not available for your account, region, or key. Run `xiaob
 
 ### Gemma model is not shown in `xiaoban model`
 
-Hermes may hide low-throughput Gemma models from the picker by default. If you intentionally want to evaluate one, set the model ID directly in `~/.hermes/config.yaml`.
+Xiaoban may hide low-throughput Gemma models from the picker by default. If you intentionally want to evaluate one, set the model ID directly in `~/.xiaoban/config.yaml`.
 
 ### "429 quota exceeded" on Gemma
 
@@ -230,7 +230,7 @@ Gemma models exposed through the Gemini API are useful for evaluation, but their
 
 ### OpenAI-compatible endpoint is configured
 
-Check `~/.hermes/.env` for:
+Check `~/.xiaoban/.env` for:
 
 ```bash
 GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
@@ -244,7 +244,7 @@ GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
 
 ### Tool calling fails with schema errors
 
-Upgrade Hermes and rerun `xiaoban model`. The native Gemini adapter sanitizes tool schemas for Gemini's stricter function-declaration format; older builds or custom endpoints may not.
+Upgrade Xiaoban and rerun `xiaoban model`. The native Gemini adapter sanitizes tool schemas for Gemini's stricter function-declaration format; older builds or custom endpoints may not.
 
 ## Related
 

@@ -988,7 +988,7 @@ function HubBrowser({
                   Featured skills
                 </span>
                 <span className="text-xs text-text-tertiary">
-                  from the Hermes index — search above for thousands more
+                  from the Xiaoban index — search above for thousands more
                 </span>
               </div>
               {featured.map((r) => (
@@ -1091,7 +1091,7 @@ function ConnectedHubs({
       </span>
       {sources.map((s) => {
         const down =
-          (s.id === "hermes-index" && s.available === false) ||
+          (s.id === "xiaoban-index" && s.available === false) ||
           (s.id === "github" && s.rate_limited === true);
         return (
           <Badge
@@ -1101,7 +1101,7 @@ function ConnectedHubs({
             title={
               s.id === "github" && s.rate_limited
                 ? "GitHub API rate-limited — set GITHUB_TOKEN to raise the limit"
-                : s.id === "hermes-index" && s.available === false
+                : s.id === "xiaoban-index" && s.available === false
                   ? "Centralized index unavailable — falling back to live sources"
                   : undefined
             }

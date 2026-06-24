@@ -19,7 +19,7 @@ import yaml
 
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname
 
-from hermes_constants import OPENROUTER_MODELS_URL
+from xiaoban_constants import OPENROUTER_MODELS_URL
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ def _resolve_requests_verify() -> bool | str:
     """Resolve SSL verify setting for `requests` calls from env vars.
 
     The `requests` library only honours REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE
-    by default. Xiaoban also honours HERMES_CA_BUNDLE (its own convention)
+    by default. Xiaoban also honours XIAOBAN_CA_BUNDLE (its own convention)
     and SSL_CERT_FILE (used by the stdlib `ssl` module and by httpx), so
     that a single env var can cover both `requests` and `httpx` callsites
     inside the same process.
@@ -36,7 +36,7 @@ def _resolve_requests_verify() -> bool | str:
     Returns either a filesystem path to a CA bundle, or True to defer to
     the requests default (certifi).
     """
-    for env_var in ("HERMES_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
+    for env_var in ("XIAOBAN_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
         val = os.getenv(env_var)
         if val and os.path.isfile(val):
             return val
@@ -115,8 +115,8 @@ _ENDPOINT_MODEL_CACHE_TTL = 300
 
 def _get_model_metadata_cache_path() -> Path:
     """Return path to the OpenRouter model metadata disk cache."""
-    from hermes_constants import get_hermes_home
-    return get_hermes_home() / "cache" / "openrouter_model_metadata.json"
+    from xiaoban_constants import get_xiaoban_home
+    return get_xiaoban_home() / "cache" / "openrouter_model_metadata.json"
 
 
 def _model_metadata_disk_cache_age_seconds() -> Optional[float]:
@@ -909,8 +909,8 @@ def _resolve_endpoint_context_length(
 
 def _get_context_cache_path() -> Path:
     """Return path to the persistent context length cache file."""
-    from hermes_constants import get_hermes_home
-    return get_hermes_home() / "context_length_cache.yaml"
+    from xiaoban_constants import get_xiaoban_home
+    return get_xiaoban_home() / "context_length_cache.yaml"
 
 
 def _load_context_cache() -> Dict[str, int]:
@@ -1652,7 +1652,7 @@ def get_model_context_length(
     # See #15779.
     if custom_providers and base_url and model:
         try:
-            from hermes_cli.config import get_custom_provider_context_length
+            from xiaoban_cli.config import get_custom_provider_context_length
             cp_ctx = get_custom_provider_context_length(
                 model=model,
                 base_url=base_url,
@@ -1846,7 +1846,7 @@ def get_model_context_length(
     # returns the provider-enforced limit which is what users can actually use.
     if effective_provider in {"copilot", "copilot-acp", "github-copilot"}:
         try:
-            from hermes_cli.models import get_copilot_model_context
+            from xiaoban_cli.models import get_copilot_model_context
             ctx = get_copilot_model_context(model, api_key=api_key)
             if ctx:
                 return ctx

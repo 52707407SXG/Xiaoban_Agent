@@ -48,21 +48,21 @@ Pick the row that matches your goal:
 
 ## 1. Install Xiaoban-Agent
 ### With the Xiaoban Desktop installer on macOS or Windows (recommended)
-To easily install the command-line and desktop applications, [download the Xiaoban Desktop installer](https://github.com/52707407SXG/Xiaoban-Agent/) from our website and run it.
+To easily install the command-line and desktop applications, [download the Xiaoban Desktop installer](https://github.com/52707407SXG/Xiaoban_Agent/) from our website and run it.
 
 ### Without Xiaoban Desktop:
 For a command-line only install without Xiaoban Desktop, run:
 
 #### Linux / macOS / WSL2 / Android (Termux)
 ```bash
-curl -fsSL https://github.com/52707407SXG/Xiaoban-Agent/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/52707407SXG/Xiaoban_Agent/main/scripts/install.sh | bash
 ```
 
 #### Windows (native)
 
 Run in powershell:
 ```powershell
-iex (irm https://github.com/52707407SXG/Xiaoban-Agent/install.ps1) 
+iex (irm https://raw.githubusercontent.com/52707407SXG/Xiaoban_Agent/main/scripts/install.ps1)
 ```
 
 :::tip Android / Termux

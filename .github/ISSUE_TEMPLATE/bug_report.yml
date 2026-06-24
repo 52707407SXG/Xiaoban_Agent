@@ -11,7 +11,7 @@ body:
         **Before submitting**, please:
         - [ ] Search [existing issues](https://github.com/52707407SXG/Xiaoban-Agent/issues) to avoid duplicates
         - [ ] Update to the latest version (`xiaoban update`) and confirm the bug still exists
-        - [ ] Run `hermes debug share` and paste the links below (see Debug Report section)
+        - [ ] Run `xiaoban debug share` and paste the links below (see Debug Report section)
 
   - type: textarea
     id: description
@@ -56,7 +56,7 @@ body:
     id: component
     attributes:
       label: Affected Component
-      description: Which part of Hermes is affected?
+      description: Which part of Xiaoban is affected?
       multiple: true
       options:
         - CLI (interactive chat)
@@ -88,12 +88,12 @@ body:
     attributes:
       label: Debug Report
       description: |
-        Run `hermes debug share` from your terminal and paste the links it prints here.
+        Run `xiaoban debug share` from your terminal and paste the links it prints here.
         This uploads your system info, config, and recent logs to a paste service automatically.
 
         If you're in an interactive chat session, you can also use the `/debug` slash command — it does the same thing.
 
-        If the upload fails, run `hermes debug share --local` and paste the output directly.
+        If the upload fails, run `xiaoban debug share --local` and paste the output directly.
       placeholder: |
         Report   https://paste.rs/abc123
         agent.log   https://paste.rs/def456
@@ -119,9 +119,9 @@ body:
       placeholder: "3.11.9"
 
   - type: input
-    id: hermes-version
+    id: xiaoban-version
     attributes:
-      label: Hermes Version
+      label: Xiaoban Version
       description: Output of `xiaoban version`
       placeholder: "2.1.0"
 
@@ -131,7 +131,7 @@ body:
       label: Additional Logs / Traceback (optional)
       description: |
         The debug report above covers most logs. Use this field for any extra error output, 
-        tracebacks, or screenshots not captured by `hermes debug share`.
+        tracebacks, or screenshots not captured by `xiaoban debug share`.
       render: shell
 
   - type: textarea

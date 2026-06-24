@@ -194,6 +194,119 @@ export const toolTrailLabel = (name: string) =>
     .map(p => p[0]!.toUpperCase() + p.slice(1))
     .join(' ') || name
 
+const TOOL_ACTION_WIDTH = 9
+
+const toolAction = (name: string, context = '') => {
+  switch (name) {
+    case 'web_search':
+    case 'search':
+      return { icon: '🔍', verb: 'search' }
+    case 'web_extract':
+      return { icon: '📄', verb: 'fetch' }
+    case 'terminal':
+      return { icon: '💻', verb: 'run' }
+    case 'execute_code':
+      return { icon: '🐍', verb: 'exec' }
+    case 'read_file':
+      return { icon: '📄', verb: 'read' }
+    case 'write_file':
+      return { icon: '✍️', verb: 'write' }
+    case 'patch':
+      return { icon: '🔧', verb: 'patch' }
+    case 'search_files':
+      return { icon: '🔎', verb: 'grep' }
+    case 'browser_navigate':
+      return { icon: '🌐', verb: 'navigate' }
+    case 'browser_snapshot':
+      return { icon: '📸', verb: 'snapshot' }
+    case 'browser_click':
+      return { icon: '👆', verb: 'click' }
+    case 'browser_type':
+      return { icon: '⌨️', verb: 'type' }
+    case 'browser_scroll':
+      return { icon: '↕', verb: 'scroll' }
+    case 'browser_back':
+      return { icon: '◀', verb: 'back' }
+    case 'browser_press':
+      return { icon: '⌨️', verb: 'press' }
+    case 'browser_get_images':
+      return { icon: '🖼️', verb: 'images' }
+    case 'browser_vision':
+    case 'vision_analyze':
+      return { icon: '👁️', verb: 'vision' }
+    case 'todo':
+      return { icon: '📋', verb: 'plan' }
+    case 'session_search':
+      return { icon: '🔍', verb: 'recall' }
+    case 'memory':
+      return { icon: '🧠', verb: 'memory' }
+    case 'skills_list':
+      return { icon: '📚', verb: 'skills' }
+    case 'skill_view':
+    case 'skill_manage':
+      return { icon: '📚', verb: 'skill' }
+    case 'image_generate':
+      return { icon: '🎨', verb: 'create' }
+    case 'text_to_speech':
+      return { icon: '🔊', verb: 'speak' }
+    case 'mixture_of_agents':
+      return { icon: '🧠', verb: 'reason' }
+    case 'send_message':
+      return { icon: '📨', verb: 'send' }
+    case 'cronjob':
+      return { icon: '⏰', verb: 'cron' }
+    case 'delegate_task':
+      return { icon: '🤝', verb: 'delegate' }
+    case 'clarify':
+      return { icon: '?', verb: 'clarify' }
+    case 'process':
+      return { icon: '⚙️', verb: 'process' }
+    default: {
+      const label = toolTrailLabel(name).toLowerCase()
+      const verb = label || compactPreview(context, 18) || 'tool'
+
+      return { icon: '⚙️', verb }
+    }
+  }
+}
+
+export const formatToolDuration = (duration?: number) => {
+  if (duration === undefined) {
+    return ''
+  }
+
+  const seconds = Math.max(0, duration)
+
+  if (seconds < 10) {
+    return `${seconds.toFixed(1)}s`
+  }
+
+  if (seconds < 60) {
+    return `${Math.round(seconds)}s`
+  }
+
+  const mins = Math.floor(seconds / 60)
+  const secs = Math.round(seconds % 60)
+
+  return secs ? `${mins}m ${secs}s` : `${mins}m`
+}
+
+export const formatToolProcessLine = (name: string, context = '', duration?: number) => {
+  const { icon, verb } = toolAction(name, context)
+  const action = verb.padEnd(TOOL_ACTION_WIDTH, ' ')
+  const preview = compactPreview(context, 64)
+  const took = formatToolDuration(duration)
+  const middle = preview ? ` ${preview}` : ''
+
+  return `${icon} ${action}${middle}${took ? `  ${took}` : ''}`.trimEnd()
+}
+
+export const formatPreparingToolLine = (name: string) => {
+  const { icon, verb } = toolAction(name)
+
+  return `${icon} preparing ${verb}…`
+}
+
 export const formatToolCall = (name: string, context = '') => {
   const label = toolTrailLabel(name)
   const preview = compactPreview(context, 64)
@@ -209,9 +322,9 @@ export const buildToolTrailLine = (
   duration?: number
 ) => {
   const detail = compactPreview(note ?? '', 72)
-  const took = duration !== undefined ? ` (${duration.toFixed(1)}s)` : ''
+  const call = formatToolProcessLine(name, context, duration)
 
-  return `${formatToolCall(name, context)}${took}${detail ? ` :: ${detail}` : ''} ${error ? '✗' : '✓'}`
+  return `${call}${detail ? ` :: ${detail}` : ''} ${error ? '✗' : '✓'}`
 }
 
 const verboseToolBlock = (label: string, text?: string) => {
@@ -240,9 +353,9 @@ export const buildVerboseToolTrailLine = (
   const detail = [verboseToolBlock('Args', argsText), verboseToolBlock(error ? 'Error' : 'Result', resultText)]
     .filter(Boolean)
     .join('\n')
-  const took = duration !== undefined ? ` (${duration.toFixed(1)}s)` : ''
+  const call = formatToolProcessLine(name, context, duration)
 
-  return `${formatToolCall(name, context)}${took}${detail ? ` :: ${detail}` : ''} ${error ? '✗' : '✓'}`
+  return `${call}${detail ? ` :: ${detail}` : ''} ${error ? '✗' : '✓'}`
 }
 
 export const isToolTrailResultLine = (line: string) => line.endsWith(' ✓') || line.endsWith(' ✗')
@@ -270,12 +383,15 @@ export const parseToolTrailResultLine = (line: string) => {
 }
 
 export const splitToolDuration = (call: string) => {
-  const match = call.match(/^(.*?)( \(\d+(?:\.\d)?s\))$/)
+  const match = call.match(/^(.*?)(?: \((\d+(?:\.\d)?s)\)|  ((?:\d+(?:\.\d)?s)|(?:\d+m(?: \d+s)?)))$/)
 
-  return match ? { label: match[1]!, duration: match[2]! } : { label: call, duration: '' }
+  return match
+    ? { label: match[1]!, duration: match[2] ? ` (${match[2]})` : `  ${match[3]}` }
+    : { label: call, duration: '' }
 }
 
-export const isTransientTrailLine = (line: string) => line.startsWith('drafting ') || line === 'analyzing tool output…'
+export const isTransientTrailLine = (line: string) =>
+  line.startsWith('drafting ') || line.startsWith('preparing ') || line === 'analyzing tool output…'
 
 export const sameToolTrailGroup = (label: string, entry: string) =>
   entry === `${label} ✓` ||

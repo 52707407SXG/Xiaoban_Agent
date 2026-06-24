@@ -6,7 +6,7 @@ description: "Schedule automated tasks with natural language, manage them with o
 
 # Scheduled Tasks (Cron)
 
-Schedule tasks to run automatically with natural language or cron expressions. Hermes exposes cron management through a single `cronjob` tool with action-style operations instead of separate schedule/list/remove tools.
+Schedule tasks to run automatically with natural language or cron expressions. Xiaoban exposes cron management through a single `cronjob` tool with action-style operations instead of separate schedule/list/remove tools.
 
 ## What cron can do now
 
@@ -19,14 +19,14 @@ Cron jobs can:
 - run in fresh agent sessions with the normal static tool list
 - run in **no-agent mode** — a script on a schedule, its stdout delivered verbatim, zero LLM involvement (see the [no-agent mode](#no-agent-mode-script-only-jobs) section below)
 
-All of this is available to Hermes itself through the `cronjob` tool, so you can create, pause, edit, and remove jobs by asking in plain language — no CLI required.
+All of this is available to Xiaoban itself through the `cronjob` tool, so you can create, pause, edit, and remove jobs by asking in plain language — no CLI required.
 
 :::tip
 Cron jobs use whatever provider `xiaoban model` selected. `xiaoban setup --portal` is the lowest-friction option for unattended runs since OAuth refresh is automatic. See [Nous Portal](/integrations/nous-portal).
 :::
 
 :::warning
-Cron-run sessions cannot recursively create more cron jobs. Hermes disables cron management tools inside cron executions to prevent runaway scheduling loops.
+Cron-run sessions cannot recursively create more cron jobs. Xiaoban disables cron management tools inside cron executions to prevent runaway scheduling loops.
 :::
 
 ## Creating scheduled tasks
@@ -43,9 +43,9 @@ Cron-run sessions cannot recursively create more cron jobs. Hermes disables cron
 ### From the standalone CLI
 
 ```bash
-hermes cron create "every 2h" "Check server status"
-hermes cron create "every 1h" "Summarize new feed items" --skill blogwatcher
-hermes cron create "every 1h" "Use both skills and combine the result" \
+xiaoban cron create "every 2h" "Check server status"
+xiaoban cron create "every 1h" "Summarize new feed items" --skill blogwatcher
+xiaoban cron create "every 1h" "Use both skills and combine the result" \
   --skill blogwatcher \
   --skill maps \
   --name "Skill combo"
@@ -53,13 +53,13 @@ hermes cron create "every 1h" "Use both skills and combine the result" \
 
 ### Through natural conversation
 
-Ask Hermes normally:
+Ask Xiaoban normally:
 
 ```text
 Every morning at 9am, check Hacker News for AI news and send me a summary on Telegram.
 ```
 
-Hermes will use the unified `cronjob` tool internally.
+Xiaoban will use the unified `cronjob` tool internally.
 
 ## Skill-backed cron jobs
 
@@ -99,7 +99,7 @@ Cron jobs default to running detached from any repo — no `AGENTS.md`, `CLAUDE.
 
 ```bash
 # Standalone CLI (schedule and prompt are positional)
-hermes cron create "every 1d at 09:00" \
+xiaoban cron create "every 1d at 09:00" \
   "Audit open PRs, summarize CI health, and post to #eng" \
   --workdir /home/me/projects/acme
 ```
@@ -146,12 +146,12 @@ The `<job_id>` placeholder below (and in [Lifecycle actions](#lifecycle-actions)
 ### Standalone CLI
 
 ```bash
-hermes cron edit <job_id> --schedule "every 4h"
-hermes cron edit <job_id> --prompt "Use the revised task"
-hermes cron edit <job_id> --skill blogwatcher --skill maps
-hermes cron edit <job_id> --add-skill maps
-hermes cron edit <job_id> --remove-skill blogwatcher
-hermes cron edit <job_id> --clear-skills
+xiaoban cron edit <job_id> --schedule "every 4h"
+xiaoban cron edit <job_id> --prompt "Use the revised task"
+xiaoban cron edit <job_id> --skill blogwatcher --skill maps
+xiaoban cron edit <job_id> --add-skill maps
+xiaoban cron edit <job_id> --remove-skill blogwatcher
+xiaoban cron edit <job_id> --clear-skills
 ```
 
 Notes:
@@ -178,14 +178,14 @@ Cron jobs now have a fuller lifecycle than just create/remove.
 ### Standalone CLI
 
 ```bash
-hermes cron list
-hermes cron pause <job_id_or_name>
-hermes cron resume <job_id_or_name>
-hermes cron run <job_id_or_name>
-hermes cron remove <job_id_or_name>
-hermes cron edit <job_id_or_name> [...flags]
-hermes cron status
-hermes cron tick
+xiaoban cron list
+xiaoban cron pause <job_id_or_name>
+xiaoban cron resume <job_id_or_name>
+xiaoban cron run <job_id_or_name>
+xiaoban cron remove <job_id_or_name>
+xiaoban cron edit <job_id_or_name> [...flags]
+xiaoban cron status
+xiaoban cron tick
 ```
 
 What they do:
@@ -207,15 +207,15 @@ xiaoban gateway install     # Install as a user service
 sudo xiaoban gateway install --system   # Linux: boot-time system service for servers
 xiaoban gateway             # Or run in foreground
 
-hermes cron list
-hermes cron status
+xiaoban cron list
+xiaoban cron status
 ```
 
 ### Gateway scheduler behavior
 
-On each tick Hermes:
+On each tick Xiaoban:
 
-1. loads jobs from `~/.hermes/cron/jobs.json`
+1. loads jobs from `~/.xiaoban/cron/jobs.json`
 2. checks `next_run_at` against the current time
 3. starts a fresh `AIAgent` session for each due job
 4. optionally injects one or more attached skills into that fresh session
@@ -223,7 +223,7 @@ On each tick Hermes:
 6. delivers the final response
 7. updates run metadata and the next scheduled time
 
-A file lock at `~/.hermes/cron/.tick.lock` prevents overlapping scheduler ticks from double-running the same job batch.
+A file lock at `~/.xiaoban/cron/.tick.lock` prevents overlapping scheduler ticks from double-running the same job batch.
 
 ## Delivery options
 
@@ -232,7 +232,7 @@ When scheduling jobs, you specify where the output goes:
 | Option | Description | Example |
 |--------|-------------|---------|
 | `"origin"` | Back to where the job was created | Default on messaging platforms |
-| `"local"` | Save to local files only (`~/.hermes/cron/output/`) | Default on CLI |
+| `"local"` | Save to local files only (`~/.xiaoban/cron/output/`) | Default on CLI |
 | `"telegram"` | Telegram home channel | Uses `TELEGRAM_HOME_CHANNEL` |
 | `"telegram:123456"` | Specific Telegram chat by ID | Direct delivery |
 | `"telegram:-100123:17585"` | Specific Telegram topic | `chat_id:thread_id` format |
@@ -293,14 +293,14 @@ Note: The agent cannot see this message, and therefore cannot respond to it.
 To deliver the raw agent output without the wrapper, set `cron.wrap_response` to `false`:
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.xiaoban/config.yaml
 cron:
   wrap_response: false
 ```
 
 ### Silent suppression
 
-If the agent's final response contains `[SILENT]`, delivery is suppressed entirely. The output is still saved locally for audit (in `~/.hermes/cron/output/`), but no message is sent to the delivery target.
+If the agent's final response contains `[SILENT]`, delivery is suppressed entirely. The output is still saved locally for audit (in `~/.xiaoban/cron/output/`), but no message is sent to the delivery target.
 
 This is useful for monitoring jobs that should only report when something is wrong:
 
@@ -316,19 +316,19 @@ Failed jobs always deliver regardless of the `[SILENT]` marker — only successf
 Pre-run scripts (attached via the `script` parameter) have a default timeout of 120 seconds. If your scripts need longer — for example, to include randomized delays that avoid bot-like timing patterns — you can increase this:
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.xiaoban/config.yaml
 cron:
   script_timeout_seconds: 300   # 5 minutes
 ```
 
-Or set the `HERMES_CRON_SCRIPT_TIMEOUT` environment variable. The resolution order is: env var → config.yaml → 120s default.
+Or set the `XIAOBAN_CRON_SCRIPT_TIMEOUT` environment variable. The resolution order is: env var → config.yaml → 120s default.
 
 ## No-agent mode (script-only jobs)
 
 For recurring jobs that don't need LLM reasoning — classic watchdogs, disk/memory alerts, heartbeats, CI pings — pass `no_agent=True` at creation time. The scheduler runs your script on schedule and delivers its stdout directly, skipping the agent entirely:
 
 ```bash
-hermes cron create "every 5m" \
+xiaoban cron create "every 5m" \
   --no-agent \
   --script memory-watchdog.sh \
   --deliver telegram \
@@ -343,17 +343,17 @@ Semantics:
 - `{"wakeAgent": false}` on the last line → silent tick (same gate LLM jobs use).
 - No tokens, no model, no provider fallback — the job never touches the inference layer.
 
-`.sh` / `.bash` files run under `/bin/bash`; anything else under the current Python interpreter (`sys.executable`). Scripts must live in `~/.hermes/scripts/` (same sandboxing rule as the pre-run script gate).
+`.sh` / `.bash` files run under `/bin/bash`; anything else under the current Python interpreter (`sys.executable`). Scripts must live in `~/.xiaoban/scripts/` (same sandboxing rule as the pre-run script gate).
 
 ### The agent sets these up for you
 
-The `cronjob` tool's schema exposes `no_agent` to Hermes directly, so you can describe a watchdog in chat and let the agent wire it up:
+The `cronjob` tool's schema exposes `no_agent` to Xiaoban directly, so you can describe a watchdog in chat and let the agent wire it up:
 
 ```text
 Ping me on Telegram if RAM is over 85%, every 5 minutes.
 ```
 
-Hermes will write the check script to `~/.hermes/scripts/` via `write_file`, then call:
+Xiaoban will write the check script to `~/.xiaoban/scripts/` via `write_file`, then call:
 
 ```python
 cronjob(action="create", schedule="every 5m",
@@ -373,7 +373,7 @@ Cron jobs run in isolated sessions with no memory of previous runs. But sometime
 # Job 1: Collect raw data
 cronjob(
     action="create",
-    prompt="Fetch the top 10 AI/ML stories from Hacker News. Save them to ~/.hermes/data/briefs/raw.md in markdown format with title, URL, and score.",
+    prompt="Fetch the top 10 AI/ML stories from Hacker News. Save them to ~/.xiaoban/data/briefs/raw.md in markdown format with title, URL, and score.",
     schedule="0 7 * * *",
     name="AI News Collector",
 )
@@ -382,7 +382,7 @@ cronjob(
 # Get Job 1's ID from: cronjob(action="list")
 cronjob(
     action="create",
-    prompt="Read ~/.hermes/data/briefs/raw.md. Score each story 1–10 for engagement potential and novelty. Output the top 5 to ~/.hermes/data/briefs/ranked.md.",
+    prompt="Read ~/.xiaoban/data/briefs/raw.md. Score each story 1–10 for engagement potential and novelty. Output the top 5 to ~/.xiaoban/data/briefs/ranked.md.",
     schedule="30 7 * * *",
     context_from="<job1_id>",
     name="AI News Triage",
@@ -391,7 +391,7 @@ cronjob(
 # Job 3: Ship — receives Job 2's output as context
 cronjob(
     action="create",
-    prompt="Read ~/.hermes/data/briefs/ranked.md. Write 3 tweet drafts (hook + body + hashtags). Deliver to telegram:7976161601.",
+    prompt="Read ~/.xiaoban/data/briefs/ranked.md. Write 3 tweet drafts (hook + body + hashtags). Deliver to telegram:7976161601.",
     schedule="0 8 * * *",
     context_from="<job2_id>",
     name="AI News Brief",
@@ -400,7 +400,7 @@ cronjob(
 
 **How it works:**
 
-- When Job 2 fires, Hermes reads Job 1's most recent output from `~/.hermes/cron/output/{job1_id}/*.md`
+- When Job 2 fires, Xiaoban reads Job 1's most recent output from `~/.xiaoban/cron/output/{job1_id}/*.md`
 - That output is prepended to Job 2's prompt automatically
 - Job 2 doesn't need to hardcode "read this file" — it receives the content as context
 - The chain can be any length: Job 1 → Job 2 → Job 3 → ...
@@ -431,7 +431,7 @@ This means cron jobs that run at high frequency or during peak hours are more re
 
 ## Schedule formats
 
-The agent's final response is automatically delivered — you do **not** need to include `send_message` in the cron prompt for that same destination. If a cron run calls `send_message` to the exact target the scheduler will already deliver to, Hermes skips that duplicate send and tells the model to put the user-facing content in the final response instead. Use `send_message` only for additional or different targets.
+The agent's final response is automatically delivered — you do **not** need to include `send_message` in the cron prompt for that same destination. If a cron run calls `send_message` to the exact target the scheduler will already deliver to, Xiaoban skips that duplicate send and tells the model to put the user-facing content in the final response instead. Use `send_message` only for additional or different targets.
 
 ### Relative delays (one-shot)
 
@@ -519,11 +519,11 @@ cronjob(action="create", name="weekly-news-summary",
         prompt="Summarize this week's AI news: ...")
 ```
 
-When `enabled_toolsets` is set on a job it wins; otherwise the `xiaoban tools` cron-platform config wins; otherwise Hermes falls back to the built-in defaults. This matters for cost control: carrying `moa`, `browser`, `delegation` into every tiny "fetch news" job bloats the tool-schema prompt on every LLM call.
+When `enabled_toolsets` is set on a job it wins; otherwise the `xiaoban tools` cron-platform config wins; otherwise Xiaoban falls back to the built-in defaults. This matters for cost control: carrying `moa`, `browser`, `delegation` into every tiny "fetch news" job bloats the tool-schema prompt on every LLM call.
 
 ### Skipping the agent entirely: `wakeAgent`
 
-If your cron job attaches a pre-check script (via `script=`), the script can decide at runtime whether Hermes should even invoke the agent. Emit a final stdout line of the form:
+If your cron job attaches a pre-check script (via `script=`), the script can decide at runtime whether Xiaoban should even invoke the agent. Emit a final stdout line of the form:
 
 ```text
 {"wakeAgent": false}
@@ -553,9 +553,9 @@ The `wakeAgent` gate gives you a $0 way to decide whether a scheduled job should
 
 ```bash
 #!/bin/bash
-# ~/.hermes/scripts/feed-changed.sh
+# ~/.xiaoban/scripts/feed-changed.sh
 FEED="$HOME/data/feed.json"
-STATE="$HOME/.hermes/scripts/.feed-changed.last"
+STATE="$HOME/.xiaoban/scripts/.feed-changed.last"
 test -f "$FEED" || { echo '{"wakeAgent": false}'; exit 0; }
 mtime=$(stat -c %Y "$FEED")
 last=$(cat "$STATE" 2>/dev/null || echo 0)
@@ -578,7 +578,7 @@ cronjob(action="create", name="process-feed",
 
 ```bash
 #!/bin/bash
-# ~/.hermes/scripts/flag-ready.sh
+# ~/.xiaoban/scripts/flag-ready.sh
 if test -f /tmp/new-data-ready; then
   rm -f /tmp/new-data-ready
   echo '{"wakeAgent": true}'
@@ -598,7 +598,7 @@ cronjob(action="create", name="nightly-analysis",
 
 ```python
 #!/usr/bin/env python
-# ~/.hermes/scripts/new-rows.py
+# ~/.xiaoban/scripts/new-rows.py
 import json, sqlite3
 conn = sqlite3.connect("/home/me/data/app.db")
 n = conn.execute(
@@ -620,10 +620,10 @@ cronjob(action="create", name="summarize-new-msgs",
 The same pattern works for any data source you can query from a script — Postgres, an HTTP API, your own state store — without baking a SQL evaluator into the cron subsystem.
 
 :::tip
-Hermes's own `~/.hermes/state.db` is an internal schema that changes between releases. Don't query it from a pre-run gate — point at your own database or feed instead.
+Xiaoban's own `~/.xiaoban/state.db` is an internal schema that changes between releases. Don't query it from a pre-run gate — point at your own database or feed instead.
 :::
 
-Credit: this recipe set was prompted by @iankar8's exploration in [#2654](https://github.com/52707407SXG/Xiaoban-Agent/pull/2654), which proposed adding sql/file/command triggers as a parallel mechanism. The `script` + `wakeAgent` gate already covers all three cases at $0, so the work landed as documentation instead.
+Credit: this recipe set was prompted by @iankar8's exploration in [#2654](https://github.com/52707407SXG/Xiaoban_Agent/pull/2654), which proposed adding sql/file/command triggers as a parallel mechanism. The `script` + `wakeAgent` gate already covers all three cases at $0, so the work landed as documentation instead.
 
 ### Chaining jobs: `context_from`
 
@@ -640,9 +640,9 @@ The referenced jobs' most recent completed outputs are injected above the prompt
 
 ## Job storage
 
-Jobs are stored in `~/.hermes/cron/jobs.json`. Output from job runs is saved to `~/.hermes/cron/output/{job_id}/{timestamp}.md`.
+Jobs are stored in `~/.xiaoban/cron/jobs.json`. Output from job runs is saved to `~/.xiaoban/cron/output/{job_id}/{timestamp}.md`.
 
-Jobs may store `model` and `provider` as `null`. When those fields are omitted, Hermes resolves them at execution time from the global configuration. They only appear in the job record when a per-job override is set.
+Jobs may store `model` and `provider` as `null`. When those fields are omitted, Xiaoban resolves them at execution time from the global configuration. They only appear in the job record when a per-job override is set.
 
 The storage uses atomic file writes so interrupted writes do not leave a partially written job file behind.
 

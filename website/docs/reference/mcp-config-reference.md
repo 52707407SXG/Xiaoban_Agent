@@ -10,7 +10,7 @@ This page is the compact reference companion to the main MCP docs.
 
 For conceptual guidance, see:
 - [MCP (Model Context Protocol)](/user-guide/features/mcp)
-- [Use MCP with Hermes](/guides/use-mcp-with-hermes)
+- [Use MCP with Xiaoban](/guides/use-mcp-with-xiaoban)
 
 ## Root config shape
 
@@ -106,7 +106,7 @@ Result:
 
 ## Utility-tool policy
 
-Hermes may register these utility wrappers per MCP server:
+Xiaoban may register these utility wrappers per MCP server:
 
 Resources:
 - `list_resources`
@@ -132,7 +132,7 @@ tools:
 
 ### Capability-aware registration
 
-Even when `resources: true` or `prompts: true`, Hermes only registers those utility tools if the MCP session actually exposes the corresponding capability.
+Even when `resources: true` or `prompts: true`, Xiaoban only registers those utility tools if the MCP session actually exposes the corresponding capability.
 
 So this is normal:
 - you enable prompts
@@ -156,7 +156,7 @@ Behavior:
 
 ## Empty result behavior
 
-If filtering removes all server-native tools and no utility tools are registered, Hermes does not create an empty MCP runtime toolset for that server.
+If filtering removes all server-native tools and no utility tools are registered, Xiaoban does not create an empty MCP runtime toolset for that server.
 
 ## Example configs
 
@@ -284,8 +284,8 @@ mcp_servers:
 ```
 
 Behavior:
-- Hermes uses the MCP SDK's OAuth 2.1 PKCE flow (metadata discovery, dynamic client registration, token exchange, and refresh)
+- Xiaoban uses the MCP SDK's OAuth 2.1 PKCE flow (metadata discovery, dynamic client registration, token exchange, and refresh)
 - On first connect, a browser window opens for authorization
-- Tokens are persisted to `~/.hermes/mcp-tokens/<server>.json` and reused across sessions
+- Tokens are persisted to `~/.xiaoban/mcp-tokens/<server>.json` and reused across sessions
 - Token refresh is automatic; re-authorization only happens when refresh fails
 - Only applies to HTTP/StreamableHTTP transport (`url`-based servers)

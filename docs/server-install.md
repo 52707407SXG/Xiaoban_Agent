@@ -30,7 +30,7 @@ Recommended runtime state:
 /etc/xiaoban-agent        environment files owned by the server operator
 ```
 
-`XIAOBAN_HOME` is the user-facing home variable. `HERMES_HOME` may still appear
+`XIAOBAN_HOME` is the user-facing home variable. `XIAOBAN_HOME` may still appear
 inside the inherited runtime as legacy runtime compatibility, but it is not the
 primary My Stand operator interface.
 
@@ -61,7 +61,7 @@ Create `/etc/xiaoban-agent/xiaoban.env`:
 
 ```bash
 XIAOBAN_HOME=/var/lib/xiaoban-agent
-HERMES_HOME=/var/lib/xiaoban-agent
+XIAOBAN_HOME=/var/lib/xiaoban-agent
 XIAOBAN_LOG_DIR=/var/log/xiaoban-agent
 MYSTAND_XIAOBAN_CHANNEL_DEBUG=false
 MYSTAND_XIAOBAN_ALLOW_UNVERIFIED_TEST_MESSAGES=false
@@ -76,8 +76,8 @@ MYSTAND_XIAOBAN_WECHAT_TOKEN=
 MYSTAND_XIAOBAN_FEISHU_VERIFICATION_TOKEN=
 ```
 
-During the transition period, set both `XIAOBAN_HOME` and `HERMES_HOME` to the
-same path. `XIAOBAN_HOME` is the operator-facing variable; `HERMES_HOME` is
+During the transition period, set both `XIAOBAN_HOME` and `XIAOBAN_HOME` to the
+same path. `XIAOBAN_HOME` is the operator-facing variable; `XIAOBAN_HOME` is
 inherited runtime compatibility.
 
 ## No-Key Smoke

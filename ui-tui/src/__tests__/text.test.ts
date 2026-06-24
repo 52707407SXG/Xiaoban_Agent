@@ -8,6 +8,9 @@ import {
   estimateRows,
   estimateTokensRough,
   fmtK,
+  formatPreparingToolLine,
+  formatToolDuration,
+  formatToolProcessLine,
   hasAnsi,
   isToolTrailResultLine,
   lastCotTrailIndex,
@@ -32,9 +35,15 @@ describe('buildToolTrailLine', () => {
   it('puts completion duration inline before the result marker', () => {
     const line = buildToolTrailLine('read_file', 'x', false, '', 0.94)
 
-    expect(line).toBe('Read File("x") (0.9s) ✓')
-    expect(parseToolTrailResultLine(line)).toEqual({ call: 'Read File("x") (0.9s)', detail: '', mark: '✓' })
-    expect(splitToolDuration('Read File("x") (0.9s)')).toEqual({ label: 'Read File("x")', duration: ' (0.9s)' })
+    expect(line).toBe('📄 read      x  0.9s ✓')
+    expect(parseToolTrailResultLine(line)).toEqual({ call: '📄 read      x  0.9s', detail: '', mark: '✓' })
+    expect(splitToolDuration('📄 read      x  0.9s')).toEqual({ label: '📄 read      x', duration: '  0.9s' })
+  })
+
+  it('formats Codex-like process labels for live tool rows', () => {
+    expect(formatToolDuration(62.4)).toBe('1m 2s')
+    expect(formatToolProcessLine('web_search', '成都天气', 1.9)).toBe('🔍 search    成都天气  1.9s')
+    expect(formatPreparingToolLine('web_search')).toBe('🔍 preparing search…')
   })
 })
 
@@ -52,7 +61,7 @@ describe('buildVerboseToolTrailLine', () => {
     expect(line).toContain('Args:\n{')
     expect(line).toContain('Result:\nfirst line\nsecond :: line')
     expect(parseToolTrailResultLine(line)).toEqual({
-      call: 'Terminal("npm test") (1.3s)',
+      call: '💻 run       npm test  1.3s',
       detail: 'Args:\n{\n  "cmd": "npm test"\n}\nResult:\nfirst line\nsecond :: line',
       mark: '✓'
     })
@@ -64,7 +73,7 @@ describe('buildVerboseToolTrailLine', () => {
     expect(line).toContain('Error:\ncommand failed')
     expect(line).not.toContain('Result:\ncommand failed')
     expect(parseToolTrailResultLine(line)).toEqual({
-      call: 'Terminal("npm test") (0.5s)',
+      call: '💻 run       npm test  0.5s',
       detail: 'Error:\ncommand failed',
       mark: '✗'
     })

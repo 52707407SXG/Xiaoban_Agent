@@ -1,16 +1,16 @@
 """Bitwarden Secrets Manager (`bws` CLI) integration.
 
 Xiaoban pulls API keys from Bitwarden Secrets Manager at process startup
-so they don't have to live in plaintext in ``~/.hermes/.env``.
+so they don't have to live in plaintext in ``~/.xiaoban/.env``.
 
 Design summary
 --------------
 
-* The ``bws`` binary is auto-installed into ``<hermes_home>/bin/bws`` on
+* The ``bws`` binary is auto-installed into ``<xiaoban_home>/bin/bws`` on
   first use.  Xiaoban pins one version (``_BWS_VERSION``) and downloads
   the matching asset from the official GitHub Releases page, verifying
   the SHA-256 against the release's published checksum file.
-* The access token is stored in ``~/.hermes/.env`` as
+* The access token is stored in ``~/.xiaoban/.env`` as
   ``BWS_ACCESS_TOKEN`` (or whatever name the user picked in
   ``secrets.bitwarden.access_token_env``).  This is the one
   bootstrap secret — every other provider key can live in Bitwarden.
@@ -67,7 +67,7 @@ _BWS_CHECKSUM_NAME = f"bws-sha256-checksums-{_BWS_VERSION}.txt"
 _BWS_DOWNLOAD_TIMEOUT = 60
 _BWS_RUN_TIMEOUT = 30
 
-# In-process cache so repeated load_hermes_dotenv() calls (CLI startup,
+# In-process cache so repeated load_xiaoban_dotenv() calls (CLI startup,
 # gateway hot-reload, test suites) don't re-fetch from BSM.
 _CacheKey = Tuple[str, str, str]  # (access_token_fingerprint, project_id, server_url)
 _CACHE: Dict[_CacheKey, "_CachedFetch"] = {}
@@ -78,21 +78,21 @@ _CACHE: Dict[_CacheKey, "_CachedFetch"] = {}
 # fetches WITHIN one process; this saves repeated fetches ACROSS processes.
 #
 # Layout: one JSON object per cache key, written atomically with mode 0600 in
-# <hermes_home>/cache/bws_cache.json. The file holds only the secret VALUES,
-# never the access token. It's plaintext-equivalent to ~/.hermes/.env (which
+# <xiaoban_home>/cache/bws_cache.json. The file holds only the secret VALUES,
+# never the access token. It's plaintext-equivalent to ~/.xiaoban/.env (which
 # we already accept) but kept out of the .env file so users editing it won't
 # accidentally commit BSM-sourced secrets.
 _DISK_CACHE_BASENAME = "bws_cache.json"
 
 
 def _disk_cache_path(home_path: Optional[Path] = None) -> Path:
-    """Return the disk cache path under hermes_home/cache/.
+    """Return the disk cache path under xiaoban_home/cache/.
 
-    `home_path` is what `load_hermes_dotenv()` already resolved; falling back
-    to `$HERMES_HOME` / `~/.hermes` keeps direct callers working too.
+    `home_path` is what `load_xiaoban_dotenv()` already resolved; falling back
+    to `$XIAOBAN_HOME` / `~/.xiaoban` keeps direct callers working too.
     """
     if home_path is None:
-        home_path = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
+        home_path = Path(os.getenv("XIAOBAN_HOME", Path.home() / ".xiaoban"))
     return home_path / "cache" / _DISK_CACHE_BASENAME
 
 
@@ -206,24 +206,24 @@ class FetchResult:
 # ---------------------------------------------------------------------------
 
 
-def _hermes_bin_dir() -> Path:
+def _xiaoban_bin_dir() -> Path:
     """Where Xiaoban stores its managed binaries.  Profile-aware."""
-    from hermes_constants import get_hermes_home
+    from xiaoban_constants import get_xiaoban_home
 
-    return get_hermes_home() / "bin"
+    return get_xiaoban_home() / "bin"
 
 
 def find_bws(*, install_if_missing: bool = False) -> Optional[Path]:
     """Return a path to a usable ``bws`` binary, or None.
 
     Resolution order:
-      1. ``<hermes_home>/bin/bws``  (our managed copy — preferred)
+      1. ``<xiaoban_home>/bin/bws``  (our managed copy — preferred)
       2. ``shutil.which("bws")``    (system PATH)
 
     When ``install_if_missing`` is True and neither resolves, this calls
     :func:`install_bws` to download and verify the pinned version.
     """
-    managed = _hermes_bin_dir() / _platform_binary_name()
+    managed = _xiaoban_bin_dir() / _platform_binary_name()
     if managed.exists() and os.access(managed, os.X_OK):
         return managed
 
@@ -295,7 +295,7 @@ def install_bws(*, force: bool = False) -> Path:
     path catch these; the user-facing ``xiaoban secrets bitwarden setup``
     surface lets them propagate so the wizard can show a clear error.
     """
-    bin_dir = _hermes_bin_dir()
+    bin_dir = _xiaoban_bin_dir()
     bin_dir.mkdir(parents=True, exist_ok=True)
     target = bin_dir / _platform_binary_name()
 
@@ -306,7 +306,7 @@ def install_bws(*, force: bool = False) -> Path:
     asset_url = f"{_BWS_RELEASE_BASE}/{asset_name}"
     checksum_url = f"{_BWS_RELEASE_BASE}/{_BWS_CHECKSUM_NAME}"
 
-    with tempfile.TemporaryDirectory(prefix="hermes-bws-") as tmpdir:
+    with tempfile.TemporaryDirectory(prefix="xiaoban-bws-") as tmpdir:
         tmp = Path(tmpdir)
         zip_path = tmp / asset_name
         checksum_path = tmp / _BWS_CHECKSUM_NAME
@@ -458,10 +458,10 @@ def fetch_bitwarden_secrets(
 
     Caching is a two-layer LRU: an in-process dict (for hot-reload paths
     inside one process) and a disk-persisted JSON file under
-    ``<hermes_home>/cache/bws_cache.json`` (for back-to-back CLI invocations).
+    ``<xiaoban_home>/cache/bws_cache.json`` (for back-to-back CLI invocations).
     Both share the same TTL.  Pass ``home_path`` so disk cache lookups find
     the right directory in tests / non-standard installs; otherwise we fall
-    back to ``$HERMES_HOME`` / ``~/.hermes``.
+    back to ``$XIAOBAN_HOME`` / ``~/.xiaoban``.
 
     Raises :class:`RuntimeError` for fatal conditions (missing binary,
     auth failure, unparseable output).  Callers in the env_loader path
@@ -584,7 +584,7 @@ def _is_valid_env_name(name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Public entry point — called from hermes_cli.env_loader
+# Public entry point — called from xiaoban_cli.env_loader
 # ---------------------------------------------------------------------------
 
 
@@ -601,7 +601,7 @@ def apply_bitwarden_secrets(
 ) -> FetchResult:
     """Pull secrets from BSM and set them on ``os.environ``.
 
-    This is the function ``load_hermes_dotenv()`` calls after the .env
+    This is the function ``load_xiaoban_dotenv()`` calls after the .env
     files have loaded.  It is intentionally defensive — any failure
     returns a :class:`FetchResult` with ``error`` set; it never raises.
 

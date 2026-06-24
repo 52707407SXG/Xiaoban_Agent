@@ -1,29 +1,29 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { HermesReadDirResult } from '@/global'
+import type { XiaobanReadDirResult } from '@/global'
 import { $connection, setCurrentCwd } from '@/store/session'
 
 import { resetProjectTreeState } from './files/use-project-tree'
 
 import { RightSidebarPane } from './index'
 
-const readDir = vi.fn<(path: string) => Promise<HermesReadDirResult>>()
+const readDir = vi.fn<(path: string) => Promise<XiaobanReadDirResult>>()
 const selectPaths = vi.fn()
 
-function ok(entries: { name: string; path: string; isDirectory: boolean }[]): HermesReadDirResult {
+function ok(entries: { name: string; path: string; isDirectory: boolean }[]): XiaobanReadDirResult {
   return { entries }
 }
 
 function installBridge() {
   ;(
     window as unknown as {
-      hermesDesktop: {
+      xiaobanDesktop: {
         readDir: typeof readDir
         selectPaths: typeof selectPaths
       }
     }
-  ).hermesDesktop = { readDir, selectPaths }
+  ).xiaobanDesktop = { readDir, selectPaths }
 }
 
 describe('RightSidebarPane', () => {
@@ -43,7 +43,7 @@ describe('RightSidebarPane', () => {
     $connection.set(null)
     setCurrentCwd('')
     resetProjectTreeState()
-    delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+    delete (window as unknown as { xiaobanDesktop?: unknown }).xiaobanDesktop
   })
 
   it('refreshes the current tree without opening the folder picker', async () => {

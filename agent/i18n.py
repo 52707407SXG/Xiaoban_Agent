@@ -21,7 +21,7 @@ Usage::
 
 Language resolution order:
     1. Explicit ``lang=`` argument passed to :func:`t`
-    2. ``HERMES_LANGUAGE`` environment variable (for tests / quick override)
+    2. ``XIAOBAN_LANGUAGE`` environment variable (for tests / quick override)
     3. ``display.language`` from config.yaml
     4. ``"en"`` (baseline)
 
@@ -90,7 +90,7 @@ def _locales_dir() -> Path:
 
     Resolution order, first existing wins:
 
-    1. ``HERMES_BUNDLED_LOCALES`` env var -- set by the Nix wrapper (or any
+    1. ``XIAOBAN_BUNDLED_LOCALES`` env var -- set by the Nix wrapper (or any
        sealed-packaging system) to point at the installed catalog directory.
     2. ``<repo-root>/locales`` -- source checkouts and ``pip install -e .``,
        where the working tree sits next to ``agent/``.
@@ -103,13 +103,13 @@ def _locales_dir() -> Path:
     ``_load_catalog`` error messages informative -- it logs the path it
     looked at -- rather than raising.
     """
-    override = os.getenv("HERMES_BUNDLED_LOCALES", "").strip()
+    override = os.getenv("XIAOBAN_BUNDLED_LOCALES", "").strip()
     if override:
         candidate = Path(override)
         if candidate.is_dir():
             return candidate
         logger.warning(
-            "HERMES_BUNDLED_LOCALES points to a non-directory path (%s); "
+            "XIAOBAN_BUNDLED_LOCALES points to a non-directory path (%s); "
             "falling back to bundled/source locale resolution",
             override,
         )
@@ -181,7 +181,7 @@ def _load_catalog(lang: str) -> dict[str, str]:
         return {}
 
     try:
-        import yaml  # PyYAML is already a hermes dependency
+        import yaml  # PyYAML is already a xiaoban dependency
         with path.open("r", encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
     except Exception as exc:
@@ -217,7 +217,7 @@ def _config_language_cached() -> str | None:
     (e.g. after the setup wizard).
     """
     try:
-        from hermes_cli.config import load_config
+        from xiaoban_cli.config import load_config
         cfg = load_config()
         lang = (cfg.get("display") or {}).get("language")
         if lang:
@@ -230,7 +230,7 @@ def _config_language_cached() -> str | None:
 def reset_language_cache() -> None:
     """Invalidate cached language resolution and catalogs.
 
-    Call after :func:`hermes_cli.config.save_config` if a running process
+    Call after :func:`xiaoban_cli.config.save_config` if a running process
     needs to pick up a changed ``display.language`` without restart.
     """
     _config_language_cached.cache_clear()
@@ -240,7 +240,7 @@ def reset_language_cache() -> None:
 
 def get_language() -> str:
     """Resolve the active language using env > config > default order."""
-    env_lang = os.environ.get("HERMES_LANGUAGE")
+    env_lang = os.environ.get("XIAOBAN_LANGUAGE")
     if env_lang:
         return _normalize_lang(env_lang)
     cfg_lang = _config_language_cached()

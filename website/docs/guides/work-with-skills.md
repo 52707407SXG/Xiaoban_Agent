@@ -1,12 +1,12 @@
 ---
 sidebar_position: 12
 title: "Working with Skills"
-description: "Find, install, use, and create skills — on-demand knowledge that teaches Hermes new workflows"
+description: "Find, install, use, and create skills — on-demand knowledge that teaches Xiaoban new workflows"
 ---
 
 # Working with Skills
 
-Skills are on-demand knowledge documents that teach Hermes how to handle specific tasks — from generating ASCII art to managing GitHub PRs. This guide walks you through using them day to day.
+Skills are on-demand knowledge documents that teach Xiaoban how to handle specific tasks — from generating ASCII art to managing GitHub PRs. This guide walks you through using them day to day.
 
 For the full technical reference, see [Skills System](/user-guide/features/skills).
 
@@ -14,7 +14,7 @@ For the full technical reference, see [Skills System](/user-guide/features/skill
 
 ## Finding Skills
 
-Every Hermes installation ships with bundled skills. See what's available:
+Every Xiaoban installation ships with bundled skills. See what's available:
 
 ```bash
 # In any chat session:
@@ -70,7 +70,7 @@ Every installed skill is automatically a slash command. Just type its name:
 /excalidraw
 ```
 
-You can also trigger skills through natural conversation — ask Hermes to use a specific skill, and it will load it via the `skill_view` tool.
+You can also trigger skills through natural conversation — ask Xiaoban to use a specific skill, and it will load it via the `skill_view` tool.
 
 ### Progressive Disclosure
 
@@ -86,7 +86,7 @@ This means skills don't cost tokens until they're actually used.
 
 ## Installing from the Hub
 
-Official optional skills ship with Hermes but aren't active by default. Install them explicitly:
+Official optional skills ship with Xiaoban but aren't active by default. Install them explicitly:
 
 ```bash
 # Install an official optional skill
@@ -101,7 +101,7 @@ xiaoban skills install https://sharethis.chat/SKILL.md
 ```
 
 What happens:
-1. The skill directory is copied to `~/.hermes/skills/`
+1. The skill directory is copied to `~/.xiaoban/skills/`
 2. It appears in your `skills_list` output
 3. It becomes available as a slash command
 
@@ -135,7 +135,7 @@ skill_view("writing-plans")
 
 Plugin skills are **not** listed in the system prompt and don't appear in `skills_list`. They're opt-in — load them explicitly when you know a plugin provides one. When loaded, the agent sees a banner listing sibling skills from the same plugin.
 
-For how to ship skills in your own plugin, see [Build a Hermes Plugin → Bundle skills](/guides/build-a-hermes-plugin#bundle-skills).
+For how to ship skills in your own plugin, see [Build a Xiaoban Plugin → Bundle skills](/guides/build-a-xiaoban-plugin#bundle-skills).
 
 ---
 
@@ -145,7 +145,7 @@ Some skills declare configuration they need in their frontmatter:
 
 ```yaml
 metadata:
-  hermes:
+  xiaoban:
     config:
       - key: tenor.api_key
         description: "Tenor API key for GIF search"
@@ -153,7 +153,7 @@ metadata:
         url: "https://developers.google.com/tenor/guides/quickstart"
 ```
 
-When a skill with config is first loaded, Hermes prompts you for the values. They're stored in `config.yaml` under `skills.config.*`.
+When a skill with config is first loaded, Xiaoban prompts you for the values. They're stored in `config.yaml` under `skills.config.*`.
 
 Manage skill config from the CLI:
 
@@ -162,7 +162,7 @@ Manage skill config from the CLI:
 xiaoban skills config gif-search
 
 # View all skill config
-hermes config show | grep '^skills\.config'
+xiaoban config show | grep '^skills\.config'
 ```
 
 ---
@@ -174,18 +174,18 @@ Skills are just markdown files with YAML frontmatter. Creating one takes under f
 ### 1. Create the Directory
 
 ```bash
-mkdir -p ~/.hermes/skills/my-category/my-skill
+mkdir -p ~/.xiaoban/skills/my-category/my-skill
 ```
 
 ### 2. Write SKILL.md
 
-```markdown title="~/.hermes/skills/my-category/my-skill/SKILL.md"
+```markdown title="~/.xiaoban/skills/my-category/my-skill/SKILL.md"
 ---
 name: my-skill
 description: Brief description of what this skill does
 version: 1.0.0
 metadata:
-  hermes:
+  xiaoban:
     tags: [my-tag, automation]
     category: my-category
 ---
@@ -238,10 +238,10 @@ Start a new session and try your skill:
 xiaoban chat -q "/my-skill help me with the thing"
 ```
 
-The skill appears automatically — no registration needed. Drop it in `~/.hermes/skills/` and it's live.
+The skill appears automatically — no registration needed. Drop it in `~/.xiaoban/skills/` and it's live.
 
 :::info
-The agent can also create and update skills itself using `skill_manage`. After solving a complex problem, Hermes may offer to save the approach as a skill for next time.
+The agent can also create and update skills itself using `skill_manage`. After solving a complex problem, Xiaoban may offer to save the approach as a skill for next time.
 :::
 
 ---
@@ -279,11 +279,11 @@ Both are persistent across sessions, but they serve different purposes:
 
 **Keep skills focused.** A skill that tries to cover "all of DevOps" will be too long and too vague. A skill that covers "deploy a Python app to Fly.io" is specific enough to be genuinely useful.
 
-**Let the agent create skills.** After a complex multi-step task, Hermes will often offer to save the approach as a skill. Say yes — these agent-authored skills capture the exact workflow including pitfalls that were discovered along the way.
+**Let the agent create skills.** After a complex multi-step task, Xiaoban will often offer to save the approach as a skill. Say yes — these agent-authored skills capture the exact workflow including pitfalls that were discovered along the way.
 
-**Use categories.** Organize skills into subdirectories (`~/.hermes/skills/devops/`, `~/.hermes/skills/research/`, etc.). This keeps the list manageable and helps the agent find relevant skills faster.
+**Use categories.** Organize skills into subdirectories (`~/.xiaoban/skills/devops/`, `~/.xiaoban/skills/research/`, etc.). This keeps the list manageable and helps the agent find relevant skills faster.
 
-**Update skills when they go stale.** If you use a skill and hit issues not covered by it, tell Hermes to update the skill with what you learned. Skills that aren't maintained become liabilities.
+**Update skills when they go stale.** If you use a skill and hit issues not covered by it, tell Xiaoban to update the skill with what you learned. Skills that aren't maintained become liabilities.
 
 ---
 

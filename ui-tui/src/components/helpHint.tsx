@@ -1,4 +1,4 @@
-import { Box, Text } from '@hermes/ink'
+import { Box, Text } from '@xiaoban/ink'
 
 import { HOTKEYS } from '../content/hotkeys.js'
 import type { Theme } from '../theme.js'

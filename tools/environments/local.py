@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from tools.environments.base import BaseEnvironment, _pipe_stdin
-from hermes_cli._subprocess_compat import windows_hide_flags
+from xiaoban_cli._subprocess_compat import windows_hide_flags
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -73,12 +73,12 @@ def _resolve_safe_cwd(cwd: str) -> str:
     return tempfile.gettempdir()
 
 
-# Hermes-internal env vars that should NOT leak into terminal subprocesses.
-_HERMES_PROVIDER_ENV_FORCE_PREFIX = "_HERMES_FORCE_"
+# Xiaoban-internal env vars that should NOT leak into terminal subprocesses.
+_XIAOBAN_PROVIDER_ENV_FORCE_PREFIX = "_XIAOBAN_FORCE_"
 
-# Hermes-managed AWS *inference* credentials for ``auth_type="aws_sdk"``
+# Xiaoban-managed AWS *inference* credentials for ``auth_type="aws_sdk"``
 # providers (Bedrock).  Scoped DELIBERATELY NARROW: this lists only the
-# Bedrock-specific bearer token, which is a Hermes inference secret exactly
+# Bedrock-specific bearer token, which is a Xiaoban inference secret exactly
 # analogous to ``OPENAI_API_KEY`` — nobody drives the ``aws``/``terraform``/
 # ``boto3`` toolchain off it, so stripping it from terminal/execute_code
 # subprocesses costs no user capability.
@@ -103,7 +103,7 @@ def _build_provider_env_blocklist() -> frozenset:
     blocked: set[str] = set()
 
     try:
-        from hermes_cli.auth import PROVIDER_REGISTRY
+        from xiaoban_cli.auth import PROVIDER_REGISTRY
         for pconfig in PROVIDER_REGISTRY.values():
             blocked.update(pconfig.api_key_env_vars)
             if pconfig.auth_type == "aws_sdk":
@@ -114,7 +114,7 @@ def _build_provider_env_blocklist() -> frozenset:
         pass
 
     try:
-        from hermes_cli.config import OPTIONAL_ENV_VARS
+        from xiaoban_cli.config import OPTIONAL_ENV_VARS
         for name, metadata in OPTIONAL_ENV_VARS.items():
             category = metadata.get("category")
             if category in {"tool", "messaging"}:
@@ -177,7 +177,7 @@ def _build_provider_env_blocklist() -> frozenset:
         "EMAIL_SMTP_HOST",
         "EMAIL_HOME_ADDRESS",
         "EMAIL_HOME_ADDRESS_NAME",
-        "HERMES_DASHBOARD_SESSION_TOKEN",
+        "XIAOBAN_DASHBOARD_SESSION_TOKEN",
         "GATEWAY_ALLOWED_USERS",
         "GH_TOKEN",
         "GITHUB_APP_ID",
@@ -190,23 +190,23 @@ def _build_provider_env_blocklist() -> frozenset:
     return frozenset(blocked)
 
 
-_HERMES_PROVIDER_ENV_BLOCKLIST = _build_provider_env_blocklist()
+_XIAOBAN_PROVIDER_ENV_BLOCKLIST = _build_provider_env_blocklist()
 
 
-def _inject_context_hermes_home(env: dict) -> None:
-    """Bridge the context-local Hermes home override into subprocess env."""
+def _inject_context_xiaoban_home(env: dict) -> None:
+    """Bridge the context-local Xiaoban home override into subprocess env."""
     try:
-        from hermes_constants import get_hermes_home_override
+        from xiaoban_constants import get_xiaoban_home_override
 
-        value = get_hermes_home_override()
+        value = get_xiaoban_home_override()
         if value:
-            env["HERMES_HOME"] = value
+            env["XIAOBAN_HOME"] = value
     except Exception:
         pass
 
 
 def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = None) -> dict:
-    """Filter Hermes-managed secrets from a subprocess environment."""
+    """Filter Xiaoban-managed secrets from a subprocess environment."""
     try:
         from tools.env_passthrough import is_env_passthrough as _is_passthrough
     except Exception:
@@ -215,21 +215,21 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     sanitized: dict[str, str] = {}
 
     for key, value in (base_env or {}).items():
-        if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
+        if key.startswith(_XIAOBAN_PROVIDER_ENV_FORCE_PREFIX):
             continue
-        if key not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(key):
+        if key not in _XIAOBAN_PROVIDER_ENV_BLOCKLIST or _is_passthrough(key):
             sanitized[key] = value
 
     for key, value in (extra_env or {}).items():
-        if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
-            real_key = key[len(_HERMES_PROVIDER_ENV_FORCE_PREFIX):]
+        if key.startswith(_XIAOBAN_PROVIDER_ENV_FORCE_PREFIX):
+            real_key = key[len(_XIAOBAN_PROVIDER_ENV_FORCE_PREFIX):]
             sanitized[real_key] = value
-        elif key not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(key):
+        elif key not in _XIAOBAN_PROVIDER_ENV_BLOCKLIST or _is_passthrough(key):
             sanitized[key] = value
 
-    _inject_context_hermes_home(sanitized)
+    _inject_context_xiaoban_home(sanitized)
 
-    from hermes_constants import apply_subprocess_home_env
+    from xiaoban_constants import apply_subprocess_home_env
     apply_subprocess_home_env(sanitized)
 
     return sanitized
@@ -246,7 +246,7 @@ def _find_bash() -> str:
             or "/bin/sh"
         )
 
-    custom = os.environ.get("HERMES_GIT_BASH_PATH")
+    custom = os.environ.get("XIAOBAN_GIT_BASH_PATH")
     if custom and os.path.isfile(custom):
         return custom
 
@@ -257,14 +257,14 @@ def _find_bash() -> str:
     #
     # Layouts (both checked so upgrades between MinGit and PortableGit
     # installs work transparently):
-    #   PortableGit: %LOCALAPPDATA%\hermes\git\bin\bash.exe   (primary)
-    #   MinGit:      %LOCALAPPDATA%\hermes\git\usr\bin\bash.exe (legacy/32-bit fallback)
+    #   PortableGit: %LOCALAPPDATA%\xiaoban\git\bin\bash.exe   (primary)
+    #   MinGit:      %LOCALAPPDATA%\xiaoban\git\usr\bin\bash.exe (legacy/32-bit fallback)
     _local_appdata = os.environ.get("LOCALAPPDATA", "")
-    _hermes_portable_git = os.path.join(_local_appdata, "hermes", "git") if _local_appdata else ""
-    if _hermes_portable_git:
+    _xiaoban_portable_git = os.path.join(_local_appdata, "xiaoban", "git") if _local_appdata else ""
+    if _xiaoban_portable_git:
         for candidate in (
-            os.path.join(_hermes_portable_git, "bin", "bash.exe"),        # PortableGit (primary)
-            os.path.join(_hermes_portable_git, "usr", "bin", "bash.exe"), # MinGit fallback
+            os.path.join(_xiaoban_portable_git, "bin", "bash.exe"),        # PortableGit (primary)
+            os.path.join(_xiaoban_portable_git, "usr", "bin", "bash.exe"), # MinGit fallback
         ):
             if os.path.isfile(candidate):
                 return candidate
@@ -284,7 +284,7 @@ def _find_bash() -> str:
     raise RuntimeError(
         "Git Bash not found. Xiaoban-Agent requires Git for Windows on Windows.\n"
         "Install it from: https://git-scm.com/download/win\n"
-        "Or set HERMES_GIT_BASH_PATH to your bash.exe location."
+        "Or set XIAOBAN_GIT_BASH_PATH to your bash.exe location."
     )
 
 
@@ -298,42 +298,42 @@ _SANE_PATH = (
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 
-# Cached directory containing the ``hermes`` console-script.
+# Cached directory containing the ``xiaoban`` console-script.
 # ``_SENTINEL`` distinguishes "not resolved yet" from a resolved ``None``.
 _SENTINEL = object()
-_HERMES_BIN_DIR: "str | None | object" = _SENTINEL
+_XIAOBAN_BIN_DIR: "str | None | object" = _SENTINEL
 
 
-def _resolve_hermes_bin_dir() -> str | None:
-    """Return the directory holding the ``hermes`` console-script, or None.
+def _resolve_xiaoban_bin_dir() -> str | None:
+    """Return the directory holding the ``xiaoban`` console-script, or None.
 
     The terminal tool runs in a freshly-spawned subshell whose PATH is the
     agent process's PATH plus a static set of system dirs (``_SANE_PATH``).
     When the gateway is launched by something that does NOT source the user's
     shell rc — systemd, a service manager, a desktop launcher, cron — the
-    hermes install dir (``~/.local/bin``, the venv ``bin``/``Scripts``, pipx,
-    nix) is absent from that PATH, so plugins shelling out to bare ``hermes``
+    xiaoban install dir (``~/.local/bin``, the venv ``bin``/``Scripts``, pipx,
+    nix) is absent from that PATH, so plugins shelling out to bare ``xiaoban``
     via the terminal tool hit ``command not found`` (exit 127) even though
-    ``hermes`` works fine in the user's own interactive terminal.
+    ``xiaoban`` works fine in the user's own interactive terminal.
 
     We resolve the install dir once (it never changes within a process) and
-    prepend-if-missing it to the subshell PATH so bare ``hermes`` resolves
+    prepend-if-missing it to the subshell PATH so bare ``xiaoban`` resolves
     regardless of how the gateway was started.
 
     Resolution order (cheap, no heavy imports):
-      1. ``shutil.which("hermes")`` — normal PATH-installed shim.
+      1. ``shutil.which("xiaoban")`` — normal PATH-installed shim.
       2. The directory of ``sys.argv[0]`` when it's an absolute path to a
-         real ``hermes`` executable (covers nix-store / venv wrappers).
+         real ``xiaoban`` executable (covers nix-store / venv wrappers).
       3. The directory of ``sys.executable`` — the running interpreter's
          venv ``bin``/``Scripts`` is where its console-scripts live.
     """
-    global _HERMES_BIN_DIR
-    if _HERMES_BIN_DIR is not _SENTINEL:
-        return _HERMES_BIN_DIR  # type: ignore[return-value]
+    global _XIAOBAN_BIN_DIR
+    if _XIAOBAN_BIN_DIR is not _SENTINEL:
+        return _XIAOBAN_BIN_DIR  # type: ignore[return-value]
 
     candidate: str | None = None
 
-    which = shutil.which("hermes")
+    which = shutil.which("xiaoban")
     if which:
         candidate = os.path.dirname(which)
 
@@ -342,7 +342,7 @@ def _resolve_hermes_bin_dir() -> str | None:
         base = os.path.basename(argv0).lower()
         if (
             os.path.isabs(argv0)
-            and (base == "hermes" or base.startswith("hermes."))
+            and (base == "xiaoban" or base.startswith("xiaoban."))
             and os.path.isfile(argv0)
         ):
             candidate = os.path.dirname(argv0)
@@ -350,25 +350,25 @@ def _resolve_hermes_bin_dir() -> str | None:
     if candidate is None:
         exe_dir = os.path.dirname(sys.executable) if sys.executable else ""
         if exe_dir:
-            shim = "hermes.exe" if _IS_WINDOWS else "hermes"
+            shim = "xiaoban.exe" if _IS_WINDOWS else "xiaoban"
             if os.path.isfile(os.path.join(exe_dir, shim)):
                 candidate = exe_dir
 
     if candidate and not os.path.isdir(candidate):
         candidate = None
 
-    _HERMES_BIN_DIR = candidate
+    _XIAOBAN_BIN_DIR = candidate
     return candidate
 
 
-def _prepend_hermes_bin_dir(existing_path: str) -> str:
-    """Prepend the hermes install dir to ``existing_path`` if it's missing.
+def _prepend_xiaoban_bin_dir(existing_path: str) -> str:
+    """Prepend the xiaoban install dir to ``existing_path`` if it's missing.
 
     Cross-platform (uses ``os.pathsep``). First-occurrence wins, so a PATH
     that already contains the dir is returned unchanged. Returns the input
     unchanged when the install dir can't be resolved.
     """
-    bin_dir = _resolve_hermes_bin_dir()
+    bin_dir = _resolve_xiaoban_bin_dir()
     if not bin_dir:
         return existing_path
     sep = os.pathsep
@@ -454,22 +454,22 @@ def _make_run_env(env: dict) -> dict:
     merged = dict(os.environ | env)
     run_env = {}
     for k, v in merged.items():
-        if k.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
-            real_key = k[len(_HERMES_PROVIDER_ENV_FORCE_PREFIX):]
+        if k.startswith(_XIAOBAN_PROVIDER_ENV_FORCE_PREFIX):
+            real_key = k[len(_XIAOBAN_PROVIDER_ENV_FORCE_PREFIX):]
             run_env[real_key] = v
-        elif k not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(k):
+        elif k not in _XIAOBAN_PROVIDER_ENV_BLOCKLIST or _is_passthrough(k):
             run_env[k] = v
     path_key = _path_env_key(run_env)
     if path_key is not None:
         new_path = _append_missing_sane_path_entries(run_env.get(path_key, ""))
-        # Ensure the hermes install dir is reachable so plugins can shell out
-        # to bare ``hermes`` via the terminal tool even when the gateway was
+        # Ensure the xiaoban install dir is reachable so plugins can shell out
+        # to bare ``xiaoban`` via the terminal tool even when the gateway was
         # launched without it on PATH (systemd, service managers, cron, etc.).
-        run_env[path_key] = _prepend_hermes_bin_dir(new_path)
+        run_env[path_key] = _prepend_xiaoban_bin_dir(new_path)
 
-    _inject_context_hermes_home(run_env)
+    _inject_context_xiaoban_home(run_env)
 
-    from hermes_constants import apply_subprocess_home_env
+    from xiaoban_constants import apply_subprocess_home_env
     apply_subprocess_home_env(run_env)
 
     # Inject ContextVar-based session vars into subprocess env.
@@ -493,7 +493,7 @@ def _read_terminal_shell_init_config() -> tuple[list[str], bool]:
     execution never breaks because the config file is unreadable.
     """
     try:
-        from hermes_cli.config import load_config
+        from xiaoban_cli.config import load_config
 
         cfg = load_config() or {}
         terminal_cfg = cfg.get("terminal") or {}
@@ -512,7 +512,7 @@ def _resolve_shell_init_files() -> list[str]:
     Expands ``~`` and ``${VAR}`` references and drops anything that doesn't
     exist on disk, so a missing ``~/.bashrc`` never breaks the snapshot.
     The ``auto_source_bashrc`` path runs only when the user hasn't supplied
-    an explicit list — once they have, Hermes trusts them.
+    an explicit list — once they have, Xiaoban trusts them.
     """
     explicit, auto_bashrc = _read_terminal_shell_init_config()
 
@@ -599,20 +599,20 @@ class LocalEnvironment(BaseEnvironment):
         can't open the path, and the Windows default temp (``%TEMP%``) often
         contains spaces (``C:\\Users\\Some Name\\AppData\\Local\\Temp``) that
         break unquoted bash interpolations.  Use a dedicated cache dir under
-        ``HERMES_HOME`` instead — single-word path, guaranteed to exist, same
+        ``XIAOBAN_HOME`` instead — single-word path, guaranteed to exist, same
         string resolves in both Git Bash and native Python.
         """
         if _IS_WINDOWS:
-            # Derive a Windows-safe temp dir under HERMES_HOME.  Using
+            # Derive a Windows-safe temp dir under XIAOBAN_HOME.  Using
             # forward slashes makes the same string work unchanged in bash
             # command interpolations AND in Python ``open()`` — Windows
             # accepts forward slashes in filesystem paths, and we control
             # the path so we can guarantee no spaces.
             try:
-                from hermes_constants import get_hermes_home
-                cache_dir = get_hermes_home() / "cache" / "terminal"
+                from xiaoban_constants import get_xiaoban_home
+                cache_dir = get_xiaoban_home() / "cache" / "terminal"
             except Exception:
-                cache_dir = Path(tempfile.gettempdir()) / "hermes_terminal"
+                cache_dir = Path(tempfile.gettempdir()) / "xiaoban_terminal"
             cache_dir.mkdir(parents=True, exist_ok=True)
             # Force forward slashes so the same string serves both contexts.
             return str(cache_dir).replace("\\", "/")
@@ -692,7 +692,7 @@ class LocalEnvironment(BaseEnvironment):
         )
         if not _IS_WINDOWS:
             try:
-                proc._hermes_pgid = os.getpgid(proc.pid)
+                proc._xiaoban_pgid = os.getpgid(proc.pid)
             except ProcessLookupError:
                 pass
 
@@ -740,7 +740,7 @@ class LocalEnvironment(BaseEnvironment):
                 try:
                     pgid = os.getpgid(proc.pid)
                 except ProcessLookupError:
-                    pgid = getattr(proc, "_hermes_pgid", None)
+                    pgid = getattr(proc, "_xiaoban_pgid", None)
                     if pgid is None:
                         raise
 

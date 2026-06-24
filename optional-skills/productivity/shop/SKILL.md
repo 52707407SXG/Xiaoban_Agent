@@ -8,7 +8,7 @@ platforms: [linux, macos, windows]
 prerequisites:
   commands: [curl, node]
 metadata:
-  hermes:
+  xiaoban:
     tags: [Shopping, E-commerce, Shop, Products, Orders, Returns, Checkout, Reorder]
     related_skills: [shopify, maps]
     homepage: https://shop.app

@@ -11,13 +11,13 @@ import {
   runToolsetPostSetup,
   selectToolsetProvider,
   setEnvVar
-} from '@/hermes'
+} from '@/xiaoban'
 import { useI18n } from '@/i18n'
 import { Check, Loader2, Save, Terminal } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { upsertDesktopActionTask } from '@/store/activity'
 import { notify, notifyError } from '@/store/notifications'
-import type { ActionStatusResponse, ToolEnvVar, ToolProvider, ToolsetConfig } from '@/types/hermes'
+import type { ActionStatusResponse, ToolEnvVar, ToolProvider, ToolsetConfig } from '@/types/xiaoban'
 
 import { EnvVarActionsMenu, EnvVarActionsTrigger } from './env-var-actions-menu'
 import { Pill } from './primitives'

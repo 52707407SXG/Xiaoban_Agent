@@ -3,13 +3,13 @@
 
 Usage (via cron with --no-agent):
 
-    hermes cron create hermes-issues \\
+    xiaoban cron create xiaoban-issues \\
       --schedule "*/5 * * * *" --no-agent \\
-      --script "$HERMES_HOME/skills/devops/watchers/scripts/watch_github.py" \\
-      --script-args "--name hermes-issues --repo 52707407SXG/Xiaoban-Agent --scope issues"
+      --script "$XIAOBAN_HOME/skills/devops/watchers/scripts/watch_github.py" \\
+      --script-args "--name xiaoban-issues --repo 52707407SXG/Xiaoban-Agent --scope issues"
 
-Set GITHUB_TOKEN (or GH_TOKEN) in the Hermes .env file
-(``${HERMES_HOME:-~/.hermes}/.env``) to avoid the 60 req/hr
+Set GITHUB_TOKEN (or GH_TOKEN) in the Xiaoban .env file
+(``${XIAOBAN_HOME:-~/.xiaoban}/.env``) to avoid the 60 req/hr
 anonymous rate limit.
 
 Scopes: issues | pulls | releases | commits.  Or pass --search QUERY to
@@ -113,7 +113,7 @@ def main() -> int:
 
     headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": "Hermes-Watcher/1.0",
+        "User-Agent": "Xiaoban-Watcher/1.0",
     }
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if token:

@@ -13,12 +13,12 @@ import type {
   DesktopUpdateStatus,
   DesktopVersionInfo
 } from '@/global'
-import { checkHermesUpdate, getActionStatus, updateHermes } from '@/hermes'
+import { checkXiaobanUpdate, getActionStatus, updateXiaoban } from '@/xiaoban'
 import { translateNow } from '@/i18n'
 import { persistString, storedString } from '@/lib/storage'
 import { dismissNotification, notify } from '@/store/notifications'
 import { $connection } from '@/store/session'
-import type { BackendUpdateCheckResponse } from '@/types/hermes'
+import type { BackendUpdateCheckResponse } from '@/types/xiaoban'
 
 export interface UpdateApplyState {
   applying: boolean
@@ -72,7 +72,7 @@ const UPDATE_TOAST_ID = 'desktop-update-available'
 // a day, so a "don't show this exact sha again" guard re-popped the toast on
 // every new commit. We instead suppress the toast for a cooldown window that
 // (re)starts whenever the user closes it.
-const UPDATE_TOAST_SNOOZE_KEY = 'hermes:update-toast-snooze-until'
+const UPDATE_TOAST_SNOOZE_KEY = 'xiaoban:update-toast-snooze-until'
 const UPDATE_TOAST_COOLDOWN_MS = 24 * 60 * 60 * 1000
 
 function snoozeUpdateToast(): void {
@@ -96,7 +96,7 @@ const SKEW_TOAST_ID = 'backend-contract-skew'
 // right after they closed it. Mirror the update toast: persist a cooldown when
 // the user dismisses it. It still reminds again after the window if the backend
 // is still behind, and clears immediately once the backend catches up.
-const SKEW_TOAST_SNOOZE_KEY = 'hermes:backend-skew-toast-snooze-until'
+const SKEW_TOAST_SNOOZE_KEY = 'xiaoban:backend-skew-toast-snooze-until'
 const SKEW_TOAST_COOLDOWN_MS = 24 * 60 * 60 * 1000
 
 function snoozeSkewToast(): void {
@@ -134,7 +134,7 @@ export function reportBackendContract(contract: number | undefined): void {
 
   notify({
     action: {
-      label: translateNow('notifications.updateHermes'),
+      label: translateNow('notifications.updateXiaoban'),
       onClick: () => {
         snoozeSkewToast()
         void applyBackendUpdate()
@@ -225,7 +225,7 @@ export async function refreshDesktopVersion(): Promise<DesktopVersionInfo | null
   // mid-reload, or the bridge not yet ready on first paint) would surface
   // as an unhandled promise rejection in the renderer. Swallow it.
   try {
-    const next = await window.hermesDesktop?.getVersion?.()
+    const next = await window.xiaobanDesktop?.getVersion?.()
 
     if (next) {
       $desktopVersion.set(next)
@@ -262,7 +262,7 @@ export async function checkBackendUpdates(): Promise<DesktopUpdateStatus | null>
   $backendUpdateChecking.set(true)
 
   try {
-    const status = mapBackendCheck(await checkHermesUpdate(true))
+    const status = mapBackendCheck(await checkXiaobanUpdate(true))
     $backendUpdateStatus.set(status)
     maybeNotifyUpdateAvailable(status)
 
@@ -284,7 +284,7 @@ export async function checkBackendUpdates(): Promise<DesktopUpdateStatus | null>
 }
 
 export async function checkUpdates(): Promise<DesktopUpdateStatus | null> {
-  const bridge = window.hermesDesktop?.updates
+  const bridge = window.xiaobanDesktop?.updates
 
   if (!bridge || $updateChecking.get()) {
     return $updateStatus.get()
@@ -319,7 +319,7 @@ export async function checkUpdates(): Promise<DesktopUpdateStatus | null> {
 }
 
 export async function applyUpdates(opts: DesktopUpdateApplyOptions = {}): Promise<DesktopUpdateApplyResult> {
-  const bridge = window.hermesDesktop?.updates
+  const bridge = window.xiaobanDesktop?.updates
 
   if (!bridge) {
     return { ok: false, error: 'unavailable', message: 'Desktop bridge unavailable.' }
@@ -424,7 +424,7 @@ async function waitForBackendReturn(): Promise<boolean> {
   for (let attempt = 0; attempt < BACKEND_RETURN_MAX_ATTEMPTS; attempt += 1) {
     await new Promise(resolve => globalThis.setTimeout(resolve, BACKEND_RETURN_POLL_MS))
     try {
-      await checkHermesUpdate()
+      await checkXiaobanUpdate()
 
       return true
     } catch {
@@ -460,7 +460,7 @@ export async function applyBackendUpdate(): Promise<DesktopUpdateApplyResult> {
   $backendUpdateApply.set({ ...IDLE, applying: true, stage: 'prepare', message: translateNow('updates.applyStatus.preparing') })
 
   try {
-    const started = await updateHermes()
+    const started = await updateXiaoban()
 
     if (!started.ok) {
       const message = (started as { message?: string }).message || translateNow('updates.applyStatus.notAvailable')
@@ -551,7 +551,7 @@ export function startUpdatePoller(): void {
     return
   }
 
-  const bridge = window.hermesDesktop?.updates
+  const bridge = window.xiaobanDesktop?.updates
 
   if (!bridge) {
     return

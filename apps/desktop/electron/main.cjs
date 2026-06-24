@@ -33,14 +33,14 @@ const {
   SESSION_WINDOW_MIN_HEIGHT,
   SESSION_WINDOW_MIN_WIDTH
 } = require('./session-windows.cjs')
-const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
+const { canImportXiaobanCli, verifyXiaobanCli } = require('./backend-probes.cjs')
 const { createLinkTitleWindow } = require('./link-title-window.cjs')
 const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
 const { adoptServedDashboardToken } = require('./dashboard-token.cjs')
 const { waitForDashboardPort } = require('./backend-ready.cjs')
 const { serializeJsonBody, setJsonRequestHeaders } = require('./oauth-net-request.cjs')
 const { fetchMarketplaceThemes, searchMarketplaceThemes } = require('./vscode-marketplace.cjs')
-const { buildDesktopBackendEnv, normalizeHermesHomeRoot } = require('./backend-env.cjs')
+const { buildDesktopBackendEnv, normalizeXiaobanHomeRoot } = require('./backend-env.cjs')
 const { readWindowsUserEnvVar } = require('./windows-user-env.cjs')
 const { readDirForIpc } = require('./fs-read-dir.cjs')
 const { readLiveUpdateMarker } = require('./update-marker.cjs')
@@ -120,14 +120,14 @@ try {
   }
 }
 
-const USER_DATA_OVERRIDE = process.env.HERMES_DESKTOP_USER_DATA_DIR
+const USER_DATA_OVERRIDE = process.env.XIAOBAN_DESKTOP_USER_DATA_DIR
 if (USER_DATA_OVERRIDE) {
   const resolvedUserData = path.resolve(USER_DATA_OVERRIDE)
   fs.mkdirSync(resolvedUserData, { recursive: true })
   app.setPath('userData', resolvedUserData)
 }
 
-const DEV_SERVER = process.env.HERMES_DESKTOP_DEV_SERVER
+const DEV_SERVER = process.env.XIAOBAN_DESKTOP_DEV_SERVER
 const IS_PACKAGED = app.isPackaged
 const IS_MAC = process.platform === 'darwin'
 const IS_WINDOWS = process.platform === 'win32'
@@ -148,7 +148,7 @@ function hiddenWindowsChildOptions(options = {}) {
 // GPU and never see it. Fall back to software rendering when a remote display
 // is detected; it's rock-steady over the wire and the CPU cost is negligible
 // next to the connection's latency. Must run before app `ready` — these
-// switches only apply pre-launch. Override with HERMES_DESKTOP_DISABLE_GPU
+// switches only apply pre-launch. Override with XIAOBAN_DESKTOP_DISABLE_GPU
 // (1/true → always disable, 0/false → keep GPU on).
 const REMOTE_DISPLAY_REASON = detectRemoteDisplay()
 if (REMOTE_DISPLAY_REASON) {
@@ -157,11 +157,11 @@ if (REMOTE_DISPLAY_REASON) {
   // with only --disable-gpu: force compositing onto the CPU too.
   app.commandLine.appendSwitch('disable-gpu-compositing')
   console.log(
-    `[hermes] remote display detected (${REMOTE_DISPLAY_REASON}); disabling GPU hardware acceleration to prevent flicker`
+    `[xiaoban] remote display detected (${REMOTE_DISPLAY_REASON}); disabling GPU hardware acceleration to prevent flicker`
   )
 }
 
-ipcMain.handle('hermes:get-remote-display-reason', () => REMOTE_DISPLAY_REASON)
+ipcMain.handle('xiaoban:get-remote-display-reason', () => REMOTE_DISPLAY_REASON)
 
 // Keep the renderer running at full speed while the window is in the background
 // or occluded. The chat transcript streams to screen through a
@@ -208,7 +208,7 @@ function loadInstallStamp() {
       if (parsed && typeof parsed === 'object' && typeof parsed.commit === 'string' && parsed.commit.length >= 7) {
         if (parsed.schemaVersion !== INSTALL_STAMP_SCHEMA_VERSION) {
           console.warn(
-            `[hermes] install-stamp.json schemaVersion ${parsed.schemaVersion} != expected ${INSTALL_STAMP_SCHEMA_VERSION}; ignoring`
+            `[xiaoban] install-stamp.json schemaVersion ${parsed.schemaVersion} != expected ${INSTALL_STAMP_SCHEMA_VERSION}; ignoring`
           )
           continue
         }
@@ -231,113 +231,113 @@ function loadInstallStamp() {
 const INSTALL_STAMP = loadInstallStamp()
 if (INSTALL_STAMP) {
   console.log(
-    `[hermes] install stamp: ${INSTALL_STAMP.commit.slice(0, 12)}${INSTALL_STAMP.branch ? ` (${INSTALL_STAMP.branch})` : ''}${INSTALL_STAMP.dirty ? ' [DIRTY]' : ''} from ${INSTALL_STAMP.source || 'unknown'}`
+    `[xiaoban] install stamp: ${INSTALL_STAMP.commit.slice(0, 12)}${INSTALL_STAMP.branch ? ` (${INSTALL_STAMP.branch})` : ''}${INSTALL_STAMP.dirty ? ' [DIRTY]' : ''} from ${INSTALL_STAMP.source || 'unknown'}`
   )
 } else if (IS_PACKAGED) {
   // Dev builds without a stamp are normal; packaged builds without one
   // mean the bootstrap won't know what to clone. Surface clearly.
   console.error(
-    '[hermes] WARNING: no install-stamp.json found in packaged build. First-launch bootstrap will not have a pinned ref to install.'
+    '[xiaoban] WARNING: no install-stamp.json found in packaged build. First-launch bootstrap will not have a pinned ref to install.'
   )
 }
 
-// HERMES_HOME — the user-facing root for everything Hermes-related. Mirrors
-// scripts/install.ps1's $HermesHome and scripts/install.sh's $HERMES_HOME.
+// XIAOBAN_HOME — the user-facing root for everything Xiaoban-related. Mirrors
+// scripts/install.ps1's $XiaobanHome and scripts/install.sh's $XIAOBAN_HOME.
 //
 // Defaults:
-//   Windows: %LOCALAPPDATA%\hermes (matches install.ps1)
-//   macOS / Linux: ~/.hermes (matches install.sh)
+//   Windows: %LOCALAPPDATA%\xiaoban (matches install.ps1)
+//   macOS / Linux: ~/.xiaoban (matches install.sh)
 //
-// Special case for Windows: if the user has a legacy ~/.hermes directory
+// Special case for Windows: if the user has a legacy ~/.xiaoban directory
 // (e.g., from a prior pip install or a manual setup) AND no
-// %LOCALAPPDATA%\hermes yet, prefer the legacy path so we don't orphan their
+// %LOCALAPPDATA%\xiaoban yet, prefer the legacy path so we don't orphan their
 // existing config / sessions / .env. New installs go to %LOCALAPPDATA%.
 //
-// HERMES_DESKTOP_USER_DATA_DIR (used by test:desktop:fresh) puts the sandbox
-// HERMES_HOME beneath the throwaway userData dir so a fresh-install run never
-// touches the user's real ~/.hermes / %LOCALAPPDATA%\hermes.
-function resolveHermesHome() {
-  if (process.env.HERMES_HOME) return normalizeHermesHomeRoot(process.env.HERMES_HOME)
-  if (USER_DATA_OVERRIDE) return path.join(path.resolve(USER_DATA_OVERRIDE), 'hermes-home')
+// XIAOBAN_DESKTOP_USER_DATA_DIR (used by test:desktop:fresh) puts the sandbox
+// XIAOBAN_HOME beneath the throwaway userData dir so a fresh-install run never
+// touches the user's real ~/.xiaoban / %LOCALAPPDATA%\xiaoban.
+function resolveXiaobanHome() {
+  if (process.env.XIAOBAN_HOME) return normalizeXiaobanHomeRoot(process.env.XIAOBAN_HOME)
+  if (USER_DATA_OVERRIDE) return path.join(path.resolve(USER_DATA_OVERRIDE), 'xiaoban-home')
   if (IS_WINDOWS) {
     // A GUI app launched from Explorer inherits the environment block captured
-    // at login, so a HERMES_HOME set via `setx` AFTER login is invisible in
+    // at login, so a XIAOBAN_HOME set via `setx` AFTER login is invisible in
     // process.env even though the CLI (a fresh shell) sees it. Without this the
-    // backend silently falls back to %LOCALAPPDATA%\hermes and reports "No
+    // backend silently falls back to %LOCALAPPDATA%\xiaoban and reports "No
     // inference provider configured" despite a valid configured home (#45471).
     // Consult the live User-scoped registry value before the default below.
-    const fromRegistry = readWindowsUserEnvVar('HERMES_HOME')
-    if (fromRegistry) return normalizeHermesHomeRoot(fromRegistry)
+    const fromRegistry = readWindowsUserEnvVar('XIAOBAN_HOME')
+    if (fromRegistry) return normalizeXiaobanHomeRoot(fromRegistry)
   }
   if (IS_WINDOWS && process.env.LOCALAPPDATA) {
-    const localappdata = path.join(process.env.LOCALAPPDATA, 'hermes')
-    const legacy = path.join(app.getPath('home'), '.hermes')
+    const localappdata = path.join(process.env.LOCALAPPDATA, 'xiaoban')
+    const legacy = path.join(app.getPath('home'), '.xiaoban')
     // Migrate transparently to LOCALAPPDATA, but honour an existing legacy
     // ~/.xiaoban setup (no LOCALAPPDATA install yet) so users don't lose state.
     if (!directoryExists(localappdata) && directoryExists(legacy)) return legacy
     return localappdata
   }
-  return path.join(app.getPath('home'), '.hermes')
+  return path.join(app.getPath('home'), '.xiaoban')
 }
 
-const HERMES_HOME = resolveHermesHome()
+const XIAOBAN_HOME = resolveXiaobanHome()
 
-function hermesManagedNodePathEntries() {
-  // NOTE: keep this ordering in sync with iter_hermes_node_dirs() in
-  // hermes_constants.py — this Node main process cannot import the Python
+function xiaobanManagedNodePathEntries() {
+  // NOTE: keep this ordering in sync with iter_xiaoban_node_dirs() in
+  // xiaoban_constants.py — this Node main process cannot import the Python
   // module, so the platform-ordering rule is mirrored here.
-  const root = path.join(HERMES_HOME, 'node')
+  const root = path.join(XIAOBAN_HOME, 'node')
   const bin = path.join(root, 'bin')
   const entries = IS_WINDOWS ? [root, bin] : [bin, root]
   return entries.filter(directoryExists)
 }
 
-function pathWithHermesManagedNode(...entries) {
-  return [...hermesManagedNodePathEntries(), ...entries, process.env.PATH]
+function pathWithXiaobanManagedNode(...entries) {
+  return [...xiaobanManagedNodePathEntries(), ...entries, process.env.PATH]
     .filter(Boolean)
     .join(path.delimiter)
 }
 
-// ACTIVE_HERMES_ROOT — the canonical mutable Hermes install. Same path
+// ACTIVE_XIAOBAN_ROOT — the canonical mutable Xiaoban install. Same path
 // install.ps1 / install.sh use, so a desktop-only user and a CLI-only user end
 // up with identical layouts and can share one install.
-const ACTIVE_HERMES_ROOT = path.join(HERMES_HOME, 'xiaoban-agent')
+const ACTIVE_XIAOBAN_ROOT = path.join(XIAOBAN_HOME, 'xiaoban-agent')
 // VENV_ROOT — venv lives inside the repo, exactly like install.ps1 does it.
-const VENV_ROOT = path.join(ACTIVE_HERMES_ROOT, 'venv')
+const VENV_ROOT = path.join(ACTIVE_XIAOBAN_ROOT, 'venv')
 // BOOTSTRAP_COMPLETE_MARKER — written by the first-launch bootstrap runner
 // (Phase 1D) after install.ps1 has completed all stages and the user has
 // finished initial configuration. Presence of this marker means the install
 // is in a known-good state and we can skip the bootstrap flow on subsequent
-// boots, going straight to `resolveHermesBackend()`. Missing or stale marker
+// boots, going straight to `resolveXiaobanBackend()`. Missing or stale marker
 // means we re-run the bootstrap; install.ps1's stages are idempotent so a
 // re-run on an already-good install just discovers everything in place.
 //
-// We deliberately put the marker INSIDE ACTIVE_HERMES_ROOT (not alongside)
+// We deliberately put the marker INSIDE ACTIVE_XIAOBAN_ROOT (not alongside)
 // so that deleting the checkout to start fresh also deletes the marker --
 // avoids the confusing "marker exists but checkout is gone" state.
-const BOOTSTRAP_COMPLETE_MARKER = path.join(ACTIVE_HERMES_ROOT, '.hermes-bootstrap-complete')
+const BOOTSTRAP_COMPLETE_MARKER = path.join(ACTIVE_XIAOBAN_ROOT, '.xiaoban-bootstrap-complete')
 const BOOTSTRAP_MARKER_SCHEMA_VERSION = 1
 
 const DESKTOP_CONNECTION_CONFIG_PATH = path.join(app.getPath('userData'), 'connection.json')
 const DESKTOP_UPDATE_CONFIG_PATH = path.join(app.getPath('userData'), 'updates.json')
-// active-profile.json records which Hermes profile the desktop launches its
-// local backend as. When set, startHermes() passes `hermes --profile <name>
-// dashboard …`, which deterministically pins HERMES_HOME (see
-// _apply_profile_override in hermes_cli/main.py) and bypasses the sticky
-// ~/.hermes/active_profile file. Unset (null) preserves the legacy behavior:
+// active-profile.json records which Xiaoban profile the desktop launches its
+// local backend as. When set, startXiaoban() passes `xiaoban --profile <name>
+// dashboard …`, which deterministically pins XIAOBAN_HOME (see
+// _apply_profile_override in xiaoban_cli/main.py) and bypasses the sticky
+// ~/.xiaoban/active_profile file. Unset (null) preserves the legacy behavior:
 // no --profile flag, so the backend honors active_profile / default.
 const DESKTOP_PROFILE_CONFIG_PATH = path.join(app.getPath('userData'), 'active-profile.json')
-// Mirrors hermes_cli.profiles._PROFILE_ID_RE so we never hand the backend a
+// Mirrors xiaoban_cli.profiles._PROFILE_ID_RE so we never hand the backend a
 // value its profile resolver would reject and exit on.
 const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
 // Branch we track for self-update. The GUI work has merged to main, so this
 // tracks main. User can also override at runtime via
-// hermesDesktop.updates.setBranch().
+// xiaobanDesktop.updates.setBranch().
 const DEFAULT_UPDATE_BRANCH = 'main'
-// desktop.log lives under HERMES_HOME/logs/ so it sits next to agent.log,
-// errors.log, gateway.log produced by hermes_logging.setup_logging — one log
+// desktop.log lives under XIAOBAN_HOME/logs/ so it sits next to agent.log,
+// errors.log, gateway.log produced by xiaoban_logging.setup_logging — one log
 // directory per user, regardless of which UI surface produced the line.
-const DESKTOP_LOG_PATH = path.join(HERMES_HOME, 'logs', 'desktop.log')
+const DESKTOP_LOG_PATH = path.join(XIAOBAN_HOME, 'logs', 'desktop.log')
 const DESKTOP_LOG_FLUSH_MS = 120
 const DESKTOP_LOG_BUFFER_MAX_CHARS = 64 * 1024
 // Bound desktop.log on disk. It is an append-only forensic log, so a boot loop
@@ -346,7 +346,7 @@ const DESKTOP_LOG_BUFFER_MAX_CHARS = 64 * 1024
 // bound — we have seen it reach ~326 GB and exhaust the disk, which then breaks
 // update/install (no room for git/venv/npm temp files).
 //
-// Mirror the Python logs (hermes_logging.py RotatingFileHandler, maxBytes x
+// Mirror the Python logs (xiaoban_logging.py RotatingFileHandler, maxBytes x
 // backupCount): cascade live -> .1 -> .2 -> .3, drop the oldest. Steady-state
 // stays bounded at ~(backupCount + 1) x cap however hard the app loops.
 //
@@ -359,13 +359,13 @@ const DESKTOP_LOG_MAX_BYTES = 10 * 1024 * 1024
 const DESKTOP_LOG_BACKUP_COUNT = 3
 const DESKTOP_LOG_DISCARD_BYTES = DESKTOP_LOG_MAX_BYTES * 4
 const desktopLogBackupPath = n => `${DESKTOP_LOG_PATH}.${n}`
-const BOOT_FAKE_MODE = process.env.HERMES_DESKTOP_BOOT_FAKE === '1'
+const BOOT_FAKE_MODE = process.env.XIAOBAN_DESKTOP_BOOT_FAKE === '1'
 const BOOT_FAKE_STEP_MS = (() => {
-  const raw = Number.parseInt(String(process.env.HERMES_DESKTOP_BOOT_FAKE_STEP_MS || ''), 10)
+  const raw = Number.parseInt(String(process.env.XIAOBAN_DESKTOP_BOOT_FAKE_STEP_MS || ''), 10)
   if (!Number.isFinite(raw) || raw <= 0) return 650
   return Math.max(120, raw)
 })()
-const APP_NAME = 'Hermes'
+const APP_NAME = 'Xiaoban'
 const TITLEBAR_HEIGHT = 34
 const MACOS_TRAFFIC_LIGHTS_HEIGHT = 14
 const WINDOW_BUTTON_POSITION = {
@@ -395,7 +395,7 @@ const terminalSessions = new Map()
 // tracks the window's effective appearance and ignores `backgroundColor` —
 // so a dark-themed app on a light-mode Mac flashes a white material on every
 // new window until the renderer covers it. The renderer reports its mode via
-// 'hermes:native-theme' ('dark' | 'light' | 'system'); we pin
+// 'xiaoban:native-theme' ('dark' | 'light' | 'system'); we pin
 // nativeTheme.themeSource to it and persist the value so cold launches paint
 // correctly before the renderer has even loaded.
 const NATIVE_THEME_CONFIG_PATH = path.join(app.getPath('userData'), 'native-theme.json')
@@ -623,20 +623,20 @@ app.setName(APP_NAME)
 // Windows toast notifications silently no-op unless an AppUserModelID is set:
 // `new Notification().show()` returns without error and nothing appears. The
 // AUMID must match the installed Start Menu shortcut's AUMID, which
-// electron-builder derives from the build `appId` (com.nousresearch.hermes) —
+// electron-builder derives from the build `appId` (com.nousresearch.xiaoban) —
 // keep this string in sync with package.json `build.appId`. macOS/Linux don't
 // need this, so gate it on Windows. (Fixes: desktop approval/turn notifications
 // never firing on Windows.)
 if (IS_WINDOWS) {
-  app.setAppUserModelId('com.nousresearch.hermes')
+  app.setAppUserModelId('com.nousresearch.xiaoban')
 }
-// Seed the native About panel with the live Hermes version. This is refreshed
+// Seed the native About panel with the live Xiaoban version. This is refreshed
 // on every open via the explicit "About" menu handler (refreshAboutPanel), so
 // an in-place `xiaoban update` mid-session is reflected without an app restart;
 // the seed here just covers the first open and any non-menu invocation path.
 app.setAboutPanelOptions({
   applicationName: APP_NAME,
-  applicationVersion: resolveHermesVersion(),
+  applicationVersion: resolveXiaobanVersion(),
   copyright: 'Copyright © 2026 Nous Research'
 })
 
@@ -646,9 +646,9 @@ app.setAboutPanelOptions({
 // so any non-trivial video silently refused to load. Streaming via a protocol
 // handler removes the size cap and gives the <video> element seekable,
 // range-aware playback. Must be registered before the app is ready.
-const MEDIA_PROTOCOL = 'hermes-media'
+const MEDIA_PROTOCOL = 'xiaoban-media'
 // Only audio/video may be streamed. Without this the handler would read any
-// non-blocklisted local file (no size cap) for any `fetch(hermes-media://…)`.
+// non-blocklisted local file (no size cap) for any `fetch(xiaoban-media://…)`.
 const STREAMABLE_MEDIA_EXTS = new Set([
   '.avi',
   '.flac',
@@ -701,11 +701,11 @@ function registerMediaProtocol() {
 }
 
 let mainWindow = null
-let hermesProcess = null
+let xiaobanProcess = null
 let connectionPromise = null
 // Additional per-profile backends, keyed by profile name. The PRIMARY backend
-// (the desktop's launch profile) stays managed by hermesProcess +
-// connectionPromise + startHermes(); this pool only holds EXTRA profile
+// (the desktop's launch profile) stays managed by xiaobanProcess +
+// connectionPromise + startXiaoban(); this pool only holds EXTRA profile
 // backends spawned lazily when a session belongs to a different profile. A user
 // with no named profiles never populates this map, so their experience is
 // byte-for-byte the single-backend behavior.
@@ -713,8 +713,8 @@ const backendPool = new Map() // profile -> { process, port, token, connectionPr
 // Keep the pool light: cap concurrent profile backends (LRU eviction) and reap
 // idle ones. A user idles at exactly the primary backend; pool backends only
 // exist while a non-primary profile is actively being chatted through.
-const POOL_MAX_BACKENDS = Math.max(1, Number(process.env.HERMES_DESKTOP_POOL_MAX) || 3)
-const POOL_IDLE_MS = Math.max(60_000, Number(process.env.HERMES_DESKTOP_POOL_IDLE_MS) || 10 * 60_000)
+const POOL_MAX_BACKENDS = Math.max(1, Number(process.env.XIAOBAN_DESKTOP_POOL_MAX) || 3)
+const POOL_IDLE_MS = Math.max(60_000, Number(process.env.XIAOBAN_DESKTOP_POOL_IDLE_MS) || 10 * 60_000)
 // A backend touched within this window has a live renderer socket (the keepalive
 // pings every 60s for every open profile). LRU eviction must spare these — a
 // concurrent multi-profile session keeps several backends "fresh" at once, and
@@ -729,7 +729,7 @@ const RENDERER_RELOAD_WINDOW_MS = 60_000
 const RENDERER_RELOAD_MAX = 3
 let rendererReloadTimes = []
 // Latched bootstrap failure: when the first-launch install fails, we hold
-// onto the error so subsequent startHermes() calls (e.g. the renderer's
+// onto the error so subsequent startXiaoban() calls (e.g. the renderer's
 // ensureGatewayOpen retrying after the WS won't open) return the same error
 // instead of re-running install.ps1 in a hot loop. Cleared explicitly by
 // the renderer's "Reload and retry" path or by quitting the app.
@@ -739,7 +739,7 @@ let bootstrapFailure = null
 let bootstrapAbortController = null
 let connectionConfigCache = null
 let connectionConfigCacheMtime = null
-const hermesLog = []
+const xiaobanLog = []
 const previewWatchers = new Map()
 let previewShortcutActive = false
 let desktopLogBuffer = ''
@@ -749,7 +749,7 @@ let nativeThemeListenerInstalled = false
 let bootProgressState = {
   error: null,
   fakeMode: BOOT_FAKE_MODE,
-  message: 'Waiting to start Hermes backend',
+  message: 'Waiting to start Xiaoban backend',
   phase: 'idle',
   progress: 0,
   running: false,
@@ -852,10 +852,10 @@ function scheduleDesktopLogFlush() {
 function rememberLog(chunk) {
   const text = String(chunk || '').trim()
   if (!text) return
-  const lines = text.split(/\r?\n/).map(line => `[hermes] ${line}`)
-  hermesLog.push(...lines)
-  if (hermesLog.length > 300) {
-    hermesLog.splice(0, hermesLog.length - 300)
+  const lines = text.split(/\r?\n/).map(line => `[xiaoban] ${line}`)
+  xiaobanLog.push(...lines)
+  if (xiaobanLog.length > 300) {
+    xiaobanLog.splice(0, xiaobanLog.length - 300)
   }
 
   desktopLogBuffer += `${lines.join('\n')}\n`
@@ -985,7 +985,7 @@ function ensureWslWindowsFonts() {
 
   try {
     const confDir = path.join(app.getPath('home'), '.config', 'fontconfig', 'conf.d')
-    const confPath = path.join(confDir, '99-hermes-wsl-windows-fonts.conf')
+    const confPath = path.join(confDir, '99-xiaoban-wsl-windows-fonts.conf')
     let existing = ''
     try {
       existing = fs.readFileSync(confPath, 'utf8')
@@ -1023,7 +1023,7 @@ function broadcastBootProgress() {
   if (!mainWindow || mainWindow.isDestroyed()) return
   const { webContents } = mainWindow
   if (!webContents || webContents.isDestroyed()) return
-  webContents.send('hermes:boot-progress', bootProgressState)
+  webContents.send('xiaoban:boot-progress', bootProgressState)
 }
 
 // Bootstrap-event broadcast channel + state. The bootstrap runner emits a
@@ -1037,7 +1037,7 @@ function broadcastBootProgress() {
 //   - log:      bounded ring buffer of the last 200 log lines for the
 //               "Show details" affordance in the overlay
 //
-// The snapshot is queryable via the hermes:bootstrap:get IPC handler so a
+// The snapshot is queryable via the xiaoban:bootstrap:get IPC handler so a
 // reloaded renderer (e.g. devtools reload during dev) recovers state.
 // Bootstrap log ring: bounded buffer so a long install (npm + playwright
 // downloads can emit thousands of lines) doesn't grow unbounded in memory
@@ -1099,7 +1099,7 @@ function broadcastBootstrapEvent(ev) {
   if (!mainWindow || mainWindow.isDestroyed()) return
   const { webContents } = mainWindow
   if (!webContents || webContents.isDestroyed()) return
-  webContents.send('hermes:bootstrap:event', ev)
+  webContents.send('xiaoban:bootstrap:event', ev)
 }
 
 function getBootstrapState() {
@@ -1158,12 +1158,12 @@ function directoryExists(filePath) {
 }
 
 // --- in-app update mutual exclusion (#50238) -------------------------------
-// The Tauri updater writes HERMES_HOME/.hermes-update-in-progress for the whole
+// The Tauri updater writes XIAOBAN_HOME/.xiaoban-update-in-progress for the whole
 // duration of an `--update` run (see update.rs UpdateMarkerGuard). If the user
 // relaunches the desktop mid-update — because the window vanished with no
 // progress and looks crashed — a fresh instance must NOT spawn its own local
 // backend: that backend re-locks the venv shim, the updater's straggler cleanup
-// (`force_kill_other_hermes`, taskkill /IM hermes.exe) kills it, the launch
+// (`force_kill_other_xiaoban`, taskkill /IM xiaoban.exe) kills it, the launch
 // fails with the 45s "backend didn't come up" error, and the relaunch/kill
 // cycle loops. Instead the fresh instance parks until the update finishes, then
 // brings the backend up itself (it is the surviving instance — the updater's
@@ -1188,7 +1188,7 @@ const UPDATE_HANDOFF_DWELL_MS = 2500
 // Emits a boot-progress phase so the renderer shows "Update in progress…"
 // rather than a frozen splash. Returns true if it parked at all.
 async function waitForUpdateToFinish() {
-  let marker = readLiveUpdateMarker(HERMES_HOME)
+  let marker = readLiveUpdateMarker(XIAOBAN_HOME)
   if (!marker) return false
 
   rememberLog(`[updates] update in progress (pid=${marker.pid}); deferring backend start until it finishes`)
@@ -1196,11 +1196,11 @@ async function waitForUpdateToFinish() {
   while (marker && Date.now() < deadline) {
     await advanceBootProgress(
       'backend.update-wait',
-      'An update is finishing — Hermes will start automatically when it completes…',
+      'An update is finishing — Xiaoban will start automatically when it completes…',
       12
     )
     await new Promise(r => setTimeout(r, UPDATE_WAIT_POLL_MS))
-    marker = readLiveUpdateMarker(HERMES_HOME)
+    marker = readLiveUpdateMarker(XIAOBAN_HOME)
   }
   if (marker) {
     rememberLog('[updates] update still in progress after wait timeout; starting backend anyway')
@@ -1279,12 +1279,12 @@ function looksLikeDesktopAppBinary(commandPath) {
   )
 }
 
-function isHermesSourceRoot(root) {
-  return directoryExists(root) && fileExists(path.join(root, 'hermes_cli', 'main.py'))
+function isXiaobanSourceRoot(root) {
+  return directoryExists(root) && fileExists(path.join(root, 'xiaoban_cli', 'main.py'))
 }
 
 function findPythonForRoot(root) {
-  const override = process.env.HERMES_DESKTOP_PYTHON
+  const override = process.env.XIAOBAN_DESKTOP_PYTHON
   if (override && fileExists(override)) return override
 
   const relativePaths = IS_WINDOWS
@@ -1322,7 +1322,7 @@ function findSystemPython() {
   //      miss real Python 3.13 installs (user-reported case).
   //
   // We also restrict ourselves to Python 3.11–3.13. 3.14 is the latest
-  // CPython but several Hermes deps (notably pywinpty's Rust-built
+  // CPython but several Xiaoban deps (notably pywinpty's Rust-built
   // windows_x86_64_msvc crate) don't yet publish 3.14 wheels, and
   // `pip install -e .` falls back to source-build, which fails without
   // a Rust toolchain. install.ps1 sidesteps this by pinning to 3.11
@@ -1420,7 +1420,7 @@ function findSystemPython() {
   return null
 }
 
-// findGitBash — locate bash.exe on Windows. Hermes' terminal tool requires
+// findGitBash — locate bash.exe on Windows. Xiaoban' terminal tool requires
 // bash (POSIX shell), and on Windows that's almost always Git for Windows'
 // bundled Git Bash. We check the same set of locations tools/environments/
 // local.py:_find_bash() checks at runtime, so a positive result here means
@@ -1433,14 +1433,14 @@ function findGitBash() {
     return findOnPath('bash')
   }
 
-  // install.ps1 drops PortableGit at %LOCALAPPDATA%\hermes\git\... — checked
+  // install.ps1 drops PortableGit at %LOCALAPPDATA%\xiaoban\git\... — checked
   // first so users who installed via install.ps1 are detected before we
   // start probing system-wide locations.
   const localAppData = process.env.LOCALAPPDATA || ''
   const candidates = []
   if (localAppData) {
-    candidates.push(path.join(localAppData, 'hermes', 'git', 'bin', 'bash.exe'))
-    candidates.push(path.join(localAppData, 'hermes', 'git', 'usr', 'bin', 'bash.exe'))
+    candidates.push(path.join(localAppData, 'xiaoban', 'git', 'bin', 'bash.exe'))
+    candidates.push(path.join(localAppData, 'xiaoban', 'git', 'usr', 'bin', 'bash.exe'))
   }
 
   // Standard Git for Windows install locations.
@@ -1465,7 +1465,7 @@ function getVenvPython(venvRoot) {
 }
 
 // resolveGitBinary — locate git.exe on Windows. A fresh installer-driven
-// install only has PortableGit under %LOCALAPPDATA%\hermes\git (never on
+// install only has PortableGit under %LOCALAPPDATA%\xiaoban\git (never on
 // PATH), so a bare spawn('git') ENOENTs and self-update checks fail with
 // "Couldn't check for updates". Mirror findGitBash: PortableGit first, then
 // standard Git-for-Windows locations, then PATH. Cached after first probe.
@@ -1480,8 +1480,8 @@ function resolveGitBinary() {
   const localAppData = process.env.LOCALAPPDATA || ''
   const candidates = []
   if (localAppData) {
-    candidates.push(path.join(localAppData, 'hermes', 'git', 'cmd', 'git.exe'))
-    candidates.push(path.join(localAppData, 'hermes', 'git', 'bin', 'git.exe'))
+    candidates.push(path.join(localAppData, 'xiaoban', 'git', 'cmd', 'git.exe'))
+    candidates.push(path.join(localAppData, 'xiaoban', 'git', 'bin', 'git.exe'))
   }
   candidates.push(path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'Git', 'cmd', 'git.exe'))
   candidates.push(path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Git', 'cmd', 'git.exe'))
@@ -1493,11 +1493,11 @@ function resolveGitBinary() {
   return _gitBinaryCache
 }
 
-function recentHermesLog() {
-  return hermesLog.slice(-20).join('\n')
+function recentXiaobanLog() {
+  return xiaobanLog.slice(-20).join('\n')
 }
 
-// ─── Self-update (git-pull against the running backend's hermes root) ──────
+// ─── Self-update (git-pull against the running backend's xiaoban root) ──────
 
 function readDesktopUpdateConfig() {
   try {
@@ -1523,16 +1523,16 @@ function writeDesktopUpdateConfig(config) {
 }
 
 // Match the backend's source resolution but bias toward a real git checkout.
-// Dev → SOURCE_REPO_ROOT. Packaged/CLI install → ACTIVE_HERMES_ROOT.
-// HERMES_DESKTOP_HERMES_ROOT always wins so devs can pin a worktree.
+// Dev → SOURCE_REPO_ROOT. Packaged/CLI install → ACTIVE_XIAOBAN_ROOT.
+// XIAOBAN_DESKTOP_XIAOBAN_ROOT always wins so devs can pin a worktree.
 function resolveUpdateRoot() {
   const candidates = [
-    process.env.HERMES_DESKTOP_HERMES_ROOT && path.resolve(process.env.HERMES_DESKTOP_HERMES_ROOT),
-    !IS_PACKAGED && isHermesSourceRoot(SOURCE_REPO_ROOT) ? SOURCE_REPO_ROOT : null,
-    isHermesSourceRoot(ACTIVE_HERMES_ROOT) ? ACTIVE_HERMES_ROOT : null
+    process.env.XIAOBAN_DESKTOP_XIAOBAN_ROOT && path.resolve(process.env.XIAOBAN_DESKTOP_XIAOBAN_ROOT),
+    !IS_PACKAGED && isXiaobanSourceRoot(SOURCE_REPO_ROOT) ? SOURCE_REPO_ROOT : null,
+    isXiaobanSourceRoot(ACTIVE_XIAOBAN_ROOT) ? ACTIVE_XIAOBAN_ROOT : null
   ].filter(Boolean)
 
-  return candidates.find(c => directoryExists(path.join(c, '.git'))) || candidates[0] || ACTIVE_HERMES_ROOT
+  return candidates.find(c => directoryExists(path.join(c, '.git'))) || candidates[0] || ACTIVE_XIAOBAN_ROOT
 }
 
 function runGit(args, options = {}) {
@@ -1575,7 +1575,7 @@ function emitUpdateProgress(payload) {
   const merged = { stage: 'idle', message: '', percent: null, error: null, ...payload, at: Date.now() }
   rememberLog(`[updates] ${merged.stage}: ${merged.message || merged.error || ''}`)
   for (const window of BrowserWindow.getAllWindows()) {
-    window.webContents.send('hermes:updates:progress', merged)
+    window.webContents.send('xiaoban:updates:progress', merged)
   }
 }
 
@@ -1614,7 +1614,7 @@ async function checkUpdates() {
       supported: false,
       reason: 'not-a-git-checkout',
       message: `${updateRoot} isn't a git checkout — desktop self-update only runs against a source install.`,
-      hermesRoot: updateRoot,
+      xiaobanRoot: updateRoot,
       branch
     }
   }
@@ -1636,7 +1636,7 @@ async function checkUpdates() {
         branch,
         error: 'fetch-failed',
         message: firstLine(target.stderr) || 'git ls-remote failed.',
-        hermesRoot: updateRoot,
+        xiaobanRoot: updateRoot,
         fetchedAt: Date.now()
       }
     }
@@ -1649,7 +1649,7 @@ async function checkUpdates() {
       targetSha,
       commits: [],
       dirty: dirtyStr.length > 0,
-      hermesRoot: updateRoot,
+      xiaobanRoot: updateRoot,
       fetchedAt: Date.now()
     }
   }
@@ -1661,7 +1661,7 @@ async function checkUpdates() {
       branch,
       error: 'fetch-failed',
       message: firstLine(fetched.stderr) || 'git fetch failed.',
-      hermesRoot: updateRoot,
+      xiaobanRoot: updateRoot,
       fetchedAt: Date.now()
     }
   }
@@ -1687,7 +1687,7 @@ async function checkUpdates() {
     targetSha,
     commits,
     dirty: dirtyStr.length > 0,
-    hermesRoot: updateRoot,
+    xiaobanRoot: updateRoot,
     fetchedAt: Date.now()
   }
 }
@@ -1713,15 +1713,15 @@ async function readCommitLog(cwd, branch) {
 let updateInFlight = false
 
 // Resolve the staged updater binary. The Tauri installer copies itself to
-// HERMES_HOME/hermes-setup.exe on a successful install (see
-// apps/bootstrap-installer paths::copy_self_to_hermes_home). That binary owns
+// XIAOBAN_HOME/xiaoban-setup.exe on a successful install (see
+// apps/bootstrap-installer paths::copy_self_to_xiaoban_home). That binary owns
 // ALL repo mutation — running `xiaoban update` + rebuilding the desktop — so
 // the desktop never touches its own bits while running. Returns null when the
 // updater isn't staged (e.g. a dev/source run that never went through the
 // installer); callers degrade gracefully.
 function resolveUpdaterBinary() {
-  const name = IS_WINDOWS ? 'hermes-setup.exe' : 'hermes-setup'
-  const candidate = path.join(HERMES_HOME, name)
+  const name = IS_WINDOWS ? 'xiaoban-setup.exe' : 'xiaoban-setup'
+  const candidate = path.join(XIAOBAN_HOME, name)
   return fileExists(candidate) ? candidate : null
 }
 
@@ -1752,11 +1752,11 @@ function repairMacUpdaterHelper(updater) {
 
 // Path to the venv shim whose lock decides whether `xiaoban update` can write
 // fresh entry points. On Windows this is the file the running backend
-// `hermes.exe` holds open; on POSIX it's never mandatory-locked.
-function venvHermesShimPath(updateRoot) {
+// `xiaoban.exe` holds open; on POSIX it's never mandatory-locked.
+function venvXiaobanShimPath(updateRoot) {
   return IS_WINDOWS
-    ? path.join(updateRoot, 'venv', 'Scripts', 'hermes.exe')
-    : path.join(updateRoot, 'venv', 'bin', 'hermes')
+    ? path.join(updateRoot, 'venv', 'Scripts', 'xiaoban.exe')
+    : path.join(updateRoot, 'venv', 'bin', 'xiaoban')
 }
 
 // Best-effort lock probe mirroring the Rust updater's is_locked(): a running
@@ -1785,8 +1785,8 @@ function isShimLocked(shimPath) {
 }
 
 // Force-kill the entire process TREE rooted at each PID. Node's child.kill()
-// only signals the direct child, so on Windows a backend `hermes.exe` that
-// spawned its own grandchildren (a `hermes` REPL, a pty terminal session, the
+// only signals the direct child, so on Windows a backend `xiaoban.exe` that
+// spawned its own grandchildren (a `xiaoban` REPL, a pty terminal session, the
 // gateway) would survive and keep the venv shim locked. taskkill /T /F reaps
 // the whole tree synchronously. Windows-only: this is called solely from the
 // Windows shim-unlock path, and the backend is NOT spawned detached (so it's
@@ -1805,9 +1805,9 @@ function forceKillProcessTree(pid) {
 
 // Before handing off the update on Windows, the desktop MUST stop every backend
 // it spawned and WAIT for the venv shim to actually unlock. The old code did
-// `hermesProcess.kill('SIGTERM')` + `app.quit()` fire-and-forget: SIGTERM on
+// `xiaobanProcess.kill('SIGTERM')` + `app.quit()` fire-and-forget: SIGTERM on
 // Windows doesn't reap the backend's grandchildren, and quit didn't wait for
-// teardown, so the updater raced a still-locked `hermes.exe`, the quarantine
+// teardown, so the updater raced a still-locked `xiaoban.exe`, the quarantine
 // rename failed, uv's `pip install` hit "Access is denied", and the git path
 // bailed into a full ZIP re-download that ALSO couldn't write the locked shim —
 // a half-applied install (ryanc's update.log). Here we tree-kill the primary +
@@ -1825,8 +1825,8 @@ async function releaseBackendLockForUpdate(updateRoot) {
 
 // Shared backend teardown + venv-shim unlock wait. Used by BOTH the self-update
 // hand-off and the desktop uninstaller — they have the identical Windows
-// problem: the desktop's backend (and the grandchildren IT spawned — a hermes
-// REPL, a pty terminal, the gateway) keep `hermes.exe` and other files in the
+// problem: the desktop's backend (and the grandchildren IT spawned — a xiaoban
+// REPL, a pty terminal, the gateway) keep `xiaoban.exe` and other files in the
 // venv mandatory-locked, so any in-place replace/delete of the install tree
 // races a live handle and half-fails (#37532). We tree-kill every backend PID
 // the desktop owns, then poll the shim until it's genuinely writable.
@@ -1838,15 +1838,15 @@ async function releaseBackendLock(updateRoot, tag) {
 
   // Collect every backend PID the desktop owns: primary window backend + pool.
   const pids = []
-  if (hermesProcess && Number.isInteger(hermesProcess.pid)) pids.push(hermesProcess.pid)
+  if (xiaobanProcess && Number.isInteger(xiaobanProcess.pid)) pids.push(xiaobanProcess.pid)
   for (const entry of backendPool.values()) {
     if (entry.process && Number.isInteger(entry.process.pid)) pids.push(entry.process.pid)
   }
 
   // Graceful first (lets Python flush), then tree-kill to catch grandchildren.
-  if (hermesProcess && !hermesProcess.killed) {
+  if (xiaobanProcess && !xiaobanProcess.killed) {
     try {
-      hermesProcess.kill('SIGTERM')
+      xiaobanProcess.kill('SIGTERM')
     } catch {
       void 0
     }
@@ -1854,7 +1854,7 @@ async function releaseBackendLock(updateRoot, tag) {
   stopAllPoolBackends()
   for (const pid of pids) forceKillProcessTree(pid)
 
-  const shim = venvHermesShimPath(updateRoot)
+  const shim = venvXiaobanShimPath(updateRoot)
   const deadlineMs = Date.now() + 15000
   while (Date.now() < deadlineMs) {
     if (!isShimLocked(shim)) {
@@ -1871,7 +1871,7 @@ async function releaseBackendLock(updateRoot, tag) {
 //
 // The desktop is a pure consumer: it does NOT git pull / pip install / rebuild
 // itself (the old open-coded git dance lived here and drifted from
-// `xiaoban update`). Instead we spawn the staged Hermes-Setup binary with
+// `xiaoban update`). Instead we spawn the staged Xiaoban-Setup binary with
 // --update and quit, so it can run `xiaoban update` (which refuses while we
 // hold the venv shim) and rebuild the desktop with our exe already gone.
 //
@@ -1886,18 +1886,18 @@ async function applyUpdates(opts = {}) {
   try {
     const updater = resolveUpdaterBinary()
     if (!updater && !IS_WINDOWS) {
-      // macOS/Linux drag-install: no staged Tauri hermes-setup. Unlike Windows
+      // macOS/Linux drag-install: no staged Tauri xiaoban-setup. Unlike Windows
       // (where a venv-shim file lock forces the quit→hand-off→rebuild dance),
       // there's no mandatory file locking here, so the desktop can drive the
-      // whole update itself: `xiaoban update` (backend) + `hermes desktop
+      // whole update itself: `xiaoban update` (backend) + `xiaoban desktop
       // --build-only` (OS-aware GUI rebuild), then swap the running .app bundle
       // with the freshly built one and relaunch.
       return await applyUpdatesPosixInApp(opts)
     }
     if (!updater) {
       // No staged updater binary — this is a CLI-installed user (they ran
-      // `hermes desktop`, never the Tauri installer that self-copies
-      // hermes-setup.exe into HERMES_HOME). They DO have a working `hermes`
+      // `xiaoban desktop`, never the Tauri installer that self-copies
+      // xiaoban-setup.exe into XIAOBAN_HOME). They DO have a working `xiaoban`
       // on PATH / in the venv, so the correct path is the one-liner in their
       // native medium. We show the EXACT command, branch-pinned to the
       // checkout they're on — bare `xiaoban update` defaults to main and would
@@ -1918,12 +1918,12 @@ async function applyUpdates(opts = {}) {
       }
       rememberLog(`[updates] no staged updater; surfacing manual \`${command}\` for CLI install at ${updateRoot}`)
       emitUpdateProgress({ stage: 'manual', message: command, percent: null })
-      return { ok: true, manual: true, command, hermesRoot: updateRoot }
+      return { ok: true, manual: true, command, xiaobanRoot: updateRoot }
     }
 
     emitUpdateProgress({
       stage: 'restart',
-      message: 'Updating Hermes — this window will close and the updater will open. Don’t reopen Hermes yourself; it restarts automatically when the update finishes.',
+      message: 'Updating Xiaoban — this window will close and the updater will open. Don’t reopen Xiaoban yourself; it restarts automatically when the update finishes.',
       percent: 100
     })
     repairMacUpdaterHelper(updater)
@@ -1940,18 +1940,18 @@ async function applyUpdates(opts = {}) {
 
     // Stop our own backend(s) and wait for the venv shim to unlock BEFORE we
     // spawn the updater. Without this the updater races a still-locked
-    // hermes.exe (held by the backend child / its grandchildren) and the update
+    // xiaoban.exe (held by the backend child / its grandchildren) and the update
     // bricks. See releaseBackendLockForUpdate for the full failure analysis.
     await releaseBackendLockForUpdate(updateRoot)
 
     // Detached so the updater outlives this process — it needs us GONE before
     // `xiaoban update` will run (the venv shim is locked while we live).
     const child = spawn(updater, updaterArgs, {
-      cwd: HERMES_HOME,
+      cwd: XIAOBAN_HOME,
       env: {
         ...process.env,
-        HERMES_HOME,
-        PATH: pathWithHermesManagedNode(venvBin)
+        XIAOBAN_HOME,
+        PATH: pathWithXiaobanManagedNode(venvBin)
       },
       detached: true,
       stdio: 'ignore',
@@ -1988,17 +1988,17 @@ async function handOffWindowsBootstrapRecovery(reason) {
     ? await resolveHealedBranch(updateRoot, configuredBranch || DEFAULT_UPDATE_BRANCH)
     : configuredBranch || DEFAULT_UPDATE_BRANCH
   const venvBin = path.join(updateRoot, 'venv', IS_WINDOWS ? 'Scripts' : 'bin')
-  const venvHermes = path.join(venvBin, IS_WINDOWS ? 'hermes.exe' : 'hermes')
-  const updaterArgs = fileExists(venvHermes) ? ['--update', '--branch', branch] : ['--repair', '--branch', branch]
+  const venvXiaoban = path.join(venvBin, IS_WINDOWS ? 'xiaoban.exe' : 'xiaoban')
+  const updaterArgs = fileExists(venvXiaoban) ? ['--update', '--branch', branch] : ['--repair', '--branch', branch]
 
   await releaseBackendLockForUpdate(updateRoot)
 
   const child = spawn(updater, updaterArgs, {
-    cwd: HERMES_HOME,
+    cwd: XIAOBAN_HOME,
     env: {
       ...process.env,
-      HERMES_HOME,
-      PATH: pathWithHermesManagedNode(venvBin)
+      XIAOBAN_HOME,
+      PATH: pathWithXiaobanManagedNode(venvBin)
     },
     detached: true,
     stdio: 'ignore',
@@ -2017,12 +2017,12 @@ async function handOffWindowsBootstrapRecovery(reason) {
   return true
 }
 
-// Resolve the hermes CLI to drive an in-app update: prefer the venv shim in
-// the install we're updating, fall back to `hermes` on PATH.
-function resolveHermesCliBinary(updateRoot) {
-  const venvHermes = path.join(updateRoot, 'venv', 'bin', 'hermes')
-  if (fileExists(venvHermes)) return venvHermes
-  return findOnPath('hermes') || null
+// Resolve the xiaoban CLI to drive an in-app update: prefer the venv shim in
+// the install we're updating, fall back to `xiaoban` on PATH.
+function resolveXiaobanCliBinary(updateRoot) {
+  const venvXiaoban = path.join(updateRoot, 'venv', 'bin', 'xiaoban')
+  if (fileExists(venvXiaoban)) return venvXiaoban
+  return findOnPath('xiaoban') || null
 }
 
 // Spawn a command and stream each output line to the update progress channel.
@@ -2070,23 +2070,23 @@ function shellQuote(value) {
 }
 
 // macOS/Linux in-app update: backend (`xiaoban update`) + OS-aware GUI rebuild
-// (`hermes desktop --build-only`), then atomically swap the running .app bundle
+// (`xiaoban desktop --build-only`), then atomically swap the running .app bundle
 // with the freshly built one and relaunch. Degrades to "backend updated,
 // restart to load the new GUI" if the swap can't be performed.
 async function applyUpdatesPosixInApp() {
   const updateRoot = resolveUpdateRoot()
-  const hermes = resolveHermesCliBinary(updateRoot)
-  if (!hermes) {
+  const xiaoban = resolveXiaobanCliBinary(updateRoot)
+  if (!xiaoban) {
     emitUpdateProgress({ stage: 'manual', message: 'xiaoban update', percent: null })
-    return { ok: true, manual: true, command: 'xiaoban update', hermesRoot: updateRoot }
+    return { ok: true, manual: true, command: 'xiaoban update', xiaobanRoot: updateRoot }
   }
 
-  // Put the Hermes-managed Node and the venv on PATH so `hermes desktop`'s
+  // Put the Xiaoban-managed Node and the venv on PATH so `xiaoban desktop`'s
   // npm build can find them on a machine with no system Node. Windows portable
-  // Node lives directly under %LOCALAPPDATA%\hermes\node, not node\bin.
+  // Node lives directly under %LOCALAPPDATA%\xiaoban\node, not node\bin.
   const env = {
-    HERMES_HOME,
-    PATH: pathWithHermesManagedNode(path.join(updateRoot, 'venv', 'bin'))
+    XIAOBAN_HOME,
+    PATH: pathWithXiaobanManagedNode(path.join(updateRoot, 'venv', 'bin'))
   }
 
   // `xiaoban update` reaps stale `xiaoban dashboard` backends (a code update
@@ -2095,14 +2095,14 @@ async function applyUpdatesPosixInApp() {
   // mid-update produces the boot→kill→crash loop in #37532 — the desktop
   // already restarts its own backend via the rebuild+relaunch below, so the
   // reap must spare it. Hand the live backend's PID to the update process;
-  // _kill_stale_dashboard_processes reads HERMES_DESKTOP_CHILD_PID and excludes
+  // _kill_stale_dashboard_processes reads XIAOBAN_DESKTOP_CHILD_PID and excludes
   // it while still reaping any genuinely-orphaned dashboards. (#37532)
   // Exclude every desktop-managed backend (primary + all pool profiles) from
   // the update reaper. _kill_stale_dashboard_processes accepts a comma-separated
   // list (a single int still parses for back-compat).
   const desktopChildPids = []
-  if (hermesProcess && Number.isInteger(hermesProcess.pid)) {
-    desktopChildPids.push(hermesProcess.pid)
+  if (xiaobanProcess && Number.isInteger(xiaobanProcess.pid)) {
+    desktopChildPids.push(xiaobanProcess.pid)
   }
   for (const entry of backendPool.values()) {
     if (entry.process && Number.isInteger(entry.process.pid)) {
@@ -2110,7 +2110,7 @@ async function applyUpdatesPosixInApp() {
     }
   }
   if (desktopChildPids.length) {
-    env.HERMES_DESKTOP_CHILD_PID = desktopChildPids.join(',')
+    env.XIAOBAN_DESKTOP_CHILD_PID = desktopChildPids.join(',')
   }
 
   // Branch-pin so a non-main checkout doesn't get switched to main (and self-heal
@@ -2126,8 +2126,8 @@ async function applyUpdatesPosixInApp() {
     // best effort
   }
 
-  emitUpdateProgress({ stage: 'update', message: 'Updating Hermes (git + dependencies)…', percent: 10 })
-  const updated = await runStreamedUpdate(hermes, ['update', '--yes', ...branchArgs], {
+  emitUpdateProgress({ stage: 'update', message: 'Updating Xiaoban (git + dependencies)…', percent: 10 })
+  const updated = await runStreamedUpdate(xiaoban, ['update', '--yes', ...branchArgs], {
     cwd: updateRoot,
     env,
     stage: 'update'
@@ -2145,18 +2145,18 @@ async function applyUpdatesPosixInApp() {
     if (attempt > 0) {
       emitUpdateProgress({ stage: 'rebuild', message: 'Retrying the desktop rebuild…', percent: 60 })
     }
-    return runStreamedUpdate(hermes, ['desktop', '--build-only'], { cwd: updateRoot, env, stage: 'rebuild' })
+    return runStreamedUpdate(xiaoban, ['desktop', '--build-only'], { cwd: updateRoot, env, stage: 'rebuild' })
   })
   if (rebuilt.code !== 0) {
     emitUpdateProgress({
       stage: 'error',
-      message: 'Backend updated, but the desktop rebuild failed. Restart Hermes to retry.',
+      message: 'Backend updated, but the desktop rebuild failed. Restart Xiaoban to retry.',
       error: rebuilt.error || 'rebuild-failed'
     })
     return { ok: false, backendUpdated: true, error: 'desktop rebuild failed' }
   }
 
-  // Linux in-app update terminal state (#45205). `hermes desktop --build-only`
+  // Linux in-app update terminal state (#45205). `xiaoban desktop --build-only`
   // rebuilds the unpacked app in place under apps/desktop/release/<plat>-unpacked.
   // We can only HONESTLY relaunch into the new GUI when the *running* binary IS
   // that rebuilt one — i.e. execPath lives under release/<plat>-unpacked. The
@@ -2194,7 +2194,7 @@ async function applyUpdatesPosixInApp() {
     const outcome = decideRelaunchOutcome({ underUnpacked, sandboxOk })
 
     if (outcome === 'relaunch') {
-      emitUpdateProgress({ stage: 'restart', message: 'Restarting Hermes…', percent: 100 })
+      emitUpdateProgress({ stage: 'restart', message: 'Restarting Xiaoban…', percent: 100 })
       // Preserve launch context across the re-exec: replay the original args
       // (filtered of Electron internals) and the env/cwd that define which
       // backend/profile/root this instance talks to. Without this the
@@ -2208,7 +2208,7 @@ async function applyUpdatesPosixInApp() {
         env: relaunchEnv,
         cwd: process.cwd()
       })
-      const scriptPath = path.join(app.getPath('temp'), `hermes-desktop-update-${Date.now()}.sh`)
+      const scriptPath = path.join(app.getPath('temp'), `xiaoban-desktop-update-${Date.now()}.sh`)
       try {
         fs.writeFileSync(scriptPath, relaunchScript, { mode: 0o755 })
         const child = spawn('/bin/bash', [scriptPath], { detached: true, stdio: 'ignore' })
@@ -2226,7 +2226,7 @@ async function applyUpdatesPosixInApp() {
           backendUpdated: true,
           guiUpdated: false,
           manualRestart: true,
-          message: 'Backend updated. Quit and reopen Hermes to load the new version.'
+          message: 'Backend updated. Quit and reopen Xiaoban to load the new version.'
         }
       }
     }
@@ -2236,7 +2236,7 @@ async function applyUpdatesPosixInApp() {
         stage: 'guiSkew',
         message:
           'Backend updated, but the desktop app package was not changed. ' +
-          'Update or reinstall the Hermes desktop app to match.',
+          'Update or reinstall the Xiaoban desktop app to match.',
         percent: 100
       })
       rememberLog(
@@ -2260,13 +2260,13 @@ async function applyUpdatesPosixInApp() {
       sandboxBlocked: true,
       message:
         'Backend updated. The rebuilt app can’t relaunch automatically ' +
-        '(sandbox helper needs root). Quit and reopen Hermes to finish.'
+        '(sandbox helper needs root). Quit and reopen Xiaoban to finish.'
     }
   }
 
   const rebuiltApp = [
-    path.join(updateRoot, 'apps', 'desktop', 'release', 'mac-arm64', 'Hermes.app'),
-    path.join(updateRoot, 'apps', 'desktop', 'release', 'mac', 'Hermes.app')
+    path.join(updateRoot, 'apps', 'desktop', 'release', 'mac-arm64', 'Xiaoban.app'),
+    path.join(updateRoot, 'apps', 'desktop', 'release', 'mac', 'Xiaoban.app')
   ].find(directoryExists)
   const targetApp = runningAppBundle()
 
@@ -2275,7 +2275,7 @@ async function applyUpdatesPosixInApp() {
   if (!rebuiltApp || !targetApp) {
     emitUpdateProgress({
       stage: 'done',
-      message: 'Backend updated. Restart Hermes to load the new version.',
+      message: 'Backend updated. Restart Xiaoban to load the new version.',
       percent: 100
     })
     return { ok: true, backendUpdated: true, rebuiltApp: rebuiltApp || null }
@@ -2295,23 +2295,23 @@ for _ in $(seq 1 240); do
   sleep 0.5
 done
 if [ "$SRC" != "$DST" ]; then
-  if /usr/bin/ditto "$SRC" "$DST.hermes-update-new"; then
-    rm -rf "$DST.hermes-update-old" 2>/dev/null || true
-    mv "$DST" "$DST.hermes-update-old" 2>/dev/null || rm -rf "$DST"
-    mv "$DST.hermes-update-new" "$DST"
-    rm -rf "$DST.hermes-update-old" 2>/dev/null || true
+  if /usr/bin/ditto "$SRC" "$DST.xiaoban-update-new"; then
+    rm -rf "$DST.xiaoban-update-old" 2>/dev/null || true
+    mv "$DST" "$DST.xiaoban-update-old" 2>/dev/null || rm -rf "$DST"
+    mv "$DST.xiaoban-update-new" "$DST"
+    rm -rf "$DST.xiaoban-update-old" 2>/dev/null || true
   fi
 fi
 /usr/bin/xattr -dr com.apple.quarantine "$DST" 2>/dev/null || true
 /usr/bin/open "$DST"
 `
-  const scriptPath = path.join(app.getPath('temp'), `hermes-desktop-update-${Date.now()}.sh`)
+  const scriptPath = path.join(app.getPath('temp'), `xiaoban-desktop-update-${Date.now()}.sh`)
   try {
     fs.writeFileSync(scriptPath, swapScript, { mode: 0o755 })
   } catch (err) {
     emitUpdateProgress({
       stage: 'done',
-      message: 'Backend + app updated. Restart Hermes to load the new version.',
+      message: 'Backend + app updated. Restart Xiaoban to load the new version.',
       percent: 100
     })
     rememberLog(`[updates] could not write swap script: ${err.message}; rebuilt app at ${rebuiltApp}`)
@@ -2358,13 +2358,13 @@ function isBootstrapComplete() {
   if (marker.schemaVersion !== BOOTSTRAP_MARKER_SCHEMA_VERSION) return false
   if (typeof marker.pinnedCommit !== 'string' || marker.pinnedCommit.length < 7) return false
   // We DELIBERATELY do NOT verify that the checkout is currently at the
-  // pinned commit -- users update via the in-app update path or `hermes
+  // pinned commit -- users update via the in-app update path or `xiaoban
   // update`, which moves HEAD legitimately. The marker just attests "we
   // ran the bootstrap successfully at least once." We DO additionally require
   // a runnable venv: an interrupted or split-home install can leave the marker
   // + checkout without a venv, and trusting that spawns a dead backend
   // ("gateway offline") instead of re-running bootstrap to repair it.
-  return isHermesSourceRoot(ACTIVE_HERMES_ROOT) && fileExists(getVenvPython(VENV_ROOT))
+  return isXiaobanSourceRoot(ACTIVE_XIAOBAN_ROOT) && fileExists(getVenvPython(VENV_ROOT))
 }
 
 function writeBootstrapMarker(payload) {
@@ -2381,7 +2381,7 @@ function writeBootstrapMarker(payload) {
 }
 
 function resolveWebDist() {
-  const override = process.env.HERMES_DESKTOP_WEB_DIST
+  const override = process.env.XIAOBAN_DESKTOP_WEB_DIST
   if (override && directoryExists(path.resolve(override))) return path.resolve(override)
 
   const unpackedDist = path.join(unpackedPathFor(APP_ROOT), 'dist')
@@ -2398,7 +2398,7 @@ function resolveWebDist() {
     rememberLog(
       `[web-dist] dashboard frontend dir resolved to an asar-internal path that ` +
         `is not a real directory: ${fallback}. Static routes will 404. ` +
-        `Ensure dist/** is unpacked (asarUnpack) or set HERMES_DESKTOP_WEB_DIST.`
+        `Ensure dist/** is unpacked (asarUnpack) or set XIAOBAN_DESKTOP_WEB_DIST.`
     )
   }
   return fallback
@@ -2414,7 +2414,7 @@ function resolveRendererIndex() {
   rememberLog(
     `[renderer] index.html not found — the desktop app was packaged without a ` +
       `renderer bundle. Tried: ${candidates.join(', ')}. ` +
-      `Rebuild with: hermes desktop --force-build`
+      `Rebuild with: xiaoban desktop --force-build`
   )
   return candidates[0]
 }
@@ -2434,9 +2434,9 @@ function isPackagedInstallPath(dir) {
   })
 }
 
-function resolveHermesCwd() {
+function resolveXiaobanCwd() {
   // In a packaged build, `process.cwd()` resolves to the install root (e.g.
-  // `…/win-unpacked` on Windows or `/Applications/Hermes.app/Contents/...`
+  // `…/win-unpacked` on Windows or `/Applications/Xiaoban.app/Contents/...`
   // on macOS). Sessions spawned there leave files inside the app bundle
   // and bewilder users when "where did my files go?" is the install dir.
   // The user-configurable default project directory wins over everything,
@@ -2444,7 +2444,7 @@ function resolveHermesCwd() {
   // real directory), then the home dir.
   const candidates = [
     readDefaultProjectDir(),
-    process.env.HERMES_DESKTOP_CWD,
+    process.env.XIAOBAN_DESKTOP_CWD,
     IS_PACKAGED ? null : process.env.INIT_CWD,
     IS_PACKAGED ? null : process.cwd(),
     !IS_PACKAGED ? SOURCE_REPO_ROOT : null,
@@ -2469,7 +2469,7 @@ function sanitizeWorkspaceCwd(cwd) {
   const trimmed = typeof cwd === 'string' ? cwd.trim() : ''
 
   if (!trimmed || isPackagedInstallPath(trimmed)) {
-    return { cwd: resolveHermesCwd(), sanitized: Boolean(trimmed) }
+    return { cwd: resolveXiaobanCwd(), sanitized: Boolean(trimmed) }
   }
 
   try {
@@ -2482,7 +2482,7 @@ function sanitizeWorkspaceCwd(cwd) {
     // Fall through to the resolved default.
   }
 
-  return { cwd: resolveHermesCwd(), sanitized: Boolean(trimmed) }
+  return { cwd: resolveXiaobanCwd(), sanitized: Boolean(trimmed) }
 }
 
 // Persisted "Default project directory" — surfaced as a setting in the
@@ -2535,9 +2535,9 @@ function createPythonBackend(root, label, dashboardArgs, options = {}) {
     kind: 'python',
     label,
     command: python,
-    args: ['-m', 'hermes_cli.main', ...dashboardArgs],
+    args: ['-m', 'xiaoban_cli.main', ...dashboardArgs],
     env: buildDesktopBackendEnv({
-      hermesHome: HERMES_HOME,
+      xiaobanHome: XIAOBAN_HOME,
       pythonPathEntries: [root],
       venvRoot: path.join(root, 'venv')
     }),
@@ -2547,7 +2547,7 @@ function createPythonBackend(root, label, dashboardArgs, options = {}) {
   }
 }
 
-// createActiveBackend — build a backend pointing at ACTIVE_HERMES_ROOT, the
+// createActiveBackend — build a backend pointing at ACTIVE_XIAOBAN_ROOT, the
 // canonical install location shared with the CLI installer. The venv at
 // VENV_ROOT may not exist yet on first run; bootstrap=true tells
 // ensureRuntime() to create / refresh it before launch.
@@ -2556,90 +2556,90 @@ function createActiveBackend(dashboardArgs) {
 
   return {
     kind: 'python',
-    label: `Hermes at ${ACTIVE_HERMES_ROOT}`,
+    label: `Xiaoban at ${ACTIVE_XIAOBAN_ROOT}`,
     command: fileExists(venvPython) ? venvPython : findSystemPython(),
-    args: ['-m', 'hermes_cli.main', ...dashboardArgs],
+    args: ['-m', 'xiaoban_cli.main', ...dashboardArgs],
     env: buildDesktopBackendEnv({
-      hermesHome: HERMES_HOME,
-      pythonPathEntries: [ACTIVE_HERMES_ROOT],
+      xiaobanHome: XIAOBAN_HOME,
+      pythonPathEntries: [ACTIVE_XIAOBAN_ROOT],
       venvRoot: VENV_ROOT
     }),
-    root: ACTIVE_HERMES_ROOT,
+    root: ACTIVE_XIAOBAN_ROOT,
     bootstrap: true,
     shell: false
   }
 }
 
-function resolveHermesBackend(dashboardArgs) {
-  // 1. Explicit override -- HERMES_DESKTOP_HERMES_ROOT points at a developer
+function resolveXiaobanBackend(dashboardArgs) {
+  // 1. Explicit override -- XIAOBAN_DESKTOP_XIAOBAN_ROOT points at a developer
   //    checkout. Honour it as-is (no bootstrap; the user is driving).
-  const overrideRoot = process.env.HERMES_DESKTOP_HERMES_ROOT && path.resolve(process.env.HERMES_DESKTOP_HERMES_ROOT)
-  if (overrideRoot && isHermesSourceRoot(overrideRoot)) {
-    const backend = createPythonBackend(overrideRoot, `Hermes source at ${overrideRoot}`, dashboardArgs)
+  const overrideRoot = process.env.XIAOBAN_DESKTOP_XIAOBAN_ROOT && path.resolve(process.env.XIAOBAN_DESKTOP_XIAOBAN_ROOT)
+  if (overrideRoot && isXiaobanSourceRoot(overrideRoot)) {
+    const backend = createPythonBackend(overrideRoot, `Xiaoban source at ${overrideRoot}`, dashboardArgs)
     if (backend) return backend
   }
 
   // 2. Development source -- when running `npm run dev` from a checkout, the
   //    cloned repo at SOURCE_REPO_ROOT takes precedence over ACTIVE and any
-  //    installed `hermes` on PATH so local Python edits are actually exercised.
-  //    (In dev with no checkout, SOURCE_REPO_ROOT won't pass isHermesSourceRoot.)
-  if (!IS_PACKAGED && isHermesSourceRoot(SOURCE_REPO_ROOT)) {
-    const backend = createPythonBackend(SOURCE_REPO_ROOT, `Hermes source at ${SOURCE_REPO_ROOT}`, dashboardArgs)
+  //    installed `xiaoban` on PATH so local Python edits are actually exercised.
+  //    (In dev with no checkout, SOURCE_REPO_ROOT won't pass isXiaobanSourceRoot.)
+  if (!IS_PACKAGED && isXiaobanSourceRoot(SOURCE_REPO_ROOT)) {
+    const backend = createPythonBackend(SOURCE_REPO_ROOT, `Xiaoban source at ${SOURCE_REPO_ROOT}`, dashboardArgs)
     if (backend) return backend
   }
 
-  // 3. Bootstrap-complete ACTIVE_HERMES_ROOT -- the canonical install at
-  //    %LOCALAPPDATA%\hermes\xiaoban-agent (Windows) or ~/.hermes/xiaoban-agent.
+  // 3. Bootstrap-complete ACTIVE_XIAOBAN_ROOT -- the canonical install at
+  //    %LOCALAPPDATA%\xiaoban\xiaoban-agent (Windows) or ~/.xiaoban/xiaoban-agent.
   //    The bootstrap marker means install.ps1 stages finished and the user
   //    completed initial configuration; we trust the install and go straight
-  //    to spawning hermes. Updates flow through the in-app update path
+  //    to spawning xiaoban. Updates flow through the in-app update path
   //    (applyUpdates -> git pull) or `xiaoban update` from the CLI.
   if (isBootstrapComplete()) {
     return createActiveBackend(dashboardArgs)
   }
 
-  // 4. Existing `hermes` on PATH -- installed via install.ps1 / install.sh from
+  // 4. Existing `xiaoban` on PATH -- installed via install.ps1 / install.sh from
   //    a previous tool-only setup, or pip-installed system-wide. Use it but
   //    do NOT write a bootstrap marker; the user did this themselves and we
   //    don't want to take ownership of an install we didn't perform.
-  //    HERMES_DESKTOP_IGNORE_EXISTING=1 forces the bootstrap path for testing.
-  if (process.env.HERMES_DESKTOP_IGNORE_EXISTING !== '1') {
-    let hermesCommand = null
-    const hermesOverride = process.env.HERMES_DESKTOP_HERMES
+  //    XIAOBAN_DESKTOP_IGNORE_EXISTING=1 forces the bootstrap path for testing.
+  if (process.env.XIAOBAN_DESKTOP_IGNORE_EXISTING !== '1') {
+    let xiaobanCommand = null
+    const xiaobanOverride = process.env.XIAOBAN_DESKTOP_XIAOBAN
 
-    if (hermesOverride) {
-      const resolvedOverride = findOnPath(hermesOverride)
+    if (xiaobanOverride) {
+      const resolvedOverride = findOnPath(xiaobanOverride)
       if (resolvedOverride) {
-        hermesCommand = resolvedOverride
-      } else if (!isWindowsBinaryPathInWsl(hermesOverride, { isWsl: IS_WSL })) {
-        hermesCommand = hermesOverride
+        xiaobanCommand = resolvedOverride
+      } else if (!isWindowsBinaryPathInWsl(xiaobanOverride, { isWsl: IS_WSL })) {
+        xiaobanCommand = xiaobanOverride
       } else {
-        rememberLog(`Ignoring Windows Hermes override under WSL: ${hermesOverride}`)
+        rememberLog(`Ignoring Windows Xiaoban override under WSL: ${xiaobanOverride}`)
       }
     } else {
-      hermesCommand = findOnPath('hermes')
+      xiaobanCommand = findOnPath('xiaoban')
     }
 
-    if (hermesCommand) {
-      if (looksLikeDesktopAppBinary(hermesCommand)) {
-        rememberLog(`Ignoring desktop app executable on PATH while resolving Xiaoban CLI: ${hermesCommand}`)
-        hermesCommand = null
+    if (xiaobanCommand) {
+      if (looksLikeDesktopAppBinary(xiaobanCommand)) {
+        rememberLog(`Ignoring desktop app executable on PATH while resolving Xiaoban CLI: ${xiaobanCommand}`)
+        xiaobanCommand = null
       }
     }
 
-    if (hermesCommand) {
-      // Smoke-test the candidate before trusting it. A `hermes` shim
+    if (xiaobanCommand) {
+      // Smoke-test the candidate before trusting it. A `xiaoban` shim
       // left behind by a half-uninstalled pip install (or a venv
       // entry-point pointing at a deleted interpreter) still resolves
       // via findOnPath but explodes on spawn -- the user then sees a
       // dead backend instead of the first-launch installer. The cheap
       // `--version` probe (see backend-probes.cjs) catches that case
       // and lets the resolver fall through to step 6 / bootstrap.
-      const shellForProbe = isCommandScript(hermesCommand)
-      if (verifyHermesCli(hermesCommand, { shell: shellForProbe })) {
+      const shellForProbe = isCommandScript(xiaobanCommand)
+      if (verifyXiaobanCli(xiaobanCommand, { shell: shellForProbe })) {
         return {
-          label: `existing Xiaoban CLI at ${hermesCommand}`,
-          command: hermesCommand,
+          label: `existing Xiaoban CLI at ${xiaobanCommand}`,
+          command: xiaobanCommand,
           args: dashboardArgs,
           bootstrap: false,
           env: {},
@@ -2648,36 +2648,36 @@ function resolveHermesBackend(dashboardArgs) {
         }
       }
       rememberLog(
-        `Ignoring existing Xiaoban CLI at ${hermesCommand}: --version probe failed; falling through to bootstrap.`
+        `Ignoring existing Xiaoban CLI at ${xiaobanCommand}: --version probe failed; falling through to bootstrap.`
       )
     }
   }
 
-  // 5. Last-ditch: pip-installed hermes_cli module via system Python.
+  // 5. Last-ditch: pip-installed xiaoban_cli module via system Python.
   //    Same rationale as #4 -- the user installed this; we use it but don't
   //    take ownership.
   const python = findSystemPython()
   if (python) {
     // Same smoke-test rationale as step 4: a system Python in the
     // SUPPORTED_VERSIONS range can be registered (PEP 514) without
-    // having hermes_cli installed -- common on dev boxes that have
+    // having xiaoban_cli installed -- common on dev boxes that have
     // a python.org install from prior unrelated work. Returning that
     // backend hands the spawn step a guaranteed ModuleNotFoundError.
     // Verify the import works before trusting the candidate; on
     // failure, fall through to step 6 so the bootstrap runner pulls
-    // a uv-managed 3.11 into %LOCALAPPDATA%\hermes\xiaoban-agent\venv.
-    if (canImportHermesCli(python)) {
+    // a uv-managed 3.11 into %LOCALAPPDATA%\xiaoban\xiaoban-agent\venv.
+    if (canImportXiaobanCli(python)) {
       return {
         kind: 'python',
-        label: `installed hermes_cli module via ${python}`,
+        label: `installed xiaoban_cli module via ${python}`,
         command: python,
-        args: ['-m', 'hermes_cli.main', ...dashboardArgs],
+        args: ['-m', 'xiaoban_cli.main', ...dashboardArgs],
         bootstrap: false,
         env: {},
         shell: false
       }
     }
-    rememberLog(`Ignoring system Python ${python}: hermes_cli is not importable; falling through to bootstrap.`)
+    rememberLog(`Ignoring system Python ${python}: xiaoban_cli is not importable; falling through to bootstrap.`)
   }
 
   // 6. Nothing usable yet -- signal the bootstrap runner that we need to
@@ -2687,7 +2687,7 @@ function resolveHermesBackend(dashboardArgs) {
   //    explaining what's missing.
   //
   //    We deliberately do NOT throw here -- throwing inside
-  //    resolveHermesBackend was the old "no payload" path and forced the
+  //    resolveXiaobanBackend was the old "no payload" path and forced the
   //    user into a dead end. With the bootstrap protocol, "no install yet"
   //    is a recoverable state the GUI can drive through.
   return {
@@ -2699,7 +2699,7 @@ function resolveHermesBackend(dashboardArgs) {
     env: {},
     shell: false,
     // Hints for the bootstrap runner / UI layer:
-    activeRoot: ACTIVE_HERMES_ROOT,
+    activeRoot: ACTIVE_XIAOBAN_ROOT,
     installStamp: INSTALL_STAMP, // may be null in dev
     isPackaged: IS_PACKAGED,
     platform: process.platform
@@ -2712,7 +2712,7 @@ async function ensureRuntime(backend) {
     return backend
   }
 
-  // backend.kind === 'bootstrap-needed' means resolveHermesBackend couldn't
+  // backend.kind === 'bootstrap-needed' means resolveXiaobanBackend couldn't
   // find anything to spawn. Hand off to the bootstrap runner which drives the
   // platform installer, writes the bootstrap-complete marker on success, then
   // we re-resolve to get the now-installed backend.
@@ -2722,10 +2722,10 @@ async function ensureRuntime(backend) {
   // will rewire startup to spawn the window first and route bootstrap events
   // to a renderer-side install overlay.
   if (backend.kind === 'bootstrap-needed') {
-    rememberLog('[bootstrap] no Hermes install found; starting first-launch bootstrap')
+    rememberLog('[bootstrap] no Xiaoban install found; starting first-launch bootstrap')
 
     if (await handOffWindowsBootstrapRecovery('bootstrap-needed')) {
-      const handoffError = new Error('Hermes recovery was handed off to Hermes Setup. The desktop will restart when recovery completes.')
+      const handoffError = new Error('Xiaoban recovery was handed off to Xiaoban Setup. The desktop will restart when recovery completes.')
       handoffError.isBootstrapFailure = true
       handoffError.bootstrapHandedOff = true
       bootstrapFailure = handoffError
@@ -2754,8 +2754,8 @@ async function ensureRuntime(backend) {
       installStamp: backend.installStamp,
       activeRoot: backend.activeRoot,
       sourceRepoRoot: SOURCE_REPO_ROOT,
-      hermesHome: HERMES_HOME,
-      logRoot: path.join(HERMES_HOME, 'logs'),
+      xiaobanHome: XIAOBAN_HOME,
+      logRoot: path.join(XIAOBAN_HOME, 'logs'),
       abortSignal: bootstrapAbortController.signal,
       onEvent: ev => {
         // Tee every bootstrap event to (a) the desktop log for forensics
@@ -2779,7 +2779,7 @@ async function ensureRuntime(backend) {
     bootstrapAbortController = null
 
     if (bootstrapResult.cancelled) {
-      const cancelledError = new Error('Hermes install was cancelled.')
+      const cancelledError = new Error('Xiaoban install was cancelled.')
       cancelledError.isBootstrapFailure = true
       cancelledError.bootstrapCancelled = true
       bootstrapFailure = cancelledError
@@ -2788,15 +2788,15 @@ async function ensureRuntime(backend) {
 
     if (!bootstrapResult.ok) {
       const bootstrapError = new Error(
-        `Hermes bootstrap failed${bootstrapResult.failedStage ? ` at stage '${bootstrapResult.failedStage}'` : ''}: ` +
+        `Xiaoban bootstrap failed${bootstrapResult.failedStage ? ` at stage '${bootstrapResult.failedStage}'` : ''}: ` +
           `${bootstrapResult.error || 'unknown error'}. ` +
-          `Check ${path.join(HERMES_HOME, 'logs', 'desktop.log')} for the full transcript.`
+          `Check ${path.join(XIAOBAN_HOME, 'logs', 'desktop.log')} for the full transcript.`
       )
       bootstrapError.isBootstrapFailure = true
       bootstrapError.failedStage = bootstrapResult.failedStage || null
-      // Latch the failure so subsequent startHermes() calls return this
+      // Latch the failure so subsequent startXiaoban() calls return this
       // same error without re-running install.ps1.  Cleared by the
-      // hermes:bootstrap:reset IPC (renderer's "Reload and retry").
+      // xiaoban:bootstrap:reset IPC (renderer's "Reload and retry").
       bootstrapFailure = bootstrapError
       throw bootstrapError
     }
@@ -2804,7 +2804,7 @@ async function ensureRuntime(backend) {
     rememberLog('[bootstrap] bootstrap complete; marker written. Re-resolving backend.')
     // Re-resolve now that the install exists. The new resolution lands in
     // step 3 (bootstrap-complete marker) and we recurse to wire venvPython.
-    return ensureRuntime(resolveHermesBackend(backend.args))
+    return ensureRuntime(resolveXiaobanBackend(backend.args))
   }
 
   // bootstrap=true with a real backend (createActiveBackend path) means we
@@ -2813,25 +2813,25 @@ async function ensureRuntime(backend) {
   // sync flow exited through, minus all the factory/pip/marker machinery
   // (install.ps1 owns those concerns now and the bootstrap-complete marker
   // attests they ran successfully).
-  if (!isHermesSourceRoot(ACTIVE_HERMES_ROOT)) {
+  if (!isXiaobanSourceRoot(ACTIVE_XIAOBAN_ROOT)) {
     throw new Error(
-      `Hermes install at ${ACTIVE_HERMES_ROOT} is missing or incomplete. ` +
+      `Xiaoban install at ${ACTIVE_XIAOBAN_ROOT} is missing or incomplete. ` +
         'Reinstall via the desktop installer or scripts/install.ps1.'
     )
   }
 
-  // On Windows, preflight Git Bash. Hermes' terminal tool calls bash.exe
+  // On Windows, preflight Git Bash. Xiaoban' terminal tool calls bash.exe
   // directly (tools/environments/local.py); without it the agent can't run
   // terminal commands. install.ps1's Stage-Git puts PortableGit at
-  // %LOCALAPPDATA%\hermes\git\, which findGitBash() picks up, so for any
+  // %LOCALAPPDATA%\xiaoban\git\, which findGitBash() picks up, so for any
   // user who completed the bootstrap this is a no-op. For users who got
-  // here via an external `hermes` on PATH, this check still helps.
+  // here via an external `xiaoban` on PATH, this check still helps.
   if (IS_WINDOWS && !findGitBash()) {
     throw new Error(
-      'Git for Windows is required for Hermes on Windows (provides Git Bash, ' +
+      'Git for Windows is required for Xiaoban on Windows (provides Git Bash, ' +
         "which the agent's terminal tool uses). Install it from " +
         'https://git-scm.com/download/win or run `winget install -e --id Git.Git`, ' +
-        'then relaunch Hermes.'
+        'then relaunch Xiaoban.'
     )
   }
 
@@ -2841,19 +2841,19 @@ async function ensureRuntime(backend) {
     // means we have a half-installed checkout: .git exists, source files
     // exist, but venv is missing or broken. This shouldn't happen in
     // normal flow because isBootstrapComplete() requires
-    // isHermesSourceRoot() and the bootstrap writes the marker only after
+    // isXiaobanSourceRoot() and the bootstrap writes the marker only after
     // install.ps1 succeeds. If we hit this, the user (or a deleted venv)
     // broke the invariant; tell them to re-run the install.
     throw new Error(
-      `Hermes venv missing at ${VENV_ROOT}. Re-run the desktop installer or ` + '`scripts/install.ps1` to rebuild it.'
+      `Xiaoban venv missing at ${VENV_ROOT}. Re-run the desktop installer or ` + '`scripts/install.ps1` to rebuild it.'
     )
   }
 
   backend.command = venvPython
-  backend.label = `Hermes at ${ACTIVE_HERMES_ROOT} (venv: ${VENV_ROOT})`
+  backend.label = `Xiaoban at ${ACTIVE_XIAOBAN_ROOT} (venv: ${VENV_ROOT})`
   updateBootProgress({
     phase: 'runtime.ready',
-    message: 'Hermes runtime is ready',
+    message: 'Xiaoban runtime is ready',
     progress: 82,
     running: true,
     error: null
@@ -2870,7 +2870,7 @@ function fetchJson(url, token, options = {}) {
     const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
 
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
+      reject(new Error(`Unsupported Xiaoban backend URL protocol: ${parsed.protocol}`))
       return
     }
 
@@ -2880,7 +2880,7 @@ function fetchJson(url, token, options = {}) {
         method: options.method || 'GET',
         headers: {
           'Content-Type': 'application/json',
-          'X-Hermes-Session-Token': token,
+          'X-Xiaoban-Session-Token': token,
           ...(body ? { 'Content-Length': String(body.length) } : {})
         }
       },
@@ -2908,7 +2908,7 @@ function fetchJson(url, token, options = {}) {
             reject(
               new Error(
                 `Expected JSON from ${url} but got HTML (status ${res.statusCode}). ` +
-                  'The endpoint is likely missing on the Hermes backend.'
+                  'The endpoint is likely missing on the Xiaoban backend.'
               )
             )
             return
@@ -2924,7 +2924,7 @@ function fetchJson(url, token, options = {}) {
 
     req.on('error', reject)
     req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
+      req.destroy(new Error(`Timed out connecting to Xiaoban backend after ${timeoutMs}ms`))
     })
     if (body) req.write(body)
     req.end()
@@ -2934,7 +2934,7 @@ function fetchJson(url, token, options = {}) {
 function fetchPublicJson(url, options = {}) {
   // Credential-free JSON GET/POST for public gateway endpoints
   // (``/api/status``, ``/api/auth/providers``). Unlike ``fetchJson`` it sends
-  // NO ``X-Hermes-Session-Token`` header — used by the auth-mode probe before
+  // NO ``X-Xiaoban-Session-Token`` header — used by the auth-mode probe before
   // any credentials exist, and any time we must not leak a token to an
   // endpoint that doesn't need one.
   return new Promise((resolve, reject) => {
@@ -2950,7 +2950,7 @@ function fetchPublicJson(url, options = {}) {
     const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
 
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
+      reject(new Error(`Unsupported Xiaoban backend URL protocol: ${parsed.protocol}`))
       return
     }
 
@@ -2982,7 +2982,7 @@ function fetchPublicJson(url, options = {}) {
             reject(
               new Error(
                 `Expected JSON from ${url} but got HTML (status ${res.statusCode}). ` +
-                  'The endpoint is likely missing on the Hermes backend.'
+                  'The endpoint is likely missing on the Xiaoban backend.'
               )
             )
             return
@@ -2998,7 +2998,7 @@ function fetchPublicJson(url, options = {}) {
 
     req.on('error', reject)
     req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
+      req.destroy(new Error(`Timed out connecting to Xiaoban backend after ${timeoutMs}ms`))
     })
     if (body) req.write(body)
     req.end()
@@ -3153,7 +3153,7 @@ function fetchHtmlTitleWithCurl(rawUrl) {
 
 function getLinkTitleSession() {
   if (linkTitleSession || !app.isReady()) return linkTitleSession
-  linkTitleSession = session.fromPartition('hermes:link-titles', { cache: false })
+  linkTitleSession = session.fromPartition('xiaoban:link-titles', { cache: false })
   linkTitleSession.webRequest.onBeforeRequest((details, callback) => {
     callback({ cancel: RENDER_TITLE_BLOCKED_RESOURCES.has(details.resourceType) })
   })
@@ -3355,7 +3355,7 @@ function expandUserPath(filePath) {
 
 async function previewFileTarget(rawTarget, baseDir) {
   const raw = String(rawTarget || '').trim()
-  const base = baseDir ? path.resolve(expandUserPath(baseDir)) : resolveHermesCwd()
+  const base = baseDir ? path.resolve(expandUserPath(baseDir)) : resolveXiaobanCwd()
   let resolved = resolveRequestedPathForIpc(/^file:/i.test(raw) ? raw : expandUserPath(raw), {
     baseDir: base,
     purpose: 'Preview target'
@@ -3444,7 +3444,7 @@ function sendPreviewFileChanged(payload) {
   if (!mainWindow || mainWindow.isDestroyed()) return
   const { webContents } = mainWindow
   if (!webContents || webContents.isDestroyed()) return
-  webContents.send('hermes:preview-file-changed', payload)
+  webContents.send('xiaoban:preview-file-changed', payload)
 }
 
 async function watchPreviewFile(rawUrl) {
@@ -3497,7 +3497,7 @@ function closePreviewWatchers() {
   }
 }
 
-async function waitForHermes(baseUrl, token) {
+async function waitForXiaoban(baseUrl, token) {
   const deadline = Date.now() + 45_000
   let lastError = null
 
@@ -3511,7 +3511,7 @@ async function waitForHermes(baseUrl, token) {
     }
   }
 
-  throw new Error(`Hermes backend did not become ready: ${lastError?.message || 'timeout'}`)
+  throw new Error(`Xiaoban backend did not become ready: ${lastError?.message || 'timeout'}`)
 }
 
 function getWindowButtonPosition() {
@@ -3539,24 +3539,24 @@ function sendBackendExit(payload) {
   if (!mainWindow || mainWindow.isDestroyed()) return
   const { webContents } = mainWindow
   if (!webContents || webContents.isDestroyed()) return
-  webContents.send('hermes:backend-exit', payload)
+  webContents.send('xiaoban:backend-exit', payload)
 }
 
 function sendClosePreviewRequested() {
   if (!mainWindow || mainWindow.isDestroyed()) return
   const { webContents } = mainWindow
   if (!webContents || webContents.isDestroyed()) return
-  webContents.send('hermes:close-preview-requested')
+  webContents.send('xiaoban:close-preview-requested')
 }
 
 // Tell the renderer the machine just woke. Sleep silently drops the
 // renderer's WebSocket to the local backend; the renderer reconnects on this
-// signal so the chat composer doesn't stay stuck on "Starting Hermes...".
+// signal so the chat composer doesn't stay stuck on "Starting Xiaoban...".
 function sendPowerResume() {
   if (!mainWindow || mainWindow.isDestroyed()) return
   const { webContents } = mainWindow
   if (!webContents || webContents.isDestroyed()) return
-  webContents.send('hermes:power-resume')
+  webContents.send('xiaoban:power-resume')
 }
 
 let powerResumeRegistered = false
@@ -3583,7 +3583,7 @@ function sendOpenUpdatesRequested() {
   if (!mainWindow || mainWindow.isDestroyed()) return
   const { webContents } = mainWindow
   if (!webContents || webContents.isDestroyed()) return
-  webContents.send('hermes:open-updates')
+  webContents.send('xiaoban:open-updates')
   if (!mainWindow.isVisible()) mainWindow.show()
   mainWindow.focus()
 }
@@ -3598,7 +3598,7 @@ function sendWindowStateChanged(nextIsFullscreen) {
     state.isFullscreen = nextIsFullscreen
   }
 
-  webContents.send('hermes:window-state-changed', state)
+  webContents.send('xiaoban:window-state-changed', state)
 }
 
 function buildApplicationMenu() {
@@ -3750,7 +3750,7 @@ function installPreviewShortcut(window) {
 // survives reloads/restarts) rather than a main-process JSON file. The main
 // process owns setZoomLevel, so we mirror each change into localStorage and
 // read it back on did-finish-load to re-apply after reloads or crash recovery.
-const ZOOM_STORAGE_KEY = 'hermes:desktop:zoomLevel'
+const ZOOM_STORAGE_KEY = 'xiaoban:desktop:zoomLevel'
 
 function clampZoomLevel(value) {
   if (!Number.isFinite(value)) return 0
@@ -3957,11 +3957,11 @@ function installMediaPermissions() {
 // ---------------------------------------------------------------------------
 // OAuth remote-gateway auth.
 //
-// Hosted Hermes gateways gate the dashboard behind an OAuth provider (e.g.
+// Hosted Xiaoban gateways gate the dashboard behind an OAuth provider (e.g.
 // Nous Research) instead of a static session token. The auth model is
 // fundamentally different from the token path:
 //
-//   * REST is authed by HttpOnly session cookies (``hermes_session_at``),
+//   * REST is authed by HttpOnly session cookies (``xiaoban_session_at``),
 //     established by a browser redirect round-trip (/login → IDP →
 //     /auth/callback sets cookies). We cannot read the HttpOnly cookie value
 //     in JS — instead we let an Electron BrowserWindow complete the round
@@ -3972,9 +3972,9 @@ function installMediaPermissions() {
 //     ``POST /api/auth/ws-ticket`` (cookie-authed). The legacy ``?token=``
 //     path is unconditionally rejected by gated gateways.
 //   * Nous Portal now issues a 24h ROTATING, reuse-detected refresh token
-//     alongside the ~15-min access token (Portal NAS #293 / hermes #37247).
-//     Both are set as HttpOnly cookies (``hermes_session_at`` ~15 min,
-//     ``hermes_session_rt`` 24h). When the AT cookie lapses but the RT cookie
+//     alongside the ~15-min access token (Portal NAS #293 / xiaoban #37247).
+//     Both are set as HttpOnly cookies (``xiaoban_session_at`` ~15 min,
+//     ``xiaoban_session_rt`` 24h). When the AT cookie lapses but the RT cookie
 //     is still alive, the gateway middleware transparently rotates a fresh AT
 //     on the next authenticated request — so connectivity must NOT be gated on
 //     the AT cookie alone. We probe liveness by actually minting a ws-ticket
@@ -3983,7 +3983,7 @@ function installMediaPermissions() {
 //     "is the user signed in at all?" gate / display signal.
 // ---------------------------------------------------------------------------
 
-const OAUTH_SESSION_PARTITION = 'persist:hermes-remote-oauth'
+const OAUTH_SESSION_PARTITION = 'persist:xiaoban-remote-oauth'
 
 function getOauthSession() {
   if (oauthSession || !app.isReady()) return oauthSession
@@ -4098,7 +4098,7 @@ function openOauthLoginWindow(baseUrl) {
       win = new BrowserWindow({
         width: 520,
         height: 720,
-        title: 'Sign in to Hermes gateway',
+        title: 'Sign in to Xiaoban gateway',
         autoHideMenuBar: true,
         webPreferences: {
           contextIsolation: true,
@@ -4153,7 +4153,7 @@ function fetchJsonViaOauthSession(url, options = {}) {
       return
     }
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
+      reject(new Error(`Unsupported Xiaoban backend URL protocol: ${parsed.protocol}`))
       return
     }
     const body = serializeJsonBody(options.body)
@@ -4176,7 +4176,7 @@ function fetchJsonViaOauthSession(url, options = {}) {
       } catch {
         // already finished
       }
-      reject(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
+      reject(new Error(`Timed out connecting to Xiaoban backend after ${timeoutMs}ms`))
     }, timeoutMs)
 
     request.on('response', res => {
@@ -4369,7 +4369,7 @@ function writeDesktopConnectionConfig(config) {
 }
 
 // Returns the desktop's chosen profile name, or null when unset. "default" is
-// a valid stored value (pins the root HERMES_HOME explicitly); null means "no
+// a valid stored value (pins the root XIAOBAN_HOME explicitly); null means "no
 // preference" and preserves the legacy launch (no --profile flag).
 function readActiveDesktopProfile() {
   try {
@@ -4409,11 +4409,11 @@ async function sanitizeDesktopConnectionConfig(config = readDesktopConnectionCon
   const scoped = key ? config.profiles?.[key] || null : null
   const block = key ? scoped || {} : config.remote || {}
 
-  const envOverride = key ? false : Boolean(process.env.HERMES_DESKTOP_REMOTE_URL)
+  const envOverride = key ? false : Boolean(process.env.XIAOBAN_DESKTOP_REMOTE_URL)
 
   const remoteToken = decryptDesktopSecret(block.token)
   const authMode = normAuthMode(block.authMode)
-  const remoteUrl = envOverride ? String(process.env.HERMES_DESKTOP_REMOTE_URL || '') : String(block.url || '')
+  const remoteUrl = envOverride ? String(process.env.XIAOBAN_DESKTOP_REMOTE_URL || '') : String(block.url || '')
   const mode = envOverride || (key ? scoped?.mode : config.mode) === 'remote' ? 'remote' : 'local'
 
   let remoteOauthConnected = false
@@ -4439,7 +4439,7 @@ async function sanitizeDesktopConnectionConfig(config = readDesktopConnectionCon
     remoteTokenPreview: tokenPreview(remoteToken),
     remoteTokenSet: Boolean(remoteToken),
     // The env override only forces the global/primary connection; a per-profile
-    // scope is never overridden by HERMES_DESKTOP_REMOTE_URL.
+    // scope is never overridden by XIAOBAN_DESKTOP_REMOTE_URL.
     envOverride
   }
 }
@@ -4503,7 +4503,7 @@ async function buildRemoteConnection(rawUrl, authMode, token, source) {
   if (authMode === 'oauth') {
     // OAuth gateway: auth comes from the session cookies in the OAuth
     // partition. Liveness is NOT "is the access-token cookie present?" —
-    // Portal issues a 24h rotating refresh token (hermes #37247), and the
+    // Portal issues a 24h rotating refresh token (xiaoban #37247), and the
     // gateway middleware transparently rotates a fresh ~15-min access token
     // from it on the next authenticated request. So a session with an expired
     // AT cookie but a live RT cookie is still perfectly connectable. We
@@ -4511,7 +4511,7 @@ async function buildRemoteConnection(rawUrl, authMode, token, source) {
     // the authoritative liveness check.
     if (!(await hasLiveOauthSession(baseUrl))) {
       const err = new Error(
-        'Remote Hermes gateway uses OAuth, but you are not signed in. ' +
+        'Remote Xiaoban gateway uses OAuth, but you are not signed in. ' +
           'Open Settings → Gateway and click "Sign in", or switch back to Local.'
       )
       err.needsOauthLogin = true
@@ -4543,7 +4543,7 @@ async function buildRemoteConnection(rawUrl, authMode, token, source) {
 
   if (!token) {
     throw new Error(
-      'Remote Hermes gateway is selected, but no session token is saved. ' +
+      'Remote Xiaoban gateway is selected, but no session token is saved. ' +
         'Open Settings → Gateway and save a token, or switch back to Local.'
     )
   }
@@ -4561,7 +4561,7 @@ async function buildRemoteConnection(rawUrl, authMode, token, source) {
 // Resolve the remote backend for a given profile, or null when that profile
 // should run a LOCAL backend. Precedence:
 //   1. explicit per-profile remote override (connection.json `profiles[name]`)
-//   2. env override (HERMES_DESKTOP_REMOTE_URL/_TOKEN) — applies app-wide
+//   2. env override (XIAOBAN_DESKTOP_REMOTE_URL/_TOKEN) — applies app-wide
 //   3. global remote (connection.json `mode: 'remote'`)
 // A null/empty profile resolves the env/global remote, so legacy callers and
 // the connection test (which pass no profile) are unchanged.
@@ -4578,13 +4578,13 @@ async function resolveRemoteBackend(profile) {
   }
 
   // 2. Env override (global, token-auth only).
-  const rawEnvUrl = process.env.HERMES_DESKTOP_REMOTE_URL
-  const rawEnvToken = process.env.HERMES_DESKTOP_REMOTE_TOKEN
+  const rawEnvUrl = process.env.XIAOBAN_DESKTOP_REMOTE_URL
+  const rawEnvToken = process.env.XIAOBAN_DESKTOP_REMOTE_TOKEN
   if (rawEnvUrl) {
     if (!rawEnvToken) {
       throw new Error(
-        'HERMES_DESKTOP_REMOTE_URL is set but HERMES_DESKTOP_REMOTE_TOKEN is not. ' +
-          'Both must be provided to connect to a remote Hermes backend.'
+        'XIAOBAN_DESKTOP_REMOTE_URL is set but XIAOBAN_DESKTOP_REMOTE_TOKEN is not. ' +
+          'Both must be provided to connect to a remote Xiaoban backend.'
       )
     }
     return buildRemoteConnection(rawEnvUrl, 'token', rawEnvToken, 'env')
@@ -4616,7 +4616,7 @@ function configuredRemoteProfileNames() {
 // Remote, or the env override): a SINGLE remote backend serves every profile via
 // ?profile=. Distinct from per-profile overrides — here there's one host for all.
 function globalRemoteActive() {
-  if (process.env.HERMES_DESKTOP_REMOTE_URL) {
+  if (process.env.XIAOBAN_DESKTOP_REMOTE_URL) {
     return true
   }
   return readDesktopConnectionConfig().mode === 'remote'
@@ -4637,7 +4637,7 @@ async function requestJsonForProfile(profile, path, method, body) {
 
 async function probeRemoteAuthMode(rawUrl) {
   // Determine how a remote gateway expects callers to authenticate, WITHOUT
-  // sending any credentials. ``/api/status`` is public on every Hermes
+  // sending any credentials. ``/api/status`` is public on every Xiaoban
   // gateway (it backs the portal liveness probe) and reports:
   //   auth_required: true  → OAuth gate is engaged (cookie + ws-ticket auth)
   //   auth_required: false → loopback/--insecure: legacy session-token auth
@@ -4722,7 +4722,7 @@ async function testDesktopConnectionConfig(input = {}) {
       token = decryptDesktopSecret(block.token)
     }
   } else {
-    const remote = (await resolveRemoteBackend(key)) || (await startHermes())
+    const remote = (await resolveRemoteBackend(key)) || (await startXiaoban())
     baseUrl = remote.baseUrl
     token = remote.token
     authMode = normAuthMode(remote.authMode)
@@ -4734,7 +4734,7 @@ async function testDesktopConnectionConfig(input = {}) {
   // connects — a separate transport with separate server-side guards (Host/
   // Origin, ws-ticket/token auth). Validating only the HTTP side produced a
   // false-positive "reachable" while the real boot still failed with "Could not
-  // connect to Hermes gateway". Mirror the renderer's connect here so the test
+  // connect to Xiaoban gateway". Mirror the renderer's connect here so the test
   // reflects the full path the app actually uses.
   const wsUrl = await resolveTestWsUrl(baseUrl, authMode, token, { mintTicket: mintGatewayWsTicket })
   // Skip the WS leg only when the runtime genuinely lacks a WebSocket (so an
@@ -4770,25 +4770,25 @@ function resetBootProgressForReconnect() {
   )
 }
 
-function resetHermesConnection() {
+function resetXiaobanConnection() {
   connectionPromise = null
 
-  if (hermesProcess && !hermesProcess.killed) {
-    hermesProcess.kill('SIGTERM')
+  if (xiaobanProcess && !xiaobanProcess.killed) {
+    xiaobanProcess.kill('SIGTERM')
   }
 
-  hermesProcess = null
+  xiaobanProcess = null
   resetBootProgressForReconnect()
 }
 
 // Re-home the primary backend: reset connection state, then wait for the live
 // dashboard process to actually exit (SIGKILL after 5s) so the next
-// startHermes() spawns fresh instead of racing the dying one. Shared by the
+// startXiaoban() spawns fresh instead of racing the dying one. Shared by the
 // connection-config and profile switch flows.
 async function teardownPrimaryBackendAndWait() {
-  // Capture the reference before resetHermesConnection() nulls hermesProcess.
-  const dying = hermesProcess && !hermesProcess.killed ? hermesProcess : null
-  resetHermesConnection()
+  // Capture the reference before resetXiaobanConnection() nulls xiaobanProcess.
+  const dying = xiaobanProcess && !xiaobanProcess.killed ? xiaobanProcess : null
+  resetXiaobanConnection()
 
   await waitForBackendExit(dying)
 }
@@ -4829,14 +4829,14 @@ function primaryProfileKey() {
 }
 
 // Resolve a backend connection for the given profile. Routes the primary
-// profile to startHermes() (the window backend: boot UI, bootstrap, remote
+// profile to startXiaoban() (the window backend: boot UI, bootstrap, remote
 // mode), and any OTHER profile to a lazily-spawned pool backend. An empty /
 // unknown profile resolves to the primary, so all legacy callers are unchanged.
 async function ensureBackend(profile) {
   const key = profile && String(profile).trim() ? String(profile).trim() : primaryProfileKey()
 
   if (key === primaryProfileKey()) {
-    return startHermes()
+    return startXiaoban()
   }
 
   const existing = backendPool.get(key)
@@ -4905,7 +4905,7 @@ function startPoolIdleReaper() {
 }
 
 // Spawn an additional dashboard backend pinned to a named profile. Mirrors the
-// local-spawn portion of startHermes() but without the boot-progress UI,
+// local-spawn portion of startXiaoban() but without the boot-progress UI,
 // bootstrap, or remote handling (those belong to the primary backend only).
 async function spawnPoolBackend(profile, entry) {
   // A profile may point at its OWN remote backend (connection.json
@@ -4916,44 +4916,44 @@ async function spawnPoolBackend(profile, entry) {
   // tolerate.
   const remote = await resolveRemoteBackend(profile)
   if (remote) {
-    await waitForHermes(remote.baseUrl, remote.token)
+    await waitForXiaoban(remote.baseUrl, remote.token)
     return {
       ...remote,
       profile,
-      logs: hermesLog.slice(-80),
+      logs: xiaobanLog.slice(-80),
       ...getWindowState()
     }
   }
 
   const token = crypto.randomBytes(32).toString('base64url')
-  // --profile wins over the inherited HERMES_HOME env (see _apply_profile_override
-  // step 3 in hermes_cli/main.py), so the child re-homes to this profile.
+  // --profile wins over the inherited XIAOBAN_HOME env (see _apply_profile_override
+  // step 3 in xiaoban_cli/main.py), so the child re-homes to this profile.
   // --port 0: the OS assigns an ephemeral port; the child announces it on stdout.
   const dashboardArgs = ['--profile', profile, 'dashboard', '--no-open', '--host', '127.0.0.1', '--port', '0']
-  const backend = await ensureRuntime(resolveHermesBackend(dashboardArgs))
-  const hermesCwd = resolveHermesCwd()
+  const backend = await ensureRuntime(resolveXiaobanBackend(dashboardArgs))
+  const xiaobanCwd = resolveXiaobanCwd()
   const webDist = resolveWebDist()
 
-  rememberLog(`Starting Hermes backend for profile "${profile}" via ${backend.label}`)
+  rememberLog(`Starting Xiaoban backend for profile "${profile}" via ${backend.label}`)
 
   const child = spawn(
     backend.command,
     backend.args,
     hiddenWindowsChildOptions({
-      cwd: hermesCwd,
+      cwd: xiaobanCwd,
       env: {
         ...process.env,
-        HERMES_HOME,
+        XIAOBAN_HOME,
         ...backend.env,
         // Pin the gateway's tool/terminal cwd to the same directory we chose for
         // the child process. Inherited TERMINAL_CWD (or a stale config bridge)
         // can still point at the install dir even when spawn cwd is home.
-        TERMINAL_CWD: hermesCwd,
-        HERMES_DASHBOARD_SESSION_TOKEN: token,
+        TERMINAL_CWD: xiaobanCwd,
+        XIAOBAN_DASHBOARD_SESSION_TOKEN: token,
         // Marks this dashboard backend as desktop-spawned so it runs the cron
         // scheduler tick loop (the gateway isn't running under the app).
-        HERMES_DESKTOP: '1',
-        HERMES_WEB_DIST: webDist
+        XIAOBAN_DESKTOP: '1',
+        XIAOBAN_WEB_DIST: webDist
       },
       shell: backend.shell,
       stdio: ['ignore', 'pipe', 'pipe']
@@ -4971,16 +4971,16 @@ async function spawnPoolBackend(profile, entry) {
     rejectStart = reject
   })
   child.once('error', error => {
-    rememberLog(`Hermes backend for profile "${profile}" failed to start: ${error.message}`)
+    rememberLog(`Xiaoban backend for profile "${profile}" failed to start: ${error.message}`)
     backendPool.delete(profile)
     rejectStart?.(error)
   })
   child.once('exit', (code, signal) => {
-    rememberLog(`Hermes backend for profile "${profile}" exited (${signal || code})`)
+    rememberLog(`Xiaoban backend for profile "${profile}" exited (${signal || code})`)
     backendPool.delete(profile)
     if (!ready) {
       rejectStart?.(
-        new Error(`Hermes backend for profile "${profile}" exited before it became ready (${signal || code}).`)
+        new Error(`Xiaoban backend for profile "${profile}" exited before it became ready (${signal || code}).`)
       )
     }
   })
@@ -4990,11 +4990,11 @@ async function spawnPoolBackend(profile, entry) {
   entry.port = port
 
   const baseUrl = `http://127.0.0.1:${port}`
-  await Promise.race([waitForHermes(baseUrl, token), startFailed])
+  await Promise.race([waitForXiaoban(baseUrl, token), startFailed])
   ready = true
   const authToken = await adoptServedDashboardToken(baseUrl, token, {
     childAlive: () => child.exitCode === null && !child.killed,
-    label: `Hermes backend for profile "${profile}"`,
+    label: `Xiaoban backend for profile "${profile}"`,
     rememberLog
   })
   entry.token = authToken
@@ -5007,7 +5007,7 @@ async function spawnPoolBackend(profile, entry) {
     token: authToken,
     profile,
     wsUrl: `ws://127.0.0.1:${port}/api/ws?token=${encodeURIComponent(authToken)}`,
-    logs: hermesLog.slice(-80),
+    logs: xiaobanLog.slice(-80),
     ...getWindowState()
   }
 }
@@ -5089,9 +5089,9 @@ async function prepareProfileDeleteRequest(request) {
   await teardownPoolBackendAndWait(profile)
 }
 
-async function startHermes() {
+async function startXiaoban() {
   // Latched-failure short-circuit: once bootstrap has failed in this
-  // process, every subsequent startHermes() call re-throws the same error
+  // process, every subsequent startXiaoban() call re-throws the same error
   // without re-running install.ps1. This prevents the renderer's
   // ensureGatewayOpen retries (and any other getConnection callers) from
   // restarting a 5-10 minute install loop while the user is still reading
@@ -5102,16 +5102,16 @@ async function startHermes() {
   if (connectionPromise) return connectionPromise
 
   connectionPromise = (async () => {
-    await advanceBootProgress('backend.resolve', 'Resolving Hermes backend', 8)
+    await advanceBootProgress('backend.resolve', 'Resolving Xiaoban backend', 8)
     // Resolve for the desktop's primary profile so a per-profile remote
     // override on the active profile is honored (falls back to env / global).
     const remote = await resolveRemoteBackend(primaryProfileKey())
     if (remote) {
-      await advanceBootProgress('backend.remote', `Connecting to remote Hermes backend at ${remote.baseUrl}`, 24)
-      await waitForHermes(remote.baseUrl, remote.token)
+      await advanceBootProgress('backend.remote', `Connecting to remote Xiaoban backend at ${remote.baseUrl}`, 24)
+      await waitForXiaoban(remote.baseUrl, remote.token)
       updateBootProgress({
         phase: 'backend.ready',
-        message: 'Remote Hermes backend is ready',
+        message: 'Remote Xiaoban backend is ready',
         progress: 94,
         running: true,
         error: null
@@ -5123,7 +5123,7 @@ async function startHermes() {
         authMode: remote.authMode || 'token',
         token: remote.token,
         wsUrl: remote.wsUrl,
-        logs: hermesLog.slice(-80),
+        logs: xiaobanLog.slice(-80),
         ...getWindowState()
       }
     }
@@ -5140,81 +5140,81 @@ async function startHermes() {
     // --port 0: the OS assigns an ephemeral port; the child announces it on stdout.
     const dashboardArgs = ['dashboard', '--no-open', '--host', '127.0.0.1', '--port', '0']
     // Pin the desktop's chosen profile via the global --profile flag. This is
-    // deterministic (it wins over the sticky ~/.hermes/active_profile file) and
-    // resolves HERMES_HOME the same way `hermes -p <name>` does on the CLI. An
+    // deterministic (it wins over the sticky ~/.xiaoban/active_profile file) and
+    // resolves XIAOBAN_HOME the same way `xiaoban -p <name>` does on the CLI. An
     // unset preference keeps the legacy launch so existing installs are
     // unaffected.
     const activeProfile = readActiveDesktopProfile()
     if (activeProfile) {
       dashboardArgs.unshift('--profile', activeProfile)
     }
-    await advanceBootProgress('backend.runtime', 'Resolving Hermes runtime', 28)
-    const backend = await ensureRuntime(resolveHermesBackend(dashboardArgs))
-    const hermesCwd = resolveHermesCwd()
+    await advanceBootProgress('backend.runtime', 'Resolving Xiaoban runtime', 28)
+    const backend = await ensureRuntime(resolveXiaobanBackend(dashboardArgs))
+    const xiaobanCwd = resolveXiaobanCwd()
     const webDist = resolveWebDist()
 
-    await advanceBootProgress('backend.spawn', `Starting Hermes backend via ${backend.label}`, 84)
-    rememberLog(`Starting Hermes backend via ${backend.label}`)
+    await advanceBootProgress('backend.spawn', `Starting Xiaoban backend via ${backend.label}`, 84)
+    rememberLog(`Starting Xiaoban backend via ${backend.label}`)
 
-    hermesProcess = spawn(
+    xiaobanProcess = spawn(
       backend.command,
       backend.args,
       hiddenWindowsChildOptions({
-        cwd: hermesCwd,
+        cwd: xiaobanCwd,
         env: {
           ...process.env,
-          // Explicitly pin HERMES_HOME for the child so Python's get_hermes_home()
-          // resolves to the SAME location our resolveHermesHome() picked. Without
-          // this pin, Python falls back to ~/.hermes on every platform — fine on
+          // Explicitly pin XIAOBAN_HOME for the child so Python's get_xiaoban_home()
+          // resolves to the SAME location our resolveXiaobanHome() picked. Without
+          // this pin, Python falls back to ~/.xiaoban on every platform — fine on
           // mac/linux (where our default matches), but on Windows our default is
-          // %LOCALAPPDATA%\hermes, which differs from C:\Users\<u>\.hermes.
+          // %LOCALAPPDATA%\xiaoban, which differs from C:\Users\<u>\.xiaoban.
           // Mismatch would split config / sessions / .env / logs across two
-          // directories. install.ps1 sets HERMES_HOME via setx; the desktop
+          // directories. install.ps1 sets XIAOBAN_HOME via setx; the desktop
           // can't reliably do that, so we set it inline for every spawn.
-          HERMES_HOME,
+          XIAOBAN_HOME,
           ...backend.env,
-          TERMINAL_CWD: hermesCwd,
-          HERMES_DASHBOARD_SESSION_TOKEN: token,
+          TERMINAL_CWD: xiaobanCwd,
+          XIAOBAN_DASHBOARD_SESSION_TOKEN: token,
           // Marks this dashboard backend as desktop-spawned so it runs the cron
           // scheduler tick loop (the gateway isn't running under the app).
-          HERMES_DESKTOP: '1',
-          HERMES_WEB_DIST: webDist
+          XIAOBAN_DESKTOP: '1',
+          XIAOBAN_WEB_DIST: webDist
         },
         shell: backend.shell,
         stdio: ['ignore', 'pipe', 'pipe']
       })
     )
 
-    hermesProcess.stdout.on('data', rememberLog)
-    hermesProcess.stderr.on('data', rememberLog)
+    xiaobanProcess.stdout.on('data', rememberLog)
+    xiaobanProcess.stderr.on('data', rememberLog)
     let backendReady = false
     let rejectBackendStart = null
     const backendStartFailed = new Promise((_resolve, reject) => {
       rejectBackendStart = reject
     })
-    hermesProcess.once('error', error => {
-      rememberLog(`Hermes backend failed to start: ${error.message}`)
+    xiaobanProcess.once('error', error => {
+      rememberLog(`Xiaoban backend failed to start: ${error.message}`)
       updateBootProgress(
         {
           error: error.message,
-          message: `Hermes backend failed to start: ${error.message}`,
+          message: `Xiaoban backend failed to start: ${error.message}`,
           phase: 'backend.error',
           running: false
         },
         { allowDecrease: true }
       )
-      hermesProcess = null
+      xiaobanProcess = null
       connectionPromise = null
       sendBackendExit({ code: null, signal: null, error: error.message })
       rejectBackendStart?.(error)
     })
-    hermesProcess.once('exit', (code, signal) => {
-      rememberLog(`Hermes backend exited (${signal || code})`)
-      hermesProcess = null
+    xiaobanProcess.once('exit', (code, signal) => {
+      rememberLog(`Xiaoban backend exited (${signal || code})`)
+      xiaobanProcess = null
       connectionPromise = null
       sendBackendExit({ code, signal })
       if (!backendReady) {
-        const message = `Hermes backend exited before it became ready (${signal || code}).`
+        const message = `Xiaoban backend exited before it became ready (${signal || code}).`
         updateBootProgress(
           {
             error: message,
@@ -5226,28 +5226,28 @@ async function startHermes() {
         )
         rejectBackendStart?.(
           new Error(
-            `Hermes backend exited before it became ready (${signal || code}). Log: ${DESKTOP_LOG_PATH}\n${recentHermesLog()}`
+            `Xiaoban backend exited before it became ready (${signal || code}). Log: ${DESKTOP_LOG_PATH}\n${recentXiaobanLog()}`
           )
         )
       }
     })
 
-    await advanceBootProgress('backend.port', 'Waiting for Hermes backend to launch', 86)
+    await advanceBootProgress('backend.port', 'Waiting for Xiaoban backend to launch', 86)
     // Discover the ephemeral port the child bound to
-    const port = await Promise.race([waitForDashboardPort(hermesProcess), backendStartFailed])
+    const port = await Promise.race([waitForDashboardPort(xiaobanProcess), backendStartFailed])
 
     const baseUrl = `http://127.0.0.1:${port}`
-    await advanceBootProgress('backend.wait', 'Waiting for Hermes backend to become ready', 90)
-    await Promise.race([waitForHermes(baseUrl, token), backendStartFailed])
+    await advanceBootProgress('backend.wait', 'Waiting for Xiaoban backend to become ready', 90)
+    await Promise.race([waitForXiaoban(baseUrl, token), backendStartFailed])
     backendReady = true
     const authToken = await adoptServedDashboardToken(baseUrl, token, {
-      // The exit/error handlers null hermesProcess when the child dies.
-      childAlive: () => hermesProcess !== null && hermesProcess.exitCode === null && !hermesProcess.killed,
+      // The exit/error handlers null xiaobanProcess when the child dies.
+      childAlive: () => xiaobanProcess !== null && xiaobanProcess.exitCode === null && !xiaobanProcess.killed,
       rememberLog
     })
     updateBootProgress({
       phase: 'backend.ready',
-      message: 'Hermes backend is ready. Finalizing desktop startup',
+      message: 'Xiaoban backend is ready. Finalizing desktop startup',
       progress: 94,
       running: true,
       error: null
@@ -5260,7 +5260,7 @@ async function startHermes() {
       authMode: 'token',
       token: authToken,
       wsUrl: `ws://127.0.0.1:${port}/api/ws?token=${encodeURIComponent(authToken)}`,
-      logs: hermesLog.slice(-80),
+      logs: xiaobanLog.slice(-80),
       ...getWindowState()
     }
   })().catch(error => {
@@ -5328,7 +5328,7 @@ function spawnSecondaryWindow({ sessionId, watch, newSession } = {}) {
     height: SESSION_WINDOW_MIN_HEIGHT,
     minWidth: SESSION_WINDOW_MIN_WIDTH,
     minHeight: SESSION_WINDOW_MIN_HEIGHT,
-    title: 'Hermes',
+    title: 'Xiaoban',
     titleBarStyle: 'hidden',
     titleBarOverlay: getTitleBarOverlayOptions(),
     trafficLightPosition: IS_MAC ? WINDOW_BUTTON_POSITION : undefined,
@@ -5392,7 +5392,7 @@ function createWindow() {
     height: 800,
     minWidth: 400,
     minHeight: 620,
-    title: 'Hermes',
+    title: 'Xiaoban',
     // Frameless title bar on every platform so the renderer can paint the
     // "hide sidebar" button (and other left-side titlebar tools) flush with
     // the top edge — matching the macOS layout where the traffic lights sit
@@ -5499,20 +5499,20 @@ function createWindow() {
     restorePersistedZoomLevel(mainWindow)
     broadcastBootProgress()
     sendWindowStateChanged()
-    startHermes().catch(error => rememberLog(error.stack || error.message))
+    startXiaoban().catch(error => rememberLog(error.stack || error.message))
   })
 }
 
-ipcMain.handle('hermes:connection', async (_event, profile) => ensureBackend(profile))
+ipcMain.handle('xiaoban:connection', async (_event, profile) => ensureBackend(profile))
 // Reconnect-after-wake recovery. A REMOTE primary backend has no child process,
 // so the 'exit'/'error' handlers that would clear a dead connectionPromise never
 // fire — once the remote becomes unreachable across a sleep/wake the renderer
 // re-dials the same dead descriptor forever and the composer stays stuck on
-// "Starting Hermes…". Before the renderer's backoff loop reconnects, it asks us
+// "Starting Xiaoban…". Before the renderer's backoff loop reconnects, it asks us
 // to confirm the cached PRIMARY backend is still reachable; if a remote one is
 // not, we drop the cache so the next getConnection() rebuilds it. Local backends
 // self-heal via their child 'exit' handler, so we never touch them here.
-ipcMain.handle('hermes:connection:revalidate', async () => {
+ipcMain.handle('xiaoban:connection:revalidate', async () => {
   if (!connectionPromise) {
     return { ok: true, rebuilt: false }
   }
@@ -5536,19 +5536,19 @@ ipcMain.handle('hermes:connection:revalidate', async () => {
     return { ok: true, rebuilt: false }
   } catch {
     // Unreachable remote: drop the stale cache so the renderer's next reconnect
-    // tick rebuilds a fresh, reachable descriptor. resetHermesConnection only
+    // tick rebuilds a fresh, reachable descriptor. resetXiaobanConnection only
     // nulls connectionPromise for a remote (no child to SIGTERM).
-    rememberLog('Cached remote Hermes backend failed liveness probe; dropping stale connection.')
-    resetHermesConnection()
+    rememberLog('Cached remote Xiaoban backend failed liveness probe; dropping stale connection.')
+    resetXiaobanConnection()
     return { ok: true, rebuilt: true }
   }
 })
-ipcMain.handle('hermes:backend:touch', async (_event, profile) => {
+ipcMain.handle('xiaoban:backend:touch', async (_event, profile) => {
   touchPoolBackend(profile)
   return { ok: true }
 })
-ipcMain.handle('hermes:gateway:ws-url', async (_event, profile) => freshGatewayWsUrl(profile))
-ipcMain.handle('hermes:window:openSession', async (_event, sessionId, opts) => {
+ipcMain.handle('xiaoban:gateway:ws-url', async (_event, profile) => freshGatewayWsUrl(profile))
+ipcMain.handle('xiaoban:window:openSession', async (_event, sessionId, opts) => {
   if (typeof sessionId !== 'string' || !sessionId.trim()) {
     return { ok: false, error: 'invalid-session-id' }
   }
@@ -5557,14 +5557,14 @@ ipcMain.handle('hermes:window:openSession', async (_event, sessionId, opts) => {
 
   return { ok: true }
 })
-ipcMain.handle('hermes:window:openNewSession', async () => {
+ipcMain.handle('xiaoban:window:openNewSession', async () => {
   createNewSessionWindow()
 
   return { ok: true }
 })
-ipcMain.handle('hermes:bootstrap:reset', async () => {
+ipcMain.handle('xiaoban:bootstrap:reset', async () => {
   // Renderer's "Reload and retry" path. Clear the latched failure and
-  // reset connection state so the next startHermes() call restarts the
+  // reset connection state so the next startXiaoban() call restarts the
   // full backend flow (including a fresh runBootstrap pass).
   rememberLog('[bootstrap] reset requested by renderer; clearing latched failure')
   await teardownPrimaryBackendAndWait()
@@ -5581,9 +5581,9 @@ ipcMain.handle('hermes:bootstrap:reset', async () => {
   }
   return { ok: true }
 })
-ipcMain.handle('hermes:bootstrap:repair', async () => {
+ipcMain.handle('xiaoban:bootstrap:repair', async () => {
   // Forceful repair: drop the bootstrap-complete marker so the next
-  // startHermes() re-runs the full installer (refreshing a broken/partial
+  // startXiaoban() re-runs the full installer (refreshing a broken/partial
   // venv), and clear any latched failure + live connection. The renderer
   // reloads afterwards to re-drive the boot flow from scratch.
   rememberLog('[bootstrap] repair requested by renderer; clearing marker + latched failure')
@@ -5595,10 +5595,10 @@ ipcMain.handle('hermes:bootstrap:repair', async () => {
     rememberLog(`[bootstrap] failed to remove marker during repair: ${error.message}`)
   }
   bootstrapFailure = null
-  resetHermesConnection()
+  resetXiaobanConnection()
   return { ok: true }
 })
-ipcMain.handle('hermes:bootstrap:cancel', async () => {
+ipcMain.handle('xiaoban:bootstrap:cancel', async () => {
   // Renderer's Cancel button during first-launch install. Abort the running
   // install script (SIGTERM via the runner's abortSignal). runBootstrap
   // resolves with { cancelled: true }, which surfaces the recovery overlay.
@@ -5612,14 +5612,14 @@ ipcMain.handle('hermes:bootstrap:cancel', async () => {
   }
   return { ok: false, cancelled: false }
 })
-ipcMain.handle('hermes:boot-progress:get', async () => bootProgressState)
-ipcMain.handle('hermes:bootstrap:get', async () => getBootstrapState())
-ipcMain.handle('hermes:connection-config:get', async (_event, profile) =>
+ipcMain.handle('xiaoban:boot-progress:get', async () => bootProgressState)
+ipcMain.handle('xiaoban:bootstrap:get', async () => getBootstrapState())
+ipcMain.handle('xiaoban:connection-config:get', async (_event, profile) =>
   sanitizeDesktopConnectionConfig(readDesktopConnectionConfig(), profile)
 )
-ipcMain.handle('hermes:connection-config:test', async (_event, payload) => testDesktopConnectionConfig(payload))
-ipcMain.handle('hermes:connection-config:probe', async (_event, rawUrl) => probeRemoteAuthMode(rawUrl))
-ipcMain.handle('hermes:connection-config:oauth-login', async (_event, rawUrl) => {
+ipcMain.handle('xiaoban:connection-config:test', async (_event, payload) => testDesktopConnectionConfig(payload))
+ipcMain.handle('xiaoban:connection-config:probe', async (_event, rawUrl) => probeRemoteAuthMode(rawUrl))
+ipcMain.handle('xiaoban:connection-config:oauth-login', async (_event, rawUrl) => {
   // Open the gateway's OAuth login window and wait for the session cookie to
   // land in the OAuth partition. The caller (settings UI) typically saves the
   // remote config with authMode='oauth' first, then calls this. We normalize
@@ -5628,7 +5628,7 @@ ipcMain.handle('hermes:connection-config:oauth-login', async (_event, rawUrl) =>
   await openOauthLoginWindow(baseUrl)
   return { ok: true, baseUrl, connected: await hasOauthSessionCookie(baseUrl) }
 })
-ipcMain.handle('hermes:connection-config:oauth-logout', async (_event, rawUrl) => {
+ipcMain.handle('xiaoban:connection-config:oauth-logout', async (_event, rawUrl) => {
   const baseUrl = rawUrl ? normalizeRemoteBaseUrl(rawUrl) : ''
   await clearOauthSession(baseUrl || undefined)
   // Report against the SAME liveness notion the Settings indicator uses
@@ -5636,13 +5636,13 @@ ipcMain.handle('hermes:connection-config:oauth-logout', async (_event, rawUrl) =
   // as still-connected rather than silently signed-out.
   return { ok: true, connected: baseUrl ? await hasLiveOauthSession(baseUrl) : false }
 })
-ipcMain.handle('hermes:connection-config:save', async (_event, payload) => {
+ipcMain.handle('xiaoban:connection-config:save', async (_event, payload) => {
   const config = coerceDesktopConnectionConfig(payload)
   writeDesktopConnectionConfig(config)
 
   return sanitizeDesktopConnectionConfig(config, payload?.profile)
 })
-ipcMain.handle('hermes:connection-config:apply', async (_event, payload) => {
+ipcMain.handle('xiaoban:connection-config:apply', async (_event, payload) => {
   const config = coerceDesktopConnectionConfig(payload)
   writeDesktopConnectionConfig(config)
 
@@ -5663,12 +5663,12 @@ ipcMain.handle('hermes:connection-config:apply', async (_event, payload) => {
   return sanitizeDesktopConnectionConfig(config, payload?.profile)
 })
 
-ipcMain.handle('hermes:profile:get', async () => ({ profile: readActiveDesktopProfile() }))
-ipcMain.handle('hermes:profile:set', async (_event, name) => {
+ipcMain.handle('xiaoban:profile:get', async () => ({ profile: readActiveDesktopProfile() }))
+ipcMain.handle('xiaoban:profile:set', async (_event, name) => {
   const next = writeActiveDesktopProfile(name)
 
   // Switching profiles is a backend re-home: relaunch the dashboard under the
-  // new HERMES_HOME. Pool backends keep their own homes, so only the primary
+  // new XIAOBAN_HOME. Pool backends keep their own homes, so only the primary
   // is torn down.
   await teardownPrimaryBackendAndWait()
   mainWindow?.reload()
@@ -5676,11 +5676,11 @@ ipcMain.handle('hermes:profile:set', async (_event, name) => {
   return { profile: next }
 })
 
-ipcMain.on('hermes:previewShortcutActive', (_event, active) => {
+ipcMain.on('xiaoban:previewShortcutActive', (_event, active) => {
   previewShortcutActive = Boolean(active)
 })
 
-ipcMain.handle('hermes:requestMicrophoneAccess', async () => {
+ipcMain.handle('xiaoban:requestMicrophoneAccess', async () => {
   if (!IS_MAC || typeof systemPreferences.askForMediaAccess !== 'function') {
     return true
   }
@@ -5819,7 +5819,7 @@ async function mergeRemoteProfileSessions(searchParams, remoteProfiles) {
   return { ...base, sessions: merged.slice(offset, offset + limit), total, profile_totals: profileTotals }
 }
 
-ipcMain.handle('hermes:api', async (_event, request) => {
+ipcMain.handle('xiaoban:api', async (_event, request) => {
   // Remote-profile session requests would otherwise hit the local primary off
   // each profile's on-disk state.db — fine for local profiles, but a remote
   // profile's sessions live on its remote host, so the UI's IDs 404 (or mutations
@@ -5857,13 +5857,13 @@ ipcMain.handle('hermes:api', async (_event, request) => {
   })
 })
 
-ipcMain.handle('hermes:notify', (_event, payload) => {
+ipcMain.handle('xiaoban:notify', (_event, payload) => {
   if (!Notification.isSupported()) return false
   // Action buttons render only on signed macOS builds; elsewhere they're dropped
   // and the body click still works.
   const actions = Array.isArray(payload?.actions) ? payload.actions : []
   const notification = new Notification({
-    title: payload?.title || 'Hermes',
+    title: payload?.title || 'Xiaoban',
     body: payload?.body || '',
     silent: Boolean(payload?.silent),
     actions: actions.map(action => ({ type: 'button', text: String(action?.text || '') }))
@@ -5872,21 +5872,21 @@ ipcMain.handle('hermes:notify', (_event, payload) => {
     if (!mainWindow || mainWindow.isDestroyed()) return
     focusWindow(mainWindow)
     if (payload?.sessionId) {
-      mainWindow.webContents.send('hermes:focus-session', payload.sessionId)
+      mainWindow.webContents.send('xiaoban:focus-session', payload.sessionId)
     }
   })
   notification.on('action', (_actionEvent, index) => {
     if (!mainWindow || mainWindow.isDestroyed()) return
     const action = actions[index]
     if (action?.id) {
-      mainWindow.webContents.send('hermes:notification-action', { sessionId: payload?.sessionId, actionId: action.id })
+      mainWindow.webContents.send('xiaoban:notification-action', { sessionId: payload?.sessionId, actionId: action.id })
     }
   })
   notification.show()
   return true
 })
 
-ipcMain.handle('hermes:readFileDataUrl', async (_event, filePath) => {
+ipcMain.handle('xiaoban:readFileDataUrl', async (_event, filePath) => {
   const { resolvedPath } = await resolveReadableFileForIpc(filePath, {
     maxBytes: DATA_URL_READ_MAX_BYTES,
     purpose: 'File preview'
@@ -5895,7 +5895,7 @@ ipcMain.handle('hermes:readFileDataUrl', async (_event, filePath) => {
   return `data:${mimeTypeForPath(resolvedPath)};base64,${data.toString('base64')}`
 })
 
-ipcMain.handle('hermes:readFileText', async (_event, filePath) => {
+ipcMain.handle('xiaoban:readFileText', async (_event, filePath) => {
   const { resolvedPath, stat } = await resolveReadableFileForIpc(filePath, {
     maxBytes: TEXT_PREVIEW_SOURCE_MAX_BYTES,
     purpose: 'Text preview'
@@ -5922,7 +5922,7 @@ ipcMain.handle('hermes:readFileText', async (_event, filePath) => {
   }
 })
 
-ipcMain.handle('hermes:selectPaths', async (_event, options = {}) => {
+ipcMain.handle('xiaoban:selectPaths', async (_event, options = {}) => {
   const properties = options?.directories ? ['openDirectory'] : ['openFile']
   if (options?.multiple !== false) properties.push('multiSelections')
 
@@ -5946,14 +5946,14 @@ ipcMain.handle('hermes:selectPaths', async (_event, options = {}) => {
   return result.filePaths
 })
 
-ipcMain.handle('hermes:writeClipboard', (_event, text) => {
+ipcMain.handle('xiaoban:writeClipboard', (_event, text) => {
   clipboard.writeText(String(text || ''))
   return true
 })
 
-ipcMain.handle('hermes:saveImageFromUrl', (_event, url) => saveImageFromUrl(String(url || '')))
+ipcMain.handle('xiaoban:saveImageFromUrl', (_event, url) => saveImageFromUrl(String(url || '')))
 
-ipcMain.handle('hermes:saveImageBuffer', async (_event, payload) => {
+ipcMain.handle('xiaoban:saveImageBuffer', async (_event, payload) => {
   const data = payload?.data
   if (!data) throw new Error('saveImageBuffer: missing data')
 
@@ -5961,7 +5961,7 @@ ipcMain.handle('hermes:saveImageBuffer', async (_event, payload) => {
   return writeComposerImage(buffer, payload?.ext || '.png')
 })
 
-ipcMain.handle('hermes:saveClipboardImage', async () => {
+ipcMain.handle('xiaoban:saveClipboardImage', async () => {
   const image = clipboard.readImage()
   if (!image || image.isEmpty()) {
     return ''
@@ -5970,15 +5970,15 @@ ipcMain.handle('hermes:saveClipboardImage', async () => {
   return writeComposerImage(image.toPNG(), '.png')
 })
 
-ipcMain.handle('hermes:normalizePreviewTarget', (_event, target, baseDir) =>
+ipcMain.handle('xiaoban:normalizePreviewTarget', (_event, target, baseDir) =>
   normalizePreviewTarget(String(target || ''), baseDir ? String(baseDir) : '')
 )
 
-ipcMain.handle('hermes:watchPreviewFile', (_event, url) => watchPreviewFile(String(url || '')))
+ipcMain.handle('xiaoban:watchPreviewFile', (_event, url) => watchPreviewFile(String(url || '')))
 
-ipcMain.handle('hermes:stopPreviewFileWatch', (_event, id) => stopPreviewFileWatch(String(id || '')))
+ipcMain.handle('xiaoban:stopPreviewFileWatch', (_event, id) => stopPreviewFileWatch(String(id || '')))
 
-ipcMain.on('hermes:titlebar-theme', (_event, payload) => {
+ipcMain.on('xiaoban:titlebar-theme', (_event, payload) => {
   if (!payload || !isHexColor(payload.background) || !isHexColor(payload.foreground)) {
     return
   }
@@ -5991,7 +5991,7 @@ ipcMain.on('hermes:titlebar-theme', (_event, payload) => {
 })
 
 // Pin the native appearance to the app theme (see NATIVE_THEME_CONFIG_PATH).
-ipcMain.on('hermes:native-theme', (_event, mode) => {
+ipcMain.on('xiaoban:native-theme', (_event, mode) => {
   if (!THEME_SOURCES.has(mode)) {
     return
   }
@@ -6004,7 +6004,7 @@ ipcMain.on('hermes:native-theme', (_event, mode) => {
 
 // See-through window translucency. Persist + re-apply opacity to every open
 // window at runtime (no recreation, so caching/sessions are untouched).
-ipcMain.on('hermes:translucency', (_event, payload) => {
+ipcMain.on('xiaoban:translucency', (_event, payload) => {
   const next = clampIntensity(payload && payload.intensity)
 
   if (next === translucencyIntensity) {
@@ -6019,13 +6019,13 @@ ipcMain.on('hermes:translucency', (_event, payload) => {
   }
 })
 
-ipcMain.handle('hermes:openExternal', (_event, url) => {
+ipcMain.handle('xiaoban:openExternal', (_event, url) => {
   if (!openExternalUrl(url)) {
     throw new Error('Invalid external URL')
   }
 })
 
-ipcMain.handle('hermes:openPreviewInBrowser', async (_event, url) => {
+ipcMain.handle('xiaoban:openPreviewInBrowser', async (_event, url) => {
   if (!(await openPreviewInBrowser(url))) {
     throw new Error('Invalid preview URL')
   }
@@ -6033,17 +6033,17 @@ ipcMain.handle('hermes:openPreviewInBrowser', async (_event, url) => {
 
 // User-configurable default project directory. The renderer reads this on
 // settings mount and seeds the value into the picker; writing back persists
-// it via writeDefaultProjectDir so resolveHermesCwd picks it up on the next
+// it via writeDefaultProjectDir so resolveXiaobanCwd picks it up on the next
 // session spawn (no app restart needed).
-ipcMain.handle('hermes:setting:defaultProjectDir:get', async () => ({
+ipcMain.handle('xiaoban:setting:defaultProjectDir:get', async () => ({
   dir: readDefaultProjectDir(),
   defaultLabel: app.getPath('home'),
-  resolvedCwd: resolveHermesCwd()
+  resolvedCwd: resolveXiaobanCwd()
 }))
 
-ipcMain.handle('hermes:workspace:sanitize', async (_event, cwd) => sanitizeWorkspaceCwd(cwd))
+ipcMain.handle('xiaoban:workspace:sanitize', async (_event, cwd) => sanitizeWorkspaceCwd(cwd))
 
-ipcMain.handle('hermes:setting:defaultProjectDir:set', async (_event, dir) => {
+ipcMain.handle('xiaoban:setting:defaultProjectDir:set', async (_event, dir) => {
   const next = typeof dir === 'string' && dir.trim() ? dir.trim() : null
 
   if (next) {
@@ -6059,7 +6059,7 @@ ipcMain.handle('hermes:setting:defaultProjectDir:set', async (_event, dir) => {
   return { dir: next }
 })
 
-ipcMain.handle('hermes:setting:defaultProjectDir:pick', async () => {
+ipcMain.handle('xiaoban:setting:defaultProjectDir:pick', async () => {
   const result = await dialog.showOpenDialog({
     title: 'Choose default project directory',
     properties: ['openDirectory', 'createDirectory'],
@@ -6073,9 +6073,9 @@ ipcMain.handle('hermes:setting:defaultProjectDir:pick', async () => {
   return { canceled: false, dir: result.filePaths[0] }
 })
 
-ipcMain.handle('hermes:fetchLinkTitle', (_event, url) => fetchLinkTitle(url))
+ipcMain.handle('xiaoban:fetchLinkTitle', (_event, url) => fetchLinkTitle(url))
 
-ipcMain.handle('hermes:logs:reveal', async () => {
+ipcMain.handle('xiaoban:logs:reveal', async () => {
   try {
     await fs.promises.mkdir(path.dirname(DESKTOP_LOG_PATH), { recursive: true })
     if (!fileExists(DESKTOP_LOG_PATH)) {
@@ -6088,7 +6088,7 @@ ipcMain.handle('hermes:logs:reveal', async () => {
   }
 })
 
-ipcMain.handle('hermes:logs:recent', async () => ({ path: DESKTOP_LOG_PATH, lines: hermesLog.slice(-200) }))
+ipcMain.handle('xiaoban:logs:recent', async () => ({ path: DESKTOP_LOG_PATH, lines: xiaobanLog.slice(-200) }))
 
 function isExecutableFile(filePath) {
   if (!filePath || !path.isAbsolute(filePath)) {
@@ -6182,11 +6182,11 @@ function windowsShellSpec() {
 // Resolve the interactive shell for the embedded terminal: an explicit user
 // override wins, otherwise auto-detect the best one installed for the platform.
 function terminalShellCommand() {
-  // HERMES_DESKTOP_SHELL is the cross-platform escape hatch (a path or a bare
+  // XIAOBAN_DESKTOP_SHELL is the cross-platform escape hatch (a path or a bare
   // name on PATH); $SHELL is honored on POSIX, where it's the user's canonical
   // choice, but ignored on Windows, where it's usually a stray MSYS/Git path
   // node-pty can't spawn natively.
-  const override = (process.env.HERMES_DESKTOP_SHELL || (IS_WINDOWS ? '' : process.env.SHELL) || '').trim()
+  const override = (process.env.XIAOBAN_DESKTOP_SHELL || (IS_WINDOWS ? '' : process.env.SHELL) || '').trim()
 
   if (override) {
     const resolved = isExecutableFile(override) ? override : findOnPath(override)
@@ -6230,7 +6230,7 @@ function terminalShellEnv() {
 
   // Strip color/theme-detection vars that ride along when Electron is launched
   // from a non-tty agent shell (Cursor's runner sets NO_COLOR/FORCE_COLOR=0
-  // /TERM=dumb; some terminals set COLORFGBG which would flip Hermes' TUI into
+  // /TERM=dumb; some terminals set COLORFGBG which would flip Xiaoban' TUI into
   // light-mode). Our PTY is a real xterm-compat terminal — force truecolor.
   delete env.NO_COLOR
   delete env.FORCE_COLOR
@@ -6239,19 +6239,19 @@ function terminalShellEnv() {
   env.COLORTERM = 'truecolor'
   env.LC_CTYPE = env.LC_CTYPE || 'UTF-8'
   env.TERM = 'xterm-256color'
-  env.TERM_PROGRAM = 'Hermes'
+  env.TERM_PROGRAM = 'Xiaoban'
   env.TERM_PROGRAM_VERSION = app.getVersion()
 
-  // Let a hermes/--tui launched in this pane know it's embedded in the desktop
-  // GUI (build_environment_hints surfaces this). Distinct from HERMES_DESKTOP,
+  // Let a xiaoban/--tui launched in this pane know it's embedded in the desktop
+  // GUI (build_environment_hints surfaces this). Distinct from XIAOBAN_DESKTOP,
   // which marks the agent *backend* and gates cron/gateway behavior.
-  env.HERMES_DESKTOP_TERMINAL = '1'
+  env.XIAOBAN_DESKTOP_TERMINAL = '1'
 
   return env
 }
 
 function terminalChannel(id, suffix) {
-  return `hermes:terminal:${id}:${suffix}`
+  return `xiaoban:terminal:${id}:${suffix}`
 }
 
 function disposeTerminalSession(id) {
@@ -6272,15 +6272,15 @@ function disposeTerminalSession(id) {
   return true
 }
 
-ipcMain.handle('hermes:fs:readDir', async (_event, dirPath) => readDirForIpc(dirPath))
+ipcMain.handle('xiaoban:fs:readDir', async (_event, dirPath) => readDirForIpc(dirPath))
 
-ipcMain.handle('hermes:fs:gitRoot', async (_event, startPath) => gitRootForIpc(startPath))
+ipcMain.handle('xiaoban:fs:gitRoot', async (_event, startPath) => gitRootForIpc(startPath))
 
-ipcMain.handle('hermes:fs:worktrees', async (_event, cwds) => worktreesForIpc(cwds))
+ipcMain.handle('xiaoban:fs:worktrees', async (_event, cwds) => worktreesForIpc(cwds))
 
-ipcMain.handle('hermes:terminal:start', async (event, payload = {}) => {
+ipcMain.handle('xiaoban:terminal:start', async (event, payload = {}) => {
   if (!nodePty) {
-    throw new Error('PTY support is unavailable. Reinstall desktop dependencies and restart Hermes.')
+    throw new Error('PTY support is unavailable. Reinstall desktop dependencies and restart Xiaoban.')
   }
 
   ensureSpawnHelperExecutable()
@@ -6318,7 +6318,7 @@ ipcMain.handle('hermes:terminal:start', async (event, payload = {}) => {
   return { cwd, id, shell: name }
 })
 
-ipcMain.handle('hermes:terminal:write', (_event, id, data) => {
+ipcMain.handle('xiaoban:terminal:write', (_event, id, data) => {
   const sessionInfo = terminalSessions.get(String(id || ''))
 
   if (!sessionInfo) {
@@ -6330,7 +6330,7 @@ ipcMain.handle('hermes:terminal:write', (_event, id, data) => {
   return true
 })
 
-ipcMain.handle('hermes:terminal:resize', (_event, id, size = {}) => {
+ipcMain.handle('xiaoban:terminal:resize', (_event, id, size = {}) => {
   const sessionInfo = terminalSessions.get(String(id || ''))
 
   if (!sessionInfo) {
@@ -6344,9 +6344,9 @@ ipcMain.handle('hermes:terminal:resize', (_event, id, size = {}) => {
 
   return true
 })
-ipcMain.handle('hermes:terminal:dispose', (_event, id) => disposeTerminalSession(String(id || '')))
+ipcMain.handle('xiaoban:terminal:dispose', (_event, id) => disposeTerminalSession(String(id || '')))
 
-ipcMain.handle('hermes:updates:check', async () =>
+ipcMain.handle('xiaoban:updates:check', async () =>
   checkUpdates().catch(error => ({
     supported: true,
     branch: readDesktopUpdateConfig().branch,
@@ -6356,7 +6356,7 @@ ipcMain.handle('hermes:updates:check', async () =>
   }))
 )
 
-ipcMain.handle('hermes:updates:apply', async (_event, payload) =>
+ipcMain.handle('xiaoban:updates:apply', async (_event, payload) =>
   applyUpdates(payload || {}).catch(error => ({
     ok: false,
     error: 'apply-failed',
@@ -6364,23 +6364,23 @@ ipcMain.handle('hermes:updates:apply', async (_event, payload) =>
   }))
 )
 
-ipcMain.handle('hermes:updates:branch:get', async () => readDesktopUpdateConfig())
+ipcMain.handle('xiaoban:updates:branch:get', async () => readDesktopUpdateConfig())
 
-ipcMain.handle('hermes:updates:branch:set', async (_event, name) => {
+ipcMain.handle('xiaoban:updates:branch:set', async (_event, name) => {
   const branch = typeof name === 'string' && name.trim() ? name.trim() : DEFAULT_UPDATE_BRANCH
   writeDesktopUpdateConfig({ branch })
   return { branch }
 })
 
-// Resolve the canonical Hermes version (the one `release.py` bumps in
-// hermes_cli/__init__.py + pyproject.toml) so the desktop About panel shows the
-// real Hermes version instead of the Electron app's own package.json version,
+// Resolve the canonical Xiaoban version (the one `release.py` bumps in
+// xiaoban_cli/__init__.py + pyproject.toml) so the desktop About panel shows the
+// real Xiaoban version instead of the Electron app's own package.json version,
 // which historically drifted (stuck at 0.0.2). Falls back to app.getVersion()
 // when the source tree can't be read (e.g. a packaged build without the repo).
-function resolveHermesVersion() {
+function resolveXiaobanVersion() {
   try {
     const root = resolveUpdateRoot()
-    const initPath = path.join(root, 'hermes_cli', '__init__.py')
+    const initPath = path.join(root, 'xiaoban_cli', '__init__.py')
     if (fileExists(initPath)) {
       const raw = fs.readFileSync(initPath, 'utf8')
       const match = raw.match(/__version__\s*=\s*["']([^"']+)["']/)
@@ -6394,25 +6394,25 @@ function resolveHermesVersion() {
   return app.getVersion()
 }
 
-// Re-resolve the live Hermes version and push it into the native About panel
+// Re-resolve the live Xiaoban version and push it into the native About panel
 // just before showing it, so an in-place `xiaoban update` is reflected without
 // an app restart. macOS only — `showAboutPanel()` is a no-op elsewhere, and the
 // other platforms don't use this menu item.
 function showAboutPanelFresh() {
   app.setAboutPanelOptions({
     applicationName: APP_NAME,
-    applicationVersion: resolveHermesVersion(),
+    applicationVersion: resolveXiaobanVersion(),
     copyright: 'Copyright © 2026 Nous Research'
   })
   app.showAboutPanel()
 }
 
-ipcMain.handle('hermes:version', async () => ({
-  appVersion: resolveHermesVersion(),
+ipcMain.handle('xiaoban:version', async () => ({
+  appVersion: resolveXiaobanVersion(),
   electronVersion: process.versions.electron,
   nodeVersion: process.versions.node,
   platform: process.platform,
-  hermesRoot: resolveUpdateRoot()
+  xiaobanRoot: resolveUpdateRoot()
 }))
 
 // ===========================================================================
@@ -6421,9 +6421,9 @@ ipcMain.handle('hermes:version', async () => ({
 //
 // The renderer's About → Danger Zone surfaces three options that mirror the
 // CLI exactly: GUI only, Lite (keep user data), Full. We ask the agent to do
-// the actual removal via `hermes uninstall …` so the cross-platform PATH /
+// the actual removal via `xiaoban uninstall …` so the cross-platform PATH /
 // registry / service / node-symlink cleanup all lives in one place
-// (hermes_cli/uninstall.py + hermes_cli/gui_uninstall.py).
+// (xiaoban_cli/uninstall.py + xiaoban_cli/gui_uninstall.py).
 //
 // getUninstallSummary() shells out to `--gui-summary` (a fast, no-side-effect
 // JSON probe) so the UI can gate options on what's actually installed — and
@@ -6436,12 +6436,12 @@ function uninstallVenvPython() {
 
 async function getUninstallSummary() {
   const py = uninstallVenvPython()
-  const agentRoot = ACTIVE_HERMES_ROOT
+  const agentRoot = ACTIVE_XIAOBAN_ROOT
   // Fast JS-side fallback used when the agent venv is gone (lite client) or the
   // probe fails — the renderer still needs *something* to render options from.
   const fallback = () => ({
-    hermes_home: HERMES_HOME,
-    agent_installed: isHermesSourceRoot(agentRoot) && fileExists(py),
+    xiaoban_home: XIAOBAN_HOME,
+    agent_installed: isXiaobanSourceRoot(agentRoot) && fileExists(py),
     gui_installed: true,
     source_built_artifacts: [],
     packaged_app_paths: [],
@@ -6466,10 +6466,10 @@ async function getUninstallSummary() {
     try {
       const child = spawn(
         py,
-        ['-m', 'hermes_cli.main', 'uninstall', '--gui-summary'],
+        ['-m', 'xiaoban_cli.main', 'uninstall', '--gui-summary'],
         hiddenWindowsChildOptions({
           cwd: agentRoot,
-          env: { ...process.env, HERMES_HOME, NO_COLOR: '1' },
+          env: { ...process.env, XIAOBAN_HOME, NO_COLOR: '1' },
           stdio: ['ignore', 'pipe', 'ignore']
         })
       )
@@ -6511,14 +6511,14 @@ async function runDesktopUninstall(mode) {
     return {
       ok: false,
       error: 'agent-missing',
-      message: `Can't run the uninstaller: no Hermes agent venv at ${VENV_ROOT}.`
+      message: `Can't run the uninstaller: no Xiaoban agent venv at ${VENV_ROOT}.`
     }
   }
 
   // Interpreter choice (Finding 3): lite/full rmtree the venv that holds the
   // running python.exe. On Windows a running .exe is mandatory-locked, so the
   // rmtree must NOT be driven by the venv's own interpreter — use a system
-  // Python with PYTHONPATH=<agentRoot> so `import hermes_cli` resolves from
+  // Python with PYTHONPATH=<agentRoot> so `import xiaoban_cli` resolves from
   // source while the venv is torn down. gui-only doesn't touch the venv, so the
   // venv python is fine there. If no system Python exists (the Windows edge
   // case), fall back to the venv python — gui-only is unaffected; lite/full may
@@ -6529,7 +6529,7 @@ async function runDesktopUninstall(mode) {
     const sysPy = findSystemPython()
     if (sysPy) {
       py = sysPy
-      pythonPath = ACTIVE_HERMES_ROOT
+      pythonPath = ACTIVE_XIAOBAN_ROOT
     } else if (IS_WINDOWS) {
       rememberLog(
         '[uninstall] no system Python found for lite/full on Windows; falling back ' +
@@ -6549,7 +6549,7 @@ async function runDesktopUninstall(mode) {
   // lock would make the script's rmdir half-fail (#37532 for the update path).
   // Reuses the incident-hardened update teardown; no-op on macOS/Linux.
   try {
-    await releaseBackendLock(ACTIVE_HERMES_ROOT, 'uninstall')
+    await releaseBackendLock(ACTIVE_XIAOBAN_ROOT, 'uninstall')
   } catch (error) {
     rememberLog(`[uninstall] backend teardown errored (continuing): ${error.message}`)
   }
@@ -6558,10 +6558,10 @@ async function runDesktopUninstall(mode) {
     desktopPid: process.pid,
     pythonExe: py,
     pythonPath,
-    agentRoot: ACTIVE_HERMES_ROOT,
+    agentRoot: ACTIVE_XIAOBAN_ROOT,
     uninstallArgs,
     appPath: removeBundle,
-    hermesHome: HERMES_HOME
+    xiaobanHome: XIAOBAN_HOME
   }
 
   let scriptPath
@@ -6569,12 +6569,12 @@ async function runDesktopUninstall(mode) {
   let runnerArgs
   try {
     if (IS_WINDOWS) {
-      scriptPath = path.join(app.getPath('temp'), `hermes-uninstall-${Date.now()}.cmd`)
+      scriptPath = path.join(app.getPath('temp'), `xiaoban-uninstall-${Date.now()}.cmd`)
       fs.writeFileSync(scriptPath, buildWindowsCleanupScript(scriptArgs))
       runner = process.env.ComSpec || 'cmd.exe'
       runnerArgs = ['/c', scriptPath]
     } else {
-      scriptPath = path.join(app.getPath('temp'), `hermes-uninstall-${Date.now()}.sh`)
+      scriptPath = path.join(app.getPath('temp'), `xiaoban-uninstall-${Date.now()}.sh`)
       fs.writeFileSync(scriptPath, buildPosixCleanupScript(scriptArgs), { mode: 0o755 })
       runner = '/bin/bash'
       runnerArgs = [scriptPath]
@@ -6605,32 +6605,32 @@ async function runDesktopUninstall(mode) {
   return { ok: true, mode, willRemoveAppBundle: Boolean(removeBundle), scriptPath }
 }
 
-ipcMain.handle('hermes:uninstall:summary', async () => getUninstallSummary())
-ipcMain.handle('hermes:uninstall:run', async (_event, payload) => {
+ipcMain.handle('xiaoban:uninstall:summary', async () => getUninstallSummary())
+ipcMain.handle('xiaoban:uninstall:run', async (_event, payload) => {
   const mode = payload && typeof payload === 'object' ? payload.mode : payload
   return runDesktopUninstall(String(mode || ''))
 })
 
 // Download a VS Code Marketplace extension and return the raw color-theme JSON
 // it contributes. No theme code is executed — we only read JSON from the .vsix.
-ipcMain.handle('hermes:vscode-theme:fetch', async (_event, id) => fetchMarketplaceThemes(String(id || '')))
+ipcMain.handle('xiaoban:vscode-theme:fetch', async (_event, id) => fetchMarketplaceThemes(String(id || '')))
 
 // Search the Marketplace for color-theme extensions (empty query = top installs).
-ipcMain.handle('hermes:vscode-theme:search', async (_event, query) => searchMarketplaceThemes(String(query || ''), 20))
+ipcMain.handle('xiaoban:vscode-theme:search', async (_event, query) => searchMarketplaceThemes(String(query || ''), 20))
 
 // ---------------------------------------------------------------------------
-// hermes:// deep links (e.g. hermes://blueprint/morning-brief?time=08:00).
+// xiaoban:// deep links (e.g. xiaoban://blueprint/morning-brief?time=08:00).
 // A docs/dashboard "Send to App" button opens this URL; we route it into the
 // running app's chat composer. Three delivery paths: macOS 'open-url',
 // Win/Linux running-app 'second-instance' (argv), Win/Linux cold-start argv.
 // ---------------------------------------------------------------------------
-const HERMES_PROTOCOL = 'hermes'
+const XIAOBAN_PROTOCOL = 'xiaoban'
 let _pendingDeepLink = null
 let _rendererReadyForDeepLink = false
 
 function _extractDeepLink(argv) {
   if (!Array.isArray(argv)) return null
-  return argv.find(a => typeof a === 'string' && a.startsWith(`${HERMES_PROTOCOL}://`)) || null
+  return argv.find(a => typeof a === 'string' && a.startsWith(`${XIAOBAN_PROTOCOL}://`)) || null
 }
 
 function handleDeepLink(url) {
@@ -6642,7 +6642,7 @@ function handleDeepLink(url) {
     rememberLog(`[deeplink] ignoring malformed url: ${url}`)
     return
   }
-  // hermes://blueprint/<key>?slot=val  -> host="blueprint", path="/<key>"
+  // xiaoban://blueprint/<key>?slot=val  -> host="blueprint", path="/<key>"
   const kind = parsed.hostname || ''
   const name = decodeURIComponent((parsed.pathname || '').replace(/^\//, ''))
   const params = {}
@@ -6658,7 +6658,7 @@ function handleDeepLink(url) {
   try {
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.focus()
-    mainWindow.webContents.send('hermes:deep-link', payload)
+    mainWindow.webContents.send('xiaoban:deep-link', payload)
     rememberLog(`[deeplink] delivered ${kind}/${name}`)
   } catch (err) {
     rememberLog(`[deeplink] delivery failed: ${err.message}`)
@@ -6667,13 +6667,13 @@ function handleDeepLink(url) {
 
 // Renderer calls this (via IPC) once it has mounted its deep-link listener, so
 // a link that arrived during boot/install is flushed exactly once.
-ipcMain.handle('hermes:deep-link-ready', () => {
+ipcMain.handle('xiaoban:deep-link-ready', () => {
   _rendererReadyForDeepLink = true
   if (_pendingDeepLink) {
     const queued = _pendingDeepLink
     _pendingDeepLink = null
     handleDeepLink(
-      `${HERMES_PROTOCOL}://${queued.kind}/${encodeURIComponent(queued.name)}` +
+      `${XIAOBAN_PROTOCOL}://${queued.kind}/${encodeURIComponent(queued.name)}` +
         (Object.keys(queued.params).length ? '?' + new URLSearchParams(queued.params).toString() : '')
     )
   }
@@ -6685,9 +6685,9 @@ function registerDeepLinkProtocol() {
     if (process.defaultApp && process.argv.length >= 2) {
       // Dev: register with the electron exec path + entry script so the OS can
       // relaunch us with the URL.
-      app.setAsDefaultProtocolClient(HERMES_PROTOCOL, process.execPath, [path.resolve(process.argv[1])])
+      app.setAsDefaultProtocolClient(XIAOBAN_PROTOCOL, process.execPath, [path.resolve(process.argv[1])])
     } else {
-      app.setAsDefaultProtocolClient(HERMES_PROTOCOL)
+      app.setAsDefaultProtocolClient(XIAOBAN_PROTOCOL)
     }
   } catch (err) {
     rememberLog(`[deeplink] protocol registration failed: ${err.message}`)
@@ -6695,7 +6695,7 @@ function registerDeepLinkProtocol() {
 }
 
 // Single-instance lock: deep links on a running app (Win/Linux) arrive as a
-// second-instance argv. Without the lock a second `hermes://` launch spawns a
+// second-instance argv. Without the lock a second `xiaoban://` launch spawns a
 // whole new app instead of routing into the running one.
 const _gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!_gotSingleInstanceLock) {
@@ -6732,7 +6732,7 @@ app.whenReady().then(() => {
   registerPowerResumeListeners()
   createWindow()
 
-  // Win/Linux cold start: the launching hermes:// URL is in our own argv.
+  // Win/Linux cold start: the launching xiaoban:// URL is in our own argv.
   const _coldStartLink = _extractDeepLink(process.argv)
   if (_coldStartLink) handleDeepLink(_coldStartLink)
 
@@ -6794,8 +6794,8 @@ app.on('before-quit', () => {
     disposeTerminalSession(id)
   }
 
-  if (hermesProcess && !hermesProcess.killed) {
-    hermesProcess.kill('SIGTERM')
+  if (xiaobanProcess && !xiaobanProcess.killed) {
+    xiaobanProcess.kill('SIGTERM')
   }
   stopAllPoolBackends()
 })

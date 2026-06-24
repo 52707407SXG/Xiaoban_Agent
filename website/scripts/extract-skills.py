@@ -7,7 +7,7 @@ Two data sources:
    (official optional). These give us full metadata — overview prose, version,
    license, env vars, commands — that the unified index doesn't carry.
 
-2. The unified Hermes Skills Index at ``website/static/api/skills-index.json``,
+2. The unified Xiaoban Skills Index at ``website/static/api/skills-index.json``,
    built twice daily by ``scripts/build_skills_index.py`` (workflow
    ``.github/workflows/skills-index.yml``). Covers skills.sh, ClawHub, browse.sh,
    LobeHub, Claude Marketplace, well-known endpoints, and the GitHub taps
@@ -287,9 +287,9 @@ def extract_local_skills():
             tags = []
             metadata = fm.get("metadata")
             if isinstance(metadata, dict):
-                hermes_meta = metadata.get("hermes", {})
-                if isinstance(hermes_meta, dict):
-                    tags = hermes_meta.get("tags", [])
+                xiaoban_meta = metadata.get("xiaoban", {})
+                if isinstance(xiaoban_meta, dict):
+                    tags = xiaoban_meta.get("tags", [])
             if not tags:
                 tags = fm.get("tags", [])
             if isinstance(tags, str):

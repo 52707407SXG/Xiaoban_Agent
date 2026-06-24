@@ -1,7 +1,7 @@
 ---
 sidebar_position: 1
 title: "CLI Commands Reference"
-description: "Authoritative reference for Hermes terminal commands and command families"
+description: "Authoritative reference for Xiaoban terminal commands and command families"
 ---
 
 # CLI Commands Reference
@@ -13,7 +13,7 @@ For in-chat slash commands, see [Slash Commands Reference](./slash-commands.md).
 ## Global entrypoint
 
 ```bash
-hermes [global-options] <command> [subcommand/options]
+xiaoban [global-options] <command> [subcommand/options]
 ```
 
 ### Global options
@@ -21,15 +21,15 @@ hermes [global-options] <command> [subcommand/options]
 | Option | Description |
 |--------|-------------|
 | `--version`, `-V` | Show version and exit. |
-| `--profile <name>`, `-p <name>` | Select which Hermes profile to use for this invocation. Overrides the sticky default set by `hermes profile use`. |
+| `--profile <name>`, `-p <name>` | Select which Xiaoban profile to use for this invocation. Overrides the sticky default set by `xiaoban profile use`. |
 | `--resume <session>`, `-r <session>` | Resume a previous session by ID or title. |
 | `--continue [name]`, `-c [name]` | Resume the most recent session, or the most recent session matching a title. |
 | `--worktree`, `-w` | Start in an isolated git worktree for parallel-agent workflows. |
 | `--yolo` | Bypass dangerous-command approval prompts. |
 | `--pass-session-id` | Include the session ID in the agent's system prompt. |
-| `--ignore-user-config` | Ignore `~/.hermes/config.yaml` and fall back to built-in defaults. Credentials in `.env` are still loaded. |
+| `--ignore-user-config` | Ignore `~/.xiaoban/config.yaml` and fall back to built-in defaults. Credentials in `.env` are still loaded. |
 | `--ignore-rules` | Skip auto-injection of `AGENTS.md`, `SOUL.md`, `.cursorrules`, memory, and preloaded skills. |
-| `--tui` | Launch the [TUI](../user-guide/tui.md) instead of the classic CLI. Equivalent to `HERMES_TUI=1`. Always wins over `display.interface`. |
+| `--tui` | Launch the [TUI](../user-guide/tui.md) instead of the classic CLI. Equivalent to `XIAOBAN_TUI=1`. Always wins over `display.interface`. |
 | `--cli` | Force the classic prompt_toolkit REPL. Use this to override `display.interface: tui` for a single invocation. |
 | `--dev` | With `--tui`: run the TypeScript sources directly via `tsx` instead of the prebuilt bundle (for TUI contributors). |
 
@@ -39,53 +39,53 @@ hermes [global-options] <command> [subcommand/options]
 |---------|---------|
 | `xiaoban chat` | Interactive or one-shot chat with the agent. |
 | `xiaoban model` | Interactively choose the default provider and model. |
-| `hermes fallback` | Manage fallback providers tried when the primary model errors. |
+| `xiaoban fallback` | Manage fallback providers tried when the primary model errors. |
 | `xiaoban gateway` | Run or manage the messaging gateway service. |
-| `hermes proxy` | Local OpenAI-compatible proxy that attaches OAuth provider credentials. See [Subscription Proxy](../user-guide/features/subscription-proxy.md). |
-| `hermes lsp` | Manage Language Server Protocol integration (semantic diagnostics for write_file/patch). |
+| `xiaoban proxy` | Local OpenAI-compatible proxy that attaches OAuth provider credentials. See [Subscription Proxy](../user-guide/features/subscription-proxy.md). |
+| `xiaoban lsp` | Manage Language Server Protocol integration (semantic diagnostics for write_file/patch). |
 | `xiaoban setup` | Interactive setup wizard for all or part of the configuration. |
-| `hermes whatsapp` | Configure and pair the WhatsApp bridge. |
-| `hermes slack` | Slack helpers (currently: generate the app manifest with every command as a native slash). |
-| `hermes auth` | Manage credentials — add, list, remove, reset, status, logout. Handles OAuth flows for Codex/Nous/Anthropic. |
-| `hermes login` / `logout` | **Deprecated** — use `hermes auth` instead. |
-| `hermes send` | Send a one-shot message to a configured messaging platform (Telegram, Discord, Slack, Signal, SMS, …). Useful from shell scripts, cron jobs, CI hooks, and monitoring daemons — no agent loop, no LLM. |
-| `hermes secrets` | Manage external secret sources (currently Bitwarden Secrets Manager) for pulling API keys at process startup instead of from `~/.hermes/.env`. |
-| `hermes migrate` | Diagnose and (optionally) rewrite `config.yaml` to replace references to retired models or deprecated settings (e.g. `migrate xai`). |
-| `hermes status` | Show agent, auth, and platform status. |
-| `hermes cron` | Inspect and tick the cron scheduler. |
-| `hermes kanban` | Multi-profile collaboration board (tasks, links, dispatcher). |
-| `hermes webhook` | Manage dynamic webhook subscriptions for event-driven activation. |
-| `hermes hooks` | Inspect, approve, or remove shell-script hooks declared in `config.yaml`. |
-| `hermes doctor` | Diagnose config and dependency issues. |
-| `hermes security audit` | On-demand supply-chain audit (OSV.dev) for the venv, plugin requirements, and pinned MCP servers. |
-| `hermes dump` | Copy-pasteable setup summary for support/debugging. |
-| `hermes prompt-size` | Show a byte breakdown of the system prompt + tool schemas (skills index, memory, profile). Runs offline. |
-| `hermes debug` | Debug tools — upload logs and system info for support. |
-| `hermes backup` | Back up Hermes home directory to a zip file. |
-| `hermes checkpoints` | Inspect / prune / clear `~/.hermes/checkpoints/` (the shadow store used by `/rollback`). Run with no args for a status overview. |
-| `hermes import` | Restore a Hermes backup from a zip file. |
+| `xiaoban whatsapp` | Configure and pair the WhatsApp bridge. |
+| `xiaoban slack` | Slack helpers (currently: generate the app manifest with every command as a native slash). |
+| `xiaoban auth` | Manage credentials — add, list, remove, reset, status, logout. Handles OAuth flows for Codex/Nous/Anthropic. |
+| `xiaoban login` / `logout` | **Deprecated** — use `xiaoban auth` instead. |
+| `xiaoban send` | Send a one-shot message to a configured messaging platform (Telegram, Discord, Slack, Signal, SMS, …). Useful from shell scripts, cron jobs, CI hooks, and monitoring daemons — no agent loop, no LLM. |
+| `xiaoban secrets` | Manage external secret sources (currently Bitwarden Secrets Manager) for pulling API keys at process startup instead of from `~/.xiaoban/.env`. |
+| `xiaoban migrate` | Diagnose and (optionally) rewrite `config.yaml` to replace references to retired models or deprecated settings (e.g. `migrate xai`). |
+| `xiaoban status` | Show agent, auth, and platform status. |
+| `xiaoban cron` | Inspect and tick the cron scheduler. |
+| `xiaoban kanban` | Multi-profile collaboration board (tasks, links, dispatcher). |
+| `xiaoban webhook` | Manage dynamic webhook subscriptions for event-driven activation. |
+| `xiaoban hooks` | Inspect, approve, or remove shell-script hooks declared in `config.yaml`. |
+| `xiaoban doctor` | Diagnose config and dependency issues. |
+| `xiaoban security audit` | On-demand supply-chain audit (OSV.dev) for the venv, plugin requirements, and pinned MCP servers. |
+| `xiaoban dump` | Copy-pasteable setup summary for support/debugging. |
+| `xiaoban prompt-size` | Show a byte breakdown of the system prompt + tool schemas (skills index, memory, profile). Runs offline. |
+| `xiaoban debug` | Debug tools — upload logs and system info for support. |
+| `xiaoban backup` | Back up Xiaoban home directory to a zip file. |
+| `xiaoban checkpoints` | Inspect / prune / clear `~/.xiaoban/checkpoints/` (the shadow store used by `/rollback`). Run with no args for a status overview. |
+| `xiaoban import` | Restore a Xiaoban backup from a zip file. |
 | `xiaoban logs` | View, tail, and filter agent/gateway/error log files. |
-| `hermes config` | Show, edit, migrate, and query configuration files. |
-| `hermes pairing` | Approve or revoke messaging pairing codes. |
+| `xiaoban config` | Show, edit, migrate, and query configuration files. |
+| `xiaoban pairing` | Approve or revoke messaging pairing codes. |
 | `xiaoban skills` | Browse, install, publish, audit, and configure skills. |
-| `hermes bundles` | Group several skills under a single `/<name>` slash command. See [Skill Bundles](../user-guide/features/skills.md#skill-bundles). |
-| `hermes curator` | Background skill maintenance — status, run, pause, pin. See [Curator](../user-guide/features/curator.md). |
-| `hermes memory` | Configure external memory provider. Plugin-specific subcommands (e.g. `hermes honcho`) register automatically when their provider is active. |
-| `hermes acp` | Run Hermes as an ACP server for editor integration. |
-| `hermes mcp` | Manage MCP server configurations and run Hermes as an MCP server. |
-| `hermes plugins` | Manage Xiaoban-Agent plugins (install, enable, disable, remove). |
-| `hermes portal` | Nous Portal status, subscription link, and Tool Gateway routing. See [Tool Gateway](../user-guide/features/tool-gateway.md). |
+| `xiaoban bundles` | Group several skills under a single `/<name>` slash command. See [Skill Bundles](../user-guide/features/skills.md#skill-bundles). |
+| `xiaoban curator` | Background skill maintenance — status, run, pause, pin. See [Curator](../user-guide/features/curator.md). |
+| `xiaoban memory` | Configure external memory provider. Plugin-specific subcommands (e.g. `xiaoban honcho`) register automatically when their provider is active. |
+| `xiaoban acp` | Run Xiaoban as an ACP server for editor integration. |
+| `xiaoban mcp` | Manage MCP server configurations and run Xiaoban as an MCP server. |
+| `xiaoban plugins` | Manage Xiaoban-Agent plugins (install, enable, disable, remove). |
+| `xiaoban portal` | Nous Portal status, subscription link, and Tool Gateway routing. See [Tool Gateway](../user-guide/features/tool-gateway.md). |
 | `xiaoban tools` | Configure enabled tools per platform. |
-| `hermes computer-use` | Install or check the cua-driver backend (macOS Computer Use). |
-| `hermes sessions` | Browse, export, prune, rename, and delete sessions. |
-| `hermes insights` | Show token/cost/activity analytics. |
-| `hermes claw` | OpenClaw migration helpers. |
+| `xiaoban computer-use` | Install or check the cua-driver backend (macOS Computer Use). |
+| `xiaoban sessions` | Browse, export, prune, rename, and delete sessions. |
+| `xiaoban insights` | Show token/cost/activity analytics. |
+| `xiaoban claw` | OpenClaw migration helpers. |
 | `xiaoban dashboard` | Launch the web dashboard for managing config, API keys, and sessions. |
-| `hermes profile` | Manage profiles — multiple isolated Hermes instances. |
-| `hermes completion` | Print shell completion scripts (bash/zsh/fish). |
+| `xiaoban profile` | Manage profiles — multiple isolated Xiaoban instances. |
+| `xiaoban completion` | Print shell completion scripts (bash/zsh/fish). |
 | `xiaoban version` | Show version information. |
-| `xiaoban update` | Pull latest code and reinstall dependencies (git installs), or check PyPI and `pip install --upgrade` (pip installs). `--check` previews without installing; `--backup` takes a pre-pull `HERMES_HOME` snapshot. |
-| `hermes uninstall` | Remove Hermes from the system. |
+| `xiaoban update` | Pull latest code and reinstall dependencies (git installs), or check PyPI and `pip install --upgrade` (pip installs). `--check` previews without installing; `--backup` takes a pre-pull `XIAOBAN_HOME` snapshot. |
+| `xiaoban uninstall` | Remove Xiaoban from the system. |
 
 ## `xiaoban chat`
 
@@ -110,55 +110,55 @@ Common options:
 | `--checkpoints` | Enable filesystem checkpoints before destructive file changes. |
 | `--yolo` | Skip approval prompts. |
 | `--pass-session-id` | Pass the session ID into the system prompt. |
-| `--ignore-user-config` | Ignore `~/.hermes/config.yaml` and use built-in defaults. Credentials in `.env` are still loaded. Useful for isolated CI runs, reproducible bug reports, and third-party integrations. |
+| `--ignore-user-config` | Ignore `~/.xiaoban/config.yaml` and use built-in defaults. Credentials in `.env` are still loaded. Useful for isolated CI runs, reproducible bug reports, and third-party integrations. |
 | `--ignore-rules` | Skip auto-injection of `AGENTS.md`, `SOUL.md`, `.cursorrules`, persistent memory, and preloaded skills. Combine with `--ignore-user-config` for a fully isolated run. |
-| `--safe-mode` | Troubleshooting mode: disable ALL customizations — user config, rules/memory injection, plugins, and MCP servers (implies `--ignore-user-config` and `--ignore-rules`). Use to isolate whether a problem comes from your setup or from Hermes itself. |
+| `--safe-mode` | Troubleshooting mode: disable ALL customizations — user config, rules/memory injection, plugins, and MCP servers (implies `--ignore-user-config` and `--ignore-rules`). Use to isolate whether a problem comes from your setup or from Xiaoban itself. |
 | `--source <tag>` | Session source tag for filtering (default: `cli`). Use `tool` for third-party integrations that should not appear in user session lists. |
 | `--max-turns <N>` | Maximum tool-calling iterations per conversation turn (default: 90, or `agent.max_turns` in config). |
 
 Examples:
 
 ```bash
-hermes
+xiaoban
 xiaoban chat -q "Summarize the latest PRs"
 xiaoban chat --provider openrouter --model anthropic/claude-sonnet-4.6
 xiaoban chat --toolsets web,terminal,skills
 xiaoban chat --quiet -q "Return only JSON"
 xiaoban chat --worktree -q "Review this repo and open a PR"
 xiaoban chat --ignore-user-config --ignore-rules -q "Repro without my personal setup"
-xiaoban chat --safe-mode -q "Is this bug mine or Hermes'?"
+xiaoban chat --safe-mode -q "Is this bug mine or Xiaoban'?"
 ```
 
-### `hermes -z <prompt>` — scripted one-shot
+### `xiaoban -z <prompt>` — scripted one-shot
 
-For programmatic callers (shell scripts, CI, cron, parent processes piping in a prompt), `hermes -z` is the purest one-shot entry point: **single prompt in, final response text out, nothing else on stdout or stderr.** No banner, no spinner, no tool previews, no `Session:` line — just the agent's final reply as plain text.
+For programmatic callers (shell scripts, CI, cron, parent processes piping in a prompt), `xiaoban -z` is the purest one-shot entry point: **single prompt in, final response text out, nothing else on stdout or stderr.** No banner, no spinner, no tool previews, no `Session:` line — just the agent's final reply as plain text.
 
 ```bash
-hermes -z "What's the capital of France?"
+xiaoban -z "What's the capital of France?"
 # → Paris.
 
 # Parent scripts can cleanly capture the response:
-answer=$(hermes -z "summarize this" < /path/to/file.txt)
+answer=$(xiaoban -z "summarize this" < /path/to/file.txt)
 ```
 
-Per-run overrides (no mutation to `~/.hermes/config.yaml`):
+Per-run overrides (no mutation to `~/.xiaoban/config.yaml`):
 
 | Flag | Equivalent env var | Purpose |
 |---|---|---|
-| `-m` / `--model <model>` | `HERMES_INFERENCE_MODEL` | Override the model for this run |
+| `-m` / `--model <model>` | `XIAOBAN_INFERENCE_MODEL` | Override the model for this run |
 | `--provider <provider>` | _(none)_ | Override the provider for this run |
 
 ```bash
-hermes -z "…" --provider openrouter --model openai/gpt-5.5
+xiaoban -z "…" --provider openrouter --model openai/gpt-5.5
 # or:
-HERMES_INFERENCE_MODEL=anthropic/claude-sonnet-4.6 hermes -z "…"
+XIAOBAN_INFERENCE_MODEL=anthropic/claude-sonnet-4.6 xiaoban -z "…"
 ```
 
 Same agent, same tools, same skills — just strips every interactive / cosmetic layer. If you need tool output in the transcript too, use `xiaoban chat -q` instead; `-z` is explicitly for "I only want the final answer".
 
 ## `xiaoban model`
 
-Interactive provider + model selector. **This is the command for adding new providers, setting up API keys, and running OAuth flows.** Run it from your terminal — not from inside an active Hermes chat session.
+Interactive provider + model selector. **This is the command for adding new providers, setting up API keys, and running OAuth flows.** Run it from your terminal — not from inside an active Xiaoban chat session.
 
 ```bash
 xiaoban model
@@ -173,11 +173,11 @@ Use this when you want to:
 - save the new default into config
 
 :::warning xiaoban model vs /model — know the difference
-**`xiaoban model`** (run from your terminal, outside any Hermes session) is the **full provider setup wizard**. It can add new providers, run OAuth flows, prompt for API keys, and configure endpoints.
+**`xiaoban model`** (run from your terminal, outside any Xiaoban session) is the **full provider setup wizard**. It can add new providers, run OAuth flows, prompt for API keys, and configure endpoints.
 
-**`/model`** (typed inside an active Hermes chat session) can only **switch between providers and models you've already set up**. It cannot add new providers, run OAuth, or prompt for API keys.
+**`/model`** (typed inside an active Xiaoban chat session) can only **switch between providers and models you've already set up**. It cannot add new providers, run OAuth, or prompt for API keys.
 
-**If you need to add a new provider:** Exit your Hermes session first (`Ctrl+C` or `/quit`), then run `xiaoban model` from your terminal prompt.
+**If you need to add a new provider:** Exit your Xiaoban session first (`Ctrl+C` or `/quit`), then run `xiaoban model` from your terminal prompt.
 :::
 
 ### `/model` slash command (mid-session)
@@ -231,19 +231,19 @@ Options:
 
 | Option | Description |
 |--------|-------------|
-| `--all` | On `start` / `restart` / `stop`: act on **every profile's** gateway, not just the active `HERMES_HOME`. Useful if you run multiple profiles side-by-side and want to restart them all after `xiaoban update`. |
-| `--no-supervise` | On `run`: inside the s6-overlay Docker image, opt out of auto-supervision and use pre-s6 foreground semantics — gateway runs as the container's main process with no auto-restart. No-op outside the s6 image. Equivalent to setting `HERMES_GATEWAY_NO_SUPERVISE=1`. |
+| `--all` | On `start` / `restart` / `stop`: act on **every profile's** gateway, not just the active `XIAOBAN_HOME`. Useful if you run multiple profiles side-by-side and want to restart them all after `xiaoban update`. |
+| `--no-supervise` | On `run`: inside the s6-overlay Docker image, opt out of auto-supervision and use pre-s6 foreground semantics — gateway runs as the container's main process with no auto-restart. No-op outside the s6 image. Equivalent to setting `XIAOBAN_GATEWAY_NO_SUPERVISE=1`. |
 
 `xiaoban gateway enroll` accepts `--token`, `--connector-url`, and `--gateway-id`. It exchanges the enrollment token with the connector and writes the resulting `GATEWAY_RELAY_ID`, `GATEWAY_RELAY_SECRET`, `GATEWAY_RELAY_DELIVERY_KEY`, and optional `GATEWAY_RELAY_URL` values to the active profile's `.env`.
 
 :::tip WSL users
-Use `xiaoban gateway run` instead of `xiaoban gateway start` — WSL's systemd support is unreliable. Wrap it in tmux for persistence: `tmux new -s hermes 'xiaoban gateway run'`. See [WSL FAQ](/reference/faq#wsl-gateway-keeps-disconnecting-or-hermes-gateway-start-fails) for details.
+Use `xiaoban gateway run` instead of `xiaoban gateway start` — WSL's systemd support is unreliable. Wrap it in tmux for persistence: `tmux new -s xiaoban 'xiaoban gateway run'`. See [WSL FAQ](/reference/faq#wsl-gateway-keeps-disconnecting-or-xiaoban-gateway-start-fails) for details.
 :::
 
-## `hermes lsp`
+## `xiaoban lsp`
 
 ```bash
-hermes lsp <subcommand>
+xiaoban lsp <subcommand>
 ```
 
 Manage the Language Server Protocol integration. LSP runs real
@@ -299,10 +299,10 @@ Options:
 | `--reconfigure` | Backwards-compat alias — bare `xiaoban setup` on an existing install now does this by default. |
 | `--portal` | One-shot Nous Portal setup: log in via OAuth, set Nous as the inference provider, and opt into the [Tool Gateway](../user-guide/features/tool-gateway.md). Skips the rest of the wizard. |
 
-## `hermes portal`
+## `xiaoban portal`
 
 ```bash
-hermes portal [status|open|tools]
+xiaoban portal [status|open|tools]
 ```
 
 Inspect Nous Portal auth, Tool Gateway routing, and reach the subscription page. Subcommand-less invocation runs `status`.
@@ -315,20 +315,20 @@ Inspect Nous Portal auth, Tool Gateway routing, and reach the subscription page.
 
 For configuration of the gateway itself, see [Tool Gateway](../user-guide/features/tool-gateway.md). For the one-shot setup path, see `xiaoban setup --portal` above.
 
-## `hermes whatsapp`
+## `xiaoban whatsapp`
 
 ```bash
-hermes whatsapp
+xiaoban whatsapp
 ```
 
 Runs the WhatsApp pairing/setup flow, including mode selection and QR-code pairing.
 
-## `hermes slack`
+## `xiaoban slack`
 
 ```bash
-hermes slack manifest              # print manifest to stdout
-hermes slack manifest --write      # write to ~/.hermes/slack-manifest.json
-hermes slack manifest --slashes-only  # just the features.slash_commands array
+xiaoban slack manifest              # print manifest to stdout
+xiaoban slack manifest --write      # write to ~/.xiaoban/slack-manifest.json
+xiaoban slack manifest --slashes-only  # just the features.slash_commands array
 ```
 
 Generates a Slack app manifest that registers every gateway command in
@@ -341,27 +341,27 @@ reinstall if scopes or slash commands changed.
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--write [PATH]` | stdout | Write to a file instead of stdout. Bare `--write` writes `$HERMES_HOME/slack-manifest.json`. |
-| `--name NAME` | `Hermes` | Bot display name in Slack. |
+| `--write [PATH]` | stdout | Write to a file instead of stdout. Bare `--write` writes `$XIAOBAN_HOME/slack-manifest.json`. |
+| `--name NAME` | `Xiaoban` | Bot display name in Slack. |
 | `--description DESC` | default blurb | Bot description shown in the Slack app directory. |
 | `--slashes-only` | off | Emit only `features.slash_commands` for merging into a manually-maintained manifest. |
 
-Run `hermes slack manifest --write` again after `xiaoban update` to pick
+Run `xiaoban slack manifest --write` again after `xiaoban update` to pick
 up any new commands.
 
 
-## `hermes send`
+## `xiaoban send`
 
 ```bash
-hermes send --to <target> "message text"
-hermes send --to <target> --file <path>
-echo "message" | hermes send --to <target>
-hermes send --list [platform]
+xiaoban send --to <target> "message text"
+xiaoban send --to <target> --file <path>
+echo "message" | xiaoban send --to <target>
+xiaoban send --list [platform]
 ```
 
-Send a one-shot message to a configured messaging platform without spinning up an agent or gateway loop. Reuses the gateway's already-configured credentials (`~/.hermes/.env` + `~/.hermes/config.yaml`) so ops scripts, cron jobs, CI hooks, and monitoring daemons can post status updates without reimplementing each platform's REST client.
+Send a one-shot message to a configured messaging platform without spinning up an agent or gateway loop. Reuses the gateway's already-configured credentials (`~/.xiaoban/.env` + `~/.xiaoban/config.yaml`) so ops scripts, cron jobs, CI hooks, and monitoring daemons can post status updates without reimplementing each platform's REST client.
 
-For bot-token platforms (Telegram, Discord, Slack, Signal, SMS, WhatsApp-CloudAPI) no running gateway is required — `hermes send` talks directly to the platform's REST endpoint. Plugin platforms that need a persistent adapter still require a live gateway.
+For bot-token platforms (Telegram, Discord, Slack, Signal, SMS, WhatsApp-CloudAPI) no running gateway is required — `xiaoban send` talks directly to the platform's REST endpoint. Plugin platforms that need a persistent adapter still require a live gateway.
 
 | Option | Description |
 |--------|-------------|
@@ -372,44 +372,44 @@ For bot-token platforms (Telegram, Discord, Slack, Signal, SMS, WhatsApp-CloudAP
 | `-q`, `--quiet` | Suppress stdout on success — useful in scripts (rely on exit code only). |
 | `--json` | Emit raw JSON result instead of human-readable output. |
 
-If neither a positional `message` argument nor `--file` is provided, `hermes send` reads from stdin when it is not a TTY. Exit codes: `0` on success, `1` on delivery/backend failure, `2` on usage errors.
+If neither a positional `message` argument nor `--file` is provided, `xiaoban send` reads from stdin when it is not a TTY. Exit codes: `0` on success, `1` on delivery/backend failure, `2` on usage errors.
 
 ### Sending images and other media
 
 `--file` is for *text* bodies only. To deliver an image, document, video, or audio file as a native platform attachment, reference it inside the message text with the `MEDIA:<local_path>` directive:
 
 ```bash
-hermes send --to telegram "MEDIA:/tmp/screenshot.png"
-hermes send --to telegram "Build chart for today MEDIA:/tmp/chart.png"   # with caption
-hermes send --to discord:#ops "MEDIA:/tmp/report.pdf"
+xiaoban send --to telegram "MEDIA:/tmp/screenshot.png"
+xiaoban send --to telegram "Build chart for today MEDIA:/tmp/chart.png"   # with caption
+xiaoban send --to discord:#ops "MEDIA:/tmp/report.pdf"
 ```
 
 By default, image files are sent as photos (platforms like Telegram recompress these). Add `[[as_document]]` to the message to deliver them as uncompressed file attachments instead:
 
 ```bash
-hermes send --to telegram "[[as_document]] MEDIA:/tmp/screenshot.png"
+xiaoban send --to telegram "[[as_document]] MEDIA:/tmp/screenshot.png"
 ```
 
 Examples:
 
 ```bash
-hermes send --to telegram "deploy finished"
-echo "RAM 92%" | hermes send --to telegram:-1001234567890
-hermes send --to discord:#ops --file /tmp/report.md
-hermes send --to slack:#eng --subject "[CI]" --file build.log
-hermes send --list                  # all platforms
-hermes send --list telegram         # filter by platform
+xiaoban send --to telegram "deploy finished"
+echo "RAM 92%" | xiaoban send --to telegram:-1001234567890
+xiaoban send --to discord:#ops --file /tmp/report.md
+xiaoban send --to slack:#eng --subject "[CI]" --file build.log
+xiaoban send --list                  # all platforms
+xiaoban send --list telegram         # filter by platform
 ```
 
 
-## `hermes secrets`
+## `xiaoban secrets`
 
 ```bash
-hermes secrets bitwarden <subcommand>
-hermes secrets bw <subcommand>          # short alias
+xiaoban secrets bitwarden <subcommand>
+xiaoban secrets bw <subcommand>          # short alias
 ```
 
-Pull API keys from an external secret manager at process startup instead of storing them in `~/.hermes/.env`. Currently supports **Bitwarden Secrets Manager**. See the full guide: [Bitwarden integration](../user-guide/secrets/bitwarden.md).
+Pull API keys from an external secret manager at process startup instead of storing them in `~/.xiaoban/.env`. Currently supports **Bitwarden Secrets Manager**. See the full guide: [Bitwarden integration](../user-guide/secrets/bitwarden.md).
 
 `bitwarden` (alias `bw`) subcommands:
 
@@ -422,10 +422,10 @@ Pull API keys from an external secret manager at process startup instead of stor
 | `disable` | Turn off the Bitwarden integration. |
 
 
-## `hermes migrate`
+## `xiaoban migrate`
 
 ```bash
-hermes migrate <type>
+xiaoban migrate <type>
 ```
 
 Diagnose and (optionally) rewrite the active `config.yaml` to replace references to retired models or deprecated settings. A timestamped backup of the original `config.yaml` is taken before any rewrite (skip with `--no-backup`).
@@ -441,13 +441,13 @@ Common flags for migration subcommands:
 | `--apply` | Rewrite `config.yaml` in-place (default: dry-run, no writes). |
 | `--no-backup` | Skip the timestamped backup of `config.yaml` when applying. |
 
-> Not to be confused with `hermes claw migrate` (one-shot import of OpenClaw configuration into Hermes) — `hermes migrate` is the top-level config-rewrite command.
+> Not to be confused with `xiaoban claw migrate` (one-shot import of OpenClaw configuration into Xiaoban) — `xiaoban migrate` is the top-level config-rewrite command.
 
 
-## `hermes proxy`
+## `xiaoban proxy`
 
 ```bash
-hermes proxy <subcommand>
+xiaoban proxy <subcommand>
 ```
 
 Run a local OpenAI-compatible HTTP server that forwards requests to an OAuth-authenticated upstream provider (e.g. Nous Portal, xAI). External apps can point at the proxy with any bearer token; the proxy attaches your real OAuth credentials on the way out. See [Subscription Proxy](../user-guide/features/subscription-proxy.md) for the full guide.
@@ -459,13 +459,13 @@ Run a local OpenAI-compatible HTTP server that forwards requests to an OAuth-aut
 | `providers` | List available proxy upstream providers. |
 
 
-## `hermes security`
+## `xiaoban security`
 
 ```bash
-hermes security <subcommand>
+xiaoban security <subcommand>
 ```
 
-On-demand vulnerability scan against [OSV.dev](https://osv.dev). Covers the Hermes venv (installed PyPI distributions), Python dependencies declared by plugins under `~/.hermes/plugins/`, and pinned `npx`/`uvx` MCP servers in `config.yaml`. Does NOT scan globally-installed packages or editor/browser extensions.
+On-demand vulnerability scan against [OSV.dev](https://osv.dev). Covers the Xiaoban venv (installed PyPI distributions), Python dependencies declared by plugins under `~/.xiaoban/plugins/`, and pinned `npx`/`uvx` MCP servers in `config.yaml`. Does NOT scan globally-installed packages or editor/browser extensions.
 
 | Subcommand | Description |
 |------------|-------------|
@@ -477,40 +477,40 @@ On-demand vulnerability scan against [OSV.dev](https://osv.dev). Covers the Herm
 |------|---------|-------------|
 | `--json` | off | Emit machine-readable JSON instead of human-readable text. |
 | `--fail-on <level>` | `critical` | Exit non-zero when any finding meets this severity (`low`, `moderate`, `high`, `critical`). |
-| `--skip-venv` | off | Skip scanning the Hermes Python venv. |
+| `--skip-venv` | off | Skip scanning the Xiaoban Python venv. |
 | `--skip-plugins` | off | Skip scanning plugin requirements files. |
 | `--skip-mcp` | off | Skip scanning pinned MCP servers in `config.yaml`. |
 
 
-## `hermes login` / `hermes logout` *(Deprecated)*
+## `xiaoban login` / `xiaoban logout` *(Deprecated)*
 
 :::caution
-`hermes login` has been removed. Use `hermes auth` to manage OAuth credentials, `xiaoban model` to select a provider, or `xiaoban setup` for full interactive setup.
+`xiaoban login` has been removed. Use `xiaoban auth` to manage OAuth credentials, `xiaoban model` to select a provider, or `xiaoban setup` for full interactive setup.
 :::
 
-## `hermes auth`
+## `xiaoban auth`
 
 Manage credential pools for same-provider key rotation. See [Credential Pools](/user-guide/features/credential-pools) for full documentation.
 
 ```bash
-hermes auth                                              # Interactive wizard
-hermes auth list                                         # Show all pools
-hermes auth list openrouter                              # Show specific provider
-hermes auth add openrouter --api-key sk-or-v1-xxx        # Add API key
-hermes auth add anthropic --type oauth                   # Add OAuth credential
-hermes auth remove openrouter 2                          # Remove by index
-hermes auth reset openrouter                             # Clear cooldowns
-hermes auth status anthropic                             # Show auth status for a provider
-hermes auth logout anthropic                             # Log out and clear stored auth state
-hermes auth spotify                                      # Authenticate Hermes with Spotify via PKCE
+xiaoban auth                                              # Interactive wizard
+xiaoban auth list                                         # Show all pools
+xiaoban auth list openrouter                              # Show specific provider
+xiaoban auth add openrouter --api-key sk-or-v1-xxx        # Add API key
+xiaoban auth add anthropic --type oauth                   # Add OAuth credential
+xiaoban auth remove openrouter 2                          # Remove by index
+xiaoban auth reset openrouter                             # Clear cooldowns
+xiaoban auth status anthropic                             # Show auth status for a provider
+xiaoban auth logout anthropic                             # Log out and clear stored auth state
+xiaoban auth spotify                                      # Authenticate Xiaoban with Spotify via PKCE
 ```
 
 Subcommands: `add`, `list`, `remove`, `reset`, `status`, `logout`, `spotify`. When called with no subcommand, launches the interactive management wizard.
 
-## `hermes status`
+## `xiaoban status`
 
 ```bash
-hermes status [--all] [--deep]
+xiaoban status [--all] [--deep]
 ```
 
 | Option | Description |
@@ -518,10 +518,10 @@ hermes status [--all] [--deep]
 | `--all` | Show all details in a shareable redacted format. |
 | `--deep` | Run deeper checks that may take longer. |
 
-## `hermes cron`
+## `xiaoban cron`
 
 ```bash
-hermes cron <list|create|edit|pause|resume|run|remove|status|tick>
+xiaoban cron <list|create|edit|pause|resume|run|remove|status|tick>
 ```
 
 | Subcommand | Description |
@@ -541,32 +541,32 @@ The cron **trigger** is pluggable via the `cron.provider` config key. Empty
 NAS-managed provider for scale-to-zero hosted gateways) — configured via the
 `cron.chronos.*` keys (`portal_url`, `callback_url`, `expected_audience`,
 `nas_jwks_url`) — or name a custom provider under `plugins/cron/<name>/` or
-`$HERMES_HOME/plugins/<name>/`. An unknown or unavailable provider falls back to
+`$XIAOBAN_HOME/plugins/<name>/`. An unknown or unavailable provider falls back to
 the built-in, so cron is never left without a trigger. See the
 [cron internals](../developer-guide/cron-internals.md#gateway-integration) doc.
 
-## `hermes kanban`
+## `xiaoban kanban`
 
 ```bash
-hermes kanban [--board <slug>] <action> [options]
+xiaoban kanban [--board <slug>] <action> [options]
 ```
 
-Multi-profile, multi-project collaboration board. Each install can host many boards (one per project, repo, or domain); each board is a standalone queue with its own SQLite DB and dispatcher scope. New installs start with one board called `default`, whose DB is `~/.hermes/kanban.db` for back-compat; additional boards live at `~/.hermes/kanban/boards/<slug>/kanban.db`. The gateway-embedded dispatcher sweeps every board per tick.
+Multi-profile, multi-project collaboration board. Each install can host many boards (one per project, repo, or domain); each board is a standalone queue with its own SQLite DB and dispatcher scope. New installs start with one board called `default`, whose DB is `~/.xiaoban/kanban.db` for back-compat; additional boards live at `~/.xiaoban/kanban/boards/<slug>/kanban.db`. The gateway-embedded dispatcher sweeps every board per tick.
 
 **Global flags (apply to every action below):**
 
 | Flag | Purpose |
 |------|---------|
-| `--board <slug>` | Operate on a specific board. Defaults to the current board (set via `hermes kanban boards switch`, the `HERMES_KANBAN_BOARD` env var, or `default`). |
+| `--board <slug>` | Operate on a specific board. Defaults to the current board (set via `xiaoban kanban boards switch`, the `XIAOBAN_KANBAN_BOARD` env var, or `default`). |
 
-**This is the human / scripting surface.** Agent workers spawned by the dispatcher drive the board through a dedicated `kanban_*` [toolset](/user-guide/features/kanban#how-workers-interact-with-the-board) (`kanban_show`, `kanban_complete`, `kanban_block`, `kanban_create`, `kanban_link`, `kanban_comment`, `kanban_heartbeat`; orchestrator profiles also get `kanban_list` and `kanban_unblock`) instead of shelling to `hermes kanban`. Workers have `HERMES_KANBAN_BOARD` pinned in their env so they physically cannot see other boards.
+**This is the human / scripting surface.** Agent workers spawned by the dispatcher drive the board through a dedicated `kanban_*` [toolset](/user-guide/features/kanban#how-workers-interact-with-the-board) (`kanban_show`, `kanban_complete`, `kanban_block`, `kanban_create`, `kanban_link`, `kanban_comment`, `kanban_heartbeat`; orchestrator profiles also get `kanban_list` and `kanban_unblock`) instead of shelling to `xiaoban kanban`. Workers have `XIAOBAN_KANBAN_BOARD` pinned in their env so they physically cannot see other boards.
 
 | Action | Purpose |
 |--------|---------|
 | `init` | Create `kanban.db` if missing. Idempotent. |
 | `boards list` / `boards ls` | List all boards with task counts. `--json`, `--all` (include archived). |
 | `boards create <slug>` | Create a new board. Flags: `--name`, `--description`, `--icon`, `--color`, `--switch` (make active). Slug is kebab-case, auto-downcased. |
-| `boards switch <slug>` / `boards use` | Persist `<slug>` as the active board (writes `~/.hermes/kanban/current`). |
+| `boards switch <slug>` / `boards use` | Persist `<slug>` as the active board (writes `~/.xiaoban/kanban/current`). |
 | `boards show` / `boards current` | Print the currently-active board's name, DB path, and task counts. |
 | `boards rename <slug> "<name>"` | Change a board's display name. Slug is immutable. |
 | `boards rm <slug>` | Archive (default) or hard-delete a board. `--delete` skips the archive step. Archived boards move to `boards/_archived/<slug>-<ts>/`. Refused for `default`. |
@@ -594,28 +594,28 @@ Examples:
 
 ```bash
 # Create a second board and put a task on it without switching away.
-hermes kanban boards create atm10-server --name "ATM10 Server" --icon 🎮
-hermes kanban --board atm10-server create "Restart server" --assignee ops
+xiaoban kanban boards create atm10-server --name "ATM10 Server" --icon 🎮
+xiaoban kanban --board atm10-server create "Restart server" --assignee ops
 
 # Switch the active board for subsequent calls.
-hermes kanban boards switch atm10-server
-hermes kanban list                  # shows atm10-server tasks
+xiaoban kanban boards switch atm10-server
+xiaoban kanban list                  # shows atm10-server tasks
 
 # Archive a board (recoverable) or hard-delete it.
-hermes kanban boards rm atm10-server
-hermes kanban boards rm atm10-server --delete
+xiaoban kanban boards rm atm10-server
+xiaoban kanban boards rm atm10-server --delete
 ```
 
-Board resolution order (highest precedence first): `--board <slug>` flag → `HERMES_KANBAN_BOARD` env var → `~/.hermes/kanban/current` file → `default`.
+Board resolution order (highest precedence first): `--board <slug>` flag → `XIAOBAN_KANBAN_BOARD` env var → `~/.xiaoban/kanban/current` file → `default`.
 
 All actions are also available as a slash command in the gateway (`/kanban …`), with the same argument surface — including `boards` subcommands and the `--board` flag.
 
-For the full design — comparison with Cline Kanban / Paperclip / NanoClaw / Gemini Enterprise, eight collaboration patterns, four user stories, concurrency correctness proof — see `docs/hermes-kanban-v1-spec.pdf` in the repository or the [Kanban user guide](/user-guide/features/kanban).
+For the full design — comparison with Cline Kanban / Paperclip / NanoClaw / Gemini Enterprise, eight collaboration patterns, four user stories, concurrency correctness proof — see `docs/xiaoban-kanban-v1-spec.pdf` in the repository or the [Kanban user guide](/user-guide/features/kanban).
 
-## `hermes webhook`
+## `xiaoban webhook`
 
 ```bash
-hermes webhook <subscribe|list|remove|test>
+xiaoban webhook <subscribe|list|remove|test>
 ```
 
 Manage dynamic webhook subscriptions for event-driven agent activation. Requires the webhook platform to be enabled in config — if not configured, prints setup instructions.
@@ -627,10 +627,10 @@ Manage dynamic webhook subscriptions for event-driven agent activation. Requires
 | `remove` / `rm` | Delete a dynamic subscription. Static routes from config.yaml are not affected. |
 | `test` | Send a test POST to verify a subscription is working. |
 
-### `hermes webhook subscribe`
+### `xiaoban webhook subscribe`
 
 ```bash
-hermes webhook subscribe <name> [options]
+xiaoban webhook subscribe <name> [options]
 ```
 
 | Option | Description |
@@ -644,25 +644,25 @@ hermes webhook subscribe <name> [options]
 | `--secret` | Custom HMAC secret. Auto-generated if omitted. |
 | `--deliver-only` | Skip the agent — deliver the rendered `--prompt` as the literal message. Zero LLM cost, sub-second delivery. Requires `--deliver` to be a real target (not `log`). |
 
-Subscriptions persist to `~/.hermes/webhook_subscriptions.json` and are hot-reloaded by the webhook adapter without a gateway restart.
+Subscriptions persist to `~/.xiaoban/webhook_subscriptions.json` and are hot-reloaded by the webhook adapter without a gateway restart.
 
-## `hermes doctor`
+## `xiaoban doctor`
 
 ```bash
-hermes doctor [--fix]
+xiaoban doctor [--fix]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--fix` | Attempt automatic repairs where possible. |
 
-## `hermes dump`
+## `xiaoban dump`
 
 ```bash
-hermes dump [--show-keys]
+xiaoban dump [--show-keys]
 ```
 
-Outputs a compact, plain-text summary of your entire Hermes setup. Designed to be copy-pasted into Discord, GitHub issues, or Telegram when asking for support — no ANSI colors, no special formatting, just data.
+Outputs a compact, plain-text summary of your entire Xiaoban setup. Designed to be copy-pasted into Discord, GitHub issues, or Telegram when asking for support — no ANSI colors, no special formatting, just data.
 
 | Option | Description |
 |--------|-------------|
@@ -672,9 +672,9 @@ Outputs a compact, plain-text summary of your entire Hermes setup. Designed to b
 
 | Section | Details |
 |---------|---------|
-| **Header** | Hermes version, release date, git commit hash |
+| **Header** | Xiaoban version, release date, git commit hash |
 | **Environment** | OS, Python version, OpenAI SDK version |
-| **Identity** | Active profile name, HERMES_HOME path |
+| **Identity** | Active profile name, XIAOBAN_HOME path |
 | **Model** | Configured default model and provider |
 | **Terminal** | Backend type (local, docker, ssh, etc.) |
 | **API keys** | Presence check for all 22 provider/tool API keys |
@@ -686,13 +686,13 @@ Outputs a compact, plain-text summary of your entire Hermes setup. Designed to b
 ### Example output
 
 ```
---- hermes dump ---
+--- xiaoban dump ---
 version:          0.8.0 (2026.4.8) [af4abd2f]
 os:               Linux 6.14.0-37-generic x86_64
 python:           3.11.14
 openai_sdk:       2.24.0
 profile:          default
-hermes_home:      ~/.hermes
+xiaoban_home:      ~/.xiaoban
 model:            anthropic/claude-opus-4.6
 provider:         openrouter
 terminal:         local
@@ -729,13 +729,13 @@ config_overrides:
 - Quick sanity check when something isn't working
 
 :::tip
-`hermes dump` is specifically designed for sharing. For interactive diagnostics, use `hermes doctor`. For a visual overview, use `hermes status`.
+`xiaoban dump` is specifically designed for sharing. For interactive diagnostics, use `xiaoban doctor`. For a visual overview, use `xiaoban status`.
 :::
 
-## `hermes debug`
+## `xiaoban debug`
 
 ```bash
-hermes debug share [options]
+xiaoban debug share [options]
 ```
 
 Upload a debug report (system info + recent logs) to a paste service and get a shareable URL. Useful for quick support requests — includes everything a helper needs to diagnose your issue.
@@ -746,34 +746,34 @@ Upload a debug report (system info + recent logs) to a paste service and get a s
 | `--expire <days>` | Paste expiry in days (default: 7). |
 | `--local` | Print the report locally instead of uploading. |
 
-The report includes system info (OS, Python version, Hermes version), recent agent, gateway, GUI/dashboard, and desktop logs (512 KB limit per file), and redacted API key status. Keys are always redacted — no secrets are uploaded.
+The report includes system info (OS, Python version, Xiaoban version), recent agent, gateway, GUI/dashboard, and desktop logs (512 KB limit per file), and redacted API key status. Keys are always redacted — no secrets are uploaded.
 
 Paste services tried in order: paste.rs, dpaste.com.
 
 ### Examples
 
 ```bash
-hermes debug share              # Upload debug report, print URL
-hermes debug share --lines 500  # Include more log lines
-hermes debug share --expire 30  # Keep paste for 30 days
-hermes debug share --local      # Print report to terminal (no upload)
+xiaoban debug share              # Upload debug report, print URL
+xiaoban debug share --lines 500  # Include more log lines
+xiaoban debug share --expire 30  # Keep paste for 30 days
+xiaoban debug share --local      # Print report to terminal (no upload)
 ```
 
-## `hermes backup`
+## `xiaoban backup`
 
 ```bash
-hermes backup [options]
+xiaoban backup [options]
 ```
 
-Create a zip archive of your Hermes configuration, skills, sessions, and data. The backup excludes the xiaoban-agent codebase itself.
+Create a zip archive of your Xiaoban configuration, skills, sessions, and data. The backup excludes the xiaoban-agent codebase itself.
 
 | Option | Description |
 |--------|-------------|
-| `-o`, `--output <path>` | Output path for the zip file (default: `~/hermes-backup-<timestamp>.zip`). |
+| `-o`, `--output <path>` | Output path for the zip file (default: `~/xiaoban-backup-<timestamp>.zip`). |
 | `-q`, `--quick` | Quick snapshot: only critical state files (config.yaml, state.db, .env, auth, cron jobs). Much faster than a full backup. |
 | `-l`, `--label <name>` | Label for the snapshot (only used with `--quick`). |
 
-The backup uses SQLite's `backup()` API for safe copying, so it works correctly even when Hermes is running (WAL-mode safe).
+The backup uses SQLite's `backup()` API for safe copying, so it works correctly even when Xiaoban is running (WAL-mode safe).
 
 **What's excluded from the zip:**
 
@@ -784,23 +784,23 @@ The backup uses SQLite's `backup()` API for safe copying, so it works correctly 
 ### Examples
 
 ```bash
-hermes backup                           # Full backup to ~/hermes-backup-*.zip
-hermes backup -o /tmp/hermes.zip        # Full backup to specific path
-hermes backup --quick                   # Quick state-only snapshot
-hermes backup --quick --label "pre-upgrade"  # Quick snapshot with label
+xiaoban backup                           # Full backup to ~/xiaoban-backup-*.zip
+xiaoban backup -o /tmp/xiaoban.zip        # Full backup to specific path
+xiaoban backup --quick                   # Quick state-only snapshot
+xiaoban backup --quick --label "pre-upgrade"  # Quick snapshot with label
 ```
 
-## `hermes checkpoints`
+## `xiaoban checkpoints`
 
 ```bash
-hermes checkpoints [COMMAND]
+xiaoban checkpoints [COMMAND]
 ```
 
-Inspect and manage the shadow git store at `~/.hermes/checkpoints/` — the storage layer behind the in-session `/rollback` command. Safe to run any time; does not require the agent to be running.
+Inspect and manage the shadow git store at `~/.xiaoban/checkpoints/` — the storage layer behind the in-session `/rollback` command. Safe to run any time; does not require the agent to be running.
 
 | Subcommand | Description |
 |------------|-------------|
-| `status` (default) | Show total size, project count, and per-project breakdown. Bare `hermes checkpoints` is equivalent. |
+| `status` (default) | Show total size, project count, and per-project breakdown. Bare `xiaoban checkpoints` is equivalent. |
 | `list` | Alias for `status`. |
 | `prune` | Force a cleanup sweep — delete orphan and stale projects, GC the store, enforce the size cap. Ignores the 24h idempotency marker. |
 | `clear` | Delete the entire checkpoint base. Irreversible; asks for confirmation unless `-f`. |
@@ -819,22 +819,22 @@ Inspect and manage the shadow git store at `~/.hermes/checkpoints/` — the stor
 ### Examples
 
 ```bash
-hermes checkpoints                                  # status overview
-hermes checkpoints prune --retention-days 3         # aggressive cleanup
-hermes checkpoints prune --max-size-mb 200          # tighten size cap once
-hermes checkpoints clear-legacy -f                  # drop v1 archive dirs
-hermes checkpoints clear -f                         # wipe everything
+xiaoban checkpoints                                  # status overview
+xiaoban checkpoints prune --retention-days 3         # aggressive cleanup
+xiaoban checkpoints prune --max-size-mb 200          # tighten size cap once
+xiaoban checkpoints clear-legacy -f                  # drop v1 archive dirs
+xiaoban checkpoints clear -f                         # wipe everything
 ```
 
 See [Checkpoints and `/rollback`](../user-guide/checkpoints-and-rollback.md) for the full architecture and the in-session commands.
 
-## `hermes import`
+## `xiaoban import`
 
 ```bash
-hermes import <zipfile> [options]
+xiaoban import <zipfile> [options]
 ```
 
-Restore a previously created Hermes backup into your Hermes home directory. All files in the archive overwrite existing files in your Hermes home; `--force` only skips the confirmation prompt that fires when the target already has a Hermes installation.
+Restore a previously created Xiaoban backup into your Xiaoban home directory. All files in the archive overwrite existing files in your Xiaoban home; `--force` only skips the confirmation prompt that fires when the target already has a Xiaoban installation.
 
 | Option | Description |
 |--------|-------------|
@@ -846,8 +846,8 @@ Stop the gateway before importing to avoid conflicts with running processes.
 
 ### Examples
 ```bash
-hermes import ~/hermes-backup-20260423.zip           # Prompts before overwriting existing config
-hermes import ~/hermes-backup-20260423.zip --force   # Overwrite without prompting
+xiaoban import ~/xiaoban-backup-20260423.zip           # Prompts before overwriting existing config
+xiaoban import ~/xiaoban-backup-20260423.zip --force   # Overwrite without prompting
 ```
 
 ## `xiaoban logs`
@@ -856,7 +856,7 @@ hermes import ~/hermes-backup-20260423.zip --force   # Overwrite without prompti
 xiaoban logs [log_name] [options]
 ```
 
-View, tail, and filter Hermes log files. All logs are stored in `~/.hermes/logs/` (or `<profile>/logs/` for non-default profiles).
+View, tail, and filter Xiaoban log files. All logs are stored in `~/.xiaoban/logs/` (or `<profile>/logs/` for non-default profiles).
 
 ### Log files
 
@@ -918,13 +918,13 @@ Lines without a parseable timestamp are included when `--since` is active (they 
 
 ### Log rotation
 
-Hermes uses Python's `RotatingFileHandler`. Old logs are rotated automatically — look for `agent.log.1`, `agent.log.2`, etc. The `xiaoban logs list` subcommand shows all log files including rotated ones.
+Xiaoban uses Python's `RotatingFileHandler`. Old logs are rotated automatically — look for `agent.log.1`, `agent.log.2`, etc. The `xiaoban logs list` subcommand shows all log files including rotated ones.
 
 
-## `hermes prompt-size`
+## `xiaoban prompt-size`
 
 ```bash
-hermes prompt-size [--platform <name>] [--json]
+xiaoban prompt-size [--platform <name>] [--json]
 ```
 
 Reports the fixed prompt budget for a fresh session — what gets sent on every
@@ -939,7 +939,7 @@ It builds the same system prompt the agent would, then breaks it down:
 - **Skills index** — the `<available_skills>` block. This is often the largest
   single block when many skills are installed.
 - **Memory** and **user profile** — your `MEMORY.md` / `USER.md` snapshots.
-- **Prompt tiers** — stable / context / volatile, matching how Hermes layers
+- **Prompt tiers** — stable / context / volatile, matching how Xiaoban layers
   the prompt for cache-friendliness.
 - **Tool schemas** — the JSON for all enabled tools (the other half of the
   fixed per-call payload).
@@ -948,13 +948,13 @@ Runs entirely offline — no API call, works with no credentials configured.
 
 ```bash
 # Human-readable breakdown for the CLI platform (default)
-hermes prompt-size
+xiaoban prompt-size
 
 # Simulate a messaging platform's prompt (different platform hint)
-hermes prompt-size --platform telegram
+xiaoban prompt-size --platform telegram
 
 # Machine-readable output for scripts
-hermes prompt-size --json
+xiaoban prompt-size --json
 ```
 
 :::tip
@@ -964,10 +964,10 @@ uninstall skills you don't need (`xiaoban skills`). Context files (AGENTS.md,
 .cursorrules) in your current directory also count toward the total.
 :::
 
-## `hermes config`
+## `xiaoban config`
 
 ```bash
-hermes config <subcommand>
+xiaoban config <subcommand>
 ```
 
 Subcommands:
@@ -982,10 +982,10 @@ Subcommands:
 | `check` | Check for missing or stale config. |
 | `migrate` | Add newly introduced options interactively. |
 
-## `hermes pairing`
+## `xiaoban pairing`
 
 ```bash
-hermes pairing <list|approve|revoke|clear-pending>
+xiaoban pairing <list|approve|revoke|clear-pending>
 ```
 
 | Subcommand | Description |
@@ -1049,17 +1049,17 @@ Notes:
 - `--force` can override non-dangerous policy blocks for third-party/community skills.
 - `--force` does not override a `dangerous` scan verdict.
 - `--source skills-sh` searches the public `skills.sh` directory.
-- `--source well-known` lets you point Hermes at a site exposing `/.well-known/skills/index.json`.
+- `--source well-known` lets you point Xiaoban at a site exposing `/.well-known/skills/index.json`.
 - `--source browse-sh` searches [browse.sh](https://browse.sh)'s catalog of 200+ site-specific browser-automation skills. Identifiers look like `browse-sh/airbnb.com/search-listings-ddgioa`.
 - Passing an `http(s)://…/*.md` URL installs a single-file SKILL.md directly. When frontmatter has no `name:` and the URL slug isn't a valid identifier, an interactive terminal prompts for a name; non-interactive surfaces (`/skills install` inside the TUI, gateway platforms) require `--name <x>` instead.
 
-## `hermes bundles`
+## `xiaoban bundles`
 
 ```bash
-hermes bundles <subcommand>
+xiaoban bundles <subcommand>
 ```
 
-Skill bundles group several skills under one `/<bundle-name>` slash command. Invoking the bundle loads every referenced skill into a single combined user message. Storage: `~/.hermes/skill-bundles/<slug>.yaml`. See [Skill Bundles](../user-guide/features/skills.md#skill-bundles) for the YAML schema and behavior.
+Skill bundles group several skills under one `/<bundle-name>` slash command. Invoking the bundle loads every referenced skill into a single combined user message. Storage: `~/.xiaoban/skill-bundles/<slug>.yaml`. See [Skill Bundles](../user-guide/features/skills.md#skill-bundles) for the YAML schema and behavior.
 
 Subcommands:
 
@@ -1069,28 +1069,28 @@ Subcommands:
 | `show <name>` | Show one bundle's name, description, skills, and file path |
 | `create <name>` | Create a new bundle. Pass `--skill <id>` (repeat) or omit for interactive entry. `--description`, `--instruction`, `--force` available. |
 | `delete <name>` | Remove a bundle file |
-| `reload` | Re-scan `~/.hermes/skill-bundles/` and report added/removed bundles |
+| `reload` | Re-scan `~/.xiaoban/skill-bundles/` and report added/removed bundles |
 
 Examples:
 
 ```bash
-hermes bundles create backend-dev \
+xiaoban bundles create backend-dev \
   --skill github-code-review \
   --skill test-driven-development \
   --skill github-pr-workflow \
   -d "Backend feature work"
 
-hermes bundles list
-hermes bundles show backend-dev
-hermes bundles delete backend-dev
+xiaoban bundles list
+xiaoban bundles show backend-dev
+xiaoban bundles delete backend-dev
 ```
 
 In a chat session, `/bundles` lists installed bundles and `/<bundle-name>` loads one.
 
-## `hermes curator`
+## `xiaoban curator`
 
 ```bash
-hermes curator <subcommand>
+xiaoban curator <subcommand>
 ```
 
 The curator is an auxiliary-model background task that periodically reviews agent-created skills, prunes stale ones, consolidates overlaps, and archives obsolete skills. Bundled and hub-installed skills are never touched. Archives are recoverable; auto-deletion never happens.
@@ -1101,8 +1101,8 @@ The curator is an auxiliary-model background task that periodically reviews agen
 | `run` | Trigger a curator review now (blocks until the LLM pass finishes) |
 | `run --background` | Start the LLM pass in a background thread and return immediately |
 | `run --dry-run` | Preview only — produce the review report with no mutations |
-| `backup` | Take a manual tar.gz snapshot of `~/.hermes/skills/` (curator also snapshots automatically before every real run) |
-| `rollback` | Restore `~/.hermes/skills/` from a snapshot (defaults to newest) |
+| `backup` | Take a manual tar.gz snapshot of `~/.xiaoban/skills/` (curator also snapshots automatically before every real run) |
+| `rollback` | Restore `~/.xiaoban/skills/` from a snapshot (defaults to newest) |
 | `rollback --list` | List available snapshots |
 | `rollback --id <ts>` | Restore a specific snapshot by id |
 | `rollback -y` | Skip the confirmation prompt |
@@ -1115,14 +1115,14 @@ The curator is an auxiliary-model background task that periodically reviews agen
 | `prune` | Manually prune skills the curator would normally clean up |
 | `list-archived` | List archived skills (recoverable via `restore`) |
 
-On a fresh install the first scheduled pass is deferred by one full `interval_hours` (7 days by default) — the gateway will not curate immediately on the first tick after `xiaoban update`. Use `hermes curator run --dry-run` to preview before that happens.
+On a fresh install the first scheduled pass is deferred by one full `interval_hours` (7 days by default) — the gateway will not curate immediately on the first tick after `xiaoban update`. Use `xiaoban curator run --dry-run` to preview before that happens.
 
 See [Curator](../user-guide/features/curator.md) for behavior and config.
 
-## `hermes fallback`
+## `xiaoban fallback`
 
 ```bash
-hermes fallback <subcommand>
+xiaoban fallback <subcommand>
 ```
 
 Manage the fallback provider chain. Fallback providers are tried in order when the primary model fails with rate-limit, overload, or connection errors.
@@ -1136,13 +1136,13 @@ Manage the fallback provider chain. Fallback providers are tried in order when t
 
 See [Fallback Providers](../user-guide/features/fallback-providers.md).
 
-## `hermes hooks`
+## `xiaoban hooks`
 
 ```bash
-hermes hooks <subcommand>
+xiaoban hooks <subcommand>
 ```
 
-Inspect shell-script hooks declared in `~/.hermes/config.yaml`, test them against synthetic payloads, and manage the first-use consent allowlist at `~/.hermes/shell-hooks-allowlist.json`.
+Inspect shell-script hooks declared in `~/.xiaoban/config.yaml`, test them against synthetic payloads, and manage the first-use consent allowlist at `~/.xiaoban/shell-hooks-allowlist.json`.
 
 | Subcommand | Description |
 |------------|-------------|
@@ -1153,10 +1153,10 @@ Inspect shell-script hooks declared in `~/.hermes/config.yaml`, test them agains
 
 See [Hooks](../user-guide/features/hooks.md) for event signatures and payload shapes.
 
-## `hermes memory`
+## `xiaoban memory`
 
 ```bash
-hermes memory <subcommand>
+xiaoban memory <subcommand>
 ```
 
 Set up and manage external memory provider plugins. Available providers: honcho, openviking, mem0, hindsight, holographic, retaindb, byterover, supermemory. Only one external provider can be active at a time. Built-in memory (MEMORY.md/USER.md) is always active.
@@ -1170,21 +1170,21 @@ Subcommands:
 | `off` | Disable external provider (built-in only). |
 
 :::info Provider-specific subcommands
-When an external memory provider is active, it may register its own top-level `hermes <provider>` command for provider-specific management (e.g. `hermes honcho` when Honcho is active). Inactive providers do not expose their subcommands. Run `hermes --help` to see what's currently wired in.
+When an external memory provider is active, it may register its own top-level `xiaoban <provider>` command for provider-specific management (e.g. `xiaoban honcho` when Honcho is active). Inactive providers do not expose their subcommands. Run `xiaoban --help` to see what's currently wired in.
 :::
 
-## `hermes acp`
+## `xiaoban acp`
 
 ```bash
-hermes acp
+xiaoban acp
 ```
 
-Starts Hermes as an ACP (Agent Client Protocol) stdio server for editor integration.
+Starts Xiaoban as an ACP (Agent Client Protocol) stdio server for editor integration.
 
 Related entrypoints:
 
 ```bash
-hermes-acp
+xiaoban-acp
 python -m acp_adapter
 ```
 
@@ -1196,20 +1196,20 @@ pip install -e '.[acp]'
 
 See [ACP Editor Integration](../user-guide/features/acp.md) and [ACP Internals](../developer-guide/acp-internals.md).
 
-## `hermes mcp`
+## `xiaoban mcp`
 
 ```bash
-hermes mcp <subcommand>
+xiaoban mcp <subcommand>
 ```
 
-Manage MCP (Model Context Protocol) server configurations and run Hermes as an MCP server.
+Manage MCP (Model Context Protocol) server configurations and run Xiaoban as an MCP server.
 
 | Subcommand | Description |
 |------------|-------------|
 | *(none)* or `picker` | Interactive catalog picker — browse Nous-approved MCPs and install/enable/disable. |
 | `catalog` | List Nous-approved MCPs (plain text, scriptable). |
-| `install <name>` | Install a catalog entry (e.g. `hermes mcp install n8n`). |
-| `serve [-v\|--verbose]` | Run Hermes as an MCP server — expose conversations to other agents. |
+| `install <name>` | Install a catalog entry (e.g. `xiaoban mcp install n8n`). |
+| `serve [-v\|--verbose]` | Run Xiaoban as an MCP server — expose conversations to other agents. |
 | `add <name> [--url URL] [--command CMD] [--auth oauth\|header] [--args ...]` | Add a custom MCP server with automatic tool discovery. `--args` passes the remaining argv to the stdio command, so put it last. |
 | `remove <name>` (alias: `rm`) | Remove an MCP server from config. |
 | `list` (alias: `ls`) | List configured MCP servers. |
@@ -1217,15 +1217,15 @@ Manage MCP (Model Context Protocol) server configurations and run Hermes as an M
 | `configure <name>` (alias: `config`) | Toggle tool selection for a server. |
 | `login <name>` | Force re-authentication for an OAuth-based MCP server. |
 
-See [MCP Config Reference](./mcp-config-reference.md), [Use MCP with Hermes](../guides/use-mcp-with-hermes.md), and [MCP Server Mode](../user-guide/features/mcp.md#running-hermes-as-an-mcp-server).
+See [MCP Config Reference](./mcp-config-reference.md), [Use MCP with Xiaoban](../guides/use-mcp-with-xiaoban.md), and [MCP Server Mode](../user-guide/features/mcp.md#running-xiaoban-as-an-mcp-server).
 
-## `hermes plugins`
+## `xiaoban plugins`
 
 ```bash
-hermes plugins [subcommand]
+xiaoban plugins [subcommand]
 ```
 
-Unified plugin management — general plugins, memory providers, and context engines in one place. Running `hermes plugins` with no subcommand opens a composite interactive screen with two sections:
+Unified plugin management — general plugins, memory providers, and context engines in one place. Running `xiaoban plugins` with no subcommand opens a composite interactive screen with two sections:
 
 - **General Plugins** — multi-select checkboxes to enable/disable installed plugins
 - **Provider Plugins** — single-select configuration for Memory Provider and Context Engine. Press ENTER on a category to open a radio picker.
@@ -1246,7 +1246,7 @@ Provider plugin selections are saved to `config.yaml`:
 
 General plugin disabled list is stored in `config.yaml` under `plugins.disabled`.
 
-See [Plugins](../user-guide/features/plugins.md) and [Build a Hermes Plugin](../guides/build-a-hermes-plugin.md).
+See [Plugins](../user-guide/features/plugins.md) and [Build a Xiaoban Plugin](../guides/build-a-xiaoban-plugin.md).
 
 ## `xiaoban tools`
 
@@ -1260,10 +1260,10 @@ xiaoban tools [--summary]
 
 Without `--summary`, this launches the interactive per-platform tool configuration UI.
 
-## `hermes computer-use`
+## `xiaoban computer-use`
 
 ```bash
-hermes computer-use <subcommand>
+xiaoban computer-use <subcommand>
 ```
 
 Subcommands:
@@ -1274,7 +1274,7 @@ Subcommands:
 | `install --upgrade` | Re-run the installer even if cua-driver is already on PATH. The upstream script always pulls the latest release, so this performs an in-place upgrade. |
 | `status` | Print whether `cua-driver` is on `$PATH` and which version is installed. |
 
-`hermes computer-use install` is the stable entry point for installing the
+`xiaoban computer-use install` is the stable entry point for installing the
 [cua-driver](https://github.com/trycua/cua) binary used by the
 `computer_use` toolset. It runs the same upstream installer that
 `xiaoban tools` invokes when you first enable Computer Use, so it's safe
@@ -1284,12 +1284,12 @@ it (for example, on returning-user setups).
 `xiaoban update` automatically re-runs the upstream installer at the end
 of the update if cua-driver is on PATH, so most users will not need to
 call `--upgrade` manually. Use it when upstream ships a fix you want
-right now without waiting for the next Hermes update.
+right now without waiting for the next Xiaoban update.
 
-## `hermes sessions`
+## `xiaoban sessions`
 
 ```bash
-hermes sessions <subcommand>
+xiaoban sessions <subcommand>
 ```
 
 Subcommands:
@@ -1304,10 +1304,10 @@ Subcommands:
 | `stats` | Show session-store statistics. |
 | `rename <session-id> <title>` | Set or change a session title. |
 
-## `hermes insights`
+## `xiaoban insights`
 
 ```bash
-hermes insights [--days N] [--source platform]
+xiaoban insights [--days N] [--source platform]
 ```
 
 | Option | Description |
@@ -1315,21 +1315,21 @@ hermes insights [--days N] [--source platform]
 | `--days <n>` | Analyze the last `n` days (default: 30). |
 | `--source <platform>` | Filter by source such as `cli`, `telegram`, or `discord`. |
 
-## `hermes claw`
+## `xiaoban claw`
 
 ```bash
-hermes claw migrate [options]
+xiaoban claw migrate [options]
 ```
 
-Migrate your OpenClaw setup to Hermes. Reads from `~/.openclaw` (or a custom path) and writes to `~/.hermes`. Automatically detects legacy directory names (`~/.clawdbot`, `~/.moltbot`) and config filenames (`clawdbot.json`, `moltbot.json`).
+Migrate your OpenClaw setup to Xiaoban. Reads from `~/.openclaw` (or a custom path) and writes to `~/.xiaoban`. Automatically detects legacy directory names (`~/.clawdbot`, `~/.moltbot`) and config filenames (`clawdbot.json`, `moltbot.json`).
 
 | Option | Description |
 |--------|-------------|
 | `--dry-run` | Preview what would be migrated without writing anything. |
 | `--preset <name>` | Migration preset: `full` (all compatible settings) or `user-data` (excludes infrastructure config). Neither preset imports secrets — pass `--migrate-secrets` explicitly. |
-| `--overwrite` | Overwrite existing Hermes files on conflicts (default: refuse to apply when the plan has conflicts). |
+| `--overwrite` | Overwrite existing Xiaoban files on conflicts (default: refuse to apply when the plan has conflicts). |
 | `--migrate-secrets` | Include API keys in migration. Required even under `--preset full`. |
-| `--no-backup` | Skip the pre-migration zip snapshot of `~/.hermes/` (by default a single restore-point archive is written to `~/.hermes/backups/pre-migration-*.zip` before apply; restorable with `hermes import`). |
+| `--no-backup` | Skip the pre-migration zip snapshot of `~/.xiaoban/` (by default a single restore-point archive is written to `~/.xiaoban/backups/pre-migration-*.zip` before apply; restorable with `xiaoban import`). |
 | `--source <path>` | Custom OpenClaw directory (default: `~/.openclaw`). |
 | `--workspace-target <path>` | Target directory for workspace instructions (AGENTS.md). |
 | `--skill-conflict <mode>` | Handle skill name collisions: `skip` (default), `overwrite`, or `rename`. |
@@ -1337,7 +1337,7 @@ Migrate your OpenClaw setup to Hermes. Reads from `~/.openclaw` (or a custom pat
 
 ### What gets migrated
 
-The migration covers 30+ categories across persona, memory, skills, model providers, messaging platforms, agent behavior, session policies, MCP servers, TTS, and more. Items are either **directly imported** into Hermes equivalents or **archived** for manual review.
+The migration covers 30+ categories across persona, memory, skills, model providers, messaging platforms, agent behavior, session policies, MCP servers, TTS, and more. Items are either **directly imported** into Xiaoban equivalents or **archived** for manual review.
 
 **Directly imported:** SOUL.md, MEMORY.md, USER.md, AGENTS.md, skills (4 source directories), default model, custom providers, MCP servers, messaging platform tokens and allowlists (Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Mattermost), agent defaults (reasoning effort, compression, human delay, timezone, sandbox), session reset policies, approval rules, TTS config, browser settings, tool settings, exec timeout, command allowlist, gateway config, and API keys from 3 sources.
 
@@ -1351,19 +1351,19 @@ For the complete config key mapping, SecretRef handling details, and post-migrat
 
 ```bash
 # Preview what would be migrated
-hermes claw migrate --dry-run
+xiaoban claw migrate --dry-run
 
 # Full migration (all compatible settings, no secrets)
-hermes claw migrate --preset full
+xiaoban claw migrate --preset full
 
 # Full migration including API keys
-hermes claw migrate --preset full --migrate-secrets
+xiaoban claw migrate --preset full --migrate-secrets
 
 # Migrate user data only (no secrets), overwrite conflicts
-hermes claw migrate --preset user-data --overwrite
+xiaoban claw migrate --preset user-data --overwrite
 
 # Migrate from a custom OpenClaw path
-hermes claw migrate --source /home/user/old-openclaw
+xiaoban claw migrate --source /home/user/old-openclaw
 ```
 
 ## `xiaoban dashboard`
@@ -1396,13 +1396,13 @@ xiaoban dashboard --port 8080 --no-open
 worker dashboard
 ```
 
-## `hermes profile`
+## `xiaoban profile`
 
 ```bash
-hermes profile <subcommand>
+xiaoban profile <subcommand>
 ```
 
-Manage profiles — multiple isolated Hermes instances, each with its own config, sessions, skills, and home directory.
+Manage profiles — multiple isolated Xiaoban instances, each with its own config, sessions, skills, and home directory.
 
 | Subcommand | Description |
 |------------|-------------|
@@ -1422,36 +1422,36 @@ Manage profiles — multiple isolated Hermes instances, each with its own config
 Examples:
 
 ```bash
-hermes profile list
-hermes profile create work --clone
-hermes profile use work
-hermes profile alias work --name h-work
-hermes profile export work -o work-backup.tar.gz
-hermes profile import work-backup.tar.gz --name restored
-hermes profile install github.com/user/my-distro --alias
-hermes profile update work
-hermes -p work chat -q "Hello from work profile"
+xiaoban profile list
+xiaoban profile create work --clone
+xiaoban profile use work
+xiaoban profile alias work --name h-work
+xiaoban profile export work -o work-backup.tar.gz
+xiaoban profile import work-backup.tar.gz --name restored
+xiaoban profile install github.com/user/my-distro --alias
+xiaoban profile update work
+xiaoban -p work chat -q "Hello from work profile"
 ```
 
-## `hermes completion`
+## `xiaoban completion`
 
 ```bash
-hermes completion [bash|zsh|fish]
+xiaoban completion [bash|zsh|fish]
 ```
 
-Print a shell completion script to stdout. Source the output in your shell profile for tab-completion of Hermes commands, subcommands, and profile names.
+Print a shell completion script to stdout. Source the output in your shell profile for tab-completion of Xiaoban commands, subcommands, and profile names.
 
 Examples:
 
 ```bash
 # Bash
-hermes completion bash >> ~/.bashrc
+xiaoban completion bash >> ~/.bashrc
 
 # Zsh
-hermes completion zsh >> ~/.zshrc
+xiaoban completion zsh >> ~/.zshrc
 
 # Fish
-hermes completion fish > ~/.config/fish/completions/hermes.fish
+xiaoban completion fish > ~/.config/fish/completions/xiaoban.fish
 ```
 
 ## `xiaoban update`
@@ -1464,23 +1464,23 @@ Pulls the latest `xiaoban-agent` code and reinstalls dependencies in your venv, 
 
 **pip installs:** `xiaoban update` detects pip-based installations automatically — it queries PyPI for the latest release and runs `pip install --upgrade xiaoban-agent` instead of `git pull`. PyPI releases track tagged versions (major/minor releases), not every commit on `main`. Use `--check` to see if a newer PyPI release is available without installing.
 
-**git installs:** `xiaoban update` pulls the configured update branch (default: `main`). If your checkout is on another branch, Hermes may check out the update branch before pulling. Commit branch work before updating when you want to keep it outside the update autostash flow.
+**git installs:** `xiaoban update` pulls the configured update branch (default: `main`). If your checkout is on another branch, Xiaoban may check out the update branch before pulling. Commit branch work before updating when you want to keep it outside the update autostash flow.
 
 | Option | Description |
 |--------|-------------|
 | `--gateway` | Internal mode used by the messaging `/update` command. Uses file-based IPC for prompts and progress streaming instead of reading from terminal stdin. Not a gateway restart flag. |
 | `--check` | Check whether an update is available without pulling, installing dependencies, or restarting anything. |
 | `--no-backup` | Skip the pre-update backup for this run, even if `updates.pre_update_backup` is enabled in `config.yaml`. |
-| `--backup` | Create a labeled pre-update snapshot of `HERMES_HOME` (config, auth, sessions, skills, pairing data) before pulling. Default is **off** — the previous always-backup behavior was adding minutes to every update on large homes. Flip it on permanently via `updates.pre_update_backup: true` in `config.yaml`. |
-| `--yes`, `-y` | Assume yes for interactive prompts such as config migration and stash restore. API-key entry is skipped; run `hermes config migrate` separately for those. |
+| `--backup` | Create a labeled pre-update snapshot of `XIAOBAN_HOME` (config, auth, sessions, skills, pairing data) before pulling. Default is **off** — the previous always-backup behavior was adding minutes to every update on large homes. Flip it on permanently via `updates.pre_update_backup: true` in `config.yaml`. |
+| `--yes`, `-y` | Assume yes for interactive prompts such as config migration and stash restore. API-key entry is skipped; run `xiaoban config migrate` separately for those. |
 
 Additional behavior:
 
-- **Gateway restart.** After a successful update, Hermes attempts to restart all running gateway profiles automatically so they pick up the new code. Use `xiaoban gateway restart` when you want to restart a gateway without applying an update.
+- **Gateway restart.** After a successful update, Xiaoban attempts to restart all running gateway profiles automatically so they pick up the new code. Use `xiaoban gateway restart` when you want to restart a gateway without applying an update.
 - **Local source changes.** For git installs, dirty tracked files and untracked files are auto-stashed before branch checkout or pull (`git stash push --include-untracked`). Interactive terminal updates ask before restoring the stash. Non-interactive updates restore it by default; set `updates.non_interactive_local_changes: discard` only on managed installs where local source edits should be thrown away after a successful pull. If stash restore conflicts or the pull fails, the stash is left in place for manual recovery.
-- **npm lockfile churn.** Before stashing or switching branches, Hermes makes a best-effort cleanup of tracked `package-lock.json` diffs produced by npm install/build steps. Commit or manually stash intentional lockfile edits before running `xiaoban update`.
-- **Pairing data snapshot.** Even when `--backup` is off, `xiaoban update` takes a lightweight snapshot of `~/.hermes/pairing/` and the Feishu comment rules before `git pull`. You can roll it back with `hermes backup restore --state pre-update` if a pull rewrites a file you were editing.
-- **Legacy `hermes.service` warning.** If Hermes detects a pre-rename `hermes.service` systemd unit (instead of the current `hermes-gateway.service`), it prints a one-time migration hint so you can avoid flap-loop issues.
+- **npm lockfile churn.** Before stashing or switching branches, Xiaoban makes a best-effort cleanup of tracked `package-lock.json` diffs produced by npm install/build steps. Commit or manually stash intentional lockfile edits before running `xiaoban update`.
+- **Pairing data snapshot.** Even when `--backup` is off, `xiaoban update` takes a lightweight snapshot of `~/.xiaoban/pairing/` and the Feishu comment rules before `git pull`. You can roll it back with `xiaoban backup restore --state pre-update` if a pull rewrites a file you were editing.
+- **Legacy `xiaoban.service` warning.** If Xiaoban detects a pre-rename `xiaoban.service` systemd unit (instead of the current `xiaoban-gateway.service`), it prints a one-time migration hint so you can avoid flap-loop issues.
 - **Exit codes.** `0` on success, `1` on pull/install/post-install errors, `2` on unexpected working-tree changes that block `git pull`.
 
 ## Maintenance commands
@@ -1489,8 +1489,8 @@ Additional behavior:
 |---------|-------------|
 | `xiaoban version` | Print version information. |
 | `xiaoban update` | Pull latest changes and reinstall dependencies. |
-| `hermes postinstall` | Internal bootstrap. Runs once after `pip install xiaoban-agent` (or `xiaoban update` on pip installs) to install non-Python dependencies that pip cannot provide — Node.js runtime, headless browser, ripgrep, ffmpeg — and then trigger `xiaoban setup` if the profile has not been configured yet. Safe to re-run idempotently. |
-| `hermes uninstall [--full] [--gui] [--yes]` | Remove Hermes, optionally deleting all config/data. `--gui` removes only the desktop Chat GUI, leaving the agent intact; `--full` also deletes config/data; `--yes` skips prompts. |
+| `xiaoban postinstall` | Internal bootstrap. Runs once after `pip install xiaoban-agent` (or `xiaoban update` on pip installs) to install non-Python dependencies that pip cannot provide — Node.js runtime, headless browser, ripgrep, ffmpeg — and then trigger `xiaoban setup` if the profile has not been configured yet. Safe to re-run idempotently. |
+| `xiaoban uninstall [--full] [--gui] [--yes]` | Remove Xiaoban, optionally deleting all config/data. `--gui` removes only the desktop Chat GUI, leaving the agent intact; `--full` also deletes config/data; `--yes` skips prompts. |
 
 ## See also
 

@@ -338,7 +338,7 @@ class TestResolveAnthropicToken:
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
         # Isolate source #4 (credential_pool): ensure source #3 (Claude Code
         # creds, incl. the macOS keychain read which Path.home does not cover)
-        # returns nothing, mirroring a Hermes-PKCE-only setup.
+        # returns nothing, mirroring a Xiaoban-PKCE-only setup.
         monkeypatch.setattr("agent.anthropic_adapter.read_claude_code_credentials", lambda: None)
 
         pool_entry = SimpleNamespace(
@@ -2250,7 +2250,7 @@ class TestConvertToolsToAnthropicDedup:
 
     Anthropic rejects requests with duplicate tool names.  This guard converts
     a hard failure into a warning log.  See:
-    https://github.com/52707407SXG/Xiaoban-Agent/issues/18478
+    https://github.com/52707407SXG/Xiaoban_Agent/issues/18478
     """
 
     def _make_openai_tool(self, name: str) -> dict:

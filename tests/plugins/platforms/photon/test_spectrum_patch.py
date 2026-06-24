@@ -1,4 +1,4 @@
-"""Regression tests for Hermes' Spectrum mixed text+attachment workaround."""
+"""Regression tests for Xiaoban' Spectrum mixed text+attachment workaround."""
 from __future__ import annotations
 
 import subprocess

@@ -26,7 +26,7 @@ description: "扮演产品最难搞的技术抵触用户"
 ## 参考：完整 SKILL.md
 
 :::info
-以下是 Hermes 在触发该 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时看到的指令内容。
+以下是 Xiaoban 在触发该 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时看到的指令内容。
 :::
 
 # 对抗性 UX 测试

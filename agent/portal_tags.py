@@ -9,10 +9,10 @@ Tag shape (sent in OpenAI-compatible ``extra_body['tags']``):
 
     [
         "product=xiaoban-agent",
-        "client=hermes-client-v<__version__>",
+        "client=xiaoban-client-v<__version__>",
     ]
 
-The version is sourced live from ``hermes_cli.__version__`` so it auto-aligns
+The version is sourced live from ``xiaoban_cli.__version__`` so it auto-aligns
 to whatever release is installed; the release script
 (``scripts/release.py``) regex-bumps that single string, and every Portal
 request picks up the new tag on the next process start.
@@ -26,7 +26,7 @@ Why one helper instead of inlining the literal at each site:
 
 Do NOT pre-compute these as module-level constants in the consumers. The
 version can change at runtime (editable installs, hot-reload tooling), and
-``hermes_cli.__version__`` is the canonical source of truth.
+``xiaoban_cli.__version__`` is the canonical source of truth.
 """
 
 from __future__ import annotations
@@ -34,25 +34,25 @@ from __future__ import annotations
 from typing import List
 
 
-def _hermes_version() -> str:
+def _xiaoban_version() -> str:
     """Return the current Xiaoban release version, e.g. ``"0.13.0"``.
 
-    Falls back to ``"unknown"`` if ``hermes_cli`` cannot be imported (should
+    Falls back to ``"unknown"`` if ``xiaoban_cli`` cannot be imported (should
     never happen in a real install — guarded for defensive testing).
     """
     try:
-        from hermes_cli import __version__
+        from xiaoban_cli import __version__
         return __version__
     except Exception:
         return "unknown"
 
 
-def hermes_client_tag() -> str:
+def xiaoban_client_tag() -> str:
     """Return the ``client=...`` tag for Nous Portal requests.
 
-    Format: ``client=hermes-client-v<MAJOR>.<MINOR>.<PATCH>``.
+    Format: ``client=xiaoban-client-v<MAJOR>.<MINOR>.<PATCH>``.
     """
-    return f"client=hermes-client-v{_hermes_version()}"
+    return f"client=xiaoban-client-v{_xiaoban_version()}"
 
 
 def nous_portal_tags() -> List[str]:
@@ -61,4 +61,4 @@ def nous_portal_tags() -> List[str]:
     Always returns a fresh list so callers can mutate it freely
     (e.g. ``merged_extra.setdefault("tags", []).extend(nous_portal_tags())``).
     """
-    return ["product=xiaoban-agent", hermes_client_tag()]
+    return ["product=xiaoban-agent", xiaoban_client_tag()]

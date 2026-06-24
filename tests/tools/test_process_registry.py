@@ -10,7 +10,7 @@ import time
 import pytest
 from unittest.mock import MagicMock, patch
 
-from tools.environments.local import _HERMES_PROVIDER_ENV_FORCE_PREFIX
+from tools.environments.local import _XIAOBAN_PROVIDER_ENV_FORCE_PREFIX
 from tools.process_registry import (
     ProcessRegistry,
     ProcessSession,
@@ -526,7 +526,7 @@ class TestSpawnEnvSanitization:
                 env_vars={
                     "MY_CUSTOM_VAR": "keep-me",
                     "TELEGRAM_BOT_TOKEN": "drop-me",
-                    f"{_HERMES_PROVIDER_ENV_FORCE_PREFIX}TELEGRAM_BOT_TOKEN": "forced-bot-token",
+                    f"{_XIAOBAN_PROVIDER_ENV_FORCE_PREFIX}TELEGRAM_BOT_TOKEN": "forced-bot-token",
                 },
             )
 
@@ -534,7 +534,7 @@ class TestSpawnEnvSanitization:
         assert env["MY_CUSTOM_VAR"] == "keep-me"
         assert env["TELEGRAM_BOT_TOKEN"] == "forced-bot-token"
         assert "FIRECRAWL_API_KEY" not in env
-        assert f"{_HERMES_PROVIDER_ENV_FORCE_PREFIX}TELEGRAM_BOT_TOKEN" not in env
+        assert f"{_XIAOBAN_PROVIDER_ENV_FORCE_PREFIX}TELEGRAM_BOT_TOKEN" not in env
         assert env["PYTHONUNBUFFERED"] == "1"
 
     def test_spawn_via_env_uses_backend_temp_dir_for_artifacts(self, registry):
@@ -558,11 +558,11 @@ class TestSpawnEnvSanitization:
 
         bg_command = env.commands[0][0]
         assert session.pid == 4321
-        assert "/data/data/com.termux/files/usr/tmp/hermes_bg_" in bg_command
+        assert "/data/data/com.termux/files/usr/tmp/xiaoban_bg_" in bg_command
         assert ".exit" in bg_command
         assert "rc=$?;" in bg_command
-        assert " > /tmp/hermes_bg_" not in bg_command
-        assert "cat /tmp/hermes_bg_" not in bg_command
+        assert " > /tmp/xiaoban_bg_" not in bg_command
+        assert "cat /tmp/xiaoban_bg_" not in bg_command
         fake_thread.start.assert_called_once()
 
     def test_spawn_via_env_checks_returncode_when_wrapper_fails(self, registry):
@@ -635,14 +635,14 @@ class TestSpawnEnvSanitization:
             registry._env_poller_loop(
                 session,
                 env,
-                "/path with spaces/hermes_bg.log",
-                "/path with spaces/hermes_bg.pid",
-                "/path with spaces/hermes_bg.exit",
+                "/path with spaces/xiaoban_bg.log",
+                "/path with spaces/xiaoban_bg.pid",
+                "/path with spaces/xiaoban_bg.exit",
             )
 
-        assert env.commands[0][0] == "cat '/path with spaces/hermes_bg.log' 2>/dev/null"
-        assert env.commands[1][0] == "kill -0 \"$(cat '/path with spaces/hermes_bg.pid' 2>/dev/null)\" 2>/dev/null; echo $?"
-        assert env.commands[2][0] == "cat '/path with spaces/hermes_bg.exit' 2>/dev/null"
+        assert env.commands[0][0] == "cat '/path with spaces/xiaoban_bg.log' 2>/dev/null"
+        assert env.commands[1][0] == "kill -0 \"$(cat '/path with spaces/xiaoban_bg.pid' 2>/dev/null)\" 2>/dev/null; echo $?"
+        assert env.commands[2][0] == "cat '/path with spaces/xiaoban_bg.exit' 2>/dev/null"
 
 
 # =========================================================================
@@ -1533,7 +1533,7 @@ class TestSigkillEscalation:
 
     def test_grace_reader_floors_at_zero(self, monkeypatch):
         """A negative configured grace is clamped to 0 (no escalation)."""
-        import hermes_cli.config as cfg_mod
+        import xiaoban_cli.config as cfg_mod
         monkeypatch.setattr(cfg_mod, "read_raw_config",
                             lambda: {"terminal": {"daemon_term_grace_seconds": -5}})
         assert ProcessRegistry._daemon_term_grace_seconds() == 0.0

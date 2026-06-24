@@ -16,19 +16,19 @@ const getAuxiliaryModels = vi.fn()
 const setModelAssignment = vi.fn()
 const getRecommendedDefaultModel = vi.fn()
 const setEnvVar = vi.fn()
-const getHermesConfigRecord = vi.fn()
-const saveHermesConfig = vi.fn()
+const getXiaobanConfigRecord = vi.fn()
+const saveXiaobanConfig = vi.fn()
 const startManualProviderOAuth = vi.fn()
 
-vi.mock('@/hermes', () => ({
+vi.mock('@/xiaoban', () => ({
   getGlobalModelInfo: () => getGlobalModelInfo(),
   getGlobalModelOptions: () => getGlobalModelOptions(),
   getAuxiliaryModels: () => getAuxiliaryModels(),
   setModelAssignment: (body: unknown) => setModelAssignment(body),
   getRecommendedDefaultModel: (slug: string) => getRecommendedDefaultModel(slug),
   setEnvVar: (key: string, value: string) => setEnvVar(key, value),
-  getHermesConfigRecord: () => getHermesConfigRecord(),
-  saveHermesConfig: (config: unknown) => saveHermesConfig(config)
+  getXiaobanConfigRecord: () => getXiaobanConfigRecord(),
+  saveXiaobanConfig: (config: unknown) => saveXiaobanConfig(config)
 }))
 
 vi.mock('@/store/onboarding', () => ({
@@ -36,29 +36,29 @@ vi.mock('@/store/onboarding', () => ({
 }))
 
 beforeEach(() => {
-  getGlobalModelInfo.mockResolvedValue({ provider: 'nous', model: 'hermes-4' })
+  getGlobalModelInfo.mockResolvedValue({ provider: 'nous', model: 'xiaoban-4' })
   getGlobalModelOptions.mockResolvedValue({
     providers: [
       {
         name: 'Nous',
         slug: 'nous',
-        models: ['hermes-4', 'hermes-4-mini'],
+        models: ['xiaoban-4', 'xiaoban-4-mini'],
         authenticated: true,
-        capabilities: { 'hermes-4': { reasoning: true, fast: true } }
+        capabilities: { 'xiaoban-4': { reasoning: true, fast: true } }
       },
       // An unconfigured api_key provider — surfaced by the full-universe payload.
       { name: 'DeepSeek', slug: 'deepseek', models: [], authenticated: false, auth_type: 'api_key', key_env: 'DEEPSEEK_API_KEY' }
     ]
   })
   getAuxiliaryModels.mockResolvedValue({
-    main: { provider: 'nous', model: 'hermes-4' },
+    main: { provider: 'nous', model: 'xiaoban-4' },
     tasks: [{ task: 'vision', provider: 'auto', model: '', base_url: '' }]
   })
-  setModelAssignment.mockResolvedValue({ provider: 'nous', model: 'hermes-4', gateway_tools: [] })
+  setModelAssignment.mockResolvedValue({ provider: 'nous', model: 'xiaoban-4', gateway_tools: [] })
   getRecommendedDefaultModel.mockResolvedValue({ provider: 'deepseek', model: 'deepseek-chat', free_tier: null })
   setEnvVar.mockResolvedValue({ ok: true })
-  getHermesConfigRecord.mockResolvedValue({ agent: { reasoning_effort: 'medium', service_tier: 'normal' } })
-  saveHermesConfig.mockResolvedValue({ ok: true })
+  getXiaobanConfigRecord.mockResolvedValue({ agent: { reasoning_effort: 'medium', service_tier: 'normal' } })
+  saveXiaobanConfig.mockResolvedValue({ ok: true })
 })
 
 afterEach(() => {
@@ -114,13 +114,13 @@ describe('ModelSettings', () => {
 
   it('writes the profile default speed (service_tier) when the fast switch is toggled', async () => {
     await renderModelSettings()
-    await waitFor(() => expect(getHermesConfigRecord).toHaveBeenCalled())
+    await waitFor(() => expect(getXiaobanConfigRecord).toHaveBeenCalled())
 
     const fastSwitch = await screen.findByRole('switch')
     fireEvent.click(fastSwitch)
 
     await waitFor(() =>
-      expect(saveHermesConfig).toHaveBeenCalledWith(
+      expect(saveXiaobanConfig).toHaveBeenCalledWith(
         expect.objectContaining({ agent: expect.objectContaining({ service_tier: 'fast' }) })
       )
     )
@@ -128,11 +128,11 @@ describe('ModelSettings', () => {
 
   it('hides the reasoning/speed defaults when the main model reports no capabilities', async () => {
     getGlobalModelOptions.mockResolvedValueOnce({
-      providers: [{ name: 'Nous', slug: 'nous', models: ['hermes-4'], authenticated: true, capabilities: { 'hermes-4': { reasoning: false, fast: false } } }]
+      providers: [{ name: 'Nous', slug: 'nous', models: ['xiaoban-4'], authenticated: true, capabilities: { 'xiaoban-4': { reasoning: false, fast: false } } }]
     })
 
     await renderModelSettings()
-    await waitFor(() => expect(getHermesConfigRecord).toHaveBeenCalled())
+    await waitFor(() => expect(getXiaobanConfigRecord).toHaveBeenCalled())
 
     expect(screen.queryByRole('switch')).toBeNull()
   })
@@ -153,7 +153,7 @@ describe('ModelSettings', () => {
 
     await waitFor(() =>
       expect(setModelAssignment).toHaveBeenCalledWith({
-        model: 'hermes-4',
+        model: 'xiaoban-4',
         provider: 'nous',
         scope: 'auxiliary',
         task: 'vision'
@@ -166,7 +166,7 @@ describe('ModelSettings', () => {
       provider: 'openrouter',
       model: 'anthropic/claude-opus-4.7',
       gateway_tools: [],
-      stale_aux: [{ task: 'compression', provider: 'nous', model: 'hermes-4' }]
+      stale_aux: [{ task: 'compression', provider: 'nous', model: 'xiaoban-4' }]
     })
 
     await renderModelSettings()
@@ -182,7 +182,7 @@ describe('ModelSettings', () => {
 
   it('shows a persistent banner when a loaded aux slot mismatches the main provider', async () => {
     getAuxiliaryModels.mockResolvedValueOnce({
-      main: { provider: 'nous', model: 'hermes-4' },
+      main: { provider: 'nous', model: 'xiaoban-4' },
       tasks: [{ task: 'curator', provider: 'openrouter', model: 'anthropic/claude-opus-4.7', base_url: '' }]
     })
 

@@ -25,12 +25,12 @@ description: "连接到运行中的 NeuroSkill 实例，将用户的实时认知
 ## 参考：完整 SKILL.md
 
 :::info
-以下是 Hermes 在触发此 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。
+以下是 Xiaoban 在触发此 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。
 :::
 
 # NeuroSkill BCI 集成
 
-将 Hermes 连接到运行中的 [NeuroSkill](https://neuroskill.com/) 实例，从 BCI 可穿戴设备读取实时脑部与身体指标。用于提供具有认知感知能力的响应、建议干预措施，并随时间追踪心理表现。
+将 Xiaoban 连接到运行中的 [NeuroSkill](https://neuroskill.com/) 实例，从 BCI 可穿戴设备读取实时脑部与身体指标。用于提供具有认知感知能力的响应、建议干预措施，并随时间追踪心理表现。
 
 > **⚠️ 仅供研究使用** — NeuroSkill 是一款开源研究工具。它**不是**医疗设备，**未**经 FDA、CE 或任何监管机构批准。切勿将这些指标用于临床诊断或治疗。
 

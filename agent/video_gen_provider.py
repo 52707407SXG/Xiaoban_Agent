@@ -8,7 +8,7 @@ instances via ``PluginContext.register_video_gen_provider()``; the active one
 ``video_generate`` tool call.
 
 Providers live in ``<repo>/plugins/video_gen/<name>/`` (built-in, auto-loaded
-as ``kind: backend``) or ``~/.hermes/plugins/video_gen/<name>/`` (user, opt-in
+as ``kind: backend``) or ``~/.xiaoban/plugins/video_gen/<name>/`` (user, opt-in
 via ``plugins.enabled``).
 
 Mirrors the ``image_gen`` provider design (``agent/image_gen_provider.py``) so
@@ -202,10 +202,10 @@ class VideoGenProvider(abc.ABC):
 
 
 def _videos_cache_dir() -> Path:
-    """Return ``$HERMES_HOME/cache/videos/``, creating parents as needed."""
-    from hermes_constants import get_hermes_home
+    """Return ``$XIAOBAN_HOME/cache/videos/``, creating parents as needed."""
+    from xiaoban_constants import get_xiaoban_home
 
-    path = get_hermes_home() / "cache" / "videos"
+    path = get_xiaoban_home() / "cache" / "videos"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -216,7 +216,7 @@ def save_b64_video(
     prefix: str = "video",
     extension: str = "mp4",
 ) -> Path:
-    """Decode base64 video data and write under ``$HERMES_HOME/cache/videos/``.
+    """Decode base64 video data and write under ``$XIAOBAN_HOME/cache/videos/``.
 
     Returns the absolute :class:`Path` to the saved file.
 

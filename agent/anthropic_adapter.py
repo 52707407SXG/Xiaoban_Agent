@@ -21,7 +21,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
-from hermes_constants import get_hermes_home
+from xiaoban_constants import get_xiaoban_home
 from typing import Any, Dict, List, Optional, Tuple
 from utils import base_url_host_matches, normalize_proxy_env_vars
 
@@ -1164,7 +1164,7 @@ def _resolve_anthropic_pool_token() -> Optional[str]:
 
     Read-only: enumerates with ``clear_expired=False, refresh=False`` so a bare
     token *resolve* (which runs from diagnostic/read-only call sites such as
-    ``account_usage`` and ``xiaoban models``) never mutates ``~/.hermes/auth.json``
+    ``account_usage`` and ``xiaoban models``) never mutates ``~/.xiaoban/auth.json``
     or makes a network refresh call. Refresh-on-expiry is owned by the API call
     path's pool recovery, not the resolver.
     """
@@ -1207,7 +1207,7 @@ def resolve_anthropic_token() -> Optional[str]:
       2. CLAUDE_CODE_OAUTH_TOKEN env var
       3. Claude Code credentials (~/.claude.json or ~/.claude/.credentials.json)
          — with automatic refresh if expired and a refresh token is available
-      4. Anthropic credential_pool OAuth entry (~/.hermes/auth.json)
+      4. Anthropic credential_pool OAuth entry (~/.xiaoban/auth.json)
       5. ANTHROPIC_API_KEY env var (regular API key, or legacy fallback)
 
     Returns the token string or None.
@@ -1294,13 +1294,13 @@ def run_oauth_setup_token() -> Optional[str]:
 
 # ── Xiaoban-native PKCE OAuth flow ────────────────────────────────────────
 # Mirrors the flow used by Claude Code, pi-ai, and OpenCode.
-# Stores credentials in ~/.hermes/.anthropic_oauth.json (our own file).
+# Stores credentials in ~/.xiaoban/.anthropic_oauth.json (our own file).
 
 _OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 _OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 _OAUTH_REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback"
 _OAUTH_SCOPES = "org:create_api_key user:profile user:inference"
-_HERMES_OAUTH_FILE = get_hermes_home() / ".anthropic_oauth.json"
+_XIAOBAN_OAUTH_FILE = get_xiaoban_home() / ".anthropic_oauth.json"
 
 
 def _generate_pkce() -> tuple:
@@ -1316,7 +1316,7 @@ def _generate_pkce() -> tuple:
     return verifier, challenge
 
 
-def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
+def run_xiaoban_oauth_login_pure() -> Optional[Dict[str, Any]]:
     """Run Xiaoban-native OAuth PKCE flow and return credential state."""
     import secrets
     import time
@@ -1351,7 +1351,7 @@ def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
     print()
 
     try:
-        from hermes_cli.auth import _can_open_graphical_browser as _can_open_gui
+        from xiaoban_cli.auth import _can_open_graphical_browser as _can_open_gui
     except Exception:
         _can_open_gui = lambda: True  # noqa: E731 — degrade to prior behavior
 
@@ -1427,11 +1427,11 @@ def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
     }
 
 
-def read_hermes_oauth_credentials() -> Optional[Dict[str, Any]]:
-    """Read Xiaoban-managed OAuth credentials from ~/.hermes/.anthropic_oauth.json."""
-    if _HERMES_OAUTH_FILE.exists():
+def read_xiaoban_oauth_credentials() -> Optional[Dict[str, Any]]:
+    """Read Xiaoban-managed OAuth credentials from ~/.xiaoban/.anthropic_oauth.json."""
+    if _XIAOBAN_OAUTH_FILE.exists():
         try:
-            data = json.loads(_HERMES_OAUTH_FILE.read_text(encoding="utf-8"))
+            data = json.loads(_XIAOBAN_OAUTH_FILE.read_text(encoding="utf-8"))
             if data.get("accessToken"):
                 return data
         except (json.JSONDecodeError, OSError, IOError) as e:

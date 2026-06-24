@@ -26,7 +26,7 @@ Reserved and on-demand GPU cloud instances for ML training and inference. Use wh
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # Lambda Labs GPU Cloud
@@ -556,8 +556,8 @@ python inference.py \
 
 ## References
 
-- **[Advanced Usage](https://github.com/52707407SXG/Xiaoban-Agent/blob/main/optional-skills/mlops/lambda-labs/references/advanced-usage.md)** - Multi-node training, API automation
-- **[Troubleshooting](https://github.com/52707407SXG/Xiaoban-Agent/blob/main/optional-skills/mlops/lambda-labs/references/troubleshooting.md)** - Common issues and solutions
+- **[Advanced Usage](https://github.com/52707407SXG/Xiaoban_Agent/blob/main/optional-skills/mlops/lambda-labs/references/advanced-usage.md)** - Multi-node training, API automation
+- **[Troubleshooting](https://github.com/52707407SXG/Xiaoban_Agent/blob/main/optional-skills/mlops/lambda-labs/references/troubleshooting.md)** - Common issues and solutions
 
 ## Resources
 

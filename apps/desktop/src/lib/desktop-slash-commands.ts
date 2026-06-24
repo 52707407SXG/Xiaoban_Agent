@@ -42,7 +42,7 @@ export type DesktopActionId =
 /** A command fulfilled by opening a desktop overlay picker. */
 export type DesktopPickerId = 'model' | 'session'
 
-/** Why a known Hermes command has no desktop UI surface. */
+/** Why a known Xiaoban command has no desktop UI surface. */
 export type DesktopUnavailableReason = 'advanced' | 'messaging' | 'settings' | 'terminal'
 
 /**
@@ -100,7 +100,7 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
   { name: '/branch', description: 'Branch the latest message into a new chat', aliases: ['/fork'], surface: action('branch') },
   { name: '/yolo', description: 'Toggle YOLO — auto-approve dangerous commands', surface: action('yolo') },
   { name: '/handoff', description: 'Hand off this session to a messaging platform', surface: action('handoff'), args: true },
-  { name: '/profile', description: 'Switch the active Hermes profile', surface: action('profile') },
+  { name: '/profile', description: 'Switch the active Xiaoban profile', surface: action('profile') },
   { name: '/skin', description: 'Switch desktop theme or cycle to the next one', surface: action('skin'), args: true },
   { name: '/title', description: 'Rename the current session', surface: action('title') },
   { name: '/help', description: 'Show desktop slash commands', aliases: ['/commands'], surface: action('help') },
@@ -203,7 +203,7 @@ export function resolveDesktopCommand(command: string): DesktopCommandSpec | nul
   return SPEC_BY_NAME.get(canonicalDesktopSlashCommand(command)) ?? null
 }
 
-function isKnownHermesSlashCommand(command: string): boolean {
+function isKnownXiaobanSlashCommand(command: string): boolean {
   const normalized = normalizeCommand(command)
 
   return SPEC_BY_NAME.has(normalized) || ALIAS_TO_CANONICAL.has(normalized)
@@ -211,7 +211,7 @@ function isKnownHermesSlashCommand(command: string): boolean {
 
 /**
  * An "extension" command is anything the backend surfaces that is NOT one of
- * Hermes' built-in slash commands — i.e. skill commands (`/gif-search`,
+ * Xiaoban' built-in slash commands — i.e. skill commands (`/gif-search`,
  * `/codex`, …) and user-defined quick commands. These are user-activated, so
  * they appear in the desktop slash palette and execute when typed.
  */
@@ -222,7 +222,7 @@ export function isDesktopSlashExtensionCommand(command: string): boolean {
     return false
   }
 
-  return !isKnownHermesSlashCommand(normalized)
+  return !isKnownXiaobanSlashCommand(normalized)
 }
 
 /** Gates execution: true unless the command is a known no-desktop-surface command. */

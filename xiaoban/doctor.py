@@ -25,7 +25,7 @@ def _status(ok: bool, label: str, detail: str = "") -> None:
 
 
 def _xiaoban_home() -> Path:
-    value = os.environ.get("XIAOBAN_HOME") or os.environ.get("HERMES_HOME") or str(Path.home() / ".xiaoban")
+    value = os.environ.get("XIAOBAN_HOME") or os.environ.get("XIAOBAN_HOME") or str(Path.home() / ".xiaoban")
     return Path(value).expanduser()
 
 
@@ -33,7 +33,7 @@ def run_doctor(argv: list[str] | None = None) -> int:
     argv = argv or []
     should_fix = "--fix" in argv
     home = _xiaoban_home()
-    inherited_home = os.environ.get("HERMES_HOME")
+    inherited_home = os.environ.get("XIAOBAN_HOME")
     repo = _repo_root()
     bin_path = repo / "bin" / "xiaoban"
 
@@ -41,7 +41,7 @@ def run_doctor(argv: list[str] | None = None) -> int:
     print("==============")
     print(f"XIAOBAN_HOME: {home}")
     if inherited_home:
-        print(f"HERMES_HOME: {inherited_home} (inherited runtime compatibility)")
+        print(f"XIAOBAN_HOME: {inherited_home} (inherited runtime compatibility)")
     print(f"Repository: {repo}")
     print(f"Python: {sys.version.split()[0]}")
     print()

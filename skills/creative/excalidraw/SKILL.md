@@ -7,7 +7,7 @@ license: MIT
 dependencies: []
 platforms: [linux, macos, windows]
 metadata:
-  hermes:
+  xiaoban:
     tags: [Excalidraw, Diagrams, Flowcharts, Architecture, Visualization, JSON]
     related_skills: []
 

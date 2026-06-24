@@ -21,7 +21,7 @@ Xiaoban-Agent supports Amazon Bedrock as a native provider using the **Converse 
   - `bedrock:ListFoundationModels` and `bedrock:ListInferenceProfiles` (for model discovery)
 
 :::tip EC2 / ECS / Lambda
-On AWS compute, attach an IAM role with `AmazonBedrockFullAccess` and you're done. No API keys, no `.env` configuration — Hermes detects the instance role automatically.
+On AWS compute, attach an IAM role with `AmazonBedrockFullAccess` and you're done. No API keys, no `.env` configuration — Xiaoban detects the instance role automatically.
 :::
 
 ## Quick Start
@@ -41,7 +41,7 @@ xiaoban chat
 
 ## Configuration
 
-After running `xiaoban model`, your `~/.hermes/config.yaml` will contain:
+After running `xiaoban model`, your `~/.xiaoban/config.yaml` will contain:
 
 ```yaml
 model:
@@ -78,7 +78,7 @@ bedrock:
 
 ### Model Discovery
 
-Hermes auto-discovers available models via the Bedrock control plane. You can customize discovery:
+Xiaoban auto-discovers available models via the Bedrock control plane. You can customize discovery:
 
 ```yaml
 bedrock:
@@ -119,7 +119,7 @@ Use the `/model` command during a conversation:
 ## Diagnostics
 
 ```bash
-hermes doctor
+xiaoban doctor
 ```
 
 The doctor checks:
@@ -130,7 +130,7 @@ The doctor checks:
 
 ## Gateway (Messaging Platforms)
 
-Bedrock works with all Hermes gateway platforms (Telegram, Discord, Slack, Feishu, etc.). Configure Bedrock as your provider, then start the gateway normally:
+Bedrock works with all Xiaoban gateway platforms (Telegram, Discord, Slack, Feishu, etc.). Configure Bedrock as your provider, then start the gateway normally:
 
 ```bash
 xiaoban gateway setup
@@ -143,7 +143,7 @@ The gateway reads `config.yaml` and uses the same Bedrock provider configuration
 
 ### "No API key found" / "No AWS credentials"
 
-Hermes checks for credentials in this order:
+Xiaoban checks for credentials in this order:
 1. `AWS_BEARER_TOKEN_BEDROCK`
 2. `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`
 3. `AWS_PROFILE`
@@ -161,7 +161,7 @@ Use an **inference profile ID** (prefixed with `us.` or `global.`) instead of th
 
 ### "ThrottlingException"
 
-You've hit the Bedrock per-model rate limit. Hermes automatically retries with backoff. To increase limits, request a quota increase in the [AWS Service Quotas console](https://console.aws.amazon.com/servicequotas/).
+You've hit the Bedrock per-model rate limit. Xiaoban automatically retries with backoff. To increase limits, request a quota increase in the [AWS Service Quotas console](https://console.aws.amazon.com/servicequotas/).
 
 ## One-Click AWS Deployment
 

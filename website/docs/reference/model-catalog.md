@@ -6,14 +6,14 @@ description: Remotely-hosted manifest driving curated model picker lists for Ope
 
 # Model Catalog
 
-Hermes fetches curated model lists for **OpenRouter** and **Nous Portal** from a JSON manifest hosted alongside the docs site. This lets maintainers update picker lists without shipping a new `xiaoban-agent` release.
+Xiaoban fetches curated model lists for **OpenRouter** and **Nous Portal** from a JSON manifest hosted alongside the docs site. This lets maintainers update picker lists without shipping a new `xiaoban-agent` release.
 
-When the manifest is unreachable (offline, network blocked, hosting failure), Hermes silently falls back to the in-repo snapshot that ships with the CLI. The manifest never breaks the picker — worst case you see whatever list was bundled with your installed version.
+When the manifest is unreachable (offline, network blocked, hosting failure), Xiaoban silently falls back to the in-repo snapshot that ships with the CLI. The manifest never breaks the picker — worst case you see whatever list was bundled with your installed version.
 
 ## Live manifest URL
 
 ```
-https://github.com/52707407SXG/Xiaoban-Agent/docs/api/model-catalog.json
+https://github.com/52707407SXG/Xiaoban_Agent/tree/main/website/docs/api/model-catalog.json
 ```
 
 Published on every merge to `main` via the existing `deploy-site.yml` GitHub Pages pipeline. The source of truth lives in the repo at `website/static/api/model-catalog.json`.
@@ -46,8 +46,8 @@ Published on every merge to `main` via the existing `deploy-site.yml` GitHub Pag
 
 Field notes:
 
-- **`version`** — integer schema version. Future schemas bump this; Hermes refuses manifests with versions it doesn't understand and falls back to the hardcoded snapshot.
-- **`metadata`** — free-form dict at the manifest, provider, and model level. Any keys. Hermes ignores unknown fields, so you can annotate entries (`"tier": "paid"`, `"tags": [...]`, etc.) without coordinating a schema change.
+- **`version`** — integer schema version. Future schemas bump this; Xiaoban refuses manifests with versions it doesn't understand and falls back to the hardcoded snapshot.
+- **`metadata`** — free-form dict at the manifest, provider, and model level. Any keys. Xiaoban ignores unknown fields, so you can annotate entries (`"tier": "paid"`, `"tags": [...]`, etc.) without coordinating a schema change.
 - **`description`** — OpenRouter-only. Drives picker badge text (`"recommended"`, `"free"`, or empty). Nous Portal doesn't use this — free-tier gating is determined live from the Portal's pricing endpoint.
 - **Pricing and context length** are NOT in the manifest. Those come from live provider APIs (`/v1/models` endpoints, models.dev) at fetch time.
 
@@ -61,14 +61,14 @@ Field notes:
 | Network failure, no cache | Silent fallback to in-repo snapshot |
 | Manifest fails schema validation | Treated as unreachable |
 
-Cache location: `~/.hermes/cache/model_catalog.json`.
+Cache location: `~/.xiaoban/cache/model_catalog.json`.
 
 ## Config
 
 ```yaml
 model_catalog:
   enabled: true
-  url: https://github.com/52707407SXG/Xiaoban-Agent/docs/api/model-catalog.json
+  url: https://github.com/52707407SXG/Xiaoban_Agent/tree/main/website/docs/api/model-catalog.json
   ttl_hours: 1
   providers: {}
 ```
@@ -94,7 +94,7 @@ Maintainers:
 
 ```bash
 # Re-generate from the in-repo hardcoded lists (keeps manifest in sync after
-# editing OPENROUTER_MODELS or _PROVIDER_MODELS["nous"] in hermes_cli/models.py).
+# editing OPENROUTER_MODELS or _PROVIDER_MODELS["nous"] in xiaoban_cli/models.py).
 python scripts/build_model_catalog.py
 ```
 

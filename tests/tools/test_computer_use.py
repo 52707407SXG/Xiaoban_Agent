@@ -22,7 +22,7 @@ def _reset_backend():
     from tools.computer_use.tool import reset_backend_for_tests
     reset_backend_for_tests()
     # Force the noop backend.
-    with patch.dict(os.environ, {"HERMES_COMPUTER_USE_BACKEND": "noop"}, clear=False):
+    with patch.dict(os.environ, {"XIAOBAN_COMPUTER_USE_BACKEND": "noop"}, clear=False):
         yield
     reset_backend_for_tests()
 
@@ -1587,7 +1587,7 @@ class TestCuaEnvironmentScrubbing:
     def test_cua_session_sanitizes_provider_env_vars(self):
         """_CuaDriverSession lifecycle must sanitize sensitive env vars.
 
-        The cua-driver MCP subprocess should not inherit Hermes-managed
+        The cua-driver MCP subprocess should not inherit Xiaoban-managed
         credentials or other sensitive environment variables — only
         runtime-required vars. Regression test for issue #37878.
 
@@ -1878,7 +1878,7 @@ class TestMcpInvocationResolution:
     """Surface 8 (52707407SXG/Xiaoban-Agent#47072): instead of hardcoding
     `["mcp"]` as the cua-driver subcommand, we ask the driver via its
     `manifest` JSON (trycua/cua#1961) so a future rename or relocation of
-    the MCP subcommand doesn't require a Hermes patch.
+    the MCP subcommand doesn't require a Xiaoban patch.
 
     The discovery hop must NEVER prevent the wrapper from starting — every
     failure mode (no manifest verb, non-zero exit, junk JSON, missing
@@ -1913,7 +1913,7 @@ class TestMcpInvocationResolution:
 
     def test_future_renamed_subcommand_is_honored(self):
         """The whole point: a future cua-driver that exposes `mcp-stdio`
-        instead of `mcp` keeps working without a Hermes patch."""
+        instead of `mcp` keeps working without a Xiaoban patch."""
         from unittest.mock import patch
         from tools.computer_use.cua_backend import _resolve_mcp_invocation
 
@@ -1927,7 +1927,7 @@ class TestMcpInvocationResolution:
 
     def test_falls_back_when_manifest_missing_command(self):
         """If the manifest knows the args but not the command, keep our
-        resolved driver path (so HERMES_CUA_DRIVER_CMD still wins)."""
+        resolved driver path (so XIAOBAN_CUA_DRIVER_CMD still wins)."""
         from unittest.mock import patch
         from tools.computer_use.cua_backend import _resolve_mcp_invocation
 
@@ -2459,7 +2459,7 @@ class TestElementTokenAttachment:
 
 
 class TestSessionLifecycle:
-    """Surface gap (audit June 2026): Hermes never declared a cua-driver
+    """Surface gap (audit June 2026): Xiaoban never declared a cua-driver
     session, so the agent-cursor overlay was inert and per-run state
     (config overrides, recording ownership, cursor identity) was shared
     across concurrent runs. Wired now: backend.start() calls
@@ -2485,16 +2485,16 @@ class TestSessionLifecycle:
     def test_session_id_format(self):
         from tools.computer_use.cua_backend import CuaDriverBackend
         backend = CuaDriverBackend()
-        # hermes-{12 hex chars} — short enough to surface in logs
+        # xiaoban-{12 hex chars} — short enough to surface in logs
         # without being a privacy hazard, unique enough for concurrent runs.
-        assert backend._session_id.startswith("hermes-")
+        assert backend._session_id.startswith("xiaoban-")
         assert len(backend._session_id) == 7 + 12
 
     def test_session_id_unique_per_backend(self):
         from tools.computer_use.cua_backend import CuaDriverBackend
         a = CuaDriverBackend()._session_id
         b = CuaDriverBackend()._session_id
-        assert a != b, "each Hermes run should mint its own session id"
+        assert a != b, "each Xiaoban run should mint its own session id"
 
     def test_start_invokes_start_session_with_run_id(self):
         from unittest.mock import MagicMock, patch

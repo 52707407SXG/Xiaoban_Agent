@@ -13,14 +13,14 @@ One command — `xiaoban setup --portal` — and you're ready to `xiaoban chat`.
 :::
 
 :::tip
-Hermes also ships a modern TUI with modal overlays, mouse selection, and non-blocking input. Launch it with `hermes --tui` — see the [TUI](tui.md) guide.
+Xiaoban also ships a modern TUI with modal overlays, mouse selection, and non-blocking input. Launch it with `xiaoban --tui` — see the [TUI](tui.md) guide.
 :::
 
 ## Running the CLI
 
 ```bash
 # Start an interactive session (default)
-hermes
+xiaoban
 
 # Single query mode (non-interactive)
 xiaoban chat -q "Hello"
@@ -36,19 +36,19 @@ xiaoban chat --provider openrouter  # Force OpenRouter
 xiaoban chat --toolsets "web,terminal,skills"
 
 # Start with one or more skills preloaded
-hermes -s xiaoban-agent-dev,github-auth
+xiaoban -s xiaoban-agent-dev,github-auth
 xiaoban chat -s github-pr-workflow -q "open a draft PR"
 
 # Resume previous sessions
-hermes --continue             # Resume the most recent CLI session (-c)
-hermes --resume <session_id>  # Resume a specific session by ID (-r)
+xiaoban --continue             # Resume the most recent CLI session (-c)
+xiaoban --resume <session_id>  # Resume a specific session by ID (-r)
 
 # Verbose mode (debug output)
 xiaoban chat --verbose
 
 # Isolated git worktree (for running multiple agents in parallel)
-hermes -w                         # Interactive mode in worktree
-hermes -w -z "Fix issue #123"     # Single query in worktree
+xiaoban -w                         # Interactive mode in worktree
+xiaoban -w -z "Fix issue #123"     # Single query in worktree
 ```
 
 ## Interface Layout
@@ -75,7 +75,7 @@ A persistent status bar sits above the input area, updating in real time:
 | 🗜️ N | **Context compression count** — how many times the running session has been auto-compressed. Appears once the first compression fires. |
 | ▶ N | **Active background tasks** — how many `/background` prompts are still running in the current session. Appears whenever at least one task is in flight. |
 | Duration | Elapsed session time |
-| ⚠ YOLO | **YOLO mode warning** — shown whenever `HERMES_YOLO_MODE` is on (either `hermes --yolo` at launch or `/yolo` toggled mid-session). Mirrors the banner-line warning so you can't forget you're in auto-approve mode. |
+| ⚠ YOLO | **YOLO mode warning** — shown whenever `XIAOBAN_YOLO_MODE` is on (either `xiaoban --yolo` at launch or `/yolo` toggled mid-session). Mirrors the banner-line warning so you can't forget you're in auto-approve mode. |
 
 The bar adapts to terminal width — full layout at ≥ 76 columns, compact at 52–75, minimal (model + duration, plus the YOLO badge when active) below 52.
 
@@ -92,7 +92,7 @@ Use `/usage` for a detailed breakdown including per-category costs (input vs out
 
 ### Session Resume Display
 
-When resuming a previous session (`hermes -c` or `hermes --resume <id>`), a "Previous Conversation" panel appears between the banner and the input prompt, showing a compact recap of the conversation history. See [Sessions — Conversation Recap on Resume](sessions.md#conversation-recap-on-resume) for details and configuration.
+When resuming a previous session (`xiaoban -c` or `xiaoban --resume <id>`), a "Previous Conversation" panel appears between the banner and the input prompt, showing a compact recap of the conversation history. See [Sessions — Conversation Recap on Resume](sessions.md#conversation-recap-on-resume) for details and configuration.
 
 ## Keybindings
 
@@ -107,7 +107,7 @@ When resuming a previous session (`hermes -c` or `hermes --resume <id>`), a "Pre
 | `Ctrl+X Ctrl+E` | Emacs-style alternate binding for the external editor (same behavior as `Ctrl+G`). |
 | `Ctrl+C` | Interrupt agent (double-press within 2s to force exit) |
 | `Ctrl+D` | Exit |
-| `Ctrl+Z` | Suspend Hermes to background (Unix only). Run `fg` in the shell to resume. |
+| `Ctrl+Z` | Suspend Xiaoban to background (Unix only). Run `fg` in the shell to resume. |
 | `Tab` | Accept auto-suggestion (ghost text) or autocomplete slash commands |
 
 **Multiline paste preview.** When you paste a multi-line block, the CLI echoes a compact single-line preview (`[pasted: 47 lines, 1,842 chars — press Enter to send]`) instead of dumping the whole payload into the scrollback. The full content is still what gets sent; this is just display polish.
@@ -116,7 +116,7 @@ When resuming a previous session (`hermes -c` or `hermes --resume <id>`), a "Pre
 
 ## Slash Commands
 
-Type `/` to see the autocomplete dropdown. Hermes supports a large set of CLI slash commands, dynamic skill commands, and user-defined quick commands.
+Type `/` to see the autocomplete dropdown. Xiaoban supports a large set of CLI slash commands, dynamic skill commands, and user-defined quick commands.
 
 Common examples:
 
@@ -129,7 +129,7 @@ Common examples:
 | `/background <prompt>` | Run a prompt in a separate background session |
 | `/skin` | Show or switch the active CLI skin |
 | `/voice on` | Enable CLI voice mode (press `Ctrl+B` to record) |
-| `/voice tts` | Toggle spoken playback for Hermes replies |
+| `/voice tts` | Toggle spoken playback for Xiaoban replies |
 | `/reasoning high` | Increase reasoning effort |
 | `/title My Session` | Name the current session |
 | `/status` | Show session info — model/profile/tokens/duration — followed by a local **Session recap** block (recent turn counts, top tools used, files touched, latest user prompt + assistant reply). Pure local compute; no LLM call. |
@@ -148,7 +148,7 @@ Commands are case-insensitive — `/HELP` works the same as `/help`. Installed s
 You can define custom commands that run shell commands instantly without invoking the LLM. These work in both the CLI and messaging platforms (Telegram, Discord, etc.).
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.xiaoban/config.yaml
 quick_commands:
   status:
     type: exec
@@ -168,15 +168,15 @@ Then type `/status`, `/gpu`, or `/restart` in any chat. See the [Configuration g
 If you already know which skills you want active for the session, pass them at launch time:
 
 ```bash
-hermes -s xiaoban-agent-dev,github-auth
+xiaoban -s xiaoban-agent-dev,github-auth
 xiaoban chat -s github-pr-workflow -s github-auth
 ```
 
-Hermes loads each named skill into the session prompt before the first turn. The same flag works in interactive mode and single-query mode.
+Xiaoban loads each named skill into the session prompt before the first turn. The same flag works in interactive mode and single-query mode.
 
 ## Skill Slash Commands
 
-Every installed skill in `~/.hermes/skills/` is automatically registered as a slash command. The skill name becomes the command:
+Every installed skill in `~/.xiaoban/skills/` is automatically registered as a slash command. The skill name becomes the command:
 
 ```
 /gif-search funny cats
@@ -199,13 +199,13 @@ Set a predefined personality to change the agent's tone:
 
 Built-in personalities include: `helpful`, `concise`, `technical`, `creative`, `teacher`, `kawaii`, `catgirl`, `pirate`, `shakespeare`, `surfer`, `noir`, `uwu`, `philosopher`, `hype`.
 
-You can also define custom personalities in `~/.hermes/config.yaml`:
+You can also define custom personalities in `~/.xiaoban/config.yaml`:
 
 ```yaml
 personalities:
   helpful: "You are a helpful, friendly AI assistant."
   kawaii: "You are a kawaii assistant! Use cute expressions..."
-  pirate: "Arrr! Ye be talkin' to Captain Hermes..."
+  pirate: "Arrr! Ye be talkin' to Captain Xiaoban..."
   # Add your own!
 ```
 
@@ -228,7 +228,7 @@ Pasting multi-line text is supported — use any of the newline keys above, or s
 
 ### Shift+Enter compatibility
 
-Most terminals send the same byte sequence for `Enter` and `Shift+Enter` by default, so applications cannot distinguish them. Hermes recognises `Shift+Enter` only when the terminal sends a distinct sequence via the [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/) or xterm's `modifyOtherKeys` mode.
+Most terminals send the same byte sequence for `Enter` and `Shift+Enter` by default, so applications cannot distinguish them. Xiaoban recognises `Shift+Enter` only when the terminal sends a distinct sequence via the [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/) or xterm's `modifyOtherKeys` mode.
 
 | Terminal | Status |
 |---|---|
@@ -237,7 +237,7 @@ Most terminals send the same byte sequence for `Enter` and `Shift+Enter` by defa
 | Windows Terminal Preview 1.25+ | Supported once the Kitty protocol is enabled in settings |
 | macOS Terminal.app, stock Windows Terminal (stable) | Not supported — `Shift+Enter` is indistinguishable from `Enter` |
 
-Where the terminal cannot distinguish them, `Alt+Enter` and `Ctrl+J` continue to work everywhere. **On Windows Terminal specifically, `Alt+Enter` is captured by the terminal (toggles fullscreen) and never reaches Hermes — use `Ctrl+Enter` (delivered as `Ctrl+J`) or `Ctrl+J` directly for a newline.**
+Where the terminal cannot distinguish them, `Alt+Enter` and `Ctrl+J` continue to work everywhere. **On Windows Terminal specifically, `Alt+Enter` is captured by the terminal (toggles fullscreen) and never reaches Xiaoban — use `Ctrl+Enter` (delivered as `Ctrl+J`) or `Ctrl+J` directly for a newline.**
 
 ## Interrupting the Agent
 
@@ -259,7 +259,7 @@ The `display.busy_input_mode` config key controls what happens when you press En
 | `"steer"` | Your message is injected into the current run via `/steer`, arriving at the agent after the next tool call — no interrupt, no new turn |
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.xiaoban/config.yaml
 display:
   busy_input_mode: "steer"   # or "queue" or "interrupt" (default)
 ```
@@ -278,12 +278,12 @@ You can also change it inside the CLI:
 ```
 
 :::tip First-touch hint
-The very first time you press Enter while Hermes is working, Hermes prints a one-line reminder explaining the `/busy` knob (`"(tip) Your message interrupted the current run…"`). It only fires once per install — a flag in `config.yaml` under `onboarding.seen.busy_input_prompt` latches it. Delete that key to see the tip again.
+The very first time you press Enter while Xiaoban is working, Xiaoban prints a one-line reminder explaining the `/busy` knob (`"(tip) Your message interrupted the current run…"`). It only fires once per install — a flag in `config.yaml` under `onboarding.seen.busy_input_prompt` latches it. Delete that key to see the tip again.
 :::
 
 ### Suspending to Background
 
-On Unix systems, press **`Ctrl+Z`** to suspend Hermes to the background — just like any terminal process. The shell prints a confirmation:
+On Unix systems, press **`Ctrl+Z`** to suspend Xiaoban to the background — just like any terminal process. The shell prints a confirmation:
 
 ```
 Xiaoban-Agent has been suspended. Run `fg` to bring Xiaoban-Agent back.
@@ -316,7 +316,7 @@ Cycle through display modes with `/verbose`: `off → new → all → verbose`. 
 The `display.tool_preview_length` config key controls the maximum number of characters shown in tool call preview lines (e.g. file paths, terminal commands). The default is `0`, which means no limit — full paths and commands are shown.
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.xiaoban/config.yaml
 display:
   tool_preview_length: 80   # Truncate tool previews to 80 chars (0 = no limit)
 ```
@@ -331,7 +331,7 @@ When you exit a CLI session, a resume command is printed:
 
 ```
 Resume this session with:
-  hermes --resume 20260225_143052_a1b2c3
+  xiaoban --resume 20260225_143052_a1b2c3
 
 Session:        20260225_143052_a1b2c3
 Duration:       12m 34s
@@ -341,21 +341,21 @@ Messages:       28 (5 user, 18 tool calls)
 Resume options:
 
 ```bash
-hermes --continue                          # Resume the most recent CLI session
-hermes -c                                  # Short form
-hermes -c "my project"                     # Resume a named session (latest in lineage)
-hermes --resume 20260225_143052_a1b2c3     # Resume a specific session by ID
-hermes --resume "refactoring auth"         # Resume by title
-hermes -r 20260225_143052_a1b2c3           # Short form
+xiaoban --continue                          # Resume the most recent CLI session
+xiaoban -c                                  # Short form
+xiaoban -c "my project"                     # Resume a named session (latest in lineage)
+xiaoban --resume 20260225_143052_a1b2c3     # Resume a specific session by ID
+xiaoban --resume "refactoring auth"         # Resume by title
+xiaoban -r 20260225_143052_a1b2c3           # Short form
 ```
 
 Resuming restores the full conversation history from SQLite. The agent sees all previous messages, tool calls, and responses — just as if you never left.
 
-Use `/title My Session Name` inside a chat to name the current session, or `hermes sessions rename <id> <title>` from the command line. Use `hermes sessions list` to browse past sessions.
+Use `/title My Session Name` inside a chat to name the current session, or `xiaoban sessions rename <id> <title>` from the command line. Use `xiaoban sessions list` to browse past sessions.
 
 ### Session Storage
 
-CLI sessions are stored in Hermes's SQLite state database under `~/.hermes/state.db`. The database keeps:
+CLI sessions are stored in Xiaoban's SQLite state database under `~/.xiaoban/state.db`. The database keeps:
 
 - session metadata (ID, title, timestamps, token counters)
 - message history
@@ -369,7 +369,7 @@ Some messaging adapters also keep per-platform transcript files alongside the da
 Long conversations are automatically summarized when approaching context limits:
 
 ```yaml
-# In ~/.hermes/config.yaml
+# In ~/.xiaoban/config.yaml
 compression:
   enabled: true
   threshold: 0.50    # Compress at 50% of context limit by default
@@ -390,7 +390,7 @@ Run a prompt in a separate background session while continuing to use the CLI fo
 /background Analyze the logs in /var/log and summarize any errors from today
 ```
 
-Hermes immediately confirms the task and gives you back the prompt:
+Xiaoban immediately confirms the task and gives you back the prompt:
 
 ```
 🔄 Background task #1 started: "Analyze the logs in /var/log and summarize..."
@@ -411,7 +411,7 @@ Each `/background` prompt spawns a **completely separate agent session** in a da
 When a background task finishes, the result appears as a panel in your terminal:
 
 ```
-╭─ ⚕ Hermes (background #1) ──────────────────────────────────╮
+╭─ ⚕ Xiaoban (background #1) ──────────────────────────────────╮
 │ Found 3 errors in syslog from today:                         │
 │ 1. OOM killer invoked at 03:22 — killed process nginx        │
 │ 2. Disk I/O error on /dev/sda1 at 07:15                      │

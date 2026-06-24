@@ -52,7 +52,7 @@ import { broadcastSessionsChanged } from '@/store/session-sync'
 import { clearSessionSubagents, pruneDelegateFallbackSubagents, upsertSubagent } from '@/store/subagents'
 import { setSessionTodos } from '@/store/todos'
 import { recordToolDiff } from '@/store/tool-diffs'
-import type { RpcEvent } from '@/types/hermes'
+import type { RpcEvent } from '@/types/xiaoban'
 
 import type { ClientSessionState } from '../../types'
 
@@ -64,7 +64,7 @@ interface MessageStreamOptions {
     runtimeSessionId?: string | null
   ) => Promise<void>
   queryClient: QueryClient
-  refreshHermesConfig: () => Promise<void>
+  refreshXiaobanConfig: () => Promise<void>
   refreshSessions: () => Promise<void>
   sessionStateByRuntimeIdRef: MutableRefObject<Map<string, ClientSessionState>>
   updateSessionState: (
@@ -258,7 +258,7 @@ export function useMessageStream({
   activeSessionIdRef,
   hydrateFromStoredSession,
   queryClient,
-  refreshHermesConfig,
+  refreshXiaobanConfig,
   refreshSessions,
   sessionStateByRuntimeIdRef,
   updateSessionState
@@ -671,7 +671,7 @@ export function useMessageStream({
         const streamId = state.streamId ?? `assistant-error-${Date.now()}`
         const groupId = state.pendingBranchGroup ?? undefined
         const prev = state.messages
-        const error = errorMessage.trim() || 'Hermes reported an error'
+        const error = errorMessage.trim() || 'Xiaoban reported an error'
 
         const nextMessages = prev.some(m => m.id === streamId)
           ? prev.map(message =>
@@ -823,7 +823,7 @@ export function useMessageStream({
           requestDesktopOnboarding(payload.credential_warning)
         }
 
-        void refreshHermesConfig()
+        void refreshXiaobanConfig()
 
         if (modelChanged || providerChanged) {
           void queryClient.invalidateQueries({
@@ -1108,7 +1108,7 @@ export function useMessageStream({
           }))
         }
       } else if (event.type === 'error') {
-        const errorMessage = payload?.message || 'Hermes reported an error'
+        const errorMessage = payload?.message || 'Xiaoban reported an error'
         const looksLikeProviderSetup = isProviderSetupErrorMessage(errorMessage)
 
         // A turn that errors out has also ended — drop any open blocking prompt
@@ -1137,7 +1137,7 @@ export function useMessageStream({
           notify({
             id: `gateway-error:${errorMessage}`,
             kind: 'error',
-            title: 'Hermes error',
+            title: 'Xiaoban error',
             message: errorMessage
           })
         }
@@ -1160,7 +1160,7 @@ export function useMessageStream({
       failAssistantMessage,
       flushQueuedDeltas,
       queryClient,
-      refreshHermesConfig,
+      refreshXiaobanConfig,
       sessionInterrupted,
       updateSessionState,
       upsertToolCall

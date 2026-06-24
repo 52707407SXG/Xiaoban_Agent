@@ -26,12 +26,12 @@ Provision SaaS services + sync creds via Stripe Projects.
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # Stripe Projects Skill
 
-Wraps the [Stripe Projects](https://projects.dev) CLI plugin so Hermes can provision SaaS services (Neon, Twilio, Vercel, etc.), generate and sync credentials into the user's `.env`, and manage billing across providers from one place.
+Wraps the [Stripe Projects](https://projects.dev) CLI plugin so Xiaoban can provision SaaS services (Neon, Twilio, Vercel, etc.), generate and sync credentials into the user's `.env`, and manage billing across providers from one place.
 
 Gated `[linux, macos]` while the broader payments cluster matures on Windows. The Stripe CLI itself is cross-platform; this gate is a posture for the cluster, not a hard limit.
 

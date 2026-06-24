@@ -36,7 +36,7 @@ dependencies = [
   # `uv lock` so the transitive resolution stays consistent. Don't
   # introduce ranges back without a written justification.
   #
-  # Scope rule: only packages used by EVERY hermes session belong here.
+  # Scope rule: only packages used by EVERY xiaoban session belong here.
   # Anything that's provider-specific (`anthropic`, `firecrawl-py`,
   # `exa-py`, `fal-client`, `edge-tts`, `parallel-web`) belongs in an
   # extra and gets lazy-installed via `tools/lazy_deps.py` when the
@@ -68,7 +68,7 @@ dependencies = [
   # try/except-ImportError fallbacks silently degrade: Hindsight's
   # ``_meets_minimum_version`` disables update_mode='append' (#40503),
   # tools/lazy_deps.py treats every version constraint as satisfied, and
-  # hermes_cli/main.py drops to naive requirement parsing. Pure-Python
+  # xiaoban_cli/main.py drops to naive requirement parsing. Pure-Python
   # py3-none-any wheel, no compiled extensions — safe to ship everywhere.
   # Pinned to the version already resolved in uv.lock (no resolution churn).
   "packaging==26.0",
@@ -129,12 +129,12 @@ dependencies = [
   # Windows log rotation. Stdlib ``RotatingFileHandler.doRollover()`` uses
   # ``os.rename()`` which fails with ``PermissionError [WinError 32]`` on
   # Windows whenever any other process holds an append-mode handle on
-  # ``agent.log`` (always the case in Hermes — TUI, gateway, ``hy_memory``
+  # ``agent.log`` (always the case in Xiaoban — TUI, gateway, ``hy_memory``
   # server, MCP servers, and on-demand CLI commands all log from separate
   # processes), pinning ``agent.log`` at the 5 MiB threshold and spamming
   # stderr on every emit (see #44873). ``concurrent-log-handler`` wraps the
   # rename in a cross-process file lock (via ``portalocker``: pywin32 on
-  # Windows) so only one process rotates at a time. ``hermes_logging.py``
+  # Windows) so only one process rotates at a time. ``xiaoban_logging.py``
   # aliases it ONLY on Windows — POSIX renames an open file fine, so stdlib
   # already works there and managed-mode perms depend on its exact lifecycle.
   # Hence the ``sys_platform == 'win32'`` marker: the dep (and its portalocker
@@ -303,7 +303,7 @@ xiaoban-agent = "run_agent:main"
 xiaoban-acp = "acp_adapter.entry:main"
 
 [tool.setuptools]
-py-modules = ["run_agent", "model_tools", "toolsets", "batch_runner", "trajectory_compressor", "toolset_distributions", "cli", "hermes_bootstrap", "hermes_constants", "hermes_state", "hermes_time", "hermes_logging", "utils", "mcp_serve"]
+py-modules = ["run_agent", "model_tools", "toolsets", "batch_runner", "trajectory_compressor", "toolset_distributions", "cli", "xiaoban_bootstrap", "xiaoban_constants", "xiaoban_state", "xiaoban_time", "xiaoban_logging", "utils", "mcp_serve"]
 
 [tool.setuptools.data-files]
 # i18n catalogs. locales/ is a bare data directory (no __init__.py), so it is
@@ -317,7 +317,7 @@ locales = ["locales/*.yaml"]
 # case as locales: data-files ships it in the wheel, `graft optional-mcps` in
 # MANIFEST.in ships it in the sdist. Without this, `xiaoban mcp catalog` and the
 # dashboard catalog screen come up empty on packaged installs even though the
-# manifests exist in the repo (hermes_cli/mcp_catalog.py:_catalog_root resolves
+# manifests exist in the repo (xiaoban_cli/mcp_catalog.py:_catalog_root resolves
 # the packaged dir; list_catalog() returns [] when it's missing).
 #
 # data-files flattens every glob match into its single target dir, so each
@@ -329,14 +329,14 @@ locales = ["locales/*.yaml"]
 "optional-mcps/n8n" = ["optional-mcps/n8n/manifest.yaml"]
 
 [tool.setuptools.package-data]
-hermes_cli = ["web_dist/**/*", "tui_dist/**/*", "scripts/install.sh", "scripts/install.ps1"]
+xiaoban_cli = ["web_dist/**/*", "tui_dist/**/*", "scripts/install.sh", "scripts/install.ps1"]
 gateway = ["assets/**/*"]
 xiaoban = ["mmcc/fixtures/*.json"]
 plugins = [
   "*/dashboard/manifest.json",
   "*/dashboard/dist/*",
   "*/dashboard/dist/**/*",
-  # Plugin discovery (hermes_cli/plugins.py) reads a plugin.yaml/plugin.yml
+  # Plugin discovery (xiaoban_cli/plugins.py) reads a plugin.yaml/plugin.yml
   # manifest from each bundled plugin directory to register it. Wheels only
   # carry files declared here, so without this glob the wheel ships every
   # plugin's Python code but none of its manifests — the scan finds zero
@@ -348,13 +348,13 @@ plugins = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["agent", "agent.*", "tools", "tools.*", "xiaoban", "xiaoban.*", "hermes_cli", "hermes_cli.*", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "cron.*", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*"]
+include = ["agent", "agent.*", "tools", "tools.*", "xiaoban", "xiaoban.*", "xiaoban_cli", "xiaoban_cli.*", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "cron.*", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
     "integration: marks tests requiring external services (API keys, Modal, etc.)",
-    "real_concurrent_gate: opt out of the autouse stub that disables _detect_concurrent_hermes_instances",
+    "real_concurrent_gate: opt out of the autouse stub that disables _detect_concurrent_xiaoban_instances",
 ]
 # integration tests take way too long to run in the normal CI environments
 addopts = "-m 'not integration'"

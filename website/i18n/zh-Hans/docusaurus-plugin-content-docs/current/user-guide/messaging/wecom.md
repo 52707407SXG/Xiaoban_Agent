@@ -6,7 +6,7 @@ description: "通过 AI Bot WebSocket 网关将 Xiaoban-Agent 连接到 WeCom"
 
 # WeCom（企业微信）
 
-将 Hermes 连接到 [WeCom](https://work.weixin.qq.com/)（企业微信），腾讯的企业即时通讯平台。该适配器使用 WeCom 的 AI Bot WebSocket 网关实现实时双向通信——无需公开端点或 webhook。
+将 Xiaoban 连接到 [WeCom](https://work.weixin.qq.com/)（企业微信），腾讯的企业即时通讯平台。该适配器使用 WeCom 的 AI Bot WebSocket 网关实现实时双向通信——无需公开端点或 webhook。
 
 ## 前提条件
 
@@ -25,7 +25,7 @@ description: "通过 AI Bot WebSocket 网关将 Xiaoban-Agent 连接到 WeCom"
 xiaoban gateway setup
 ```
 
-选择 **WeCom**，用企业微信手机端扫描二维码。Hermes 将自动创建具有正确权限的机器人应用并保存凭据。
+选择 **WeCom**，用企业微信手机端扫描二维码。Xiaoban 将自动创建具有正确权限的机器人应用并保存凭据。
 
 设置向导将：
 1. 在终端中显示二维码
@@ -47,7 +47,7 @@ xiaoban gateway setup
 请妥善保管 Bot Secret。任何持有它的人都可以冒充你的机器人。
 :::
 
-### 第二步：配置 Hermes
+### 第二步：配置 Xiaoban
 
 #### 方式 A：交互式设置（推荐）
 
@@ -62,7 +62,7 @@ xiaoban gateway setup
 
 #### 方式 B：手动配置
 
-将以下内容添加到 `~/.hermes/.env`：
+将以下内容添加到 `~/.xiaoban/.env`：
 
 ```bash
 WECOM_BOT_ID=your-bot-id

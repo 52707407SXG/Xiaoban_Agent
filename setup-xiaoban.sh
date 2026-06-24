@@ -399,8 +399,8 @@ fi
 # Seed bundled skills into ~/.xiaoban/skills/
 # ============================================================================
 
-# HERMES_HOME is accepted only as legacy runtime compatibility for older installs.
-XIAOBAN_SKILLS_DIR="${XIAOBAN_HOME:-${HERMES_HOME:-$HOME/.xiaoban}}/skills"
+# XIAOBAN_HOME is accepted only as legacy runtime compatibility for older installs.
+XIAOBAN_SKILLS_DIR="${XIAOBAN_HOME:-${XIAOBAN_HOME:-$HOME/.xiaoban}}/skills"
 mkdir -p "$XIAOBAN_SKILLS_DIR"
 
 echo ""

@@ -6,7 +6,7 @@ import { DASHBOARD_EXIT_DISABLED_MESSAGE, DASHBOARD_UPDATE_DISABLED_MESSAGE } fr
 import { getUiState, patchUiState, resetUiState } from '../app/uiStore.js'
 import { TUI_SESSION_MODEL_FLAG } from '../domain/slash.js'
 
-// DASHBOARD_TUI_MODE resolves once at module load from HERMES_TUI_DASHBOARD,
+// DASHBOARD_TUI_MODE resolves once at module load from XIAOBAN_TUI_DASHBOARD,
 // so toggling process.env in a test body can't move it. Mock just that one
 // export (everything else stays real) and flip the holder per test.
 const envState = { dashboardTuiMode: false }
@@ -74,7 +74,7 @@ describe('createSlashHandler', () => {
 
     expect(createSlashHandler(ctx)('/redraw')).toBe(true)
     expect(ctx.gateway.gw.request).not.toHaveBeenCalled()
-    expect(ctx.transcript.sys).toHaveBeenCalledWith('ui redrawn')
+    expect(ctx.transcript.sys).toHaveBeenCalledWith('界面已重绘')
   })
 
   it('opens the editor locally for /prompt without slash worker fallback', () => {
@@ -125,7 +125,7 @@ describe('createSlashHandler', () => {
 
     expect(createSlashHandler(ctx)('/update')).toBe(true)
     expect(ctx.gateway.gw.request).not.toHaveBeenCalled()
-    expect(ctx.transcript.sys).toHaveBeenCalledWith('exiting TUI to run update...')
+    expect(ctx.transcript.sys).toHaveBeenCalledWith('正在退出 TUI 并执行更新...')
 
     // Advance past the 100ms setTimeout
     vi.advanceTimersByTime(150)
@@ -152,14 +152,14 @@ describe('createSlashHandler', () => {
 
   it('routes /status to live session.status instead of slash worker', async () => {
     patchUiState({ sid: 'sid-abc' })
-    const rpc = vi.fn(() => Promise.resolve({ output: 'Hermes TUI Status' }))
+    const rpc = vi.fn(() => Promise.resolve({ output: 'Xiaoban TUI Status' }))
     const ctx = buildCtx({ gateway: { ...buildGateway(), rpc } })
 
     expect(createSlashHandler(ctx)('/status')).toBe(true)
     expect(rpc).toHaveBeenCalledWith('session.status', { session_id: 'sid-abc' })
     expect(ctx.gateway.gw.request).not.toHaveBeenCalled()
     await vi.waitFor(() => {
-      expect(ctx.transcript.page).toHaveBeenCalledWith('Hermes TUI Status', 'Status')
+      expect(ctx.transcript.page).toHaveBeenCalledWith('Xiaoban TUI Status', 'Status')
     })
   })
 
@@ -765,11 +765,11 @@ describe('createSlashHandler', () => {
     const [body, title] = ctx.transcript.page.mock.calls[0]!
 
     expect(title).toBe('History')
-    expect(body).toContain('[You #1]')
+    expect(body).toContain('[你 #1]')
     expect(body).toContain('hello')
-    expect(body).toContain('[Hermes #2]')
+    expect(body).toContain('[小伴 #2]')
     expect(body).toContain('hi there')
-    expect(body).toContain('[You #3]')
+    expect(body).toContain('[你 #3]')
     expect(body).not.toContain('ignore me')
     expect(ctx.gateway.gw.request).not.toHaveBeenCalled()
   })
@@ -785,7 +785,7 @@ describe('createSlashHandler', () => {
   it('/save forwards to session.save RPC and reports the returned file', async () => {
     patchUiState({ sid: 'sid-abc' })
 
-    const rpc = vi.fn(() => Promise.resolve({ file: '/tmp/hermes_conversation_test.json' }))
+    const rpc = vi.fn(() => Promise.resolve({ file: '/tmp/xiaoban_conversation_test.json' }))
 
     const ctx = buildCtx({
       gateway: { ...buildGateway(), rpc },
@@ -805,7 +805,7 @@ describe('createSlashHandler', () => {
     expect(rpc).toHaveBeenCalledWith('session.save', { session_id: 'sid-abc' })
 
     await vi.waitFor(() => {
-      expect(ctx.transcript.sys).toHaveBeenCalledWith('conversation saved to: /tmp/hermes_conversation_test.json')
+      expect(ctx.transcript.sys).toHaveBeenCalledWith('conversation saved to: /tmp/xiaoban_conversation_test.json')
     })
   })
 

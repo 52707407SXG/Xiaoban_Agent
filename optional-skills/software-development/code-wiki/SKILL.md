@@ -6,14 +6,14 @@ author: Teknium (teknium1), Xiaoban-Agent
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
-  hermes:
+  xiaoban:
     tags: [Documentation, Mermaid, Architecture, Diagrams, Wiki, Code-Analysis]
     related_skills: [codebase-inspection, github-repo-management]
 ---
 
 # Code Wiki Skill
 
-Generate a comprehensive wiki for any codebase — overview, architecture, per-module deep-dives, Mermaid class and sequence diagrams. Inspired by Google CodeWiki, but works on local repos, private repos, and any language. Uses only existing Hermes tools (`terminal`, `read_file`, `search_files`, `write_file`); no Docker, no external services, no extra dependencies.
+Generate a comprehensive wiki for any codebase — overview, architecture, per-module deep-dives, Mermaid class and sequence diagrams. Inspired by Google CodeWiki, but works on local repos, private repos, and any language. Uses only existing Xiaoban tools (`terminal`, `read_file`, `search_files`, `write_file`); no Docker, no external services, no extra dependencies.
 
 This skill produces **reference documentation** (what/how). It does not produce strategic narrative (why — that's a different skill).
 
@@ -38,7 +38,7 @@ Do NOT use this for:
 
 ## How to Run
 
-Invoke through the `terminal` tool from the target repo's root, then use `read_file` / `search_files` / `write_file` to produce the wiki. Default output location is `~/.hermes/wikis/<repo-name>/`. Only write into the repo (`docs/wiki/`) when the user explicitly requests it.
+Invoke through the `terminal` tool from the target repo's root, then use `read_file` / `search_files` / `write_file` to produce the wiki. Default output location is `~/.xiaoban/wikis/<repo-name>/`. Only write into the repo (`docs/wiki/`) when the user explicitly requests it.
 
 ## Quick Reference
 
@@ -82,7 +82,7 @@ REPO_NAME=$(basename "$PWD")
 Then set the output dir:
 
 ```bash
-OUTPUT_DIR="$HOME/.hermes/wikis/$REPO_NAME"
+OUTPUT_DIR="$HOME/.xiaoban/wikis/$REPO_NAME"
 mkdir -p "$OUTPUT_DIR/modules" "$OUTPUT_DIR/diagrams"
 ```
 
@@ -307,7 +307,7 @@ sequenceDiagram
 
 ### Walkthrough
 
-1. **User input** — [`cli.py:HermesCLI.run_session`](<link>)
+1. **User input** — [`cli.py:XiaobanCLI.run_session`](<link>)
 2. **Message dispatch** — [`run_agent.py:AIAgent.chat`](<link>)
 ````
 
@@ -378,7 +378,7 @@ EOF
 State exactly what was generated and where:
 
 ```
-Generated wiki at ~/.hermes/wikis/<repo-name>/:
+Generated wiki at ~/.xiaoban/wikis/<repo-name>/:
   README.md                   project overview, module map
   architecture.md             system architecture + flowchart
   getting-started.md          setup, first run, workflows
@@ -418,7 +418,7 @@ Full incremental-regeneration is a future enhancement — for now, regenerating 
 - **Restating code as prose.** A module doc that says "the `process` function processes things by calling `process_item` on each item" is worse than just linking to the function.
 - **Mermaid > 50 nodes.** They don't render legibly. Split them.
 - **Documenting tests, generated code, or vendored deps as if they were product code.** Skip them.
-- **In-repo output without asking.** Default is `~/.hermes/wikis/`. Only write into the repo when the user explicitly requests it.
+- **In-repo output without asking.** Default is `~/.xiaoban/wikis/`. Only write into the repo when the user explicitly requests it.
 - **Mermaid special chars need quotes:** `A["Tool / Agent"]` not `A[Tool / Agent]`. `<br>` for line breaks inside a node.
 - **Nested code fences in SKILL.md.** When writing a markdown example that contains a Mermaid block, use 4-backtick outer fences so the 3-backtick inner ` ```mermaid ` doesn't close the outer. (This SKILL.md does it.)
 - **classDiagram generics** render as `~T~` (e.g. `List~Tool~`), not `<T>`.

@@ -1,4 +1,4 @@
-"""My Stand native Xiaoban layer for the Hermes runtime fork."""
+"""My Stand native Xiaoban layer for the Xiaoban runtime fork."""
 
 __all__ = ["__version__"]
 

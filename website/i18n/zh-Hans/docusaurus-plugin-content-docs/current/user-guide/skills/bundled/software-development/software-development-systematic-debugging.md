@@ -26,7 +26,7 @@ description: "4阶段根因调试：先理解缺陷再修复"
 ## 参考：完整 SKILL.md
 
 :::info
-以下是 Hermes 在触发此 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。
+以下是 Xiaoban 在触发此 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。
 :::
 
 # 系统化调试
@@ -337,7 +337,7 @@ pytest tests/ -q
 
 ### 调查工具
 
-在阶段 1 中使用以下 Hermes 工具：
+在阶段 1 中使用以下 Xiaoban 工具：
 
 - **`search_files`** — 查找错误字符串、追踪函数调用、定位模式
 - **`read_file`** — 带行号读取源代码，用于精确分析

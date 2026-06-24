@@ -26,7 +26,7 @@ Parameter-efficient fine-tuning for LLMs using LoRA, QLoRA, and 25+ methods. Use
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # PEFT (Parameter-Efficient Fine-Tuning)
@@ -440,8 +440,8 @@ TrainingArguments(learning_rate=1e-4)
 
 ## References
 
-- **[Advanced Usage](https://github.com/52707407SXG/Xiaoban-Agent/blob/main/optional-skills/mlops/peft/references/advanced-usage.md)** - DoRA, LoftQ, rank stabilization, custom modules
-- **[Troubleshooting](https://github.com/52707407SXG/Xiaoban-Agent/blob/main/optional-skills/mlops/peft/references/troubleshooting.md)** - Common errors, debugging, optimization
+- **[Advanced Usage](https://github.com/52707407SXG/Xiaoban_Agent/blob/main/optional-skills/mlops/peft/references/advanced-usage.md)** - DoRA, LoftQ, rank stabilization, custom modules
+- **[Troubleshooting](https://github.com/52707407SXG/Xiaoban_Agent/blob/main/optional-skills/mlops/peft/references/troubleshooting.md)** - Common errors, debugging, optimization
 
 ## Resources
 

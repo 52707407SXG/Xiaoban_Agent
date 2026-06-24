@@ -174,6 +174,36 @@ def test_persist_user_message_becomes_original():
     assert ctx.messages[-1]["content"] == "api-prefixed"
 
 
+def test_auto_skill_context_flows_into_turn_context():
+    agent = _FakeAgent()
+    agent.valid_tool_names = {"skill_view", "web_search"}
+    agent.enabled_toolsets = ["skills", "web"]
+
+    with patch(
+        "agent.auto_skill_context.collect_matching_skill_context",
+        return_value="AUTO_SKILL_CONTEXT",
+    ):
+        ctx = _build(agent, user_message="查一下加拿大和瑞士比分")
+
+    assert ctx.plugin_user_context == "AUTO_SKILL_CONTEXT"
+
+
+def test_auto_skill_context_is_prepended_before_plugin_context():
+    agent = _FakeAgent()
+    agent.valid_tool_names = {"skill_view", "web_search"}
+
+    with patch(
+        "xiaoban_cli.plugins.invoke_hook",
+        return_value=[{"context": "PLUGIN_CONTEXT"}],
+    ), patch(
+        "agent.auto_skill_context.collect_matching_skill_context",
+        return_value="AUTO_SKILL_CONTEXT",
+    ):
+        ctx = _build(agent, user_message="查一下今天的新闻")
+
+    assert ctx.plugin_user_context == "AUTO_SKILL_CONTEXT\n\nPLUGIN_CONTEXT"
+
+
 def test_memory_nudge_fires_at_interval():
     agent = _FakeAgent()
     agent._memory_nudge_interval = 1
@@ -258,4 +288,3 @@ def test_between_turns_refresh_no_churn_when_unchanged():
         _build(agent)
 
     assert agent.tools is same  # not replaced → no churn
-

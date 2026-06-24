@@ -20,12 +20,12 @@ def server():
     with patch.dict(
         "sys.modules",
         {
-            "hermes_constants": MagicMock(
-                get_hermes_home=MagicMock(return_value="/tmp/hermes_test_child_mirror")
+            "xiaoban_constants": MagicMock(
+                get_xiaoban_home=MagicMock(return_value="/tmp/xiaoban_test_child_mirror")
             ),
-            "hermes_cli.env_loader": MagicMock(),
-            "hermes_cli.banner": MagicMock(),
-            "hermes_state": MagicMock(),
+            "xiaoban_cli.env_loader": MagicMock(),
+            "xiaoban_cli.banner": MagicMock(),
+            "xiaoban_state": MagicMock(),
         },
     ):
         import importlib

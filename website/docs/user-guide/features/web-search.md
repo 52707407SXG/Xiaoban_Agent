@@ -25,9 +25,9 @@ Both are configured through a single backend selection. Providers are chosen via
 | **Tavily** | `TAVILY_API_KEY` | ✔ | ✔ | 1 000 searches/mo |
 | **Exa** | `EXA_API_KEY` | ✔ | ✔ | 1 000 searches/mo |
 | **Parallel** | `PARALLEL_API_KEY` | ✔ | ✔ | Paid |
-| **xAI (Grok)** | `XAI_API_KEY` or `hermes auth login xai-oauth` | ✔ | — | Paid (SuperGrok or per-token) |
+| **xAI (Grok)** | `XAI_API_KEY` or `xiaoban auth login xai-oauth` | ✔ | — | Paid (SuperGrok or per-token) |
 
-Brave Search, DDGS, and xAI are **search-only** — pair any of them with Firecrawl/Tavily/Exa/Parallel when you also need `web_extract`. DDGS uses the [`ddgs` Python package](https://pypi.org/project/ddgs/) under the hood; if it isn't already installed, run `pip install ddgs` (or let Hermes lazy-install it on first use). xAI runs Grok's server-side `web_search` tool on the Responses API — results are LLM-generated rather than index-backed, so titles, descriptions, and URL choice are all model output (see the [trust-model caveat](#xai-grok) below).
+Brave Search, DDGS, and xAI are **search-only** — pair any of them with Firecrawl/Tavily/Exa/Parallel when you also need `web_extract`. DDGS uses the [`ddgs` Python package](https://pypi.org/project/ddgs/) under the hood; if it isn't already installed, run `pip install ddgs` (or let Xiaoban lazy-install it on first use). xAI runs Grok's server-side `web_search` tool on the Responses API — results are LLM-generated rather than index-backed, so titles, descriptions, and URL choice are all model output (see the [trust-model caveat](#xai-grok) below).
 
 **Per-capability split:** you can use different providers for search and extract independently — for example SearXNG (free) for search and Firecrawl for extract. See [Per-capability configuration](#per-capability-configuration) below.
 
@@ -48,7 +48,7 @@ Backends return raw page markdown, which can be huge (forum threads, docs sites,
 | 500 000 – 2 000 000 | Chunked: split into 100 k-char chunks, summarize each in parallel, then synthesize a final summary (~5 000 chars) |
 | Over 2 000 000 | Refused with a hint to use a more focused source URL |
 
-The summary keeps quotes, code blocks, and key facts in their original formatting — it's a content compressor, not a paraphraser. If summarization fails or times out, Hermes falls back to the first ~5 000 chars of raw content rather than a useless error.
+The summary keeps quotes, code blocks, and key facts in their original formatting — it's a content compressor, not a paraphraser. If summarization fails or times out, Xiaoban falls back to the first ~5 000 chars of raw content rather than a useless error.
 
 ### Which model does the summarizing?
 
@@ -57,7 +57,7 @@ The `web_extract` auxiliary task. By default (`auxiliary.web_extract.provider: "
 To route extraction summaries to a cheap, fast model regardless of your main:
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.xiaoban/config.yaml
 auxiliary:
   web_extract:
     provider: openrouter
@@ -92,7 +92,7 @@ xiaoban tools
 Full-featured search and extract. Recommended for most users.
 
 ```bash
-# ~/.hermes/.env
+# ~/.xiaoban/.env
 FIRECRAWL_API_KEY=fc-your-key-here
 ```
 
@@ -101,7 +101,7 @@ Get a key at [firecrawl.dev](https://firecrawl.dev). The free tier includes 500 
 **Self-hosted Firecrawl:** Point at your own instance instead of the cloud API:
 
 ```bash
-# ~/.hermes/.env
+# ~/.xiaoban/.env
 FIRECRAWL_API_URL=http://localhost:3002
 ```
 
@@ -111,7 +111,7 @@ When `FIRECRAWL_API_URL` is set, the API key is optional (disable server auth wi
 
 ### SearXNG (free, self-hosted)
 
-SearXNG is a privacy-respecting, open-source metasearch engine that aggregates results from 70+ search engines. **No API key required** — just point Hermes at a running SearXNG instance.
+SearXNG is a privacy-respecting, open-source metasearch engine that aggregates results from 70+ search engines. **No API key required** — just point Xiaoban at a running SearXNG instance.
 
 SearXNG is **search-only** — `web_extract` requires a separate extract provider.
 
@@ -165,7 +165,7 @@ Open `~/searxng/searxng/settings.yml` and find the `formats` block (around line 
 formats:
   - html
 
-# After (enable JSON for Hermes):
+# After (enable JSON for Xiaoban):
 formats:
   - html
   - json
@@ -187,14 +187,14 @@ curl -s "http://localhost:8888/search?q=test&format=json" | python3 -c \
 
 You should see something like `10 results`. If you get a `403 Forbidden`, JSON format is still disabled — recheck step 4.
 
-**7. Configure Hermes:**
+**7. Configure Xiaoban:**
 
 ```bash
-# ~/.hermes/.env
+# ~/.xiaoban/.env
 SEARXNG_URL=http://localhost:8888
 ```
 
-Then select SearXNG as the search backend in `~/.hermes/config.yaml`:
+Then select SearXNG as the search backend in `~/.xiaoban/config.yaml`:
 
 ```yaml
 web:
@@ -210,7 +210,7 @@ Or set via `xiaoban tools` → Web Search & Extract → SearXNG.
 Public SearXNG instances are listed at [searx.space](https://searx.space/). Filter by instances that have **JSON format enabled** (shown in the table).
 
 ```bash
-# ~/.hermes/.env
+# ~/.xiaoban/.env
 SEARXNG_URL=https://searx.example.com
 ```
 
@@ -225,13 +225,13 @@ Public instances have rate limits, variable uptime, and may disable JSON format 
 SearXNG handles search; you need a separate provider for `web_extract`. Use the per-capability keys:
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.xiaoban/config.yaml
 web:
   search_backend: "searxng"
   extract_backend: "firecrawl"   # or tavily, exa, parallel
 ```
 
-With this config, Hermes uses SearXNG for all search queries and Firecrawl for URL extraction — combining free search with high-quality extraction.
+With this config, Xiaoban uses SearXNG for all search queries and Firecrawl for URL extraction — combining free search with high-quality extraction.
 
 ---
 
@@ -240,7 +240,7 @@ With this config, Hermes uses SearXNG for all search queries and Firecrawl for U
 AI-optimised search and extract with a generous free tier.
 
 ```bash
-# ~/.hermes/.env
+# ~/.xiaoban/.env
 TAVILY_API_KEY=tvly-your-key-here
 ```
 
@@ -253,7 +253,7 @@ Get a key at [app.tavily.com](https://app.tavily.com/home). The free tier includ
 Neural search with semantic understanding. Good for research and finding conceptually related content.
 
 ```bash
-# ~/.hermes/.env
+# ~/.xiaoban/.env
 EXA_API_KEY=your-exa-key-here
 ```
 
@@ -266,7 +266,7 @@ Get a key at [exa.ai](https://exa.ai). The free tier includes 1 000 searches/mon
 AI-native search and extraction with deep research capabilities.
 
 ```bash
-# ~/.hermes/.env
+# ~/.xiaoban/.env
 PARALLEL_API_KEY=your-parallel-key-here
 ```
 
@@ -281,20 +281,20 @@ Routes `web_search` through Grok's server-side [web_search tool](https://docs.x.
 Works with either credential path — no new env vars, no new setup wizard:
 
 ```bash
-# ~/.hermes/.env (env-var path)
+# ~/.xiaoban/.env (env-var path)
 XAI_API_KEY=sk-xai-your-key-here
 ```
 
 or for SuperGrok subscribers:
 
 ```bash
-hermes auth login xai-oauth
+xiaoban auth login xai-oauth
 ```
 
 Then select xAI as the search backend:
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.xiaoban/config.yaml
 web:
   backend: "xai"
 ```
@@ -328,7 +328,7 @@ Unlike index-backed providers (Brave, Tavily, Exa) which return verbatim search-
 Set one provider for all web capabilities:
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.xiaoban/config.yaml
 web:
   backend: "searxng"   # firecrawl | searxng | brave-free | ddgs | tavily | exa | parallel | xai
 ```
@@ -338,7 +338,7 @@ web:
 Use different providers for search vs extract. This lets you combine free search (SearXNG) with a paid extract provider, or vice versa:
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.xiaoban/config.yaml
 web:
   search_backend: "searxng"     # used by web_search
   extract_backend: "firecrawl"  # used by web_extract
@@ -353,7 +353,7 @@ When per-capability keys are empty, both fall through to `web.backend`. When `we
 
 ### Auto-detection
 
-If no backend is explicitly configured, Hermes picks the first available one based on which credentials are set:
+If no backend is explicitly configured, Xiaoban picks the first available one based on which credentials are set:
 
 | Credential present | Auto-selected backend |
 |--------------------|-----------------------|
@@ -379,7 +379,7 @@ Or check via the CLI:
 
 ```bash
 # Activate the venv and run the web tools module directly
-source ~/.hermes/xiaoban-agent/.venv/bin/activate
+source ~/.xiaoban/xiaoban-agent/.venv/bin/activate
 python -m tools.web_tools
 ```
 

@@ -1,14 +1,14 @@
 import type {
-  HermesConnection,
-  HermesReadDirResult,
-  HermesReadFileTextResult,
-  HermesSelectPathsOptions,
-  HermesWorktreeInfo
+  XiaobanConnection,
+  XiaobanReadDirResult,
+  XiaobanReadFileTextResult,
+  XiaobanSelectPathsOptions,
+  XiaobanWorktreeInfo
 } from '@/global'
 import { $connection } from '@/store/session'
 
 export interface DesktopFsRemotePicker {
-  selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>
+  selectPaths: (options?: XiaobanSelectPathsOptions) => Promise<string[]>
 }
 
 let remotePicker: DesktopFsRemotePicker | null = null
@@ -17,7 +17,7 @@ export function setDesktopFsRemotePicker(next: DesktopFsRemotePicker | null) {
   remotePicker = next
 }
 
-function connectionCacheKey(connection: HermesConnection | null) {
+function connectionCacheKey(connection: XiaobanConnection | null) {
   if (!connection) {
     return 'local:'
   }
@@ -37,27 +37,27 @@ function fsPath(endpoint: string, filePath: string) {
 }
 
 function bridge() {
-  const desktop = window.hermesDesktop
+  const desktop = window.xiaobanDesktop
   if (!desktop) {
     throw new Error('Xiaoban Desktop bridge is unavailable')
   }
   return desktop
 }
 
-export async function readDesktopDir(path: string): Promise<HermesReadDirResult> {
+export async function readDesktopDir(path: string): Promise<XiaobanReadDirResult> {
   const desktop = bridge()
   if (!isDesktopFsRemoteMode()) {
     return desktop.readDir(path)
   }
-  return desktop.api<HermesReadDirResult>({ path: fsPath('list', path) })
+  return desktop.api<XiaobanReadDirResult>({ path: fsPath('list', path) })
 }
 
-export async function readDesktopFileText(path: string): Promise<HermesReadFileTextResult> {
+export async function readDesktopFileText(path: string): Promise<XiaobanReadFileTextResult> {
   const desktop = bridge()
   if (!isDesktopFsRemoteMode()) {
     return desktop.readFileText(path)
   }
-  return desktop.api<HermesReadFileTextResult>({ path: fsPath('read-text', path) })
+  return desktop.api<XiaobanReadFileTextResult>({ path: fsPath('read-text', path) })
 }
 
 export async function readDesktopFileDataUrl(path: string): Promise<string> {
@@ -83,7 +83,7 @@ export async function desktopGitRoot(path: string): Promise<string | null> {
 // Worktree detection runs against the LOCAL filesystem (the electron main
 // process). For a remote backend the session cwds live on another machine, so
 // we can't resolve them here — callers fall back to the path-name heuristic.
-export async function desktopWorktrees(cwds: string[]): Promise<Record<string, HermesWorktreeInfo | null>> {
+export async function desktopWorktrees(cwds: string[]): Promise<Record<string, XiaobanWorktreeInfo | null>> {
   if (isDesktopFsRemoteMode()) {
     return {}
   }
@@ -101,7 +101,7 @@ export async function desktopDefaultCwd(): Promise<{ branch: string; cwd: string
   return bridge().api<{ branch: string; cwd: string }>({ path: '/api/fs/default-cwd' })
 }
 
-export async function selectDesktopPaths(options?: HermesSelectPathsOptions): Promise<string[]> {
+export async function selectDesktopPaths(options?: XiaobanSelectPathsOptions): Promise<string[]> {
   const desktop = bridge()
   if (!isDesktopFsRemoteMode()) {
     return desktop.selectPaths(options)

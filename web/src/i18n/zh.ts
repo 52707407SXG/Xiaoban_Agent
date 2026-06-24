@@ -119,8 +119,8 @@ export const zh: Translations = {
     starting: "启动中",
     startedInBackground: "已在后台启动 — 请查看日志",
     stopped: "已停止",
-    updateHermes: "更新 Hermes",
-    updatingHermes: "正在更新 Hermes…",
+    updateXiaoban: "更新 Xiaoban",
+    updatingXiaoban: "正在更新 Xiaoban…",
     waitingForOutput: "等待输出…",
   },
 
@@ -315,7 +315,7 @@ export const zh: Translations = {
     enableAfterInstall: "安装后启用",
     enableRuntime: "启用",
     forceReinstall: "强制重装（先删除已有目录）",
-    headline: "发现、安装、启用和更新 Hermes 插件（对齐 `hermes plugins` CLI）。",
+    headline: "发现、安装、启用和更新 Xiaoban 插件（对齐 `xiaoban plugins` CLI）。",
     identifierLabel: "Git 地址或 owner/repo",
     inactive: "未启用",
     installBtn: "安装",
@@ -332,8 +332,8 @@ export const zh: Translations = {
     providersHint:
       "写入 config.yaml：memory.provider（留空为内置）、context.engine。下次会话生效。",
     refreshDashboard: "重新扫描仪表盘扩展",
-    removeConfirm: "从 ~/.hermes/plugins/ 删除此插件？",
-    removeHint: "仅可移除用户安装在 ~/.hermes/plugins 下的插件。",
+    removeConfirm: "从 ~/.xiaoban/plugins/ 删除此插件？",
+    removeHint: "仅可移除用户安装在 ~/.xiaoban/plugins 下的插件。",
     rescanHeading: "SPA 插件注册表",
     rescanHint: "在磁盘新增文件后扫描，使侧边栏载入新 manifest。",
     runtimeHeading: "网关运行时（YAML 插件）",
@@ -355,7 +355,7 @@ export const zh: Translations = {
     all: "全部",
     categories: "分类",
     filters: "筛选",
-    noSkills: "未找到技能。技能从 ~/.hermes/skills/ 加载",
+    noSkills: "未找到技能。技能从 ~/.xiaoban/skills/ 加载",
     noSkillsMatch: "没有匹配的技能。",
     skillCount: "{count} 个技能",
     resultCount: "{count} 个结果",
@@ -369,7 +369,7 @@ export const zh: Translations = {
   },
 
   config: {
-    configPath: "~/.hermes/config.yaml",
+    configPath: "~/.xiaoban/config.yaml",
     filters: "筛选",
     sections: "分类",
     exportConfig: "导出配置为 JSON",
@@ -480,11 +480,11 @@ export const zh: Translations = {
   achievements: {
     hero: {
       kicker: "Agentic Gamerscore",
-      title: "Hermes Achievements",
+      title: "Xiaoban Achievements",
       subtitle:
-        "从真实会话历史中获得的 Hermes 可收集徽章。已知尚未达成的成就显示为「已发现」；秘密成就在首次出现匹配行为之前保持隐藏。",
+        "从真实会话历史中获得的 Xiaoban 可收集徽章。已知尚未达成的成就显示为「已发现」；秘密成就在首次出现匹配行为之前保持隐藏。",
       scan_subtitle:
-        "正在扫描 Hermes 会话历史。在历史记录较多时，首次扫描可能需要 5–10 秒。",
+        "正在扫描 Xiaoban 会话历史。在历史记录较多时，首次扫描可能需要 5–10 秒。",
     },
     actions: {
       rescan: "重新扫描",
@@ -499,7 +499,7 @@ export const zh: Translations = {
       highest_tier: "最高等级",
       highest_tier_hint: "Copper → Silver → Gold → Diamond → Olympian",
       latest: "最新",
-      latest_hint_empty: "多多运行 Hermes",
+      latest_hint_empty: "多多运行 Xiaoban",
       none_yet: "暂无",
     },
     state: {
@@ -530,10 +530,10 @@ export const zh: Translations = {
       tiers_header: "等级",
       secret_header: "秘密成就",
       secret_body:
-        "秘密成就会隐藏其确切触发条件。一旦 Hermes 检测到相关信号，卡片将变为「已发现」并显示其要求。",
+        "秘密成就会隐藏其确切触发条件。一旦 Xiaoban 检测到相关信号，卡片将变为「已发现」并显示其要求。",
       scan_status_header: "扫描状态",
       scan_status_body:
-        "Hermes 正在对本地历史进行一次扫描，之后卡片会自动出现。即使这需要几秒钟，也没有卡住。",
+        "Xiaoban 正在对本地历史进行一次扫描，之后卡片会自动出现。即使这需要几秒钟，也没有卡住。",
       what_scanned_header: "扫描内容",
       what_scanned_body:
         "会话、工具调用、模型元数据、错误、成就和本地解锁状态。",

@@ -84,6 +84,53 @@ def _stable_prompt(agent):
         return build_system_prompt_parts(agent)["stable"]
 
 
+class TestXiaobanOperatingPolicy:
+    def test_xiaoban_operating_policy_is_stable_prompt_layer(self):
+        stable = _stable_prompt(_make_agent())
+
+        assert "# Xiaoban operating policy" in stable
+        assert "Uploaded files" in stable
+        assert "Yuan Laoshi" in stable
+        assert "Did I answer the newest user message" in stable
+        assert "Visual and media evidence" in stable
+        assert "Do not invent scenes, people, actions" in stable
+        assert "Live sports and current scores" in stable
+        assert "search result snippet gives a fresh score/status" in stable
+        assert "Do not bury a usable live/final score behind vague uncertainty" in stable
+        assert "Clean web research workflow" in stable
+        assert "internal evidence ledger" in stable
+        assert "Do not present a stale snippet" in stable
+        assert "# Xiaoban agentic workflow principles" in stable
+        assert "latest user message and this-turn evidence override old topic drift" in stable
+        assert "anchor the reasoning to the user's default Beijing time" in stable
+
+    def test_deepseek_gets_xiaoban_execution_discipline(self):
+        agent = _make_agent(
+            valid_tool_names=["web_search"],
+            model="deepseek-v4-pro",
+            _tool_use_enforcement="auto",
+        )
+
+        stable = _stable_prompt(agent)
+
+        assert "# Tool-use enforcement" in stable
+        assert "# Xiaoban execution discipline for DeepSeek-class models" in stable
+        assert "Do not fabricate results" in stable
+        assert "Uploaded-file, current-time, and explicit correction turns are hard pivots" in stable
+
+    def test_non_deepseek_does_not_get_deepseek_specific_block(self):
+        agent = _make_agent(
+            valid_tool_names=["web_search"],
+            model="claude-sonnet-4",
+            _tool_use_enforcement="auto",
+        )
+
+        stable = _stable_prompt(agent)
+
+        assert "# Xiaoban operating policy" in stable
+        assert "# Xiaoban execution discipline for DeepSeek-class models" not in stable
+
+
 class TestCodingContextBlock:
     def test_injected_when_active(self, monkeypatch, tmp_path):
         import subprocess

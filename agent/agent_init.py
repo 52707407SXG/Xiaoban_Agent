@@ -47,9 +47,9 @@ from agent.tool_guardrails import (
     ToolCallGuardrailController,
     ToolGuardrailDecision,
 )
-from hermes_cli.config import cfg_get
-from hermes_cli.timeouts import get_provider_request_timeout
-from hermes_constants import get_hermes_home
+from xiaoban_cli.config import cfg_get
+from xiaoban_cli.timeouts import get_provider_request_timeout
+from xiaoban_constants import get_xiaoban_home
 from utils import base_url_host_matches, is_truthy_value
 
 # Use the same logger name as run_agent so tests patching ``run_agent.logger``
@@ -82,7 +82,7 @@ def _build_codex_gpt55_autoraise_notice(autoraise: Dict[str, float]) -> str:
         f"ℹ Codex gpt-5.5 caps context at 272K, so auto-compaction was raised "
         f"to {to_pct}% (from {from_pct}%) to use more of the window before "
         f"summarizing.\n"
-        f"  Opt back out: hermes config set compression.codex_gpt55_autoraise false"
+        f"  Opt back out: xiaoban config set compression.codex_gpt55_autoraise false"
     )
 
 
@@ -266,10 +266,10 @@ def init_agent(
         platform (str): The interface platform the user is on (e.g. "cli", "telegram", "discord", "whatsapp").
             Used to inject platform-specific formatting hints into the system prompt.
         skip_context_files (bool): If True, skip auto-injection of project context files
-            (SOUL.md, .hermes.md, AGENTS.md, CLAUDE.md, .cursorrules) from the cwd / HERMES_HOME
+            (SOUL.md, .xiaoban.md, AGENTS.md, CLAUDE.md, .cursorrules) from the cwd / XIAOBAN_HOME
             into the system prompt. Use this for batch processing and data generation to avoid
             polluting trajectories with user-specific persona or project instructions.
-        load_soul_identity (bool): If True, still use ~/.hermes/SOUL.md as the primary
+        load_soul_identity (bool): If True, still use ~/.xiaoban/SOUL.md as the primary
             identity even when skip_context_files=True. Project context files from the cwd
             remain skipped.
     """
@@ -355,7 +355,7 @@ def init_agent(
         pass  # Non-fatal — transport may not exist for all modes yet
 
     try:
-        from hermes_cli.model_normalize import (
+        from xiaoban_cli.model_normalize import (
             _AGGREGATOR_PROVIDERS,
             normalize_model_for_provider,
         )
@@ -506,7 +506,7 @@ def init_agent(
     # sessions with >5-minute pauses between turns (#14971).
     agent._cache_ttl = "5m"
     try:
-        from hermes_cli.config import load_config as _load_pc_cfg
+        from xiaoban_cli.config import load_config as _load_pc_cfg
 
         _pc_cfg = _load_pc_cfg().get("prompt_caching", {}) or {}
         _ttl = _pc_cfg.get("cache_ttl", "5m")
@@ -547,7 +547,7 @@ def init_agent(
     # Credits tracking (dev-only, L0 usage-aware-credits) — updated from
     # x-nous-credits-* response headers after each API call.  Session-start
     # remaining is latched the first time a header is ever seen so we can
-    # report cumulative micros spent.  Surfaced behind HERMES_DEV_CREDITS.
+    # report cumulative micros spent.  Surfaced behind XIAOBAN_DEV_CREDITS.
     agent._credits_state = None
     agent._credits_session_start_micros = None
     # Threshold-notice latch (L4): active sticky-notice keys + the warn90 crossing gate.
@@ -558,10 +558,10 @@ def init_agent(
     agent._or_cache_hits: int = 0
 
     # Centralized logging — agent.log (INFO+) and errors.log (WARNING+)
-    # both live under ~/.hermes/logs/.  Idempotent, so gateway mode
+    # both live under ~/.xiaoban/logs/.  Idempotent, so gateway mode
     # (which creates a new AIAgent per message) won't duplicate handlers.
-    from hermes_logging import setup_logging, setup_verbose_logging
-    setup_logging(hermes_home=_ra()._hermes_home)
+    from xiaoban_logging import setup_logging, setup_verbose_logging
+    setup_logging(xiaoban_home=_ra()._xiaoban_home)
 
     if agent.verbose_logging:
         setup_verbose_logging()
@@ -572,11 +572,11 @@ def init_agent(
         # root logger's file handlers (agent.log, errors.log) from
         # ever seeing the records, because Python checks
         # logger.isEnabledFor() before handler propagation. We rely
-        # on the fact that hermes_logging.setup_logging() does not
+        # on the fact that xiaoban_logging.setup_logging() does not
         # install a console StreamHandler in quiet mode — so INFO
         # records flow to the file handlers but never reach a
         # console. Any future noise reduction belongs at the
-        # handler level inside hermes_logging.py, not here.
+        # handler level inside xiaoban_logging.py, not here.
         pass
     
     # Internal stream callback (set during streaming TTS).
@@ -668,7 +668,7 @@ def init_agent(
             # state cost is one file read + one timestamp compare per request.
             if agent.provider == "minimax-oauth" and isinstance(effective_key, str) and effective_key:
                 try:
-                    from hermes_cli.auth import build_minimax_oauth_token_provider
+                    from xiaoban_cli.auth import build_minimax_oauth_token_provider
                     effective_key = build_minimax_oauth_token_provider()
                 except Exception as _mm_exc:  # noqa: BLE001 — never block startup on this
                     import logging as _logging
@@ -715,7 +715,7 @@ def init_agent(
         # Guardrail config — read from config.yaml at init time.
         agent._bedrock_guardrail_config = None
         try:
-            from hermes_cli.config import load_config as _load_br_cfg
+            from xiaoban_cli.config import load_config as _load_br_cfg
             _gr = _load_br_cfg().get("bedrock", {}).get("guardrail", {})
             if _gr.get("guardrail_identifier") and _gr.get("guardrail_version"):
                 agent._bedrock_guardrail_config = {
@@ -768,7 +768,7 @@ def init_agent(
             elif base_url_host_matches(effective_base, "api.routermint.com"):
                 client_kwargs["default_headers"] = _ra()._routermint_headers()
             elif base_url_host_matches(effective_base, "api.githubcopilot.com"):
-                from hermes_cli.models import copilot_default_headers
+                from xiaoban_cli.models import copilot_default_headers
 
                 client_kwargs["default_headers"] = copilot_default_headers()
             elif base_url_host_matches(effective_base, "api.kimi.com"):
@@ -825,7 +825,7 @@ def init_agent(
                     # (e.g. alibaba → DASHSCOPE_API_KEY, not ALIBABA_API_KEY).
                     _env_hint = f"{_explicit.upper()}_API_KEY"
                     try:
-                        from hermes_cli.auth import PROVIDER_REGISTRY
+                        from xiaoban_cli.auth import PROVIDER_REGISTRY
                         _pcfg = PROVIDER_REGISTRY.get(_explicit)
                         if _pcfg and _pcfg.api_key_env_vars:
                             _env_hint = _pcfg.api_key_env_vars[0]
@@ -996,7 +996,7 @@ def init_agent(
 
     # Kanban worker/orchestrator lifecycle guidance is session-static:
     # the dispatcher decides at spawn time whether this process is a kanban
-    # worker (kanban_show tool is present iff HERMES_KANBAN_TASK is set).
+    # worker (kanban_show tool is present iff XIAOBAN_KANBAN_TASK is set).
     # Resolving the ~835-token block once here avoids re-running the
     # membership test + reference on every system-prompt rebuild
     # (init + each context compression).
@@ -1051,19 +1051,19 @@ def init_agent(
 
         set_current_session_id(agent.session_id)
     except Exception:
-        os.environ["HERMES_SESSION_ID"] = agent.session_id
+        os.environ["XIAOBAN_SESSION_ID"] = agent.session_id
 
-    # Session logs go into ~/.hermes/sessions/ alongside gateway sessions
-    hermes_home = get_hermes_home()
-    agent.logs_dir = hermes_home / "sessions"
+    # Session logs go into ~/.xiaoban/sessions/ alongside gateway sessions
+    xiaoban_home = get_xiaoban_home()
+    agent.logs_dir = xiaoban_home / "sessions"
     agent.logs_dir.mkdir(parents=True, exist_ok=True)
-    # Per-session JSON snapshot writer (~/.hermes/sessions/session_{sid}.json)
+    # Per-session JSON snapshot writer (~/.xiaoban/sessions/session_{sid}.json)
     # is opt-in via sessions.write_json_snapshots (default False).  state.db
     # is canonical — the snapshot is only useful for external tooling that
     # reads the JSON files directly.  See run_agent._save_session_log.
     agent._session_json_enabled = False
     try:
-        from hermes_cli.config import load_config as _load_sess_cfg
+        from xiaoban_cli.config import load_config as _load_sess_cfg
         _sess_cfg = (_load_sess_cfg().get("sessions") or {})
         agent._session_json_enabled = bool(_sess_cfg.get("write_json_snapshots", False))
     except Exception:
@@ -1118,7 +1118,7 @@ def init_agent(
     
     # Load config once for memory, skills, and compression sections
     try:
-        from hermes_cli.config import load_config as _load_agent_config
+        from xiaoban_cli.config import load_config as _load_agent_config
         _agent_cfg = _load_agent_config()
     except Exception:
         _agent_cfg = {}
@@ -1178,7 +1178,7 @@ def init_agent(
                     _init_kwargs = {
                         "session_id": agent.session_id,
                         "platform": platform or "cli",
-                        "hermes_home": str(get_hermes_home()),
+                        "xiaoban_home": str(get_xiaoban_home()),
                         "agent_context": "primary",
                     }
                     if _init_kwargs["platform"] == "cli":
@@ -1213,10 +1213,10 @@ def init_agent(
                         _init_kwargs["gateway_session_key"] = agent._gateway_session_key
                     # Profile identity for per-profile provider scoping
                     try:
-                        from hermes_cli.profiles import get_active_profile_name
+                        from xiaoban_cli.profiles import get_active_profile_name
                         _profile = get_active_profile_name()
                         _init_kwargs["agent_identity"] = _profile
-                        _init_kwargs["agent_workspace"] = "hermes"
+                        _init_kwargs["agent_workspace"] = "xiaoban"
                     except Exception:
                         pass
                     agent._memory_manager.initialize_all(**_init_kwargs)
@@ -1431,7 +1431,7 @@ def init_agent(
     # Resolve custom_providers list once for reuse below (startup
     # context-length override and plugin context-engine init).
     try:
-        from hermes_cli.config import get_compatible_custom_providers
+        from xiaoban_cli.config import get_compatible_custom_providers
         _custom_providers = get_compatible_custom_providers(_agent_cfg)
     except Exception:
         _custom_providers = _agent_cfg.get("custom_providers")
@@ -1446,7 +1446,7 @@ def init_agent(
     # Check custom_providers per-model context_length
     if _config_context_length is None and _custom_providers:
         try:
-            from hermes_cli.config import get_custom_provider_context_length
+            from xiaoban_cli.config import get_custom_provider_context_length
             _cp_ctx_resolved = get_custom_provider_context_length(
                 model=agent.model,
                 base_url=agent.base_url,
@@ -1524,7 +1524,7 @@ def init_agent(
         # Try general plugin system as fallback
         if _selected_engine is None:
             try:
-                from hermes_cli.plugins import get_plugin_context_engine
+                from xiaoban_cli.plugins import get_plugin_context_engine
                 _candidate = get_plugin_context_engine()
                 if _candidate and _candidate.name == _engine_name:
                     _selected_engine = _candidate
@@ -1637,7 +1637,7 @@ def init_agent(
         try:
             agent.context_compressor.on_session_start(
                 agent.session_id,
-                hermes_home=str(get_hermes_home()),
+                xiaoban_home=str(get_xiaoban_home()),
                 platform=agent.platform or "cli",
                 model=agent.model,
                 context_length=getattr(agent.context_compressor, "context_length", 0),

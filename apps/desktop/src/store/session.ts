@@ -2,28 +2,28 @@ import { atom, computed } from 'nanostores'
 
 import { lastVisibleMessageIsUser } from '@/app/chat/thread-loading'
 import type { ContextSuggestion } from '@/app/types'
-import type { HermesConnection } from '@/global'
+import type { XiaobanConnection } from '@/global'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { persistBoolean, persistString, storedBoolean, storedString } from '@/lib/storage'
-import type { SessionInfo, UsageStats } from '@/types/hermes'
+import type { SessionInfo, UsageStats } from '@/types/xiaoban'
 
 type Updater<T> = T | ((current: T) => T)
 
-const WORKSPACE_CWD_KEY = 'hermes.desktop.workspace-cwd'
+const WORKSPACE_CWD_KEY = 'xiaoban.desktop.workspace-cwd'
 
 // The composer's model/effort/fast is sticky UI state, NOT the profile default
 // (that lives in Settings → Model). Persisting it in localStorage makes a pick
 // follow across Cmd+N and app restarts instead of snapping back to the default.
 // It's deliberately global (not per-profile): a profile switch force-reseeds to
 // that profile's default, while within a profile new chats keep your last pick.
-const COMPOSER_MODEL_KEY = 'hermes.desktop.composer.model'
-const COMPOSER_PROVIDER_KEY = 'hermes.desktop.composer.provider'
-const COMPOSER_EFFORT_KEY = 'hermes.desktop.composer.reasoning-effort'
-const COMPOSER_FAST_KEY = 'hermes.desktop.composer.fast'
+const COMPOSER_MODEL_KEY = 'xiaoban.desktop.composer.model'
+const COMPOSER_PROVIDER_KEY = 'xiaoban.desktop.composer.provider'
+const COMPOSER_EFFORT_KEY = 'xiaoban.desktop.composer.reasoning-effort'
+const COMPOSER_FAST_KEY = 'xiaoban.desktop.composer.fast'
 
 let configuredDefaultProjectDir = ''
 
-function workspaceCwdKey(connection: HermesConnection | null = $connection.get()): string {
+function workspaceCwdKey(connection: XiaobanConnection | null = $connection.get()): string {
   if (connection?.mode !== 'remote') {
     return WORKSPACE_CWD_KEY
   }
@@ -38,7 +38,7 @@ export const getRememberedWorkspaceCwd = (): string => storedString(workspaceCwd
 export const getConfiguredDefaultProjectDir = (): string => configuredDefaultProjectDir
 
 export async function syncConfiguredDefaultProjectDir(): Promise<string> {
-  const settings = window.hermesDesktop?.settings?.getDefaultProjectDir
+  const settings = window.xiaobanDesktop?.settings?.getDefaultProjectDir
 
   if (!settings) {
     configuredDefaultProjectDir = ''
@@ -56,7 +56,7 @@ export async function syncConfiguredDefaultProjectDir(): Promise<string> {
  *  packaged, optional Settings override). Clears stale install-dir paths that
  *  PR #37586's localStorage stickiness can preserve across the #37536 fix. */
 export async function ensureDefaultWorkspaceCwd(): Promise<void> {
-  const sanitize = window.hermesDesktop?.sanitizeWorkspaceCwd
+  const sanitize = window.xiaobanDesktop?.sanitizeWorkspaceCwd
 
   if (!sanitize) {
     return
@@ -169,7 +169,7 @@ export function mergeSessionPage(
   return survivors.length ? [...survivors, ...incoming] : incoming
 }
 
-export const $connection = atom<HermesConnection | null>(null)
+export const $connection = atom<XiaobanConnection | null>(null)
 export const $gatewayState = atom('idle')
 export const $sessions = atom<SessionInfo[]>([])
 export const $sessionsTotal = atom<number>(0)
@@ -262,7 +262,7 @@ export const $contextSuggestions = atom<ContextSuggestion[]>([])
 export const $modelPickerOpen = atom(false)
 export const $sessionPickerOpen = atom(false)
 
-export const setConnection = (next: Updater<HermesConnection | null>) => updateAtom($connection, next)
+export const setConnection = (next: Updater<XiaobanConnection | null>) => updateAtom($connection, next)
 export const setGatewayState = (next: Updater<string>) => updateAtom($gatewayState, next)
 export const setSessions = (next: Updater<SessionInfo[]>) => updateAtom($sessions, next)
 export const setSessionsTotal = (next: Updater<number>) => updateAtom($sessionsTotal, next)

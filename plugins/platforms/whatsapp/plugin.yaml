@@ -5,7 +5,7 @@ version: 1.0.0
 description: >
   WhatsApp gateway adapter for Xiaoban-Agent.
   Connects to WhatsApp via a local Node.js bridge (WhatsApp Web client) over
-  an HTTP API and relays messages between WhatsApp chats and the Hermes agent.
+  an HTTP API and relays messages between WhatsApp chats and the Xiaoban agent.
   Supports DM/group policies, mention gating, free-response chats, and
   per-user allowlists.
 author: NousResearch

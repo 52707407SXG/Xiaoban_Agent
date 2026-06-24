@@ -1,19 +1,19 @@
-import { withInkSuspended } from '@hermes/ink'
+import { withInkSuspended } from '@xiaoban/ink'
 
-import { launchHermesCommand } from '../../../lib/externalCli.js'
+import { launchXiaobanCommand } from '../../../lib/externalCli.js'
 import { runExternalSetup } from '../../setupHandoff.js'
 import type { SlashCommand } from '../types.js'
 
 export const setupCommands: SlashCommand[] = [
   {
-    help: 'run full setup wizard (launches `xiaoban setup`)',
+    help: '运行完整设置向导（会启动 `xiaoban setup`）',
     name: 'setup',
     run: (arg, ctx) =>
       void runExternalSetup({
         args: ['setup', ...arg.split(/\s+/).filter(Boolean)],
         ctx,
         done: 'setup complete — starting session…',
-        launcher: launchHermesCommand,
+        launcher: launchXiaobanCommand,
         suspend: withInkSuspended
       })
   }

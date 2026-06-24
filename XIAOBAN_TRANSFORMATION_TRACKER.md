@@ -4,19 +4,19 @@ Date: 2026-06-24
 
 ## Non-Negotiable Rule
 
-The first GitHub version of this repository must not be a pure Hermes baseline.
+The first GitHub version of this repository must not be a pure Xiaoban baseline.
 
-Hermes is the runtime chassis, but the first pushed version must already be a
+Xiaoban is the runtime chassis, but the first pushed version must already be a
 My Stand native Xiaoban build with:
 
 - Xiaoban identity and launch path.
 - My Stand module capability contract alignment.
 - My Stand permission and context boundaries.
 - Tests proving the first Xiaoban layers work.
-- Documentation that clearly says this is Xiaoban-Agent, powered by a Hermes
-  runtime fork, not upstream Hermes itself.
+- Documentation that clearly says this is Xiaoban-Agent, powered by a Xiaoban
+  runtime fork, not upstream Xiaoban itself.
 
-Upstream Hermes commit is recorded only for traceability:
+Upstream Xiaoban commit is recorded only for traceability:
 
 ```txt
 5ecf3bf0e0726b8b33682bb5c3aad9679b7b5be4
@@ -24,7 +24,7 @@ Upstream Hermes commit is recorded only for traceability:
 
 ## Source Plans
 
-- `/Users/saix/Documents/Codex/2026-06-18/ssh-root-47-237-254-194-2/work/hermes-xiaoban-transformation-plan-20260623.md`
+- `/Users/saix/Documents/Codex/2026-06-18/ssh-root-47-237-254-194-2/work/xiaoban-xiaoban-transformation-plan-20260623.md`
 - `/Users/saix/Documents/Codex/2026-06-18/ssh-root-47-237-254-194-2/work/xiaoban-agent-mmcc-v0.1-plugin-alignment-plan.md`
 
 ## Architecture Target
@@ -51,11 +51,11 @@ not own business logic. The server-side Agent owns:
 Status: in progress, first pass complete.
 
 Goal: the repository can be pushed as an initial Xiaoban version, not as raw
-Hermes.
+Xiaoban.
 
 Actions:
 
-- [x] Keep Hermes source as runtime foundation.
+- [x] Keep Xiaoban source as runtime foundation.
 - [x] Add Xiaoban package and docs.
 - [x] Add `xiaoban` CLI entry point.
 - [x] Add visible Xiaoban README/installer notes before first push.
@@ -64,11 +64,11 @@ Actions:
 - [x] Rename top-level package metadata to `xiaoban-agent`.
 - [x] Add `bin/xiaoban`.
 - [x] Rename developer setup script to `setup-xiaoban.sh`.
-- [x] Replace default toolset IDs from `hermes-*` to `xiaoban-*`.
+- [x] Replace default toolset IDs from `xiaoban-*` to `xiaoban-*`.
 - [x] `python3 -m xiaoban.cli --version` shows `Xiaoban-Agent`.
 - [x] Core docs/config/package surfaces use `xiaoban` commands.
 - [x] Add `scripts/xiaoban_rebrand_check.py` to prevent first-release surfaces
-  from regressing to Hermes branding.
+  from regressing to Xiaoban branding.
 - [x] Add `scripts/xiaoban_validate.py` as the first-release validation gate.
 - [x] Rewrite default seeded SOUL identity as Xiaoban/My Stand native identity.
 - [x] Change CLI help examples and parser program name to `xiaoban`.
@@ -77,22 +77,22 @@ Actions:
 - [x] Rebrand user-facing skill/plugin/doc text assets away from upstream
   runtime identity.
 - [x] Add smoke assertions that preserve the key identity relationship:
-  Xiaoban is the user-facing Agent; Hermes is only the runtime chassis.
+  Xiaoban is the user-facing Agent; Xiaoban is only the runtime chassis.
 
 Verification:
 
-- [ ] `git log` before first push does not contain a public "pure Hermes baseline"
+- [ ] `git log` before first push does not contain a public "pure Xiaoban baseline"
   release commit.
 - [x] `xiaoban` package exists.
 - [x] First pushed README says Xiaoban-Agent clearly.
-- [x] Core identity files do not contain `You are Hermes`.
+- [x] Core identity files do not contain `You are Xiaoban`.
 - [x] `xiaoban-cli`, `xiaoban-feishu`, `xiaoban-weixin`, `xiaoban-wecom`,
   `xiaoban-qqbot`, and `xiaoban-api-server` toolsets resolve.
 
 Validation run:
 
 ```txt
-python3 -m py_compile toolsets.py tests/test_toolsets.py bin/xiaoban xiaoban/cli.py hermes_cli/main.py agent/prompt_builder.py scripts/xiaoban_smoke.py
+python3 -m py_compile toolsets.py tests/test_toolsets.py bin/xiaoban xiaoban/cli.py xiaoban_cli/main.py agent/prompt_builder.py scripts/xiaoban_smoke.py
 python3 scripts/xiaoban_smoke.py
 python3 -c "from toolsets import TOOLSETS, resolve_toolset; ..."
 ```
@@ -152,7 +152,7 @@ Goal: Xiaoban discovers module tools as `moduleId.toolName`.
 
 Actions:
 
-- [x] Convert MMCC `agent.tools` into Hermes-compatible tool schema.
+- [x] Convert MMCC `agent.tools` into Xiaoban-compatible tool schema.
 - [x] Bind each tool to capability, sideEffect, dataScope, idempotency.
 - [x] Route execution through a My Stand module tool gateway stub.
 - [x] Deny direct import of My Stand module internals.
@@ -259,7 +259,7 @@ person-graph ok
 
 Status: contract first pass complete, real platform adapters pending.
 
-Goal: Hermes channels become Xiaoban connectors, not fake adapters.
+Goal: Xiaoban channels become Xiaoban connectors, not fake adapters.
 
 Actions:
 
@@ -367,10 +367,10 @@ Goal: first GitHub push is a verified Xiaoban-Agent build.
 Actions:
 
 - Run targeted Xiaoban tests after every phase.
-- Run touched Hermes regression tests.
+- Run touched Xiaoban regression tests.
 - Run final smoke 3 times.
 - Update README, SECURITY, install docs, and release checklist.
-- Add `docs/xiaoban-hermes-fork-strategy.md`.
+- Add `docs/xiaoban-xiaoban-fork-strategy.md`.
 - Add `docs/mmcc-v0.1-agent-plugin-alignment.md`.
 - Push to `52707407SXG/Xiaoban-Agent`.
 
@@ -398,7 +398,7 @@ Verification:
 
 - Do not SSH.
 - Do not deploy production.
-- Do not push a pure Hermes baseline as the first Xiaoban version.
+- Do not push a pure Xiaoban baseline as the first Xiaoban version.
 - Do not add a second plugin protocol beside MMCC v0.1.
 - Do not hardcode production account, domain, or server paths.
 - Do not put secrets in Git, prompt, docs, logs, or tests.

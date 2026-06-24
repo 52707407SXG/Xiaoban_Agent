@@ -23,7 +23,7 @@ Give the agent its own dedicated email inbox via AgentMail. Send, receive, and m
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # AgentMail — Agent-Owned Email Inboxes
@@ -52,7 +52,7 @@ AgentMail gives the agent its own identity and inbox.
 - Create an account and generate an API key (starts with `am_`)
 
 ### 2. Configure MCP Server
-Add to `~/.hermes/config.yaml` (paste your actual key — MCP env vars are not expanded from .env):
+Add to `~/.xiaoban/config.yaml` (paste your actual key — MCP env vars are not expanded from .env):
 ```yaml
 mcp_servers:
   agentmail:
@@ -62,9 +62,9 @@ mcp_servers:
       AGENTMAIL_API_KEY: "am_your_key_here"
 ```
 
-### 3. Restart Hermes
+### 3. Restart Xiaoban
 ```bash
-hermes
+xiaoban
 ```
 All 11 AgentMail tools are now available automatically.
 
@@ -117,7 +117,7 @@ All 11 AgentMail tools are now available automatically.
 
 **Agent-to-human outreach:**
 ```
-1. create_inbox (username: "hermes-outreach")
+1. create_inbox (username: "xiaoban-outreach")
 2. send_message (to: user@example.com, subject: "Hello", text: "...")
 3. list_threads to check for replies
 ```
@@ -132,7 +132,7 @@ All 11 AgentMail tools are now available automatically.
 ## Verification
 After setup, test with:
 ```
-hermes --toolsets mcp -q "Create an AgentMail inbox called test-agent and tell me its email address"
+xiaoban --toolsets mcp -q "Create an AgentMail inbox called test-agent and tell me its email address"
 ```
 You should see the new inbox address returned.
 

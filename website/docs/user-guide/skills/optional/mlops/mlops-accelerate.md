@@ -26,7 +26,7 @@ Simplest distributed training API. 4 lines to add distributed support to any PyT
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # HuggingFace Accelerate - Unified Distributed Training
@@ -319,11 +319,11 @@ set_seed(42)
 
 ## Advanced topics
 
-**Megatron integration**: See [references/megatron-integration.md](https://github.com/52707407SXG/Xiaoban-Agent/blob/main/optional-skills/mlops/accelerate/references/megatron-integration.md) for tensor parallelism, pipeline parallelism, and sequence parallelism setup.
+**Megatron integration**: See [references/megatron-integration.md](https://github.com/52707407SXG/Xiaoban_Agent/blob/main/optional-skills/mlops/accelerate/references/megatron-integration.md) for tensor parallelism, pipeline parallelism, and sequence parallelism setup.
 
-**Custom plugins**: See [references/custom-plugins.md](https://github.com/52707407SXG/Xiaoban-Agent/blob/main/optional-skills/mlops/accelerate/references/custom-plugins.md) for creating custom distributed plugins and advanced configuration.
+**Custom plugins**: See [references/custom-plugins.md](https://github.com/52707407SXG/Xiaoban_Agent/blob/main/optional-skills/mlops/accelerate/references/custom-plugins.md) for creating custom distributed plugins and advanced configuration.
 
-**Performance tuning**: See [references/performance.md](https://github.com/52707407SXG/Xiaoban-Agent/blob/main/optional-skills/mlops/accelerate/references/performance.md) for profiling, memory optimization, and best practices.
+**Performance tuning**: See [references/performance.md](https://github.com/52707407SXG/Xiaoban_Agent/blob/main/optional-skills/mlops/accelerate/references/performance.md) for profiling, memory optimization, and best practices.
 
 ## Hardware requirements
 

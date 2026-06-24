@@ -26,7 +26,7 @@ Zero-install localhost tunnels over SSH via Pinggy.
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # Pinggy Tunnel Skill
@@ -263,7 +263,7 @@ echo "MCP URL: $URL"
 echo "Bearer token: $TOKEN"
 ```
 
-The remote client connects to `$URL` with `Authorization: Bearer $TOKEN`. Hermes' own native MCP client config: `{"transport": "http", "url": "<URL>", "headers": {"Authorization": "Bearer <TOKEN>"}}`.
+The remote client connects to `$URL` with `Authorization: Bearer $TOKEN`. Xiaoban' own native MCP client config: `{"transport": "http", "url": "<URL>", "headers": {"Authorization": "Bearer <TOKEN>"}}`.
 
 ### Recipe 3 — Expose a local LLM endpoint (Ollama / vLLM / llama.cpp)
 

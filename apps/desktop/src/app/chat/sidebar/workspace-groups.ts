@@ -1,5 +1,5 @@
-import type { HermesWorktreeInfo } from '@/global'
-import type { SessionInfo } from '@/hermes'
+import type { XiaobanWorktreeInfo } from '@/global'
+import type { SessionInfo } from '@/xiaoban'
 
 export interface SidebarSessionGroup {
   id: string
@@ -137,7 +137,7 @@ export interface SidebarWorkspaceTree {
 }
 
 /** Resolves a session cwd to git-worktree identity (from the local fs probe). */
-export type WorktreeResolver = (cwd: string) => HermesWorktreeInfo | null | undefined
+export type WorktreeResolver = (cwd: string) => XiaobanWorktreeInfo | null | undefined
 
 interface WorkspacePlacement {
   parentKey: string

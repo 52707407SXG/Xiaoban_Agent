@@ -11,7 +11,7 @@ Original PR #1811 by benfrank241, adapted to MemoryProvider ABC.
 
 Config via environment variables:
   HINDSIGHT_API_KEY                — API key for Hindsight Cloud
-  HINDSIGHT_BANK_ID                — memory bank identifier (default: hermes)
+  HINDSIGHT_BANK_ID                — memory bank identifier (default: xiaoban)
   HINDSIGHT_BUDGET                 — recall budget: low/mid/high (default: mid)
   HINDSIGHT_API_URL                — API endpoint
   HINDSIGHT_MODE                   — cloud or local (default: cloud)
@@ -24,7 +24,7 @@ Config via environment variables:
   HINDSIGHT_RETAIN_USER_PREFIX     — label used before user turns in retained transcripts
   HINDSIGHT_RETAIN_ASSISTANT_PREFIX — label used before assistant turns in retained transcripts
 
-Or via $HERMES_HOME/hindsight/config.json (profile-scoped), falling back to
+Or via $XIAOBAN_HOME/hindsight/config.json (profile-scoped), falling back to
 ~/.hindsight/config.json (legacy, shared) for backward compatibility.
 """
 
@@ -44,9 +44,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
-from hermes_constants import get_hermes_home
+from xiaoban_constants import get_xiaoban_home
 from tools.registry import tool_error
-from hermes_cli.config import cfg_get
+from xiaoban_cli.config import cfg_get
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +129,7 @@ def _check_local_runtime() -> tuple[bool, str | None]:
 
     On older CPUs, importing the local Hindsight stack can raise a runtime
     error from NumPy before the daemon starts. Treat that as "unavailable"
-    so Hermes can degrade gracefully instead of repeatedly trying to start
+    so Xiaoban can degrade gracefully instead of repeatedly trying to start
     a broken local memory backend.
     """
     try:
@@ -350,14 +350,14 @@ def _load_config() -> dict:
     """Load config from profile-scoped path, legacy path, or env vars.
 
     Resolution order:
-      1. $HERMES_HOME/hindsight/config.json  (profile-scoped)
+      1. $XIAOBAN_HOME/hindsight/config.json  (profile-scoped)
       2. ~/.hindsight/config.json             (legacy, shared)
       3. Environment variables
     """
     from pathlib import Path
 
     # Profile-scoped path (preferred)
-    profile_path = get_hermes_home() / "hindsight" / "config.json"
+    profile_path = get_xiaoban_home() / "hindsight" / "config.json"
     if profile_path.exists():
         try:
             return json.loads(profile_path.read_text(encoding="utf-8"))
@@ -383,8 +383,8 @@ def _load_config() -> dict:
         "retain_user_prefix": os.environ.get("HINDSIGHT_RETAIN_USER_PREFIX", "User"),
         "retain_assistant_prefix": os.environ.get("HINDSIGHT_RETAIN_ASSISTANT_PREFIX", "Assistant"),
         "banks": {
-            "hermes": {
-                "bankId": os.environ.get("HINDSIGHT_BANK_ID", "hermes"),
+            "xiaoban": {
+                "bankId": os.environ.get("HINDSIGHT_BANK_ID", "xiaoban"),
                 "budget": os.environ.get("HINDSIGHT_BUDGET", "mid"),
                 "enabled": True,
             }
@@ -485,9 +485,9 @@ def _utc_timestamp() -> str:
 
 
 def _embedded_profile_name(config: dict[str, Any]) -> str:
-    """Return the Hindsight embedded profile name for this Hermes config."""
-    profile = config.get("profile", "hermes")
-    return str(profile or "hermes")
+    """Return the Hindsight embedded profile name for this Xiaoban config."""
+    profile = config.get("profile", "xiaoban")
+    return str(profile or "xiaoban")
 
 
 def _load_simple_env(path) -> dict[str, str]:
@@ -585,14 +585,14 @@ def _resolve_bank_id_template(template: str, fallback: str, **placeholders: str)
     """Resolve a bank_id template string with the given placeholders.
 
     Supported placeholders (each is sanitized before substitution):
-      {profile}   — active Hermes profile name (from agent_identity)
-      {workspace} — Hermes workspace name (from agent_workspace)
+      {profile}   — active Xiaoban profile name (from agent_identity)
+      {workspace} — Xiaoban workspace name (from agent_workspace)
       {platform}  — "cli", "telegram", "discord", etc.
       {user}      — platform user id (gateway sessions)
       {session}   — current session id
 
     Missing/empty placeholders are rendered as the empty string and then
-    collapsed — e.g. ``hermes-{user}`` with no user becomes ``hermes``.
+    collapsed — e.g. ``xiaoban-{user}`` with no user becomes ``xiaoban``.
 
     If the template is empty, resolution falls back to *fallback*.
     Returns the sanitized bank id.
@@ -635,7 +635,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._config = None
         self._api_key = None
         self._api_url = _DEFAULT_API_URL
-        self._bank_id = "hermes"
+        self._bank_id = "xiaoban"
         self._budget = "mid"
         self._mode = "cloud"
         self._llm_base_url = ""
@@ -736,11 +736,11 @@ class HindsightMemoryProvider(MemoryProvider):
         except Exception:
             return False
 
-    def save_config(self, values, hermes_home):
-        """Write config to $HERMES_HOME/hindsight/config.json."""
+    def save_config(self, values, xiaoban_home):
+        """Write config to $XIAOBAN_HOME/hindsight/config.json."""
         import json
         from pathlib import Path
-        config_dir = Path(hermes_home) / "hindsight"
+        config_dir = Path(xiaoban_home) / "hindsight"
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / "config.json"
         existing = {}
@@ -753,17 +753,17 @@ class HindsightMemoryProvider(MemoryProvider):
         from utils import atomic_json_write
         atomic_json_write(config_path, existing, mode=0o600)
 
-    def post_setup(self, hermes_home: str, config: dict) -> None:
+    def post_setup(self, xiaoban_home: str, config: dict) -> None:
         """Custom setup wizard — installs only the deps needed for the selected mode."""
         import subprocess
         import shutil
         import sys
         from pathlib import Path
 
-        from hermes_cli.config import save_config
-        from hermes_cli.secret_prompt import masked_secret_prompt
+        from xiaoban_cli.config import save_config
+        from xiaoban_cli.secret_prompt import masked_secret_prompt
 
-        from hermes_cli.memory_setup import _CANCELLED, _curses_select, _print_cancelled_setup
+        from xiaoban_cli.memory_setup import _CANCELLED, _curses_select, _print_cancelled_setup
 
         print("\n  Configuring Hindsight memory:\n")
 
@@ -892,7 +892,7 @@ class HindsightMemoryProvider(MemoryProvider):
             if llm_key:
                 env_writes["HINDSIGHT_LLM_API_KEY"] = llm_key
             else:
-                env_path = Path(hermes_home) / ".env"
+                env_path = Path(xiaoban_home) / ".env"
                 existing_llm_key = ""
                 if env_path.exists():
                     for line in env_path.read_text().splitlines():
@@ -902,7 +902,7 @@ class HindsightMemoryProvider(MemoryProvider):
                 env_writes["HINDSIGHT_LLM_API_KEY"] = existing_llm_key
 
         # Step 4: Save everything
-        provider_config.setdefault("bank_id", "hermes")
+        provider_config.setdefault("bank_id", "xiaoban")
         provider_config.setdefault("recall_budget", "mid")
         # Read existing timeout from config if present, otherwise use default.
         # Preserve explicit 0 values instead of treating them as blank.
@@ -918,10 +918,10 @@ class HindsightMemoryProvider(MemoryProvider):
         config["memory"]["provider"] = "hindsight"
         save_config(config)
 
-        self.save_config(provider_config, hermes_home)
+        self.save_config(provider_config, xiaoban_home)
 
         if env_writes:
-            env_path = Path(hermes_home) / ".env"
+            env_path = Path(xiaoban_home) / ".env"
             env_path.parent.mkdir(parents=True, exist_ok=True)
             existing_lines = []
             if env_path.exists():
@@ -942,7 +942,7 @@ class HindsightMemoryProvider(MemoryProvider):
 
         if mode == "local_embedded":
             materialized_config = dict(provider_config)
-            config_path = Path(hermes_home) / "hindsight" / "config.json"
+            config_path = Path(xiaoban_home) / "hindsight" / "config.json"
             try:
                 materialized_config = json.loads(config_path.read_text(encoding="utf-8"))
             except Exception:
@@ -950,7 +950,7 @@ class HindsightMemoryProvider(MemoryProvider):
 
             llm_api_key = env_writes.get("HINDSIGHT_LLM_API_KEY", "")
             if not llm_api_key:
-                llm_api_key = _load_simple_env(Path(hermes_home) / ".env").get("HINDSIGHT_LLM_API_KEY", "")
+                llm_api_key = _load_simple_env(Path(xiaoban_home) / ".env").get("HINDSIGHT_LLM_API_KEY", "")
             if not llm_api_key:
                 llm_api_key = _load_simple_env(_embedded_profile_env_path(materialized_config)).get(
                     "HINDSIGHT_API_LLM_API_KEY",
@@ -981,8 +981,8 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "llm_base_url", "description": "Endpoint URL (e.g. http://192.168.1.10:8080/v1)", "default": "", "when": {"mode": "local_embedded", "llm_provider": "openai_compatible"}},
             {"key": "llm_api_key", "description": "LLM API key (optional for openai_compatible)", "secret": True, "env_var": "HINDSIGHT_LLM_API_KEY", "when": {"mode": "local_embedded"}},
             {"key": "llm_model", "description": "LLM model", "default": "gpt-4o-mini", "default_from": {"field": "llm_provider", "map": _PROVIDER_DEFAULT_MODELS}, "when": {"mode": "local_embedded"}},
-            {"key": "bank_id", "description": "Memory bank name (static fallback when bank_id_template is unset)", "default": "hermes"},
-            {"key": "bank_id_template", "description": "Optional template to derive bank_id dynamically. Placeholders: {profile}, {workspace}, {platform}, {user}, {session}. Example: hermes-{profile}", "default": ""},
+            {"key": "bank_id", "description": "Memory bank name (static fallback when bank_id_template is unset)", "default": "xiaoban"},
+            {"key": "bank_id_template", "description": "Optional template to derive bank_id dynamically. Placeholders: {profile}, {workspace}, {platform}, {user}, {session}. Example: xiaoban-{profile}", "default": ""},
             {"key": "bank_mission", "description": "Mission/purpose description for the memory bank"},
             {"key": "bank_retain_mission", "description": "Custom extraction prompt for memory retention"},
             {"key": "recall_budget", "description": "Recall thoroughness", "default": "mid", "choices": ["low", "mid", "high"]},
@@ -1032,9 +1032,9 @@ class HindsightMemoryProvider(MemoryProvider):
                 if llm_provider in {"openai_compatible", "openrouter"}:
                     llm_provider = "openai"
                 logger.debug("Creating HindsightEmbedded client (profile=%s, provider=%s)",
-                             self._config.get("profile", "hermes"), llm_provider)
+                             self._config.get("profile", "xiaoban"), llm_provider)
                 kwargs = dict(
-                    profile=self._config.get("profile", "hermes"),
+                    profile=self._config.get("profile", "xiaoban"),
                     llm_provider=llm_provider,
                     llm_api_key=self._config.get("llmApiKey") or self._config.get("llm_api_key") or os.environ.get("HINDSIGHT_LLM_API_KEY", ""),
                     llm_model=self._config.get("llm_model", ""),
@@ -1283,8 +1283,8 @@ class HindsightMemoryProvider(MemoryProvider):
         self._api_url = self._config.get("api_url") or os.environ.get("HINDSIGHT_API_URL", default_url)
         self._llm_base_url = self._config.get("llm_base_url", "")
 
-        banks = cfg_get(self._config, "banks", "hermes", default={})
-        static_bank_id = self._config.get("bank_id") or banks.get("bankId", "hermes")
+        banks = cfg_get(self._config, "banks", "xiaoban", default={})
+        static_bank_id = self._config.get("bank_id") or banks.get("bankId", "xiaoban")
         self._bank_id_template = self._config.get("bank_id_template", "") or ""
         self._bank_id = _resolve_bank_id_template(
             self._bank_id_template,
@@ -1385,13 +1385,13 @@ class HindsightMemoryProvider(MemoryProvider):
                 msg = (
                     "Hindsight local_embedded mode cannot run as root "
                     "(PostgreSQL initdb refuses root). Skipping the embedded "
-                    "memory daemon. Run Hermes as a non-root user, or switch "
-                    "to cloud / local_external mode via 'hermes memory setup'."
+                    "memory daemon. Run Xiaoban as a non-root user, or switch "
+                    "to cloud / local_external mode via 'xiaoban memory setup'."
                 )
                 logger.warning(msg)
                 # Surface to the terminal too — a daemon that never starts
                 # would otherwise fail silently and the user would only see
-                # Hermes get sluggish. (issue #13125)
+                # Xiaoban get sluggish. (issue #13125)
                 try:
                     print(f"  ⚠ {msg}", file=sys.stderr, flush=True)
                 except Exception:
@@ -1401,7 +1401,7 @@ class HindsightMemoryProvider(MemoryProvider):
 
             def _start_daemon():
                 import traceback
-                log_dir = get_hermes_home() / "logs"
+                log_dir = get_xiaoban_home() / "logs"
                 log_dir.mkdir(parents=True, exist_ok=True)
                 log_path = log_dir / "hindsight-embed.log"
                 try:
@@ -1413,7 +1413,7 @@ class HindsightMemoryProvider(MemoryProvider):
                     dem.console = Console(file=open(log_path, "a", encoding="utf-8"), force_terminal=False)
 
                     client = self._get_client()
-                    profile = self._config.get("profile", "hermes")
+                    profile = self._config.get("profile", "xiaoban")
 
                     # Update the profile .env to match our current config so
                     # the daemon always starts with the right settings.
@@ -1929,7 +1929,7 @@ class HindsightMemoryProvider(MemoryProvider):
             try:
                 if self._mode == "local_embedded":
                     # HindsightEmbedded.close() delegates to its sync client.close().
-                    # When Hermes created/used that client on the shared async loop,
+                    # When Xiaoban created/used that client on the shared async loop,
                     # closing it from this thread can raise "attached to a different
                     # loop" before aiohttp releases the session. Close the embedded
                     # inner async client on the shared loop first, then let the

@@ -1,4 +1,4 @@
-import { forceRedraw, type MouseTrackingMode } from '@hermes/ink'
+import { forceRedraw, type MouseTrackingMode } from '@xiaoban/ink'
 
 import { DASHBOARD_TUI_MODE, NO_CONFIRM_DESTRUCTIVE } from '../../../config/env.js'
 import { dailyFortune, randomFortune } from '../../../content/fortunes.js'
@@ -79,14 +79,14 @@ const DETAILS_SECTION_USAGE = 'usage: /details <section> [hidden|collapsed|expan
 // Shown when /exit or /quit is refused in the hosted dashboard chat. Kept as a
 // constant so the test asserts against the same source of truth as production.
 export const DASHBOARD_EXIT_DISABLED_MESSAGE =
-  'exit is disabled in hosted dashboard chat — use /new to start a fresh session'
+  '托管网页聊天里不能直接退出；请用 /new 开启新会话'
 
 export const DASHBOARD_UPDATE_DISABLED_MESSAGE =
-  'update is disabled in hosted dashboard chat — the hosted environment is managed separately'
+  '托管网页聊天里不能直接更新；该环境由服务端统一管理'
 
 export const coreCommands: SlashCommand[] = [
   {
-    help: 'list commands + hotkeys',
+    help: '查看命令和快捷键',
     name: 'help',
     run: (_arg, ctx) => {
       const sections: PanelSection[] = (ctx.local.catalog?.categories ?? []).map(cat => ({
@@ -95,22 +95,22 @@ export const coreCommands: SlashCommand[] = [
       }))
 
       if (ctx.local.catalog?.skillCount) {
-        sections.push({ text: `${ctx.local.catalog.skillCount} skill commands available — /skills to browse` })
+        sections.push({ text: `还有 ${ctx.local.catalog.skillCount} 个技能命令，可用 /skills 浏览` })
       }
 
       sections.push(
         {
           rows: [
-            ['/details [hidden|collapsed|expanded|cycle]', 'set global agent detail visibility mode'],
+            ['/details [hidden|collapsed|expanded|cycle]', '设置 Agent 细节展示模式'],
             [
               '/details <section> [hidden|collapsed|expanded|reset]',
-              'override one section (thinking/tools/subagents/activity)'
+              '单独设置某一块细节（thinking/tools/subagents/activity）'
             ],
-            ['/fortune [random|daily]', 'show a random or daily local fortune']
+            ['/fortune [random|daily]', '显示一条随机或每日小提示']
           ],
           title: 'TUI'
         },
-        { rows: HOTKEYS, title: 'Hotkeys' }
+        { rows: HOTKEYS, title: '快捷键' }
       )
 
       ctx.transcript.panel(ctx.ui.theme.brand.helpHeader, sections)
@@ -119,7 +119,7 @@ export const coreCommands: SlashCommand[] = [
 
   {
     aliases: ['exit'],
-    help: 'exit hermes',
+    help: '退出小伴 CLI',
     name: 'quit',
     run: (_arg, ctx) => {
       // In the hosted dashboard chat there is no in-page restart path after
@@ -140,7 +140,7 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'update Xiaoban to the latest version (exits TUI)',
+    help: '更新小伴到最新版本（会退出当前 TUI）',
     name: 'update',
     run: (_arg, ctx) => {
       if (DASHBOARD_TUI_MODE) {
@@ -149,7 +149,7 @@ export const coreCommands: SlashCommand[] = [
         return
       }
 
-      ctx.transcript.sys('exiting TUI to run update...')
+      ctx.transcript.sys('正在退出 TUI 并执行更新...')
       // Exit code 42 signals the Python wrapper to exec `xiaoban update`.
       // Use dieWithCode for proper cleanup (gateway kill + Ink unmount).
       setTimeout(() => ctx.session.dieWithCode(42), 100)
@@ -158,7 +158,7 @@ export const coreCommands: SlashCommand[] = [
 
   {
     aliases: ['scroll'],
-    help: 'set mouse tracking preset [on|off|toggle|wheel|buttons|all]',
+    help: '设置鼠标跟踪模式 [on|off|toggle|wheel|buttons|all]',
     name: 'mouse',
     run: (arg, ctx) => {
       const current = ctx.ui.mouseTracking
@@ -177,7 +177,7 @@ export const coreCommands: SlashCommand[] = [
 
   {
     aliases: ['new'],
-    help: 'start a new session',
+    help: '开启新会话',
     name: 'clear',
     run: (arg, ctx, cmd) => {
       if (ctx.session.guardBusySessionSwitch('switch sessions')) {
@@ -198,32 +198,32 @@ export const coreCommands: SlashCommand[] = [
 
       patchOverlayState({
         confirm: {
-          cancelLabel: 'No, keep going',
-          confirmLabel: isNew ? 'Yes, start a new session' : 'Yes, clear the session',
+          cancelLabel: '不，继续当前会话',
+          confirmLabel: isNew ? '确认开启新会话' : '确认清空当前会话',
           danger: true,
-          detail: 'This ends the current conversation and clears the transcript.',
+          detail: '这会结束当前对话，并清空屏幕里的聊天记录。',
           onConfirm: commit,
-          title: isNew ? 'Start a new session?' : 'Clear the current session?'
+          title: isNew ? '开启新会话？' : '清空当前会话？'
         }
       })
     }
   },
 
   {
-    help: 'force a full UI repaint',
+    help: '强制重绘界面',
     name: 'redraw',
     run: (_arg, ctx) => {
       forceRedraw(process.stdout)
-      ctx.transcript.sys('ui redrawn')
+      ctx.transcript.sys('界面已重绘')
     }
   },
 
   {
-    help: 'show live session info',
+    help: '查看当前会话信息',
     name: 'status',
     run: (_arg, ctx) => {
       if (!ctx.sid) {
-        return ctx.transcript.sys('no active session')
+        return ctx.transcript.sys('当前没有活动会话')
       }
 
       ctx.gateway
@@ -234,11 +234,11 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'set or show current session title',
+    help: '设置或查看当前会话标题',
     name: 'title',
     run: (arg, ctx) => {
       if (!ctx.sid) {
-        return ctx.transcript.sys('no active session')
+        return ctx.transcript.sys('当前没有活动会话')
       }
 
       const title = arg.trim()
@@ -275,7 +275,7 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'toggle compact transcript',
+    help: '切换紧凑聊天记录模式',
     name: 'compact',
     run: (arg, ctx) => {
       const next = flagFromArg(arg, ctx.ui.compact)
@@ -293,7 +293,7 @@ export const coreCommands: SlashCommand[] = [
 
   {
     aliases: ['detail'],
-    help: 'control agent detail visibility (global or per-section)',
+    help: '控制 Agent 细节展示，可全局或分块设置',
     name: 'details',
     run: (arg, ctx) => {
       const { gateway, transcript, ui } = ctx
@@ -356,7 +356,7 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'local fortune',
+    help: '显示本地小提示',
     name: 'fortune',
     run: (arg, ctx) => {
       const key = arg.trim().toLowerCase()
@@ -374,7 +374,7 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'copy selection or assistant message',
+    help: '复制选中文字或小伴回复',
     name: 'copy',
     run: async (arg, ctx) => {
       const { sys } = ctx.transcript
@@ -386,7 +386,7 @@ export const coreCommands: SlashCommand[] = [
           return sys(`copied ${text.length} characters`)
         } else {
           return sys(
-            'clipboard copy failed — try HERMES_TUI_FORCE_OSC52=1 to force the escape sequence'
+            '剪贴板复制失败；可尝试设置 XIAOBAN_TUI_FORCE_OSC52=1 强制使用终端复制序列'
           )
         }
       }
@@ -424,14 +424,14 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'attach clipboard image',
+    help: '附加剪贴板里的图片',
     name: 'paste',
     run: (arg, ctx) => (arg ? ctx.transcript.sys('usage: /paste') : ctx.composer.paste())
   },
 
   {
     aliases: ['compose'],
-    help: 'compose your next prompt in $EDITOR (same as Ctrl+G)',
+    help: '用 $EDITOR 编写下一条消息（同 Ctrl+G）',
     name: 'prompt',
     run: (arg, ctx) => {
       if (arg) {
@@ -448,7 +448,7 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'configure IDE terminal keybindings for multiline + undo/redo',
+    help: '配置 IDE 终端快捷键，支持多行输入和撤销重做',
     name: 'terminal-setup',
     run: (arg, ctx) => {
       const target = arg.trim().toLowerCase()
@@ -483,7 +483,7 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'view gateway logs',
+    help: '查看网关日志',
     name: 'logs',
     run: (arg, ctx) => {
       const text = ctx.gateway.gw.getLogTail(Math.min(80, Math.max(1, parseInt(arg, 10) || 20)))
@@ -493,7 +493,7 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'view current transcript (user + assistant messages)',
+    help: '查看当前聊天记录（用户和小伴消息）',
     name: 'history',
     run: (arg, ctx) => {
       // The CLI-side `/history` runs in a detached slash-worker subprocess
@@ -509,7 +509,7 @@ export const coreCommands: SlashCommand[] = [
       const preview = Math.max(80, parseInt(arg, 10) || 400)
 
       const lines = items.map((m, i) => {
-        const tag = m.role === 'user' ? `You #${i + 1}` : `Hermes #${i + 1}`
+        const tag = m.role === 'user' ? `你 #${i + 1}` : `小伴 #${i + 1}`
         const body = m.text.trim() || (m.tools?.length ? `(${m.tools.length} tool calls)` : '(empty)')
         const clipped = body.length > preview ? `${body.slice(0, preview).trimEnd()}…` : body
 
@@ -521,7 +521,7 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'save the current transcript to JSON',
+    help: '把当前聊天记录保存成 JSON',
     name: 'save',
     run: (_arg, ctx) => {
       const hasConversation = ctx.local
@@ -555,7 +555,7 @@ export const coreCommands: SlashCommand[] = [
 
   {
     aliases: ['sb'],
-    help: 'status bar position (on|off|top|bottom)',
+    help: '设置状态栏位置 [on|off|top|bottom]',
     name: 'statusbar',
     run: (arg, ctx) => {
       const mode = arg.trim().toLowerCase()
@@ -583,7 +583,7 @@ export const coreCommands: SlashCommand[] = [
 
   {
     aliases: ['q'],
-    help: 'inspect or enqueue a message',
+    help: '查看队列或把消息加入队列',
     name: 'queue',
     run: (arg, ctx) => {
       if (!arg) {
@@ -596,7 +596,7 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'inject a message after the next tool call (no interrupt)',
+    help: '在下一次工具调用后插入消息，不中断当前任务',
     name: 'steer',
     run: (arg, ctx) => {
       const payload = arg?.trim() ?? ''
@@ -634,7 +634,7 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'undo last exchange',
+    help: '撤销上一轮对话',
     name: 'undo',
     run: (_arg, ctx) => {
       if (!ctx.sid) {
@@ -655,7 +655,7 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'retry last user message',
+    help: '重试上一条用户消息',
     name: 'retry',
     run: (_arg, ctx) => {
       const last = ctx.local.getLastUserMsg()

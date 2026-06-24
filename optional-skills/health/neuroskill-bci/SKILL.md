@@ -11,7 +11,7 @@ version: 1.0.0
 author: Xiaoban-Agent + Nous Research
 license: MIT
 metadata:
-  hermes:
+  xiaoban:
     tags: [BCI, neurofeedback, health, focus, EEG, cognitive-state, biometrics, neuroskill]
     category: health
     related_skills: []
@@ -19,7 +19,7 @@ metadata:
 
 # NeuroSkill BCI Integration
 
-Connect Hermes to a running [NeuroSkill](https://neuroskill.com/) instance to read
+Connect Xiaoban to a running [NeuroSkill](https://neuroskill.com/) instance to read
 real-time brain and body metrics from a BCI wearable. Use this to give
 cognitively-aware responses, suggest interventions, and track mental performance
 over time.

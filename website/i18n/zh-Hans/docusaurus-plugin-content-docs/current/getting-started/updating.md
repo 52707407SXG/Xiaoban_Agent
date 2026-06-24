@@ -34,18 +34,18 @@ pip install --upgrade xiaoban-agent    # 或：uv pip install --upgrade xiaoban-
 ```
 
 :::tip
-`xiaoban update` 会自动检测新的配置选项并提示你添加。如果跳过了该提示，可手动运行 `hermes config check` 查看缺失的选项，再运行 `hermes config migrate` 以交互方式添加。
+`xiaoban update` 会自动检测新的配置选项并提示你添加。如果跳过了该提示，可手动运行 `xiaoban config check` 查看缺失的选项，再运行 `xiaoban config migrate` 以交互方式添加。
 :::
 
 ### 更新过程（Git 安装方式）
 
 运行 `xiaoban update` 时，将依次执行以下步骤：
 
-1. **配对数据快照** — 保存一份轻量级的更新前状态快照（涵盖 `~/.hermes/pairing/`、飞书评论规则及其他运行时修改的状态文件）。可通过 [快照与回滚](../user-guide/checkpoints-and-rollback.md) 中描述的快照恢复流程进行恢复，或从 Hermes 写入 `~/.hermes/` 目录旁的最新快速快照 zip 文件中提取。
+1. **配对数据快照** — 保存一份轻量级的更新前状态快照（涵盖 `~/.xiaoban/pairing/`、飞书评论规则及其他运行时修改的状态文件）。可通过 [快照与回滚](../user-guide/checkpoints-and-rollback.md) 中描述的快照恢复流程进行恢复，或从 Xiaoban 写入 `~/.xiaoban/` 目录旁的最新快速快照 zip 文件中提取。
 2. **Git pull** — 从 `main` 分支拉取最新代码并更新子模块
 3. **依赖安装** — 运行 `uv pip install -e ".[all]"` 以获取新增或变更的依赖项
 4. **配置迁移** — 检测自当前版本以来新增的配置选项并提示设置
-5. **Gateway 自动重启** — 更新完成后刷新正在运行的 gateway，使新代码立即生效。由服务管理的 gateway（Linux 上的 systemd、macOS 上的 launchd）通过服务管理器重启；手动启动的 gateway 在 Hermes 能将运行中的 PID 映射回某个 profile 时会自动重新启动。
+5. **Gateway 自动重启** — 更新完成后刷新正在运行的 gateway，使新代码立即生效。由服务管理的 gateway（Linux 上的 systemd、macOS 上的 launchd）通过服务管理器重启；手动启动的 gateway 在 Xiaoban 能将运行中的 PID 映射回某个 profile 时会自动重新启动。
 
 ### 仅预览：`xiaoban update --check`
 
@@ -53,7 +53,7 @@ pip install --upgrade xiaoban-agent    # 或：uv pip install --upgrade xiaoban-
 
 ### 完整更新前备份：`--backup`
 
-对于高价值 profile（生产环境 gateway、团队共享安装），可选择在拉取前对 `HERMES_HOME`（配置、认证、会话、技能、配对数据）进行完整备份：
+对于高价值 profile（生产环境 gateway、团队共享安装），可选择在拉取前对 `XIAOBAN_HOME`（配置、认证、会话、技能、配对数据）进行完整备份：
 
 ```bash
 xiaoban update --backup
@@ -62,26 +62,26 @@ xiaoban update --backup
 或将其设为每次运行的默认行为：
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.xiaoban/config.yaml
 updates:
   pre_update_backup: true
 ```
 
 `--backup` 在早期版本中是始终开启的行为，但在大型 home 目录上会给每次更新增加数分钟时间，因此现已改为按需启用。上述轻量级配对数据快照仍会无条件执行。
 
-### Windows：另一个 `hermes.exe` 正在运行
+### Windows：另一个 `xiaoban.exe` 正在运行
 
-在 Windows 上，如果 `xiaoban update` 检测到另一个 `hermes.exe` 进程持有 venv 入口点可执行文件的句柄，它将拒绝运行 — 最常见的情况是 Xiaoban Desktop 应用启动的后端进程、另一个终端中打开的 `hermes` REPL，或正在运行的 gateway：
+在 Windows 上，如果 `xiaoban update` 检测到另一个 `xiaoban.exe` 进程持有 venv 入口点可执行文件的句柄，它将拒绝运行 — 最常见的情况是 Xiaoban Desktop 应用启动的后端进程、另一个终端中打开的 `xiaoban` REPL，或正在运行的 gateway：
 
 ```
 $ xiaoban update
-✗ Another hermes.exe is running:
-    PID 12345  hermes.exe
+✗ Another xiaoban.exe is running:
+    PID 12345  xiaoban.exe
 
-  Updating now would fail to overwrite ...\venv\Scripts\hermes.exe because
+  Updating now would fail to overwrite ...\venv\Scripts\xiaoban.exe because
   Windows blocks REPLACE on a running executable.
 
-  Close Xiaoban Desktop, exit any open `hermes` REPLs, and
+  Close Xiaoban Desktop, exit any open `xiaoban` REPLs, and
   stop the gateway (`xiaoban gateway stop`) before retrying.
   Override with `xiaoban update --force` if you've already
   confirmed those processes will not write to the venv.
@@ -110,8 +110,8 @@ Already up to date.  (or: Updating abc1234..def5678)
 `xiaoban update` 处理主要的更新流程，但快速验证可确认一切正常落地：
 
 1. `git status --short` — 若工作树出现意外的脏状态，请在继续前检查
-2. `hermes doctor` — 检查配置、依赖项和服务健康状态
-3. `hermes --version` — 确认版本已按预期更新
+2. `xiaoban doctor` — 检查配置、依赖项和服务健康状态
+3. `xiaoban --version` — 确认版本已按预期更新
 4. 如果使用 gateway：`xiaoban gateway status`
 5. 如果 `doctor` 报告 npm audit 问题：在标记的目录中运行 `npm audit fix`
 
@@ -124,10 +124,10 @@ Already up to date.  (or: Updating abc1234..def5678)
 `xiaoban update` 针对意外终端断开进行了保护：
 
 - 更新会忽略 `SIGHUP`，因此关闭 SSH 会话或终端窗口不再会在安装中途终止它。`pip` 和 `git` 子进程继承此保护，因此 Python 环境不会因连接断开而处于半安装状态。
-- 更新运行期间，所有输出会同步镜像到 `~/.hermes/logs/update.log`。如果终端消失，重新连接后检查日志，确认更新是否完成以及 gateway 重启是否成功：
+- 更新运行期间，所有输出会同步镜像到 `~/.xiaoban/logs/update.log`。如果终端消失，重新连接后检查日志，确认更新是否完成以及 gateway 重启是否成功：
 
 ```bash
-tail -f ~/.hermes/logs/update.log
+tail -f ~/.xiaoban/logs/update.log
 ```
 
 - `Ctrl-C`（SIGINT）和系统关机（SIGTERM）仍会被响应 — 这些是主动取消操作，而非意外中断。
@@ -140,7 +140,7 @@ tail -f ~/.hermes/logs/update.log
 xiaoban version
 ```
 
-与 [GitHub releases 页面](https://github.com/52707407SXG/Xiaoban-Agent/releases) 上的最新版本进行比较。
+与 [GitHub releases 页面](https://github.com/52707407SXG/Xiaoban_Agent/releases) 上的最新版本进行比较。
 
 ### 从消息平台更新
 
@@ -167,8 +167,8 @@ git pull origin main
 uv pip install -e ".[all]"
 
 # Check for new config options
-hermes config check
-hermes config migrate   # Interactively add any missing options
+xiaoban config check
+xiaoban config migrate   # Interactively add any missing options
 ```
 
 ### 回滚说明
@@ -197,7 +197,7 @@ uv pip install -e ".[all]"
 ```
 
 :::warning
-如果新增了配置选项，回滚可能导致配置不兼容。回滚后运行 `hermes config check`，如果遇到错误，请从 `config.yaml` 中删除无法识别的选项。
+如果新增了配置选项，回滚可能导致配置不兼容。回滚后运行 `xiaoban config check`，如果遇到错误，请从 `config.yaml` 中删除无法识别的选项。
 :::
 
 ### Nix 用户注意事项
@@ -227,31 +227,31 @@ nix profile rollback
 ### Git 安装方式
 
 ```bash
-hermes uninstall
+xiaoban uninstall
 ```
 
-卸载程序会提供选项，让你保留配置文件（`~/.hermes/`）以便将来重新安装。
+卸载程序会提供选项，让你保留配置文件（`~/.xiaoban/`）以便将来重新安装。
 
 ### pip 安装方式
 
 ```bash
 pip uninstall xiaoban-agent
-rm -rf ~/.hermes            # 可选 — 如计划重新安装则保留
+rm -rf ~/.xiaoban            # 可选 — 如计划重新安装则保留
 ```
 
 ### 手动卸载
 
 ```bash
-rm -f ~/.local/bin/hermes
+rm -f ~/.local/bin/xiaoban
 rm -rf /path/to/xiaoban-agent
-rm -rf ~/.hermes            # 可选 — 如计划重新安装则保留
+rm -rf ~/.xiaoban            # 可选 — 如计划重新安装则保留
 ```
 
 :::info
 如果你将 gateway 安装为系统服务，请先停止并禁用它：
 ```bash
 xiaoban gateway stop
-# Linux: systemctl --user disable hermes-gateway
-# macOS: launchctl remove ai.hermes.gateway
+# Linux: systemctl --user disable xiaoban-gateway
+# macOS: launchctl remove ai.xiaoban.gateway
 ```
 :::

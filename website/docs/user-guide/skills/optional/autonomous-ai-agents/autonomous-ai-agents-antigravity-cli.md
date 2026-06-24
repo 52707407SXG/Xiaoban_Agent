@@ -26,15 +26,15 @@ Operate the Antigravity CLI (agy): plugins, auth, sandbox.
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # Antigravity CLI (`agy`)
 
 Operator guide for the Antigravity CLI, invoked as `agy`. Run all `agy`
-commands through the Hermes `terminal` tool; inspect its config and logs with
+commands through the Xiaoban `terminal` tool; inspect its config and logs with
 `read_file`. This skill is reference + procedure — it does not wrap a network
-API, so there is nothing to authenticate from Hermes itself.
+API, so there is nothing to authenticate from Xiaoban itself.
 
 ## When to Use
 

@@ -20,7 +20,7 @@ def test_openrouter_base_url_applies_or_headers(mock_openai):
     agent._apply_client_headers_for_base_url("https://openrouter.ai/api/v1")
 
     headers = agent._client_kwargs["default_headers"]
-    assert headers["HTTP-Referer"] == "https://github.com/52707407SXG/Xiaoban-Agent"
+    assert headers["HTTP-Referer"] == "https://github.com/52707407SXG/Xiaoban_Agent"
     assert headers["X-Title"] == "Xiaoban-Agent"
 
 
@@ -190,13 +190,13 @@ def test_openrouter_headers_include_response_cache_when_enabled(mock_openai):
         skip_memory=True,
     )
 
-    with patch("hermes_cli.config.load_config", return_value={
+    with patch("xiaoban_cli.config.load_config", return_value={
         "openrouter": {"response_cache": True, "response_cache_ttl": 600},
     }):
         agent._apply_client_headers_for_base_url("https://openrouter.ai/api/v1")
 
     headers = agent._client_kwargs["default_headers"]
-    assert headers["HTTP-Referer"] == "https://github.com/52707407SXG/Xiaoban-Agent"
+    assert headers["HTTP-Referer"] == "https://github.com/52707407SXG/Xiaoban_Agent"
     assert headers["X-OpenRouter-Cache"] == "true"
     assert headers["X-OpenRouter-Cache-TTL"] == "600"
 
@@ -221,7 +221,7 @@ def test_user_default_headers_override_sdk_user_agent(mock_openai):
         skip_memory=True,
     )
 
-    with patch("hermes_cli.config.load_config", return_value={
+    with patch("xiaoban_cli.config.load_config", return_value={
         "model": {"default_headers": {"User-Agent": "curl/8.7.1", "X-Extra": "1"}},
     }):
         agent._apply_client_headers_for_base_url("http://localhost:8080/v1")
@@ -244,14 +244,14 @@ def test_user_default_headers_win_over_provider_defaults(mock_openai):
         skip_memory=True,
     )
 
-    with patch("hermes_cli.config.load_config", return_value={
+    with patch("xiaoban_cli.config.load_config", return_value={
         "model": {"default_headers": {"X-Title": "MyApp"}},
     }):
         agent._apply_client_headers_for_base_url("https://openrouter.ai/api/v1")
 
     headers = agent._client_kwargs["default_headers"]
     assert headers["X-Title"] == "MyApp"  # user override wins
-    assert headers["HTTP-Referer"] == "https://github.com/52707407SXG/Xiaoban-Agent"  # default preserved
+    assert headers["HTTP-Referer"] == "https://github.com/52707407SXG/Xiaoban_Agent"  # default preserved
 
 
 @patch("run_agent.OpenAI")
@@ -266,11 +266,11 @@ def test_no_user_default_headers_leaves_provider_defaults_untouched(mock_openai)
         skip_memory=True,
     )
 
-    with patch("hermes_cli.config.load_config", return_value={"model": {}}):
+    with patch("xiaoban_cli.config.load_config", return_value={"model": {}}):
         agent._apply_client_headers_for_base_url("https://openrouter.ai/api/v1")
 
     headers = agent._client_kwargs["default_headers"]
-    assert headers["HTTP-Referer"] == "https://github.com/52707407SXG/Xiaoban-Agent"
+    assert headers["HTTP-Referer"] == "https://github.com/52707407SXG/Xiaoban_Agent"
     assert "User-Agent" not in headers  # nothing injected when unconfigured
 
 
@@ -290,7 +290,7 @@ def test_user_default_headers_skipped_for_anthropic_mode(mock_openai):
     agent.api_mode = "anthropic_messages"
     agent._client_kwargs = {}
 
-    with patch("hermes_cli.config.load_config", return_value={
+    with patch("xiaoban_cli.config.load_config", return_value={
         "model": {"default_headers": {"User-Agent": "curl/8.7.1"}},
     }):
         agent._apply_user_default_headers()
@@ -311,12 +311,12 @@ def test_openrouter_headers_no_cache_when_disabled(mock_openai):
         skip_memory=True,
     )
 
-    with patch("hermes_cli.config.load_config", return_value={
+    with patch("xiaoban_cli.config.load_config", return_value={
         "openrouter": {"response_cache": False},
     }):
         agent._apply_client_headers_for_base_url("https://openrouter.ai/api/v1")
 
     headers = agent._client_kwargs["default_headers"]
-    assert headers["HTTP-Referer"] == "https://github.com/52707407SXG/Xiaoban-Agent"
+    assert headers["HTTP-Referer"] == "https://github.com/52707407SXG/Xiaoban_Agent"
     assert "X-OpenRouter-Cache" not in headers
     assert "X-OpenRouter-Cache-TTL" not in headers

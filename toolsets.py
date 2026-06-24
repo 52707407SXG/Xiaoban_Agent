@@ -33,11 +33,11 @@ _XIAOBAN_CORE_TOOLS = [
     "web_search", "web_extract",
     # Terminal + process management
     "terminal", "process",
-    # Read the desktop GUI's embedded terminal pane (gated on HERMES_DESKTOP
+    # Read the desktop GUI's embedded terminal pane (gated on XIAOBAN_DESKTOP
     # via check_fn in tools/read_terminal_tool.py — hidden outside the GUI).
     "read_terminal",
-    # File manipulation and My Stand parsing
-    "read_file", "write_file", "patch", "search_files", "mystand_parse",
+    # File manipulation
+    "read_file", "write_file", "patch", "search_files",
     # Vision + image generation
     "vision_analyze", "image_generate",
     # Skills
@@ -62,7 +62,7 @@ _XIAOBAN_CORE_TOOLS = [
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
     # Kanban multi-agent coordination — only in schema when the agent is
-    # spawned as a kanban worker (HERMES_KANBAN_TASK env set) or the current
+    # spawned as a kanban worker (XIAOBAN_KANBAN_TASK env set) or the current
     # profile explicitly enables the kanban toolset. Gated via check_fn in
     # tools/kanban_tools.py.
     "kanban_show", "kanban_list",
@@ -72,11 +72,6 @@ _XIAOBAN_CORE_TOOLS = [
     # Computer use (macOS, gated on cua-driver being installed via check_fn)
     "computer_use",
 ]
-
-# Back-compat for inherited Hermes-era modules and tests that still import the
-# old private name. Keep this alias until the full fork is rebranded; changing
-# every import at once is lower value than preserving one canonical tool list.
-_HERMES_CORE_TOOLS = _XIAOBAN_CORE_TOOLS
 
 # Webhook events may originate from untrusted third-party content (for example,
 # public PR titles/comments). Keep the default webhook toolset intentionally
@@ -193,8 +188,14 @@ TOOLSETS = {
     
 
     "file": {
-        "description": "File manipulation and My Stand parser tools: read, write, patch, search, and parse files or URLs",
-        "tools": ["read_file", "write_file", "patch", "search_files", "mystand_parse"],
+        "description": "File manipulation tools: read, write, patch, and search files",
+        "tools": ["read_file", "write_file", "patch", "search_files"],
+        "includes": []
+    },
+
+    "mystand_parser": {
+        "description": "My Stand parser tool for documents, spreadsheets, images, audio attachments, and supported URLs",
+        "tools": ["mystand_parse"],
         "includes": []
     },
     
@@ -258,7 +259,7 @@ TOOLSETS = {
     "kanban": {
         "description": (
             "Kanban multi-agent coordination — only active when the agent "
-            "is spawned by the kanban dispatcher (HERMES_KANBAN_TASK env "
+            "is spawned by the kanban dispatcher (XIAOBAN_KANBAN_TASK env "
             "set). The dispatcher runs inside the gateway by default; see "
             "`kanban.dispatch_in_gateway` in config.yaml. Lets workers mark "
             "tasks done with structured handoffs, block for human input, "
@@ -360,7 +361,7 @@ TOOLSETS = {
         "includes": [],
         # Posture toolset: selected per-session by agent/coding_context.py,
         # never auto-recovered into per-platform tool config (see the
-        # non-configurable-toolset recovery loop in hermes_cli/tools_config.py).
+        # non-configurable-toolset recovery loop in xiaoban_cli/tools_config.py).
         "posture": True,
     },
     
@@ -370,7 +371,7 @@ TOOLSETS = {
     # All platforms share the same core tools. Note: agents do NOT get an
     # agent-callable send_message tool — outbound platform messaging is handled
     # outside the agent loop (cron delivery, the gateway kanban notifier, and
-    # the `hermes send` CLI), not by the model deciding to send on its own.
+    # the `xiaoban send` CLI), not by the model deciding to send on its own.
     # ==========================================================================
 
     "xiaoban-acp": {
@@ -399,8 +400,8 @@ TOOLSETS = {
             "web_search", "web_extract",
             # Terminal + process management
             "terminal", "process",
-            # File manipulation and My Stand parsing
-            "read_file", "write_file", "patch", "search_files", "mystand_parse",
+            # File manipulation
+            "read_file", "write_file", "patch", "search_files",
             # Vision + image generation
             "vision_analyze", "image_generate",
             # Skills
@@ -573,9 +574,28 @@ TOOLSETS = {
     },
 
     "xiaoban-gateway": {
-        "description": "My Stand default gateway toolset - CLI/Web/Webhook/Weixin/Feishu/WeCom/QQ only; legacy platforms are opt-in",
+        "description": "Gateway aggregate toolset - includes all messaging platform defaults",
         "tools": [],
-        "includes": ["xiaoban-feishu", "xiaoban-wecom", "xiaoban-wecom-callback", "xiaoban-weixin", "xiaoban-qqbot", "xiaoban-webhook"]
+        "includes": [
+            "xiaoban-telegram",
+            "xiaoban-discord",
+            "xiaoban-slack",
+            "xiaoban-whatsapp",
+            "xiaoban-signal",
+            "xiaoban-bluebubbles",
+            "xiaoban-email",
+            "xiaoban-homeassistant",
+            "xiaoban-mattermost",
+            "xiaoban-matrix",
+            "xiaoban-dingtalk",
+            "xiaoban-feishu",
+            "xiaoban-wecom",
+            "xiaoban-wecom-callback",
+            "xiaoban-weixin",
+            "xiaoban-qqbot",
+            "xiaoban-yuanbao",
+            "xiaoban-webhook",
+        ]
     }
 }
 

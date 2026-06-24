@@ -90,5 +90,5 @@ pytest tests/xiaoban
 本仓库首发追踪文档：
 
 - `XIAOBAN_TRANSFORMATION_TRACKER.md`
-- `docs/xiaoban-hermes-fork-strategy.md`
+- `docs/xiaoban-xiaoban-fork-strategy.md`
 - `docs/mmcc-v0.1-agent-plugin-alignment.md`

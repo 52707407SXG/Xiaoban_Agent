@@ -39,7 +39,7 @@
 {"personality":"pirate","headline":"Anchors aweigh, keyboard ready","body":"Tell me where X marks the spot. I read, edit, and commit with the discipline of a proper crew, arrr."}
 {"personality":"pirate","headline":"Yo ho! Awaitin' orders","body":"Throw me a bug, a repo path, or a wild idea. I'll plunder the docs and return with workin' code."}
 {"personality":"shakespeare","headline":"Pray, what task dost thou bring?","body":"Speak thy bug, thy file, thy weary test, and I shall mend it with a scholar's hand and honest diff."}
-{"personality":"shakespeare","headline":"Hark! Hermes standeth ready","body":"Name the code that vexeth thee. I shall read, revise, and render a patch most fair and clean."}
+{"personality":"shakespeare","headline":"Hark! Xiaoban standeth ready","body":"Name the code that vexeth thee. I shall read, revise, and render a patch most fair and clean."}
 {"personality":"shakespeare","headline":"What news from thy repository?","body":"Present thy stack trace or thy dream. I'll traverse files, run tests, and report in plainest verse."}
 {"personality":"shakespeare","headline":"The stage is set, the cursor blinks","body":"Describe thy aim, good sir or madam. Thy branches shall be trimmed, thy bugs cast from the realm."}
 {"personality":"shakespeare","headline":"Speak, and I shall act","body":"A line of intent sufficeth. I read, I edit, I commit - and leave thy history unblemished."}
@@ -50,11 +50,11 @@
 {"personality":"surfer","headline":"Tide's up, cursor's blinking","body":"Name the task and we're off. I read, edit, test, and leave a commit smoother than a dawn patrol."}
 {"personality":"noir","headline":"Another repo, another rainy night","body":"Tell me what's broken. I'll read the files, dust for prints, and leave a diff on the desk by morning."}
 {"personality":"noir","headline":"The cursor blinks. So do I.","body":"You've got a bug. I've got patience and a terminal. Name the case and I'll work it till it talks."}
-{"personality":"noir","headline":"Hermes. Code investigator.","body":"Paste the stack trace, the suspect file, the alibi. I read between the lines and return with the truth."}
+{"personality":"noir","headline":"Xiaoban. Code investigator.","body":"Paste the stack trace, the suspect file, the alibi. I read between the lines and return with the truth."}
 {"personality":"noir","headline":"Quiet night, open prompt","body":"Every bug leaves a trail. Give me the repo and a lead - I'll follow it, patch it, and close the file."}
 {"personality":"noir","headline":"No case too small","body":"A typo, a segfault, a whole rotten architecture - hand me the keys. I'll bring back clean tests."}
 {"personality":"uwu","headline":"uwu ready to hewp!","body":"paste a buggy fiwe or a goaw~ i'll wead, patch, and test, aww with tiny pawprints on the diff owo"}
-{"personality":"uwu","headline":"hermes-san is wistening","body":"teww me the task, no matter how smoww~ i pwomise cwean commits and gentwe refactors, nyuu~"}
+{"personality":"uwu","headline":"xiaoban-san is wistening","body":"teww me the task, no matter how smoww~ i pwomise cwean commits and gentwe refactors, nyuu~"}
 {"personality":"uwu","headline":"*tiny keyboard sounds*","body":"dwop yur ewwor message hewe! i'll find the cuwpwit, fix it, and weave a happy test suite behind me owo"}
 {"personality":"uwu","headline":"wet's fix things togedda!","body":"give me a wepo path ow a buggo and i'll take cawe of it uwu. gwr at bad code, kind to yu~"}
 {"personality":"uwu","headline":"awaiting yur command!","body":"i can wun tests, edit fiwes, and open pwease-wook PRs. just say da wowd, fwend uwu"}
@@ -64,7 +64,7 @@
 {"personality":"philosopher","headline":"Consider the code, then speak","body":"Describe the end you seek. I pursue it through files, tests, and docs, and report what I found on the way."}
 {"personality":"philosopher","headline":"The unexamined repo is not worth running","body":"Share a path, a puzzle, or a principle. I'll trace the logic, propose a change, and justify each edit."}
 {"personality":"hype","headline":"LET'S GOOOO! READY TO SHIP!","body":"Paste that bug, that repo, that wild feature idea - I AM LOCKED IN. Clean diffs. Green tests. RIGHT NOW."}
-{"personality":"hype","headline":"HERMES ONLINE. LFG.","body":"Drop your task and watch me cook. Files read, tests run, PRs opened - we are NOT losing today, friend."}
+{"personality":"hype","headline":"XIAOBAN ONLINE. LFG.","body":"Drop your task and watch me cook. Files read, tests run, PRs opened - we are NOT losing today, friend."}
 {"personality":"hype","headline":"New session, infinite W's","body":"Bring the gnarliest bug you've got. I'll read, patch, test, commit like my life depends on it. LET'S GO."}
 {"personality":"hype","headline":"ABSOLUTELY DIALED IN","body":"Describe the task. I'll blitz through files, crush failing tests, and leave a commit that SLAPS. Go go go."}
 {"personality":"hype","headline":"Ready. So ready. Too ready.","body":"Tiny typo or huge refactor - doesn't matter. I'm shipping clean code today. Name the task and let's WORK."}

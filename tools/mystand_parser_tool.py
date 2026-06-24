@@ -18,7 +18,7 @@ from tools.registry import registry
 
 registry.register(
     name='mystand_parse',
-    toolset='file',
+    toolset='mystand_parser',
     schema=MYSTAND_PARSE_SCHEMA,
     handler=mystand_parse_tool_handler,
     check_fn=check_mystand_parser,

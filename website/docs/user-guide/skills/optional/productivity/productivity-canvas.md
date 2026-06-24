@@ -25,7 +25,7 @@ Canvas LMS integration — fetch enrolled courses and assignments using API toke
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # Canvas LMS — Course & Assignment Access
@@ -42,7 +42,7 @@ Read-only access to Canvas LMS for listing courses and assignments.
 2. Go to **Account → Settings** (click your profile icon, then Settings)
 3. Scroll to **Approved Integrations** and click **+ New Access Token**
 4. Name the token (e.g., "Xiaoban-Agent"), set an optional expiry, and click **Generate Token**
-5. Copy the token and add to `${HERMES_HOME:-~/.hermes}/.env`:
+5. Copy the token and add to `${XIAOBAN_HOME:-~/.xiaoban}/.env`:
 
 ```
 CANVAS_API_TOKEN=your_token_here
@@ -54,7 +54,7 @@ The base URL is whatever appears in your browser when you're logged into Canvas 
 ## Usage
 
 ```bash
-CANVAS="python $HERMES_HOME/skills/productivity/canvas/scripts/canvas_api.py"
+CANVAS="python $XIAOBAN_HOME/skills/productivity/canvas/scripts/canvas_api.py"
 
 # List all active courses
 $CANVAS list_courses --enrollment-state active

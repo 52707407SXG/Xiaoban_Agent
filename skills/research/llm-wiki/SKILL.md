@@ -6,7 +6,7 @@ author: Xiaoban-Agent
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
-  hermes:
+  xiaoban:
     tags: [wiki, knowledge-base, research, notes, markdown, rag-alternative]
     category: research
     related_skills: [obsidian, arxiv]
@@ -35,7 +35,7 @@ Use this skill when the user:
 
 ## Wiki Location
 
-**Location:** Set via `WIKI_PATH` environment variable (e.g. in `${HERMES_HOME:-~/.hermes}/.env`).
+**Location:** Set via `WIKI_PATH` environment variable (e.g. in `${XIAOBAN_HOME:-~/.xiaoban}/.env`).
 
 If unset, defaults to `~/wiki`.
 

@@ -12,7 +12,7 @@
  * testable without booting Electron (main.cjs requires('electron') at load).
  */
 
-const OFFICIAL_REPO_HTTPS_URL = 'https://github.com/52707407SXG/Xiaoban-Agent.git'
+const OFFICIAL_REPO_HTTPS_URL = 'https://github.com/52707407SXG/Xiaoban_Agent.git'
 const OFFICIAL_REPO_CANONICAL = 'github.com/52707407SXG/xiaoban-agent'
 
 // Normalize common GitHub remote URL forms to `host/owner/repo` (lowercased,

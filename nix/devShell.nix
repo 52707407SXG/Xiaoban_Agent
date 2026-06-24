@@ -11,7 +11,7 @@
     { pkgs, self', ... }:
     let
       packages = builtins.attrValues self'.packages;
-      hermesNpmLib = self'.packages.default.passthru.hermesNpmLib;
+      xiaobanNpmLib = self'.packages.default.passthru.xiaobanNpmLib;
 
       # Collect all packageJsonPath values from npm workspace packages.
       npmPackageJsonPaths = builtins.filter (p: p != null) (
@@ -32,8 +32,8 @@
         shellHook = ''
           echo "Xiaoban-Agent dev shell"
           ${combinedNonNpm}
-          ${hermesNpmLib.mkNpmDevShellHook npmPackageJsonPaths}
-          echo "Ready. Run 'hermes' to start."
+          ${xiaobanNpmLib.mkNpmDevShellHook npmPackageJsonPaths}
+          echo "Ready. Run 'xiaoban' to start."
         '';
       };
     };

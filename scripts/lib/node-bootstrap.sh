@@ -7,26 +7,26 @@
 #
 # Strategy (first hit wins — respects the user's existing tooling):
 #   1. modern `node` already on PATH
-#   2. ~/.hermes/node/ from a prior Hermes-managed install
+#   2. ~/.xiaoban/node/ from a prior Xiaoban-managed install
 #   3. fnm, proto, nvm (in that order) if the user already uses a version manager
 #   4. Termux `pkg`, macOS Homebrew
-#   5. pinned nodejs.org tarball into ~/.hermes/node/ (always works, zero shell rc edits)
+#   5. pinned nodejs.org tarball into ~/.xiaoban/node/ (always works, zero shell rc edits)
 #
 # Usage:
 #   source scripts/lib/node-bootstrap.sh
 #   ensure_node   # returns 0 on success, non-zero on failure
-#   if [ "$HERMES_NODE_AVAILABLE" = true ]; then ...; fi
+#   if [ "$XIAOBAN_NODE_AVAILABLE" = true ]; then ...; fi
 #
 # Env inputs (set before sourcing to override defaults):
-#   HERMES_NODE_MIN_VERSION   (default: 20)   — accepted on PATH
-#   HERMES_NODE_TARGET_MAJOR  (default: 22)   — installed when we install
-#   HERMES_HOME               (default: $HOME/.hermes)
+#   XIAOBAN_NODE_MIN_VERSION   (default: 20)   — accepted on PATH
+#   XIAOBAN_NODE_TARGET_MAJOR  (default: 22)   — installed when we install
+#   XIAOBAN_HOME               (default: $HOME/.xiaoban)
 # ============================================================================
 
-HERMES_NODE_MIN_VERSION="${HERMES_NODE_MIN_VERSION:-20}"
-HERMES_NODE_TARGET_MAJOR="${HERMES_NODE_TARGET_MAJOR:-22}"
-HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-HERMES_NODE_AVAILABLE=false
+XIAOBAN_NODE_MIN_VERSION="${XIAOBAN_NODE_MIN_VERSION:-20}"
+XIAOBAN_NODE_TARGET_MAJOR="${XIAOBAN_NODE_TARGET_MAJOR:-22}"
+XIAOBAN_HOME="${XIAOBAN_HOME:-$HOME/.xiaoban}"
+XIAOBAN_NODE_AVAILABLE=false
 
 # ---------------------------------------------------------------------------
 # Logging — prefer the host script's log_* helpers when present
@@ -57,17 +57,17 @@ _nb_get_link_dir() {
     fi
 }
 
-# Redirect a Hermes-managed Node's `npm install -g` to the command link dir
-# (already on PATH) instead of the default $HERMES_HOME/node/bin, which is off
+# Redirect a Xiaoban-managed Node's `npm install -g` to the command link dir
+# (already on PATH) instead of the default $XIAOBAN_HOME/node/bin, which is off
 # PATH and wiped on every Node upgrade. Scoped to the managed Node via its
 # prefix-local global npmrc; the user's other Node installs / ~/.npmrc are
 # untouched. Idempotent no-op when there's no managed npm.
 _nb_configure_npm_prefix() {
-    [ -x "$HERMES_HOME/node/bin/npm" ] || return 0
+    [ -x "$XIAOBAN_HOME/node/bin/npm" ] || return 0
     local _link_dir
     _link_dir="$(_nb_get_link_dir)"
-    mkdir -p "$HERMES_HOME/node/etc"
-    printf 'prefix=%s\n' "$(dirname "$_link_dir")" > "$HERMES_HOME/node/etc/npmrc"
+    mkdir -p "$XIAOBAN_HOME/node/etc"
+    printf 'prefix=%s\n' "$(dirname "$_link_dir")" > "$XIAOBAN_HOME/node/etc/npmrc"
 }
 
 _nb_node_major() {
@@ -78,7 +78,7 @@ _nb_node_major() {
 
 _nb_have_modern_node() {
     command -v node >/dev/null 2>&1 || return 1
-    [ "$(_nb_node_major)" -ge "$HERMES_NODE_MIN_VERSION" ]
+    [ "$(_nb_node_major)" -ge "$XIAOBAN_NODE_MIN_VERSION" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -87,10 +87,10 @@ _nb_have_modern_node() {
 
 _nb_try_fnm() {
     command -v fnm >/dev/null 2>&1 || return 1
-    _nb_log "fnm detected — installing Node $HERMES_NODE_TARGET_MAJOR..."
+    _nb_log "fnm detected — installing Node $XIAOBAN_NODE_TARGET_MAJOR..."
     eval "$(fnm env 2>/dev/null)" || true
-    fnm install "$HERMES_NODE_TARGET_MAJOR" >/dev/null 2>&1 || return 1
-    fnm use     "$HERMES_NODE_TARGET_MAJOR" >/dev/null 2>&1 || return 1
+    fnm install "$XIAOBAN_NODE_TARGET_MAJOR" >/dev/null 2>&1 || return 1
+    fnm use     "$XIAOBAN_NODE_TARGET_MAJOR" >/dev/null 2>&1 || return 1
     _nb_have_modern_node || return 1
     _nb_ok "Node $(node --version) activated via fnm"
     return 0
@@ -98,8 +98,8 @@ _nb_try_fnm() {
 
 _nb_try_proto() {
     command -v proto >/dev/null 2>&1 || return 1
-    _nb_log "proto detected — installing Node $HERMES_NODE_TARGET_MAJOR..."
-    proto install node "$HERMES_NODE_TARGET_MAJOR" >/dev/null 2>&1 || return 1
+    _nb_log "proto detected — installing Node $XIAOBAN_NODE_TARGET_MAJOR..."
+    proto install node "$XIAOBAN_NODE_TARGET_MAJOR" >/dev/null 2>&1 || return 1
     _nb_have_modern_node || return 1
     _nb_ok "Node $(node --version) activated via proto"
     return 0
@@ -110,9 +110,9 @@ _nb_try_nvm() {
     [ -s "$nvm_sh" ] || return 1
     # shellcheck source=/dev/null
     \. "$nvm_sh" >/dev/null 2>&1 || return 1
-    _nb_log "nvm detected — installing Node $HERMES_NODE_TARGET_MAJOR..."
-    nvm install "$HERMES_NODE_TARGET_MAJOR" >/dev/null 2>&1 || return 1
-    nvm use     "$HERMES_NODE_TARGET_MAJOR" >/dev/null 2>&1 || return 1
+    _nb_log "nvm detected — installing Node $XIAOBAN_NODE_TARGET_MAJOR..."
+    nvm install "$XIAOBAN_NODE_TARGET_MAJOR" >/dev/null 2>&1 || return 1
+    nvm use     "$XIAOBAN_NODE_TARGET_MAJOR" >/dev/null 2>&1 || return 1
     _nb_have_modern_node || return 1
     _nb_ok "Node $(node --version) activated via nvm"
     return 0
@@ -135,10 +135,10 @@ _nb_try_brew() {
     [ "$(uname -s)" = "Darwin" ] || return 1
     command -v brew >/dev/null 2>&1 || return 1
     _nb_log "Installing Node via Homebrew..."
-    brew install "node@${HERMES_NODE_TARGET_MAJOR}" >/dev/null 2>&1 \
+    brew install "node@${XIAOBAN_NODE_TARGET_MAJOR}" >/dev/null 2>&1 \
         || brew install node >/dev/null 2>&1 \
         || return 1
-    brew link --overwrite --force "node@${HERMES_NODE_TARGET_MAJOR}" >/dev/null 2>&1 || true
+    brew link --overwrite --force "node@${XIAOBAN_NODE_TARGET_MAJOR}" >/dev/null 2>&1 || true
     _nb_have_modern_node || return 1
     _nb_ok "Node $(node --version) installed via Homebrew"
     return 0
@@ -171,18 +171,18 @@ _nb_install_bundled_node() {
             ;;
     esac
 
-    local index_url="https://nodejs.org/dist/latest-v${HERMES_NODE_TARGET_MAJOR}.x/"
+    local index_url="https://nodejs.org/dist/latest-v${XIAOBAN_NODE_TARGET_MAJOR}.x/"
     local tarball
     tarball=$(curl -fsSL "$index_url" \
-        | grep -oE "node-v${HERMES_NODE_TARGET_MAJOR}\.[0-9]+\.[0-9]+-${node_os}-${node_arch}\.tar\.xz" \
+        | grep -oE "node-v${XIAOBAN_NODE_TARGET_MAJOR}\.[0-9]+\.[0-9]+-${node_os}-${node_arch}\.tar\.xz" \
         | head -1)
     if [ -z "$tarball" ]; then
         tarball=$(curl -fsSL "$index_url" \
-            | grep -oE "node-v${HERMES_NODE_TARGET_MAJOR}\.[0-9]+\.[0-9]+-${node_os}-${node_arch}\.tar\.gz" \
+            | grep -oE "node-v${XIAOBAN_NODE_TARGET_MAJOR}\.[0-9]+\.[0-9]+-${node_os}-${node_arch}\.tar\.gz" \
             | head -1)
     fi
     if [ -z "$tarball" ]; then
-        _nb_warn "Could not resolve Node $HERMES_NODE_TARGET_MAJOR binary for $node_os-$node_arch"
+        _nb_warn "Could not resolve Node $XIAOBAN_NODE_TARGET_MAJOR binary for $node_os-$node_arch"
         return 1
     fi
 
@@ -193,7 +193,7 @@ _nb_install_bundled_node() {
         _nb_warn "Download failed"; rm -rf "$tmp"; return 1
     }
 
-    _nb_log "Extracting to $HERMES_HOME/node/..."
+    _nb_log "Extracting to $XIAOBAN_HOME/node/..."
     if [[ "$tarball" == *.tar.xz ]]; then
         tar xf  "$tmp/$tarball" -C "$tmp" || { rm -rf "$tmp"; return 1; }
     else
@@ -208,24 +208,24 @@ _nb_install_bundled_node() {
         return 1
     fi
 
-    mkdir -p "$HERMES_HOME"
-    rm -rf "$HERMES_HOME/node"
-    mv "$extracted" "$HERMES_HOME/node"
+    mkdir -p "$XIAOBAN_HOME"
+    rm -rf "$XIAOBAN_HOME/node"
+    mv "$extracted" "$XIAOBAN_HOME/node"
     rm -rf "$tmp"
 
     local _link_dir
     _link_dir="$(_nb_get_link_dir)"
     mkdir -p "$_link_dir"
-    ln -sf "$HERMES_HOME/node/bin/node" "$_link_dir/node"
-    ln -sf "$HERMES_HOME/node/bin/npm"  "$_link_dir/npm"
-    ln -sf "$HERMES_HOME/node/bin/npx"  "$_link_dir/npx"
+    ln -sf "$XIAOBAN_HOME/node/bin/node" "$_link_dir/node"
+    ln -sf "$XIAOBAN_HOME/node/bin/npm"  "$_link_dir/npm"
+    ln -sf "$XIAOBAN_HOME/node/bin/npx"  "$_link_dir/npx"
 
     _nb_configure_npm_prefix
 
-    export PATH="$HERMES_HOME/node/bin:$PATH"
+    export PATH="$XIAOBAN_HOME/node/bin:$PATH"
 
     _nb_have_modern_node || return 1
-    _nb_ok "Node $(node --version) installed to $HERMES_HOME/node/"
+    _nb_ok "Node $(node --version) installed to $XIAOBAN_HOME/node/"
     return 0
 }
 
@@ -234,7 +234,7 @@ _nb_install_bundled_node() {
 # ---------------------------------------------------------------------------
 
 ensure_node() {
-    HERMES_NODE_AVAILABLE=false
+    XIAOBAN_NODE_AVAILABLE=false
 
     # Repair pre-existing managed installs where `npm install -g` lands off
     # PATH. No-op when there's no managed Node, so it's safe to run first.
@@ -242,32 +242,32 @@ ensure_node() {
 
     if _nb_have_modern_node; then
         _nb_ok "Node $(node --version) found"
-        HERMES_NODE_AVAILABLE=true
+        XIAOBAN_NODE_AVAILABLE=true
         return 0
     fi
 
-    if [ -x "$HERMES_HOME/node/bin/node" ]; then
-        export PATH="$HERMES_HOME/node/bin:$PATH"
+    if [ -x "$XIAOBAN_HOME/node/bin/node" ]; then
+        export PATH="$XIAOBAN_HOME/node/bin:$PATH"
         if _nb_have_modern_node; then
-            _nb_ok "Node $(node --version) found (Hermes-managed)"
-            HERMES_NODE_AVAILABLE=true
+            _nb_ok "Node $(node --version) found (Xiaoban-managed)"
+            XIAOBAN_NODE_AVAILABLE=true
             return 0
         fi
     fi
 
     # Version managers first — respect the user's existing setup.
-    _nb_try_fnm   && { HERMES_NODE_AVAILABLE=true; return 0; }
-    _nb_try_proto && { HERMES_NODE_AVAILABLE=true; return 0; }
-    _nb_try_nvm   && { HERMES_NODE_AVAILABLE=true; return 0; }
+    _nb_try_fnm   && { XIAOBAN_NODE_AVAILABLE=true; return 0; }
+    _nb_try_proto && { XIAOBAN_NODE_AVAILABLE=true; return 0; }
+    _nb_try_nvm   && { XIAOBAN_NODE_AVAILABLE=true; return 0; }
 
     # Platform package managers.
-    _nb_try_termux_pkg && { HERMES_NODE_AVAILABLE=true; return 0; }
-    _nb_try_brew       && { HERMES_NODE_AVAILABLE=true; return 0; }
+    _nb_try_termux_pkg && { XIAOBAN_NODE_AVAILABLE=true; return 0; }
+    _nb_try_brew       && { XIAOBAN_NODE_AVAILABLE=true; return 0; }
 
     # Last resort: pinned nodejs.org tarball.
-    _nb_install_bundled_node && { HERMES_NODE_AVAILABLE=true; return 0; }
+    _nb_install_bundled_node && { XIAOBAN_NODE_AVAILABLE=true; return 0; }
 
     _nb_warn "Node.js install failed — TUI and browser tools will be unavailable."
-    _nb_warn "Install manually: https://nodejs.org/en/download/  (or: \`brew install node\`, \`fnm install $HERMES_NODE_TARGET_MAJOR\`, etc.)"
+    _nb_warn "Install manually: https://nodejs.org/en/download/  (or: \`brew install node\`, \`fnm install $XIAOBAN_NODE_TARGET_MAJOR\`, etc.)"
     return 1
 }

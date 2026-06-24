@@ -6,8 +6,8 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { Switch } from '@/components/ui/switch'
-import type { HermesGateway } from '@/hermes'
-import { getGlobalModelOptions } from '@/hermes'
+import type { XiaobanGateway } from '@/xiaoban'
+import { getGlobalModelOptions } from '@/xiaoban'
 import { useI18n } from '@/i18n'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
 import {
@@ -18,10 +18,10 @@ import {
   setVisibleModels,
   toggleModelVisibility
 } from '@/store/model-visibility'
-import type { ModelOptionProvider, ModelOptionsResponse } from '@/types/hermes'
+import type { ModelOptionProvider, ModelOptionsResponse } from '@/types/xiaoban'
 
 interface ModelVisibilityDialogProps {
-  gw?: HermesGateway
+  gw?: XiaobanGateway
   onOpenChange: (open: boolean) => void
   onOpenProviders: () => void
   open: boolean

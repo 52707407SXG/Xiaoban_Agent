@@ -26,7 +26,7 @@ TDD：强制执行 RED-GREEN-REFACTOR，测试先于代码。
 ## 参考：完整 SKILL.md
 
 :::info
-以下是 Hermes 在触发该 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。
+以下是 Xiaoban 在触发该 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。
 :::
 
 # 测试驱动开发（TDD）

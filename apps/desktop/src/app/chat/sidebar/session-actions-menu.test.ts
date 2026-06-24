@@ -14,9 +14,9 @@ const renameSession = vi.fn(async () => ({ ok: true, title: 'rest-title' }))
 const request = vi.fn(async () => ({ title: 'rpc-title' }) as never)
 const activeGateway = vi.fn<() => { request: typeof request } | null>(() => ({ request }))
 
-vi.mock('@/hermes', () => ({
+vi.mock('@/xiaoban', () => ({
   renameSession: (...args: unknown[]) => renameSession(...(args as [])),
-  HermesGateway: class {}
+  XiaobanGateway: class {}
 }))
 
 vi.mock('@/store/gateway', () => ({

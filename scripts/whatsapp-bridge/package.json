@@ -1,5 +1,5 @@
 {
-  "name": "hermes-whatsapp-bridge",
+  "name": "xiaoban-whatsapp-bridge",
   "version": "1.0.0",
   "description": "WhatsApp bridge for Xiaoban-Agent using Baileys",
   "private": true,

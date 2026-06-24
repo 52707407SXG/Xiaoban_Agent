@@ -3,7 +3,7 @@
   "updated_at": "2026-06-16T18:04:33Z",
   "metadata": {
     "source": "xiaoban-agent repo",
-    "docs": "https://github.com/52707407SXG/Xiaoban-Agent/docs/reference/model-catalog"
+    "docs": "https://github.com/52707407SXG/Xiaoban_Agent/tree/main/website/docs/reference/model-catalog"
   },
   "providers": {
     "openrouter": {

@@ -36,12 +36,12 @@ Xiaoban-Agent 支持跨所有消息平台的文字转语音（TTS）输出和语
 | Telegram | 语音气泡（内联播放） | Opus `.ogg` |
 | Discord | 语音气泡（Opus/OGG），回退为文件附件 | Opus/MP3 |
 | WhatsApp | 音频文件附件 | MP3 |
-| CLI | 保存至 `~/.hermes/audio_cache/` | MP3 |
+| CLI | 保存至 `~/.xiaoban/audio_cache/` | MP3 |
 
 ### 配置
 
 ```yaml
-# In ~/.hermes/config.yaml
+# In ~/.xiaoban/config.yaml
 tts:
   provider: "edge"              # "edge" | "elevenlabs" | "openai" | "minimax" | "mistral" | "gemini" | "xai" | "neutts" | "kittentts" | "piper"
   speed: 1.0                    # Global speed multiplier (provider-specific settings override this)
@@ -86,7 +86,7 @@ tts:
     clean_text: true                            # Expand numbers, currencies, units
   piper:
     voice: en_US-lessac-medium                  # voice name (auto-downloaded) OR absolute path to .onnx
-    # voices_dir: ''                            # default: ~/.hermes/cache/piper-voices/
+    # voices_dir: ''                            # default: ~/.xiaoban/cache/piper-voices/
     # use_cuda: false                           # requires onnxruntime-gpu
     # length_scale: 1.0                         # 2.0 = twice as slow
     # noise_scale: 0.667
@@ -100,7 +100,7 @@ tts:
 
 ### 输入长度限制
 
-每个提供商都有文档记录的单次请求输入字符上限。Hermes 在调用提供商前会截断文本，确保请求不会因长度错误而失败：
+每个提供商都有文档记录的单次请求输入字符上限。Xiaoban 在调用提供商前会截断文本，确保请求不会因长度错误而失败：
 
 | 提供商 | 默认上限（字符数） |
 |----------|---------------------|
@@ -181,7 +181,7 @@ tts:
 
 Piper 是来自 Open Home Foundation（Home Assistant 维护者）的快速本地神经网络 TTS 引擎。它完全在 CPU 上运行，支持 **44 种语言**的预训练声音，无需 API 密钥。
 
-**通过 `xiaoban tools` 安装** → Voice & TTS → Piper — Hermes 会自动为你运行 `pip install piper-tts`。或手动安装：`pip install piper-tts`。
+**通过 `xiaoban tools` 安装** → Voice & TTS → Piper — Xiaoban 会自动为你运行 `pip install piper-tts`。或手动安装：`pip install piper-tts`。
 
 **切换至 Piper：**
 
@@ -192,7 +192,7 @@ tts:
     voice: en_US-lessac-medium
 ```
 
-首次对未在本地缓存的声音进行 TTS 调用时，Hermes 会运行 `python -m piper.download_voices <name>` 并将模型（约 20-90MB，取决于质量等级）下载至 `~/.hermes/cache/piper-voices/`。后续调用将复用已缓存的模型。
+首次对未在本地缓存的声音进行 TTS 调用时，Xiaoban 会运行 `python -m piper.download_voices <name>` 并将模型（约 20-90MB，取决于质量等级）下载至 `~/.xiaoban/cache/piper-voices/`。后续调用将复用已缓存的模型。
 
 **选择声音。** [完整声音目录](https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/VOICES.md) 涵盖英语、西班牙语、法语、德语、意大利语、荷兰语、葡萄牙语、俄语、波兰语、土耳其语、中文、阿拉伯语、印地语等——每种语言均有 `x_low` / `low` / `medium` / `high` 质量等级。可在 [rhasspy.github.io/piper-samples](https://rhasspy.github.io/piper-samples/) 试听声音样本。
 
@@ -208,7 +208,7 @@ tts:
 
 ### 自定义命令提供商
 
-如果你想使用的 TTS 引擎未被原生支持（VoxCPM、MLX-Kokoro、XTTS CLI、声音克隆脚本，或任何其他暴露 CLI 的引擎），你可以将其作为**命令类型提供商**接入，无需编写任何 Python 代码。Hermes 将输入文本写入临时 UTF-8 文件，运行你的 shell 命令，并读取命令生成的音频文件。
+如果你想使用的 TTS 引擎未被原生支持（VoxCPM、MLX-Kokoro、XTTS CLI、声音克隆脚本，或任何其他暴露 CLI 的引擎），你可以将其作为**命令类型提供商**接入，无需编写任何 Python 代码。Xiaoban 将输入文本写入临时 UTF-8 文件，运行你的 shell 命令，并读取命令生成的音频文件。
 
 在 `tts.providers.<name>` 下声明一个或多个提供商，并通过 `tts.provider: <name>` 在它们之间切换——与切换 `edge` 和 `openai` 等内置提供商的方式相同。
 
@@ -257,15 +257,15 @@ tts:
       timeout: 30
 ```
 
-凭据来自你的 shell 环境（`VOLCENGINE_APP_ID` / `VOLCENGINE_ACCESS_TOKEN`）或 `~/.doubao-speech/config.yaml`。通过在命令中添加 `--voice zh-female-warm`（或 `doubao-speech list-voices` 中的任何其他别名）来选择声音。`doubao-speech` 还内置了流式 ASR——有关 Hermes 集成，请参阅[下方的 STT 章节](#example-doubao--volcengine-asr)。源码和完整文档：[github.com/Hypnus-Yuan/doubao-speech](https://github.com/Hypnus-Yuan/doubao-speech)。
+凭据来自你的 shell 环境（`VOLCENGINE_APP_ID` / `VOLCENGINE_ACCESS_TOKEN`）或 `~/.doubao-speech/config.yaml`。通过在命令中添加 `--voice zh-female-warm`（或 `doubao-speech list-voices` 中的任何其他别名）来选择声音。`doubao-speech` 还内置了流式 ASR——有关 Xiaoban 集成，请参阅[下方的 STT 章节](#example-doubao--volcengine-asr)。源码和完整文档：[github.com/Hypnus-Yuan/doubao-speech](https://github.com/Hypnus-Yuan/doubao-speech)。
 
 #### 占位符
 
-你的命令模板可以引用以下占位符。Hermes 在渲染时会替换它们，并根据上下文（裸值 / 单引号 / 双引号）对每个值进行 shell 转义，因此包含空格和其他 shell 敏感字符的路径是安全的。
+你的命令模板可以引用以下占位符。Xiaoban 在渲染时会替换它们，并根据上下文（裸值 / 单引号 / 双引号）对每个值进行 shell 转义，因此包含空格和其他 shell 敏感字符的路径是安全的。
 
 | 占位符 | 含义 |
 |------------------|------------------------------------------------------|
-| `{input_path}` | Hermes 写入的临时 UTF-8 文本文件路径 |
+| `{input_path}` | Xiaoban 写入的临时 UTF-8 文本文件路径 |
 | `{text_path}` | `{input_path}` 的别名 |
 | `{output_path}` | 命令必须写入音频的路径 |
 | `{format}` | `mp3` / `wav` / `ogg` / `flac` |
@@ -280,8 +280,8 @@ tts:
 | 键 | 默认值 | 含义 |
 |--------------------|---------|------------------------------------------------------------------------------------------------------------|
 | `timeout` | `120` | 秒数；超时后进程树将被终止（Unix `killpg`，Windows `taskkill /T`）。 |
-| `output_format` | `mp3` | `mp3` / `wav` / `ogg` / `flac` 之一。若 Hermes 选择路径，则从输出扩展名自动推断。 |
-| `voice_compatible` | `false` | 为 `true` 时，Hermes 通过 ffmpeg 将 MP3/WAV 输出转换为 Opus/OGG，使 Telegram 渲染语音气泡。 |
+| `output_format` | `mp3` | `mp3` / `wav` / `ogg` / `flac` 之一。若 Xiaoban 选择路径，则从输出扩展名自动推断。 |
+| `voice_compatible` | `false` | 为 `true` 时，Xiaoban 通过 ffmpeg 将 MP3/WAV 输出转换为 Opus/OGG，使 Telegram 渲染语音气泡。 |
 | `max_text_length` | `5000` | 渲染命令前，输入将被截断至此长度。 |
 | `voice` / `model` | 空 | 仅作为占位符值传递给命令。 |
 
@@ -295,7 +295,7 @@ tts:
 
 #### 安全性
 
-命令类型提供商会以你的用户权限运行你配置的任何 shell 命令。Hermes 会对占位符值进行转义并强制执行配置的超时，但命令模板本身是受信任的本地输入——请像对待 PATH 中的 shell 脚本一样对待它。
+命令类型提供商会以你的用户权限运行你配置的任何 shell 命令。Xiaoban 会对占位符值进行转义并强制执行配置的超时，但命令模板本身是受信任的本地输入——请像对待 PATH 中的 shell 脚本一样对待它。
 
 ### Python 插件提供商
 
@@ -316,7 +316,7 @@ tts:
 
 #### 最小插件
 
-将以下内容放入 `~/.hermes/plugins/my-tts/`：
+将以下内容放入 `~/.xiaoban/plugins/my-tts/`：
 
 `plugin.yaml`：
 ```yaml
@@ -362,7 +362,7 @@ def register(ctx):
     ctx.register_tts_provider(MyTTSProvider())
 ```
 
-启用它（`hermes plugins enable my-tts`），将 `tts.provider` 指向它（在 `config.yaml` 中设置 `tts.provider: my-tts`），`text_to_speech` 工具将通过你的插件路由。
+启用它（`xiaoban plugins enable my-tts`），将 `tts.provider` 指向它（在 `config.yaml` 中设置 `tts.provider: my-tts`），`text_to_speech` 工具将通过你的插件路由。
 
 #### 可选 hook
 
@@ -387,13 +387,13 @@ def register(ctx):
 | **OpenAI Whisper API** | 良好至最佳 | 付费 | `VOICE_TOOLS_OPENAI_KEY` 或 `OPENAI_API_KEY` |
 
 :::info 零配置
-安装了 `faster-whisper` 后，本地转录即可开箱即用。若不可用，Hermes 也可使用常见安装位置（如 `/opt/homebrew/bin`）的本地 `whisper` CLI，或通过 `HERMES_LOCAL_STT_COMMAND` 指定的自定义命令。
+安装了 `faster-whisper` 后，本地转录即可开箱即用。若不可用，Xiaoban 也可使用常见安装位置（如 `/opt/homebrew/bin`）的本地 `whisper` CLI，或通过 `XIAOBAN_LOCAL_STT_COMMAND` 指定的自定义命令。
 :::
 
 ### 配置
 
 ```yaml
-# In ~/.hermes/config.yaml
+# In ~/.xiaoban/config.yaml
 stt:
   provider: "local"           # "local" | "groq" | "openai" | "mistral" | "xai"
   local:
@@ -426,7 +426,7 @@ stt:
 
 **xAI Grok STT** — 需要 `XAI_API_KEY`。以 multipart/form-data 格式发送至 `https://api.x.ai/v1/stt`。如果你已在使用 xAI 进行聊天或 TTS 并希望一个 API 密钥搞定一切，这是个好选择。自动检测顺序将其排在 Groq 之后——显式设置 `stt.provider: xai` 可强制使用。
 
-**自定义本地 CLI 回退** — 若你希望 Hermes 直接调用本地转录命令，请设置 `HERMES_LOCAL_STT_COMMAND`。命令模板支持 `{input_path}`、`{output_dir}`、`{language}` 和 `{model}` 占位符。你的命令必须在 `{output_dir}` 下某处写入 `.txt` 转录文件。
+**自定义本地 CLI 回退** — 若你希望 Xiaoban 直接调用本地转录命令，请设置 `XIAOBAN_LOCAL_STT_COMMAND`。命令模板支持 `{input_path}`、`{output_dir}`、`{language}` 和 `{model}` 占位符。你的命令必须在 `{output_dir}` 下某处写入 `.txt` 转录文件。
 
 #### 示例：Doubao / Volcengine ASR
 
@@ -436,7 +436,7 @@ stt:
 pip install doubao-speech
 export VOLCENGINE_APP_ID="your-app-id"
 export VOLCENGINE_ACCESS_TOKEN="your-access-token"
-export HERMES_LOCAL_STT_COMMAND='doubao-speech transcribe {input_path} --out {output_dir}/transcript.txt'
+export XIAOBAN_LOCAL_STT_COMMAND='doubao-speech transcribe {input_path} --out {output_dir}/transcript.txt'
 ```
 
 ```yaml
@@ -444,12 +444,12 @@ stt:
   provider: local_command
 ```
 
-Hermes 将传入的语音消息写入 `{input_path}`，运行命令，并读取 `{output_dir}` 下生成的 `.txt` 文件。语言由 Volcengine bigmodel 端点自动检测。
+Xiaoban 将传入的语音消息写入 `{input_path}`，运行命令，并读取 `{output_dir}` 下生成的 `.txt` 文件。语言由 Volcengine bigmodel 端点自动检测。
 
 ### 回退行为
 
-若配置的提供商不可用，Hermes 会自动回退：
-- **本地 faster-whisper 不可用** → 在云端提供商之前尝试本地 `whisper` CLI 或 `HERMES_LOCAL_STT_COMMAND`
+若配置的提供商不可用，Xiaoban 会自动回退：
+- **本地 faster-whisper 不可用** → 在云端提供商之前尝试本地 `whisper` CLI 或 `XIAOBAN_LOCAL_STT_COMMAND`
 - **未设置 Groq 密钥** → 回退至本地转录，然后是 OpenAI
 - **未设置 OpenAI 密钥** → 回退至本地转录，然后是 Groq
 - **未设置 Mistral 密钥/SDK** → 在自动检测中跳过；回退至下一个可用提供商

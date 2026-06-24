@@ -6,7 +6,7 @@ author: Xiaoban-Agent
 license: MIT
 platforms: [macos]
 metadata:
-  hermes:
+  xiaoban:
     tags: [Reminders, tasks, todo, macOS, Apple]
 prerequisites:
   commands: [remindctl]

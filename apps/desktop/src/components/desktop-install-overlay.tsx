@@ -270,7 +270,7 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
       return
     }
 
-    const desktop = window.hermesDesktop
+    const desktop = window.xiaobanDesktop
 
     if (!desktop || typeof desktop.onBootstrapEvent !== 'function') {
       return
@@ -375,7 +375,7 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
               </Button>
               <Button
                 onClick={() => {
-                  window.hermesDesktop?.openExternal?.(ups.docsUrl)
+                  window.xiaobanDesktop?.openExternal?.(ups.docsUrl)
                 }}
                 size="sm"
                 variant="ghost"
@@ -521,7 +521,7 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
                   setCancelling(true)
 
                   try {
-                    await window.hermesDesktop?.cancelBootstrap?.()
+                    await window.xiaobanDesktop?.cancelBootstrap?.()
                   } catch {
                     // ignore -- the failed/cancelled event will surface the result
                   }
@@ -542,7 +542,7 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs text-muted-foreground">
                 {copy.transcriptSaved}{' '}
-                <code className="rounded bg-muted/50 px-1 py-0.5 font-mono">%LOCALAPPDATA%\hermes\logs\</code>
+                <code className="rounded bg-muted/50 px-1 py-0.5 font-mono">%LOCALAPPDATA%\xiaoban\logs\</code>
               </span>
               <div className="flex gap-2">
                 <Button
@@ -573,7 +573,7 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
                     // and main short-circuits to the latched error without
                     // re-running install.ps1.
                     try {
-                      await window.hermesDesktop?.resetBootstrap?.()
+                      await window.xiaobanDesktop?.resetBootstrap?.()
                     } catch {
                       // best-effort -- continue with reload regardless
                     }

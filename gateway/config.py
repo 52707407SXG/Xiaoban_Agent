@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable
 from enum import Enum
 
-from hermes_cli.config import get_hermes_home
+from xiaoban_cli.config import get_xiaoban_home
 from utils import env_int, is_truthy_value
 
 logger = logging.getLogger(__name__)
@@ -513,7 +513,7 @@ class GatewayConfig:
     quick_commands: Dict[str, Any] = field(default_factory=dict)
     
     # Storage paths
-    sessions_dir: Path = field(default_factory=lambda: get_hermes_home() / "sessions")
+    sessions_dir: Path = field(default_factory=lambda: get_xiaoban_home() / "sessions")
     
     # Delivery settings
     always_log_local: bool = True  # Always save cron outputs to local files
@@ -537,7 +537,7 @@ class GatewayConfig:
     # When True, the default profile's gateway serves inbound messages for every
     # profile on the host: profiles are stamped into session keys and (in later
     # phases) per-profile adapters/credentials are resolved. When False, the
-    # gateway behaves exactly as before — single HERMES_HOME, no profile stamping.
+    # gateway behaves exactly as before — single XIAOBAN_HOME, no profile stamping.
     multiplex_profiles: bool = False
 
     # Unauthorized DM policy
@@ -589,7 +589,7 @@ class GatewayConfig:
         try:
             from gateway.platform_registry import platform_registry
             try:
-                from hermes_cli.plugins import discover_plugins
+                from xiaoban_cli.plugins import discover_plugins
                 discover_plugins()
             except Exception:
                 pass
@@ -685,7 +685,7 @@ class GatewayConfig:
         if "default_reset_policy" in data:
             default_policy = SessionResetPolicy.from_dict(data["default_reset_policy"])
         
-        sessions_dir = get_hermes_home() / "sessions"
+        sessions_dir = get_xiaoban_home() / "sessions"
         if "sessions_dir" in data:
             sessions_dir = Path(data["sessions_dir"])
         
@@ -703,7 +703,7 @@ class GatewayConfig:
         nested_gateway = data.get("gateway") if isinstance(data.get("gateway"), dict) else {}
         if multiplex_profiles is None and isinstance(nested_gateway, dict):
             # Also honor gateway.multiplex_profiles written by
-            # ``hermes config set gateway.multiplex_profiles true``.
+            # ``xiaoban config set gateway.multiplex_profiles true``.
             multiplex_profiles = nested_gateway.get("multiplex_profiles")
         if "max_concurrent_sessions" in data:
             max_concurrent_raw = data.get("max_concurrent_sessions")
@@ -784,11 +784,11 @@ def load_gateway_config() -> GatewayConfig:
 
     Priority (highest to lowest):
     1. Environment variables
-    2. ~/.hermes/config.yaml (primary user-facing config)
-    3. ~/.hermes/gateway.json (legacy — provides defaults under config.yaml)
+    2. ~/.xiaoban/config.yaml (primary user-facing config)
+    3. ~/.xiaoban/gateway.json (legacy — provides defaults under config.yaml)
     4. Built-in defaults
     """
-    _home = get_hermes_home()
+    _home = get_xiaoban_home()
     gw_data: dict = {}
 
     # Legacy fallback: gateway.json provides the base layer.
@@ -815,10 +815,10 @@ def load_gateway_config() -> GatewayConfig:
 
             # Managed scope: overlay administrator-pinned values so the gateway
             # honors them too. This loader builds its own dict instead of going
-            # through hermes_cli.config.load_config, so without this a managed
+            # through xiaoban_cli.config.load_config, so without this a managed
             # session_reset / quick_commands / stt / model would be ignored by
             # the messaging gateway. Fail-open via the shared helper.
-            from hermes_cli import managed_scope
+            from xiaoban_cli import managed_scope
             yaml_cfg = managed_scope.apply_managed_overlay(yaml_cfg)
 
             # Map config.yaml keys → GatewayConfig.from_dict() schema.
@@ -865,7 +865,7 @@ def load_gateway_config() -> GatewayConfig:
             streaming_cfg = yaml_cfg.get("streaming")
             if not isinstance(streaming_cfg, dict):
                 # Fall back to nested gateway.streaming written by
-                # ``hermes config set gateway.streaming.*``
+                # ``xiaoban config set gateway.streaming.*``
                 streaming_cfg = yaml_cfg.get("gateway", {}).get("streaming")
             if isinstance(streaming_cfg, dict):
                 gw_data["streaming"] = streaming_cfg
@@ -923,7 +923,7 @@ def load_gateway_config() -> GatewayConfig:
             # Iterate built-in platforms plus any registered plugin platforms
             # so plugin authors get the same shared-key bridging (#24836).
             try:
-                from hermes_cli.plugins import discover_plugins
+                from xiaoban_cli.plugins import discover_plugins
                 discover_plugins()  # idempotent
                 from gateway.platform_registry import platform_registry as _pr
             except Exception as e:
@@ -1194,7 +1194,7 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
     # without changing placeholder values get a clear startup error instead
     # of a confusing "auth failed" from the platform API.
     try:
-        from hermes_cli.auth import has_usable_secret
+        from xiaoban_cli.auth import has_usable_secret
     except ImportError:
         has_usable_secret = None  # type: ignore[assignment]
 
@@ -1909,7 +1909,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     # for the same bug class in commit 7849a3d73; this is the runtime
     # counterpart.
     try:
-        from hermes_cli.plugins import discover_plugins
+        from xiaoban_cli.plugins import discover_plugins
         discover_plugins()  # idempotent
         from gateway.platform_registry import platform_registry
         for entry in platform_registry.plugin_entries():

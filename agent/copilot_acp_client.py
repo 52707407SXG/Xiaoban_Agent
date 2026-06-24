@@ -55,14 +55,14 @@ def _is_gh_copilot_deprecation_message(stderr_text: str) -> bool:
 
 def _resolve_command() -> str:
     return (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
+        os.getenv("XIAOBAN_COPILOT_ACP_COMMAND", "").strip()
         or os.getenv("COPILOT_CLI_PATH", "").strip()
         or "copilot"
     )
 
 
 def _resolve_args() -> list[str]:
-    raw = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
+    raw = os.getenv("XIAOBAN_COPILOT_ACP_ARGS", "").strip()
     if not raw:
         return ["--acp", "--stdio"]
     return shlex.split(raw)
@@ -88,7 +88,7 @@ def _resolve_home_dir() -> str:
         pass
 
     # Last resort: /tmp (writable on any POSIX system). Avoids crashing the
-    # subprocess with no HOME; callers can set HERMES_HOME explicitly if they
+    # subprocess with no HOME; callers can set XIAOBAN_HOME explicitly if they
     # need a different writable dir.
     return "/tmp"
 
@@ -97,7 +97,7 @@ def _build_subprocess_env() -> dict[str, str]:
     env = os.environ.copy()
     home = _resolve_home_dir()
     env["HOME"] = home
-    from hermes_constants import apply_subprocess_home_env
+    from xiaoban_constants import apply_subprocess_home_env
     apply_subprocess_home_env(env)
     return env
 
@@ -138,7 +138,7 @@ def _format_messages_as_prompt(
         "If no tool is needed, answer normally.",
     ]
     if model:
-        sections.append(f"Hermes requested model hint: {model}")
+        sections.append(f"Xiaoban requested model hint: {model}")
 
     if isinstance(tools, list) and tools:
         tool_specs: list[dict[str, Any]] = []
@@ -443,7 +443,7 @@ class CopilotACPClient:
         except FileNotFoundError as exc:
             raise RuntimeError(
                 f"Could not start Copilot ACP command '{self._acp_command}'. "
-                "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
+                "Install GitHub Copilot CLI or set XIAOBAN_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
             ) from exc
 
         if proc.stdin is None or proc.stdout is None:
@@ -531,7 +531,7 @@ class CopilotACPClient:
                         "  # then verify with: copilot --help\n\n"
                         "If `copilot` already resolves to the new CLI but you still see this,\n"
                         "point Xiaoban at it explicitly:\n"
-                        "  export HERMES_COPILOT_ACP_COMMAND=/path/to/new/copilot\n\n"
+                        "  export XIAOBAN_COPILOT_ACP_COMMAND=/path/to/new/copilot\n\n"
                         "Alternative: use the `copilot` provider (no ACP, hits the Copilot API\n"
                         "directly with a Copilot subscription token) via `xiaoban setup`.\n\n"
                         f"Original error:\n{stderr_text}"
@@ -671,7 +671,7 @@ class CopilotACPClient:
             response = _jsonrpc_error(
                 message_id,
                 -32601,
-                f"ACP client method '{method}' is not supported by Hermes yet.",
+                f"ACP client method '{method}' is not supported by Xiaoban yet.",
             )
 
         process.stdin.write(json.dumps(response) + "\n")

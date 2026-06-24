@@ -35,7 +35,7 @@ def test_docker_context_includes_license_file() -> None:
 def test_setup_uses_temporary_outputs_when_source_tree_is_read_only(
     monkeypatch,
 ) -> None:
-    """WebUI installs from read-only /opt/hermes must not write build metadata."""
+    """WebUI installs from read-only /opt/xiaoban must not write build metadata."""
     captured: dict[str, object] = {}
 
     def capture_setup(**kwargs: object) -> None:

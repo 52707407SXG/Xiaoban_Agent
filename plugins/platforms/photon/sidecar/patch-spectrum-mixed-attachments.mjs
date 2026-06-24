@@ -2,12 +2,12 @@
 // Patch spectrum-ts' iMessage inbound mapper until upstream preserves mixed
 // text + attachment Apple events. The current spectrum-ts mapper returns only
 // buildAttachmentMessage(...) whenever attachments are present, which drops
-// event.message.content.text before Hermes can see it.
+// event.message.content.text before Xiaoban can see it.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const MARKER = "Hermes patch: Preserve mixed text + attachment iMessage payloads";
+const MARKER = "Xiaoban patch: Preserve mixed text + attachment iMessage payloads";
 
 function scriptDir() {
   return path.dirname(fileURLToPath(import.meta.url));

@@ -17,7 +17,7 @@ Usage::
 Output: ``website/static/api/model-catalog.json``
 
 Live URL (after ``deploy-site.yml`` runs on merge to main):
-``https://xiaoban-agent.nousresearch.com/docs/api/model-catalog.json``
+``https://raw.githubusercontent.com/52707407SXG/Xiaoban_Agent/main/website/static/api/model-catalog.json``
 """
 
 from __future__ import annotations
@@ -30,10 +30,10 @@ from datetime import datetime, timezone
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
-# Ensure HERMES_HOME is set for imports that touch it at module level.
-os.environ.setdefault("HERMES_HOME", os.path.join(os.path.expanduser("~"), ".hermes"))
+# Ensure XIAOBAN_HOME is set for imports that touch it at module level.
+os.environ.setdefault("XIAOBAN_HOME", os.path.join(os.path.expanduser("~"), ".xiaoban"))
 
-from hermes_cli.models import OPENROUTER_MODELS, _PROVIDER_MODELS  # noqa: E402
+from xiaoban_cli.models import OPENROUTER_MODELS, _PROVIDER_MODELS  # noqa: E402
 
 OUTPUT_PATH = os.path.join(REPO_ROOT, "website", "static", "api", "model-catalog.json")
 CATALOG_VERSION = 1
@@ -45,7 +45,7 @@ def build_catalog() -> dict:
         "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "metadata": {
             "source": "xiaoban-agent repo",
-            "docs": "https://xiaoban-agent.nousresearch.com/docs/reference/model-catalog",
+            "docs": "https://github.com/52707407SXG/Xiaoban_Agent/tree/main/website/docs/reference/model-catalog",
         },
         "providers": {
             "openrouter": {

@@ -6,7 +6,7 @@ author: Xiaoban-Agent
 license: MIT
 platforms: [macos]
 metadata:
-  hermes:
+  xiaoban:
     tags: [iMessage, SMS, messaging, macOS, Apple]
 prerequisites:
   commands: [imsg]

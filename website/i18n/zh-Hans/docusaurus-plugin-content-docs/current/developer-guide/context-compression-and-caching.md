@@ -34,13 +34,13 @@ context:
 
 插件引擎**永远不会自动激活**——用户必须在 `context.engine` 中显式设置插件名称。默认的 `"compressor"` 始终使用内置实现。
 
-通过 `hermes plugins` → Provider Plugins → Context Engine 进行配置，或直接编辑 `config.yaml`。
+通过 `xiaoban plugins` → Provider Plugins → Context Engine 进行配置，或直接编辑 `config.yaml`。
 
 关于构建上下文引擎插件，请参阅 [Context Engine 插件](/developer-guide/context-engine-plugin)。
 
 ## 双重压缩系统
 
-Hermes 有两个独立运行的压缩层：
+Xiaoban 有两个独立运行的压缩层：
 
 ```
                      ┌──────────────────────────┐
@@ -264,7 +264,7 @@ max_summary_tokens   = min(200,000 × 0.05, 12,000) = 10,000
 
 ### 策略：system_and_3
 
-Anthropic 每次请求最多允许 4 个 `cache_control` 断点。Hermes 使用"system_and_3"策略：
+Anthropic 每次请求最多允许 4 个 `cache_control` 断点。Xiaoban 使用"system_and_3"策略：
 
 ```
 Breakpoint 1: System prompt           (stable across all turns)

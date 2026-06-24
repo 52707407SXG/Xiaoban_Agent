@@ -1,6 +1,6 @@
 # Contributing To Xiaoban-Agent
 
-Xiaoban-Agent is a My Stand native Agent built on a mature Hermes runtime fork.
+Xiaoban-Agent is a My Stand native Agent built on a mature Xiaoban runtime fork.
 
 The main contribution rule is simple: preserve the runtime chassis, and make My
 Stand integration cleaner.

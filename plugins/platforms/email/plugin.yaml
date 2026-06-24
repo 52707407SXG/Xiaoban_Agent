@@ -5,7 +5,7 @@ version: 1.0.0
 description: >
   Email gateway adapter for Xiaoban-Agent. Polls an IMAP mailbox for inbound
   messages and replies over SMTP, relaying email threads to and from the
-  Hermes agent.
+  Xiaoban agent.
 author: NousResearch
 requires_env:
   - name: EMAIL_ADDRESS

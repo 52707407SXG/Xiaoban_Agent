@@ -18,47 +18,47 @@ flowchart LR
     B -->|SSE streaming response| A
 ```
 
-Open WebUI connects to Xiaoban-Agent's API server just like it would connect to OpenAI. Hermes handles the requests with its full toolset — terminal, file operations, web search, memory, skills — and returns the final response.
+Open WebUI connects to Xiaoban-Agent's API server just like it would connect to OpenAI. Xiaoban handles the requests with its full toolset — terminal, file operations, web search, memory, skills — and returns the final response.
 
 :::important Runtime location
-The API server is a **Hermes agent runtime**, not a pure LLM proxy. For each request, Hermes creates a server-side `AIAgent` on the API-server host. Tool calls run where that API server is running.
+The API server is a **Xiaoban agent runtime**, not a pure LLM proxy. For each request, Xiaoban creates a server-side `AIAgent` on the API-server host. Tool calls run where that API server is running.
 
-For example, if a laptop points Open WebUI or another OpenAI-compatible client at a Hermes API server on a remote machine, `pwd`, file tools, browser tools, local MCP tools, and other workspace tools run on the remote API-server host, not on the laptop.
+For example, if a laptop points Open WebUI or another OpenAI-compatible client at a Xiaoban API server on a remote machine, `pwd`, file tools, browser tools, local MCP tools, and other workspace tools run on the remote API-server host, not on the laptop.
 :::
 
-Open WebUI talks to Hermes server-to-server, so you do not need `API_SERVER_CORS_ORIGINS` for this integration.
+Open WebUI talks to Xiaoban server-to-server, so you do not need `API_SERVER_CORS_ORIGINS` for this integration.
 
 ## Quick Setup
 
 ### One-command local bootstrap (macOS/Linux, no Docker)
 
-If you want Hermes + Open WebUI wired together locally with a reusable launcher, run:
+If you want Xiaoban + Open WebUI wired together locally with a reusable launcher, run:
 
 ```bash
-cd ~/.hermes/xiaoban-agent
+cd ~/.xiaoban/xiaoban-agent
 bash scripts/setup_open_webui.sh
 ```
 
 What the script does:
 
-- ensures `~/.hermes/.env` contains `API_SERVER_ENABLED`, `API_SERVER_HOST`, `API_SERVER_KEY`, `API_SERVER_PORT`, and `API_SERVER_MODEL_NAME`
-- restarts the Hermes gateway so the API server comes up
+- ensures `~/.xiaoban/.env` contains `API_SERVER_ENABLED`, `API_SERVER_HOST`, `API_SERVER_KEY`, `API_SERVER_PORT`, and `API_SERVER_MODEL_NAME`
+- restarts the Xiaoban gateway so the API server comes up
 - installs Open WebUI into `~/.local/open-webui-venv`
-- writes a launcher at `~/.local/bin/start-open-webui-hermes.sh`
+- writes a launcher at `~/.local/bin/start-open-webui-xiaoban.sh`
 - on macOS, installs a `launchd` user service; on Linux with `systemd --user`, installs a user service there
 
 Defaults:
 
-- Hermes API: `http://127.0.0.1:8642/v1`
+- Xiaoban API: `http://127.0.0.1:8642/v1`
 - Open WebUI: `http://127.0.0.1:8080`
 - model name advertised to Open WebUI: `Xiaoban-Agent`
 
 Useful overrides:
 
 ```bash
-OPEN_WEBUI_NAME='My Hermes UI' \
+OPEN_WEBUI_NAME='My Xiaoban UI' \
 OPEN_WEBUI_ENABLE_SIGNUP=true \
-HERMES_API_MODEL_NAME='My Xiaoban-Agent' \
+XIAOBAN_API_MODEL_NAME='My Xiaoban-Agent' \
 bash scripts/setup_open_webui.sh
 ```
 
@@ -71,11 +71,11 @@ OPEN_WEBUI_ENABLE_SERVICE=false bash scripts/setup_open_webui.sh
 ### 1. Enable the API server
 
 ```bash
-hermes config set API_SERVER_ENABLED true
-hermes config set API_SERVER_KEY your-secret-key
+xiaoban config set API_SERVER_ENABLED true
+xiaoban config set API_SERVER_KEY your-secret-key
 ```
 
-`hermes config set` auto-routes the flag to `config.yaml` and the secret to `~/.hermes/.env`. If the gateway is already running, restart it so the change takes effect:
+`xiaoban config set` auto-routes the flag to `config.yaml` and the secret to `~/.xiaoban/.env`. If the gateway is already running, restart it so the change takes effect:
 
 ```bash
 xiaoban gateway stop && xiaoban gateway
@@ -168,7 +168,7 @@ If you prefer to configure the connection through the UI instead of environment 
 5. Click **+ Add New Connection**
 6. Enter:
    - **URL**: `http://host.docker.internal:8642/v1`
-   - **API Key**: the exact same value as `API_SERVER_KEY` in Hermes
+   - **API Key**: the exact same value as `API_SERVER_KEY` in Xiaoban
 7. Click the **checkmark** to verify the connection
 8. **Save**
 
@@ -200,7 +200,7 @@ To use the Responses API mode:
 3. Change **API Type** from "Chat Completions" to **"Responses (Experimental)"**
 4. Save
 
-With the Responses API, Open WebUI sends requests in the Responses format (`input` array + `instructions`), and Xiaoban-Agent can preserve full tool call history across turns via `previous_response_id`. When `stream: true`, Hermes also streams spec-native `function_call` and `function_call_output` items, which enables custom structured tool-call UI in clients that render Responses events.
+With the Responses API, Open WebUI sends requests in the Responses format (`input` array + `instructions`), and Xiaoban-Agent can preserve full tool call history across turns via `previous_response_id`. When `stream: true`, Xiaoban also streams spec-native `function_call` and `function_call_output` items, which enables custom structured tool-call UI in clients that render Responses events.
 
 :::note
 Open WebUI currently manages conversation history client-side even in Responses mode — it sends the full message history in each request rather than using `previous_response_id`. The main advantage of Responses mode today is the structured event stream: text deltas, `function_call`, and `function_call_output` items arrive as OpenAI Responses SSE events instead of Chat Completions chunks.
@@ -217,9 +217,9 @@ When you send a message in Open WebUI:
 5. The agent's final text response streams back to Open WebUI
 6. Open WebUI displays the response in its chat interface
 
-Your agent has access to the same tools and capabilities as that API-server Hermes instance. If the API server is remote, those tools are remote too.
+Your agent has access to the same tools and capabilities as that API-server Xiaoban instance. If the API server is remote, those tools are remote too.
 
-If you need tools to run against your **local** workspace today, run Hermes locally and point it at a pure LLM provider or pure OpenAI-compatible model proxy (for example vLLM, LiteLLM, Ollama, llama.cpp, OpenAI, OpenRouter, etc.). A future split-runtime mode for "remote brain, local hands" is being tracked in [#18715](https://github.com/52707407SXG/Xiaoban-Agent/issues/18715); it is not the behavior of the current API server.
+If you need tools to run against your **local** workspace today, run Xiaoban locally and point it at a pure LLM provider or pure OpenAI-compatible model proxy (for example vLLM, LiteLLM, Ollama, llama.cpp, OpenAI, OpenRouter, etc.). A future split-runtime mode for "remote brain, local hands" is being tracked in [#18715](https://github.com/52707407SXG/Xiaoban_Agent/issues/18715); it is not the behavior of the current API server.
 
 :::tip Tool Progress
 With streaming enabled (the default), you'll see brief inline indicators as tools run — the tool emoji and its key argument. These appear in the response stream before the agent's final answer, giving you visibility into what's happening behind the scenes.
@@ -251,7 +251,7 @@ With streaming enabled (the default), you'll see brief inline indicators as tool
 - **Verify the gateway is running**: `curl http://localhost:8642/health` should return `{"status": "ok"}`
 - **Check model listing**: `curl -H "Authorization: Bearer your-secret-key" http://localhost:8642/v1/models` should return a list with `xiaoban-agent`
 - **Docker networking**: From inside Docker, `localhost` means the container, not your host. Use `host.docker.internal` or `--network=host`.
-- **Empty Ollama backend shadowing the picker**: If you omitted `ENABLE_OLLAMA_API=false`, Open WebUI shows an empty Ollama section above your Hermes models. Restart the container with `-e ENABLE_OLLAMA_API=false` or disable Ollama in **Admin Settings → Connections**.
+- **Empty Ollama backend shadowing the picker**: If you omitted `ENABLE_OLLAMA_API=false`, Open WebUI shows an empty Ollama section above your Xiaoban models. Restart the container with `-e ENABLE_OLLAMA_API=false` or disable Ollama in **Admin Settings → Connections**.
 
 ### Connection test passes but no models load
 
@@ -271,22 +271,22 @@ Open WebUI persists OpenAI-compatible connection settings in its own database af
 
 ## Multi-User Setup with Profiles
 
-To run separate Hermes instances per user — each with their own config, memory, and skills — use [profiles](/user-guide/profiles). Each profile runs its own API server on a different port and automatically advertises the profile name as the model in Open WebUI.
+To run separate Xiaoban instances per user — each with their own config, memory, and skills — use [profiles](/user-guide/profiles). Each profile runs its own API server on a different port and automatically advertises the profile name as the model in Open WebUI.
 
 ### 1. Create profiles and configure API servers
 
 `API_SERVER_*` are env vars, not YAML config keys, so write them to each profile's `.env`. Pick ports outside the default-platform range (`8644` is the webhook adapter, `8645` is wecom-callback, `8646` is msgraph-webhook), e.g. `8650+`:
 
 ```bash
-hermes profile create alice
-cat >> ~/.hermes/profiles/alice/.env <<EOF
+xiaoban profile create alice
+cat >> ~/.xiaoban/profiles/alice/.env <<EOF
 API_SERVER_ENABLED=true
 API_SERVER_PORT=8650
 API_SERVER_KEY=alice-secret
 EOF
 
-hermes profile create bob
-cat >> ~/.hermes/profiles/bob/.env <<EOF
+xiaoban profile create bob
+cat >> ~/.xiaoban/profiles/bob/.env <<EOF
 API_SERVER_ENABLED=true
 API_SERVER_PORT=8651
 API_SERVER_KEY=bob-secret
@@ -296,8 +296,8 @@ EOF
 ### 2. Start each gateway
 
 ```bash
-hermes -p alice gateway &
-hermes -p bob gateway &
+xiaoban -p alice gateway &
+xiaoban -p bob gateway &
 ```
 
 ### 3. Add connections in Open WebUI
@@ -309,12 +309,12 @@ In **Admin Settings** → **Connections** → **OpenAI API** → **Manage**, add
 | Alice | `http://host.docker.internal:8650/v1` | `alice-secret` |
 | Bob | `http://host.docker.internal:8651/v1` | `bob-secret` |
 
-The model dropdown will show `alice` and `bob` as distinct models. You can assign models to Open WebUI users via the admin panel, giving each user their own isolated Hermes agent.
+The model dropdown will show `alice` and `bob` as distinct models. You can assign models to Open WebUI users via the admin panel, giving each user their own isolated Xiaoban agent.
 
 :::tip Custom Model Names
 The model name defaults to the profile name. To override it, set `API_SERVER_MODEL_NAME` in the profile's `.env`:
 ```bash
-hermes -p alice config set API_SERVER_MODEL_NAME "Alice's Agent"
+xiaoban -p alice config set API_SERVER_MODEL_NAME "Alice's Agent"
 ```
 :::
 

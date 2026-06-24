@@ -31,7 +31,7 @@ Tool Gateway 仅对 **[付费](https://portal.nousresearch.com/manage-subscripti
 检查当前状态：
 
 ```bash
-hermes status
+xiaoban status
 ```
 
 在输出中找到 **Nous Tool Gateway** 小节：会标明哪些工具经订阅网关启用、哪些使用直连 Key、哪些尚未配置。
@@ -40,7 +40,7 @@ hermes status
 
 ### 在模型配置流程中
 
-运行 `xiaoban model` 并选择 Nous Portal 作为提供商时，Hermes 会主动询问是否启用 Tool Gateway：
+运行 `xiaoban model` 并选择 Nous Portal 作为提供商时，Xiaoban 会主动询问是否启用 Tool Gateway：
 
 ```
 Your Nous subscription includes the Tool Gateway.
@@ -74,7 +74,7 @@ xiaoban tools
 
 ### 手动编辑配置
 
-在 `~/.hermes/config.yaml` 中直接设置 `use_gateway`：
+在 `~/.xiaoban/config.yaml` 中直接设置 `use_gateway`：
 
 ```yaml
 web:
@@ -102,7 +102,7 @@ browser:
 3. **TTS** — `text_to_speech` 走网关的 OpenAI Audio 端点  
 4. **浏览器** — `browser_navigate` 等走网关的 Browser Use 端点  
 
-网关使用 Nous Portal 凭据认证（在 `xiaoban model` 完成后写入 `~/.hermes/auth.json`）。
+网关使用 Nous Portal 凭据认证（在 `xiaoban model` 完成后写入 `~/.xiaoban/auth.json`）。
 
 ### 优先级
 
@@ -134,7 +134,7 @@ web:
 ## 查看状态
 
 ```bash
-hermes status
+xiaoban status
 ```
 
 **Nous Tool Gateway** 小节示例：
@@ -153,7 +153,7 @@ hermes status
 
 ## 进阶：自建网关
 
-若使用自建或自定义网关，可在 `~/.hermes/.env` 中用环境变量覆盖端点：
+若使用自建或自定义网关，可在 `~/.xiaoban/.env` 中用环境变量覆盖端点：
 
 ```bash
 TOOL_GATEWAY_DOMAIN=nousresearch.com     # 网关路由基础域名

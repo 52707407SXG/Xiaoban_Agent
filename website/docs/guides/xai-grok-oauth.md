@@ -6,13 +6,13 @@ description: "Sign in with your SuperGrok or X Premium+ subscription to use Grok
 
 # xAI Grok OAuth (SuperGrok / X Premium+)
 
-Xiaoban-Agent supports xAI Grok through a browser-based OAuth login flow against [accounts.x.ai](https://accounts.x.ai), using either a **SuperGrok subscription** ([grok.com](https://x.ai/grok)) or an **X Premium+ subscription** (linked X account). No `XAI_API_KEY` is required — log in once and Hermes automatically refreshes your session in the background.
+Xiaoban-Agent supports xAI Grok through a browser-based OAuth login flow against [accounts.x.ai](https://accounts.x.ai), using either a **SuperGrok subscription** ([grok.com](https://x.ai/grok)) or an **X Premium+ subscription** (linked X account). No `XAI_API_KEY` is required — log in once and Xiaoban automatically refreshes your session in the background.
 
 When you sign in with an X account that has Premium+, xAI automatically links the subscription status to your xAI session, so the OAuth flow works the same as it does for direct SuperGrok subscribers.
 
 The transport reuses the `codex_responses` adapter (xAI exposes a Responses-style endpoint), so reasoning, tool-calling, streaming, and prompt caching work without any adapter changes.
 
-The same OAuth bearer token is also reused by every direct-to-xAI surface in Hermes — TTS, image generation, video generation, and transcription — so a single login covers all four.
+The same OAuth bearer token is also reused by every direct-to-xAI surface in Xiaoban — TTS, image generation, video generation, and transcription — so a single login covers all four.
 
 ## Overview
 
@@ -36,7 +36,7 @@ The same OAuth bearer token is also reused by every direct-to-xAI surface in Her
 - A browser available on the local machine (or use `--no-browser` for remote sessions)
 
 :::warning xAI may restrict OAuth API access by tier
-xAI's backend enforces its own allowlist on the OAuth API surface and has been seen to reject standard SuperGrok subscribers with `HTTP 403` (see issue [#26847](https://github.com/52707407SXG/Xiaoban-Agent/issues/26847)) even though the in-app subscription is active. If OAuth login succeeds in the browser but inference returns 403, set `XAI_API_KEY` and switch to the API-key path (`provider: xai`) — that surface is not subject to the same gating today.
+xAI's backend enforces its own allowlist on the OAuth API surface and has been seen to reject standard SuperGrok subscribers with `HTTP 403` (see issue [#26847](https://github.com/52707407SXG/Xiaoban_Agent/issues/26847)) even though the in-app subscription is active. If OAuth login succeeds in the browser but inference returns 403, set `XAI_API_KEY` and switch to the API-key path (`provider: xai`) — that surface is not subject to the same gating today.
 :::
 
 ## Quick Start
@@ -45,27 +45,27 @@ xAI's backend enforces its own allowlist on the OAuth API surface and has been s
 # Launch the provider and model picker
 xiaoban model
 # → Select "xAI Grok OAuth (SuperGrok / X Premium+)" from the provider list
-# → Hermes opens your browser to accounts.x.ai
+# → Xiaoban opens your browser to accounts.x.ai
 # → Approve access in the browser
 # → Pick a model (grok-build-0.1 is at the top)
 # → Start chatting
 
-hermes
+xiaoban
 ```
 
-After the first login, credentials are stored under `~/.hermes/auth.json` and refreshed automatically before they expire.
+After the first login, credentials are stored under `~/.xiaoban/auth.json` and refreshed automatically before they expire.
 
 ## Logging In Manually
 
 You can trigger a login without going through the model picker:
 
 ```bash
-hermes auth add xai-oauth
+xiaoban auth add xai-oauth
 ```
 
 ### Remote / headless sessions
 
-On servers, containers, or SSH sessions where no browser is available, Hermes detects the remote environment and prints the authorization URL instead of opening a browser.
+On servers, containers, or SSH sessions where no browser is available, Xiaoban detects the remote environment and prints the authorization URL instead of opening a browser.
 
 **Important:** the loopback listener still runs on the remote machine at `127.0.0.1:56121`. The xAI redirect needs to reach *that* listener, so opening the URL on your laptop will fail (`Could not establish connection. We couldn't reach your app.`) unless you forward the port:
 
@@ -74,7 +74,7 @@ On servers, containers, or SSH sessions where no browser is available, Hermes de
 ssh -N -L 56121:127.0.0.1:56121 user@remote-host
 
 # Then in your SSH session on the remote machine:
-hermes auth add xai-oauth --no-browser
+xiaoban auth add xai-oauth --no-browser
 # Open the printed authorize URL in your local browser.
 ```
 
@@ -84,29 +84,29 @@ See [OAuth over SSH / Remote Hosts](./oauth-over-ssh.md) for the full step-by-st
 
 ### Browser-only remotes (Cloud Shell, Codespaces, EC2 Instance Connect)
 
-If you don't have a regular SSH client (e.g. you're running Hermes inside GCP Cloud Shell, GitHub Codespaces, AWS EC2 Instance Connect, Gitpod, or another browser-based console), the `ssh -L` recipe above isn't available. Use `--manual-paste` instead — Hermes skips the loopback listener and lets you paste the failed callback URL straight from your browser:
+If you don't have a regular SSH client (e.g. you're running Xiaoban inside GCP Cloud Shell, GitHub Codespaces, AWS EC2 Instance Connect, Gitpod, or another browser-based console), the `ssh -L` recipe above isn't available. Use `--manual-paste` instead — Xiaoban skips the loopback listener and lets you paste the failed callback URL straight from your browser:
 
 ```bash
-hermes auth add xai-oauth --manual-paste
+xiaoban auth add xai-oauth --manual-paste
 # Or via the model picker:
 xiaoban model --manual-paste
 ```
 
-See [OAuth over SSH / Remote Hosts](./oauth-over-ssh.md#browser-only-remote-cloud-shell--codespaces--ec2-instance-connect) for the full walkthrough. Regression fix for [#26923](https://github.com/52707407SXG/Xiaoban-Agent/issues/26923).
+See [OAuth over SSH / Remote Hosts](./oauth-over-ssh.md#browser-only-remote-cloud-shell--codespaces--ec2-instance-connect) for the full walkthrough. Regression fix for [#26923](https://github.com/52707407SXG/Xiaoban_Agent/issues/26923).
 
-If the consent page renders the authorization code directly on the page (xAI's current behavior on browser-based consoles) instead of redirecting to your `127.0.0.1:56121/callback`, paste **just the bare code value** at the `Callback URL:` prompt — Hermes accepts the full URL, a bare `?code=...&state=...` query fragment, or a bare code interchangeably.
+If the consent page renders the authorization code directly on the page (xAI's current behavior on browser-based consoles) instead of redirecting to your `127.0.0.1:56121/callback`, paste **just the bare code value** at the `Callback URL:` prompt — Xiaoban accepts the full URL, a bare `?code=...&state=...` query fragment, or a bare code interchangeably.
 
 ## How the Login Works
 
-1. Hermes opens your browser to `accounts.x.ai`.
+1. Xiaoban opens your browser to `accounts.x.ai`.
 2. You sign in (or confirm your existing session) and approve access.
-3. xAI redirects back to Hermes and the tokens are saved to `~/.hermes/auth.json`.
-4. From then on, Hermes refreshes the access token in the background — you stay signed in until you `hermes auth logout xai-oauth` or revoke access from your xAI account settings.
+3. xAI redirects back to Xiaoban and the tokens are saved to `~/.xiaoban/auth.json`.
+4. From then on, Xiaoban refreshes the access token in the background — you stay signed in until you `xiaoban auth logout xai-oauth` or revoke access from your xAI account settings.
 
 ## Checking Login Status
 
 ```bash
-hermes doctor
+xiaoban doctor
 ```
 
 The `◆ Auth Providers` section will show the current state of every provider, including `xai-oauth`.
@@ -122,13 +122,13 @@ xiaoban model
 Or set the model directly:
 
 ```bash
-hermes config set model.default grok-build-0.1
-hermes config set model.provider xai-oauth
+xiaoban config set model.default grok-build-0.1
+xiaoban config set model.provider xai-oauth
 ```
 
 ## Configuration Reference
 
-After login, `~/.hermes/config.yaml` will contain:
+After login, `~/.xiaoban/config.yaml` will contain:
 
 ```yaml
 model:
@@ -142,10 +142,10 @@ model:
 All of the following resolve to `xai-oauth`:
 
 ```bash
-hermes --provider xai-oauth        # canonical
-hermes --provider grok-oauth       # alias
-hermes --provider x-ai-oauth       # alias
-hermes --provider xai-grok-oauth   # alias
+xiaoban --provider xai-oauth        # canonical
+xiaoban --provider grok-oauth       # alias
+xiaoban --provider x-ai-oauth       # alias
+xiaoban --provider xai-grok-oauth   # alias
 ```
 
 ## Direct-to-xAI Tools (TTS / Image / Video / Transcription / X Search)
@@ -201,34 +201,34 @@ To select xAI as the active provider, set `model.provider: xai-oauth` in `config
 
 ### Token expired — not re-logging in automatically
 
-Hermes refreshes the token before each session and again reactively on a 401. If refresh fails with `invalid_grant` (the refresh token was revoked, or the account was rotated), Hermes surfaces a typed re-auth message instead of crashing.
+Xiaoban refreshes the token before each session and again reactively on a 401. If refresh fails with `invalid_grant` (the refresh token was revoked, or the account was rotated), Xiaoban surfaces a typed re-auth message instead of crashing.
 
-When the refresh failure is terminal (HTTP 4xx, `invalid_grant`, revoked grant, etc.), Hermes marks the refresh token as dead and quarantines it locally — subsequent calls skip the doomed refresh attempt instead of replaying the same 401 over and over. The agent surfaces a single "re-authentication required" message and stays out of the way until you log in again.
+When the refresh failure is terminal (HTTP 4xx, `invalid_grant`, revoked grant, etc.), Xiaoban marks the refresh token as dead and quarantines it locally — subsequent calls skip the doomed refresh attempt instead of replaying the same 401 over and over. The agent surfaces a single "re-authentication required" message and stays out of the way until you log in again.
 
-**Fix:** run `hermes auth add xai-oauth` again to start a fresh login. The quarantine clears on the next successful exchange.
+**Fix:** run `xiaoban auth add xai-oauth` again to start a fresh login. The quarantine clears on the next successful exchange.
 
 ### Authorization timed out
 
-The loopback listener has a finite expiry window (default 180 s). If you don't approve the login in time, Hermes raises a timeout error.
+The loopback listener has a finite expiry window (default 180 s). If you don't approve the login in time, Xiaoban raises a timeout error.
 
-**Fix:** re-run `hermes auth add xai-oauth` (or `xiaoban model`). The flow starts fresh.
+**Fix:** re-run `xiaoban auth add xai-oauth` (or `xiaoban model`). The flow starts fresh.
 
 ### State mismatch (possible CSRF)
 
-Hermes detected that the `state` value returned by the authorization server doesn't match what it sent.
+Xiaoban detected that the `state` value returned by the authorization server doesn't match what it sent.
 
 **Fix:** re-run the login. If it persists, check for a proxy or redirect that is modifying the OAuth response.
 
 ### Logging in from a remote server
 
-On SSH or container sessions Hermes prints the authorization URL instead of opening a browser. The loopback callback listener still binds `127.0.0.1:56121` on the remote host — your laptop's browser can't reach it without an SSH local-forward:
+On SSH or container sessions Xiaoban prints the authorization URL instead of opening a browser. The loopback callback listener still binds `127.0.0.1:56121` on the remote host — your laptop's browser can't reach it without an SSH local-forward:
 
 ```bash
 # Local machine, separate terminal:
 ssh -N -L 56121:127.0.0.1:56121 user@remote-host
 
 # Remote machine:
-hermes auth add xai-oauth --no-browser
+xiaoban auth add xai-oauth --no-browser
 ```
 
 Full walkthrough (jump boxes, mosh/tmux, port conflicts): [OAuth over SSH / Remote Hosts](./oauth-over-ssh.md).
@@ -237,13 +237,13 @@ Full walkthrough (jump boxes, mosh/tmux, port conflicts): [OAuth over SSH / Remo
 
 OAuth completed in the browser, tokens are saved, but inference or token refresh returns `HTTP 403` with a message similar to *"The caller does not have permission to execute the specified operation"*.
 
-This is **not** a stale-token problem — re-running `xiaoban model` won't change it. xAI's backend has been seen to restrict OAuth API access to specific SuperGrok tiers despite the in-app subscription being active (issue [#26847](https://github.com/52707407SXG/Xiaoban-Agent/issues/26847)).
+This is **not** a stale-token problem — re-running `xiaoban model` won't change it. xAI's backend has been seen to restrict OAuth API access to specific SuperGrok tiers despite the in-app subscription being active (issue [#26847](https://github.com/52707407SXG/Xiaoban_Agent/issues/26847)).
 
 **Fix:** set `XAI_API_KEY` and switch to the API-key path:
 
 ```bash
 export XAI_API_KEY=xai-...
-hermes config set model.provider xai
+xiaoban config set model.provider xai
 ```
 
 Or upgrade your subscription at [x.ai/grok](https://x.ai/grok) if the OAuth route is required.
@@ -252,21 +252,21 @@ Or upgrade your subscription at [x.ai/grok](https://x.ai/grok) if the OAuth rout
 
 The auth store has no `xai-oauth` entry and no `XAI_API_KEY` is set. You haven't logged in yet, or the credential file was deleted.
 
-**Fix:** run `xiaoban model` and pick the xAI Grok OAuth provider, or run `hermes auth add xai-oauth`.
+**Fix:** run `xiaoban model` and pick the xAI Grok OAuth provider, or run `xiaoban auth add xai-oauth`.
 
 ## Logging Out
 
 To remove all stored xAI Grok OAuth credentials:
 
 ```bash
-hermes auth logout xai-oauth
+xiaoban auth logout xai-oauth
 ```
 
-This clears both the singleton OAuth entry in `auth.json` and any credential-pool rows for `xai-oauth`. Use `hermes auth remove xai-oauth <index|id|label>` if you only want to drop a single pool entry (run `hermes auth list xai-oauth` to see them).
+This clears both the singleton OAuth entry in `auth.json` and any credential-pool rows for `xai-oauth`. Use `xiaoban auth remove xai-oauth <index|id|label>` if you only want to drop a single pool entry (run `xiaoban auth list xai-oauth` to see them).
 
 ## See Also
 
-- [OAuth over SSH / Remote Hosts](./oauth-over-ssh.md) — required reading if Hermes is on a different machine than your browser
+- [OAuth over SSH / Remote Hosts](./oauth-over-ssh.md) — required reading if Xiaoban is on a different machine than your browser
 - [AI Providers reference](../integrations/providers.md)
 - [Environment Variables](../reference/environment-variables.md)
 - [Configuration](../user-guide/configuration.md)

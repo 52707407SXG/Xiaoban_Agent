@@ -255,7 +255,7 @@ class QQAdapter(BasePlatformAdapter):
 
         # Default interaction dispatcher: routes approval-button clicks to
         # tools.approval.resolve_gateway_approval() and update-prompt clicks
-        # to ~/.hermes/.update_response. Set here so the cross-adapter gateway
+        # to ~/.xiaoban/.update_response. Set here so the cross-adapter gateway
         # contract (send_exec_approval / send_update_prompt) works out of the
         # box; callers can override with set_interaction_callback(None) or
         # register a custom handler.
@@ -455,7 +455,7 @@ class QQAdapter(BasePlatformAdapter):
             await self._session.close()
         self._session = None
 
-        # Honor WSL proxy env for QQ WebSocket. Hermes upgrades overwrite this
+        # Honor WSL proxy env for QQ WebSocket. Xiaoban upgrades overwrite this
         # local patch, so QQ can regress to direct-connect timeouts after update.
         self._session = aiohttp.ClientSession(trust_env=True)
         ws_proxy = (
@@ -1114,7 +1114,7 @@ class QQAdapter(BasePlatformAdapter):
           :func:`tools.approval.resolve_gateway_approval`
           (unblocks the agent thread waiting on a dangerous-command approval).
         - ``update_prompt:<answer>`` →
-          writes the answer to ``~/.hermes/.update_response`` for the
+          writes the answer to ``~/.xiaoban/.update_response`` for the
           detached ``xiaoban update --gateway`` process to consume.
         - Anything else is logged at DEBUG and ignored.
 
@@ -1189,8 +1189,8 @@ class QQAdapter(BasePlatformAdapter):
         Writes via ``tmp + rename`` so a partial write can't fool the reader.
         """
         try:
-            from hermes_constants import get_hermes_home
-            home = get_hermes_home()
+            from xiaoban_constants import get_xiaoban_home
+            home = get_xiaoban_home()
             response_path = home / ".update_response"
             tmp = response_path.with_suffix(".tmp")
             tmp.write_text(answer)
@@ -2703,7 +2703,7 @@ class QQAdapter(BasePlatformAdapter):
         clicks surface as ``INTERACTION_CREATE`` with
         ``button_data = 'update_prompt:y'`` or ``'update_prompt:n'``;
         the adapter's interaction callback writes the answer to
-        ``~/.hermes/.update_response`` so the detached update process
+        ``~/.xiaoban/.update_response`` so the detached update process
         can read it.
         """
         del session_key, metadata  # present for contract parity only.

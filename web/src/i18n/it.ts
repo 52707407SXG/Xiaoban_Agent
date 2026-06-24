@@ -120,8 +120,8 @@ export const it: Translations = {
     starting: "Avvio in corso",
     startedInBackground: "Avviato in background — controlla i log per i progressi",
     stopped: "Arrestato",
-    updateHermes: "Aggiorna Hermes",
-    updatingHermes: "Aggiornamento di Hermes…",
+    updateXiaoban: "Aggiorna Xiaoban",
+    updatingXiaoban: "Aggiornamento di Xiaoban…",
     waitingForOutput: "In attesa di output…",
   },
 
@@ -320,7 +320,7 @@ export const it: Translations = {
     enableRuntime: "Abilita",
     forceReinstall: "Forza reinstallazione (elimina prima la cartella esistente)",
     headline:
-      "Scopri, installa, abilita e aggiorna i plugin Hermes (parità con `hermes plugins`).",
+      "Scopri, installa, abilita e aggiorna i plugin Xiaoban (parità con `xiaoban plugins`).",
     identifierLabel: "URL Git o owner/repo",
     inactive: "inattivo",
     installBtn: "Installa",
@@ -337,8 +337,8 @@ export const it: Translations = {
     providersHint:
       "Scrive memory.provider (vuoto = integrato) e context.engine in config.yaml. Effetto dalla prossima sessione.",
     refreshDashboard: "Riscansiona estensioni dashboard",
-    removeConfirm: "Rimuovere questo plugin da ~/.hermes/plugins/?",
-    removeHint: "Solo i plugin installati dall'utente in ~/.hermes/plugins possono essere rimossi.",
+    removeConfirm: "Rimuovere questo plugin da ~/.xiaoban/plugins/?",
+    removeHint: "Solo i plugin installati dall'utente in ~/.xiaoban/plugins possono essere rimossi.",
     rescanHeading: "Registro plugin SPA",
     rescanHint: "Riscansiona dopo aver aggiunto file su disco affinché la barra laterale rilevi i nuovi manifest.",
     runtimeHeading: "Runtime gateway (plugin YAML)",
@@ -360,7 +360,7 @@ export const it: Translations = {
     all: "Tutti",
     categories: "Categorie",
     filters: "Filtri",
-    noSkills: "Nessuna competenza trovata. Le competenze vengono caricate da ~/.hermes/skills/",
+    noSkills: "Nessuna competenza trovata. Le competenze vengono caricate da ~/.xiaoban/skills/",
     noSkillsMatch: "Nessuna competenza corrisponde alla ricerca o al filtro.",
     skillCount: "{count} competenz{s}",
     resultCount: "{count} risultat{s}",
@@ -374,7 +374,7 @@ export const it: Translations = {
   },
 
   config: {
-    configPath: "~/.hermes/config.yaml",
+    configPath: "~/.xiaoban/config.yaml",
     filters: "Filtri",
     sections: "Sezioni",
     exportConfig: "Esporta configurazione come JSON",
@@ -485,11 +485,11 @@ export const it: Translations = {
   achievements: {
     hero: {
       kicker: "Agentic Gamerscore",
-      title: "Hermes Achievements",
+      title: "Xiaoban Achievements",
       subtitle:
-        "Badge Hermes da collezione, ottenuti dalla cronologia reale delle sessioni. Gli achievement noti non completati vengono mostrati come Scoperti; gli achievement segreti restano nascosti finché non compare il primo comportamento corrispondente.",
+        "Badge Xiaoban da collezione, ottenuti dalla cronologia reale delle sessioni. Gli achievement noti non completati vengono mostrati come Scoperti; gli achievement segreti restano nascosti finché non compare il primo comportamento corrispondente.",
       scan_subtitle:
-        "Scansione della cronologia delle sessioni Hermes in corso. La prima scansione può richiedere 5–10 secondi su cronologie ampie.",
+        "Scansione della cronologia delle sessioni Xiaoban in corso. La prima scansione può richiedere 5–10 secondi su cronologie ampie.",
     },
     actions: {
       rescan: "Riscansiona",
@@ -504,7 +504,7 @@ export const it: Translations = {
       highest_tier: "Livello più alto",
       highest_tier_hint: "Copper → Silver → Gold → Diamond → Olympian",
       latest: "Più recente",
-      latest_hint_empty: "usa Hermes di più",
+      latest_hint_empty: "usa Xiaoban di più",
       none_yet: "Nessuno ancora",
     },
     state: {
@@ -535,10 +535,10 @@ export const it: Translations = {
       tiers_header: "Livelli",
       secret_header: "Achievement segreti",
       secret_body:
-        "I segreti nascondono il loro trigger esatto. Quando Hermes rileva un segnale correlato, la carta passa a Scoperto e mostra il requisito.",
+        "I segreti nascondono il loro trigger esatto. Quando Xiaoban rileva un segnale correlato, la carta passa a Scoperto e mostra il requisito.",
       scan_status_header: "Stato della scansione",
       scan_status_body:
-        "Hermes sta scansionando la cronologia locale una sola volta, poi le carte appariranno automaticamente. Non è bloccato nulla se richiede qualche secondo.",
+        "Xiaoban sta scansionando la cronologia locale una sola volta, poi le carte appariranno automaticamente. Non è bloccato nulla se richiede qualche secondo.",
       what_scanned_header: "Cosa viene scansionato",
       what_scanned_body:
         "Sessioni, chiamate agli strumenti, metadati del modello, errori, achievement e stato di sblocco locale.",

@@ -90,8 +90,8 @@ async def test_draining_rejects_new_session_messages():
 
 
 def test_load_busy_input_mode_prefers_env_then_config_then_default(tmp_path, monkeypatch):
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.delenv("HERMES_GATEWAY_BUSY_INPUT_MODE", raising=False)
+    monkeypatch.setattr(gateway_run, "_xiaoban_home", tmp_path)
+    monkeypatch.delenv("XIAOBAN_GATEWAY_BUSY_INPUT_MODE", raising=False)
 
     assert gateway_run.GatewayRunner._load_busy_input_mode() == "interrupt"
 
@@ -105,21 +105,21 @@ def test_load_busy_input_mode_prefers_env_then_config_then_default(tmp_path, mon
     )
     assert gateway_run.GatewayRunner._load_busy_input_mode() == "steer"
 
-    monkeypatch.setenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "interrupt")
+    monkeypatch.setenv("XIAOBAN_GATEWAY_BUSY_INPUT_MODE", "interrupt")
     assert gateway_run.GatewayRunner._load_busy_input_mode() == "interrupt"
 
-    monkeypatch.setenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "steer")
+    monkeypatch.setenv("XIAOBAN_GATEWAY_BUSY_INPUT_MODE", "steer")
     assert gateway_run.GatewayRunner._load_busy_input_mode() == "steer"
 
     # Unknown values fall through to the safe default
-    monkeypatch.setenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "bogus")
+    monkeypatch.setenv("XIAOBAN_GATEWAY_BUSY_INPUT_MODE", "bogus")
     assert gateway_run.GatewayRunner._load_busy_input_mode() == "interrupt"
 
 
 def test_load_busy_text_mode_follows_input_mode_and_honors_legacy(tmp_path, monkeypatch):
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.delenv("HERMES_GATEWAY_BUSY_TEXT_MODE", raising=False)
-    monkeypatch.delenv("HERMES_GATEWAY_BUSY_INPUT_MODE", raising=False)
+    monkeypatch.setattr(gateway_run, "_xiaoban_home", tmp_path)
+    monkeypatch.delenv("XIAOBAN_GATEWAY_BUSY_TEXT_MODE", raising=False)
+    monkeypatch.delenv("XIAOBAN_GATEWAY_BUSY_INPUT_MODE", raising=False)
 
     # No knobs set → follows busy_input_mode, which defaults to interrupt.
     assert gateway_run.GatewayRunner._load_busy_text_mode() == "interrupt"
@@ -141,19 +141,19 @@ def test_load_busy_text_mode_follows_input_mode_and_honors_legacy(tmp_path, monk
     (tmp_path / "config.yaml").write_text(
         "display:\n  busy_input_mode: interrupt\n", encoding="utf-8"
     )
-    monkeypatch.setenv("HERMES_GATEWAY_BUSY_TEXT_MODE", "queue")
+    monkeypatch.setenv("XIAOBAN_GATEWAY_BUSY_TEXT_MODE", "queue")
     assert gateway_run.GatewayRunner._load_busy_text_mode() == "queue"
 
     # Bogus legacy value is ignored → falls through to busy_input_mode (interrupt).
-    monkeypatch.setenv("HERMES_GATEWAY_BUSY_TEXT_MODE", "bogus")
+    monkeypatch.setenv("XIAOBAN_GATEWAY_BUSY_TEXT_MODE", "bogus")
     assert gateway_run.GatewayRunner._load_busy_text_mode() == "interrupt"
 
 
 def test_load_restart_drain_timeout_prefers_env_then_config_then_default(
     tmp_path, monkeypatch, caplog
 ):
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.delenv("HERMES_RESTART_DRAIN_TIMEOUT", raising=False)
+    monkeypatch.setattr(gateway_run, "_xiaoban_home", tmp_path)
+    monkeypatch.delenv("XIAOBAN_RESTART_DRAIN_TIMEOUT", raising=False)
 
     assert (
         gateway_run.GatewayRunner._load_restart_drain_timeout()
@@ -165,10 +165,10 @@ def test_load_restart_drain_timeout_prefers_env_then_config_then_default(
     )
     assert gateway_run.GatewayRunner._load_restart_drain_timeout() == 12.0
 
-    monkeypatch.setenv("HERMES_RESTART_DRAIN_TIMEOUT", "7")
+    monkeypatch.setenv("XIAOBAN_RESTART_DRAIN_TIMEOUT", "7")
     assert gateway_run.GatewayRunner._load_restart_drain_timeout() == 7.0
 
-    monkeypatch.setenv("HERMES_RESTART_DRAIN_TIMEOUT", "invalid")
+    monkeypatch.setenv("XIAOBAN_RESTART_DRAIN_TIMEOUT", "invalid")
     assert (
         gateway_run.GatewayRunner._load_restart_drain_timeout()
         == DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
@@ -198,9 +198,9 @@ async def test_launch_detached_restart_command_uses_setsid(monkeypatch):
     popen_calls = []
 
     monkeypatch.setattr(gateway_run.sys, "platform", "linux")
-    monkeypatch.setattr(gateway_run, "_resolve_hermes_bin", lambda: ["/usr/bin/hermes"])
+    monkeypatch.setattr(gateway_run, "_resolve_xiaoban_bin", lambda: ["/usr/bin/xiaoban"])
     monkeypatch.setattr(gateway_run.os, "getpid", lambda: 321)
-    monkeypatch.setenv("_HERMES_GATEWAY", "1")
+    monkeypatch.setenv("_XIAOBAN_GATEWAY", "1")
     monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/setsid" if cmd == "setsid" else None)
 
     def fake_popen(cmd, **kwargs):
@@ -221,7 +221,7 @@ async def test_launch_detached_restart_command_uses_setsid(monkeypatch):
     assert kwargs["stderr"] is subprocess.DEVNULL
     # The watcher must NOT inherit the gateway marker, or the CLI's
     # self-restart loop guard refuses to run `xiaoban gateway restart`.
-    assert kwargs["env"].get("_HERMES_GATEWAY") is None
+    assert kwargs["env"].get("_XIAOBAN_GATEWAY") is None
 
 
 def test_windows_gateway_venv_imports_add_site_packages(monkeypatch, tmp_path):
@@ -256,12 +256,12 @@ async def test_windows_detached_restart_scrubs_gateway_marker(monkeypatch, tmp_p
     site_packages.mkdir(parents=True)
 
     monkeypatch.setattr(gateway_run.sys, "platform", "win32")
-    monkeypatch.setattr(gateway_run, "_resolve_hermes_bin", lambda: ["hermes"])
+    monkeypatch.setattr(gateway_run, "_resolve_xiaoban_bin", lambda: ["xiaoban"])
     monkeypatch.setattr(gateway_run.os, "getpid", lambda: 321)
-    monkeypatch.setenv("_HERMES_GATEWAY", "1")
+    monkeypatch.setenv("_XIAOBAN_GATEWAY", "1")
     monkeypatch.setenv("VIRTUAL_ENV", str(venv_dir))
 
-    import hermes_cli._subprocess_compat as subprocess_compat
+    import xiaoban_cli._subprocess_compat as subprocess_compat
 
     monkeypatch.setattr(
         subprocess_compat,
@@ -279,8 +279,8 @@ async def test_windows_detached_restart_scrubs_gateway_marker(monkeypatch, tmp_p
 
     assert len(popen_calls) == 1
     cmd, kwargs = popen_calls[0]
-    assert cmd[-3:] == ["hermes", "gateway", "restart"]
-    assert kwargs["env"].get("_HERMES_GATEWAY") is None
+    assert cmd[-3:] == ["xiaoban", "gateway", "restart"]
+    assert kwargs["env"].get("_XIAOBAN_GATEWAY") is None
     assert kwargs["env"]["VIRTUAL_ENV"] == str(venv_dir)
     assert str(site_packages) in kwargs["env"]["PYTHONPATH"].split(gateway_run.os.pathsep)
     assert kwargs["stdout"] is subprocess.DEVNULL

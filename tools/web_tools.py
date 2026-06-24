@@ -4,7 +4,7 @@ Standalone Web Tools Module
 
 This module provides generic web tools that work with multiple backend providers.
 Backend is selected during ``xiaoban tools`` setup (web.backend in config.yaml).
-When available, Hermes can route Firecrawl calls through a Nous-hosted tool-gateway
+When available, Xiaoban can route Firecrawl calls through a Nous-hosted tool-gateway
 for Nous Subscribers only.
 
 Available tools:
@@ -111,16 +111,16 @@ logger = logging.getLogger(__name__)
 # ─── Backend Selection ────────────────────────────────────────────────────────
 
 def _env_value(name: str) -> str:
-    """Resolve ``name`` via Hermes config-aware env, falling back to process env.
+    """Resolve ``name`` via Xiaoban config-aware env, falling back to process env.
 
     Mirrors the SearXNG provider's ``_searxng_url()`` so that values set
-    through Hermes' config/.env layer (``hermes config set``, ``xiaoban tools``)
+    through Xiaoban' config/.env layer (``xiaoban config set``, ``xiaoban tools``)
     are honored here too — not just raw process-env exports. Without this,
     a config-only ``SEARXNG_URL`` (or any provider key) leaves the backend
     auto-detect cascade and ``check_web_api_key()`` blind to it. See #34290.
     """
     try:
-        from hermes_cli.config import get_env_value
+        from xiaoban_cli.config import get_env_value
 
         val = get_env_value(name)
     except Exception:
@@ -134,9 +134,9 @@ def _has_env(name: str) -> bool:
     return bool(_env_value(name))
 
 def _load_web_config() -> dict:
-    """Load the ``web:`` section from ~/.hermes/config.yaml."""
+    """Load the ``web:`` section from ~/.xiaoban/config.yaml."""
     try:
-        from hermes_cli.config import load_config
+        from xiaoban_cli.config import load_config
         return load_config().get("web", {})
     except (ImportError, Exception):
         return {}
@@ -861,7 +861,7 @@ def _ensure_web_plugins_loaded() -> None:
     invocations.
     """
     try:
-        from hermes_cli.plugins import _ensure_plugins_discovered
+        from xiaoban_cli.plugins import _ensure_plugins_discovered
 
         _ensure_plugins_discovered()
     except Exception as exc:  # noqa: BLE001

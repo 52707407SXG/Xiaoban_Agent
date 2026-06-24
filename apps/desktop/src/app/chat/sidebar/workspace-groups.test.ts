@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import type { HermesWorktreeInfo } from '@/global'
-import type { SessionInfo } from '@/types/hermes'
+import type { XiaobanWorktreeInfo } from '@/global'
+import type { SessionInfo } from '@/types/xiaoban'
 
 import { uniqueCwds, workspaceGroupsFor, workspaceTreeFor, type WorktreeResolver } from './workspace-groups'
 
@@ -68,7 +68,7 @@ describe('workspaceGroupsFor', () => {
   })
 })
 
-const info = (over: Partial<HermesWorktreeInfo> & Pick<HermesWorktreeInfo, 'repoRoot' | 'worktreeRoot'>): HermesWorktreeInfo => ({
+const info = (over: Partial<XiaobanWorktreeInfo> & Pick<XiaobanWorktreeInfo, 'repoRoot' | 'worktreeRoot'>): XiaobanWorktreeInfo => ({
   branch: null,
   isMainWorktree: false,
   ...over

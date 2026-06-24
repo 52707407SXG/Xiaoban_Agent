@@ -1,12 +1,12 @@
-"""Harness: dashboard opt-in via HERMES_DASHBOARD.
+"""Harness: dashboard opt-in via XIAOBAN_DASHBOARD.
 
-Today (tini): dashboard starts once when HERMES_DASHBOARD=1; if it crashes
+Today (tini): dashboard starts once when XIAOBAN_DASHBOARD=1; if it crashes
 it stays dead. After Phase 2 (s6): dashboard starts once; if it crashes
 it is restarted under supervision. The restart-after-crash test lives in
 Phase 2 Task 2.5; this file only locks the opt-in surface (which must
 not change between tini and s6).
 
-Every ``docker exec`` here runs as the unprivileged ``hermes`` user
+Every ``docker exec`` here runs as the unprivileged ``xiaoban`` user
 (via :func:`docker_exec`/:func:`docker_exec_sh` in conftest), matching
 the realistic runtime context. See the conftest module docstring.
 """
@@ -37,7 +37,7 @@ def _poll(container: str, probe: str, *, deadline_s: float = 30.0,
 def test_dashboard_not_running_by_default(
     built_image: str, container_name: str,
 ) -> None:
-    """Without HERMES_DASHBOARD, no dashboard process should be running."""
+    """Without XIAOBAN_DASHBOARD, no dashboard process should be running."""
     subprocess.run(
         ["docker", "run", "-d", "--name", container_name, built_image,
          "sleep", "60"],
@@ -49,20 +49,20 @@ def test_dashboard_not_running_by_default(
     r = docker_exec(container_name, "pgrep", "-f", "xiaoban dashboard")
     # pgrep exits non-zero when no match found
     assert r.returncode != 0, (
-        "Dashboard should not be running without HERMES_DASHBOARD"
+        "Dashboard should not be running without XIAOBAN_DASHBOARD"
     )
 
 
 def test_dashboard_slot_reports_down_when_disabled(
     built_image: str, container_name: str,
 ) -> None:
-    """Without HERMES_DASHBOARD, s6-svstat should report the dashboard
+    """Without XIAOBAN_DASHBOARD, s6-svstat should report the dashboard
     slot as DOWN (not up-with-sleep-infinity, which would
-    false-positive `hermes doctor` and any other health check).
+    false-positive `xiaoban doctor` and any other health check).
 
     Locks the PR #30136 review item I3 fix: cont-init.d/03-dashboard-toggle
     writes a `down` marker file in the live service-dir when
-    HERMES_DASHBOARD is unset, so the slot reflects reality.
+    XIAOBAN_DASHBOARD is unset, so the slot reflects reality.
     """
     subprocess.run(
         ["docker", "run", "-d", "--name", container_name, built_image,
@@ -77,7 +77,7 @@ def test_dashboard_slot_reports_down_when_disabled(
     )
     assert r.returncode == 0, f"s6-svstat failed: {r.stderr!r} / {r.stdout!r}"
     assert "down" in r.stdout, (
-        f"Dashboard slot should be 'down' without HERMES_DASHBOARD; "
+        f"Dashboard slot should be 'down' without XIAOBAN_DASHBOARD; "
         f"svstat reports: {r.stdout!r}"
     )
 
@@ -85,18 +85,18 @@ def test_dashboard_slot_reports_down_when_disabled(
 def test_dashboard_slot_reports_up_when_enabled(
     built_image: str, container_name: str,
 ) -> None:
-    """Symmetry: with HERMES_DASHBOARD=1, s6-svstat reports the slot as up."""
+    """Symmetry: with XIAOBAN_DASHBOARD=1, s6-svstat reports the slot as up."""
     subprocess.run(
         ["docker", "run", "-d", "--name", container_name,
-         "-e", "HERMES_DASHBOARD=1",
+         "-e", "XIAOBAN_DASHBOARD=1",
          # The default dashboard host is 0.0.0.0, which now engages the
          # OAuth auth gate. Without a provider registered (no
-         # HERMES_DASHBOARD_OAUTH_CLIENT_ID in this test env), start_server
+         # XIAOBAN_DASHBOARD_OAUTH_CLIENT_ID in this test env), start_server
          # would fail closed and the slot would never come up. Pin the
          # explicit insecure opt-in to keep this test focused on the s6
          # supervision contract, not the auth gate.
-         "-e", "HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin",
-         "-e", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=test-dashboard-pw",
+         "-e", "XIAOBAN_DASHBOARD_BASIC_AUTH_USERNAME=admin",
+         "-e", "XIAOBAN_DASHBOARD_BASIC_AUTH_PASSWORD=test-dashboard-pw",
          built_image, "sleep", "120"],
         check=True, capture_output=True, timeout=30,
     )
@@ -119,16 +119,16 @@ def test_dashboard_slot_reports_up_when_enabled(
 def test_dashboard_opt_in_starts(
     built_image: str, container_name: str,
 ) -> None:
-    """With HERMES_DASHBOARD=1, a dashboard process should be visible."""
+    """With XIAOBAN_DASHBOARD=1, a dashboard process should be visible."""
     subprocess.run(
         ["docker", "run", "-d", "--name", container_name,
-         "-e", "HERMES_DASHBOARD=1",
+         "-e", "XIAOBAN_DASHBOARD=1",
          # Default bind is 0.0.0.0, which engages the auth gate. Register the
          # bundled basic password provider so the gate has a provider and the
          # dashboard binds (vs fail-closed). Keeps the test focused on s6
          # supervision, not auth.
-         "-e", "HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin",
-         "-e", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=test-dashboard-pw",
+         "-e", "XIAOBAN_DASHBOARD_BASIC_AUTH_USERNAME=admin",
+         "-e", "XIAOBAN_DASHBOARD_BASIC_AUTH_PASSWORD=test-dashboard-pw",
          built_image, "sleep", "120"],
         check=True, capture_output=True, timeout=30,
     )
@@ -138,21 +138,21 @@ def test_dashboard_opt_in_starts(
     ok, _ = _poll(
         container_name, "pgrep -f 'xiaoban dashboard'", deadline_s=30.0,
     )
-    assert ok, "Dashboard should be running with HERMES_DASHBOARD=1"
+    assert ok, "Dashboard should be running with XIAOBAN_DASHBOARD=1"
 
 
 def test_dashboard_port_override(
     built_image: str, container_name: str,
 ) -> None:
-    """HERMES_DASHBOARD_PORT changes the dashboard's listen port."""
+    """XIAOBAN_DASHBOARD_PORT changes the dashboard's listen port."""
     subprocess.run(
         ["docker", "run", "-d", "--name", container_name,
-         "-e", "HERMES_DASHBOARD=1", "-e", "HERMES_DASHBOARD_PORT=9120",
+         "-e", "XIAOBAN_DASHBOARD=1", "-e", "XIAOBAN_DASHBOARD_PORT=9120",
          # Default bind is 0.0.0.0; register the basic password provider so
          # the auth gate has a provider and the dashboard binds. See
          # test_dashboard_slot_reports_up_when_enabled for the full rationale.
-         "-e", "HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin",
-         "-e", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=test-dashboard-pw",
+         "-e", "XIAOBAN_DASHBOARD_BASIC_AUTH_USERNAME=admin",
+         "-e", "XIAOBAN_DASHBOARD_BASIC_AUTH_PASSWORD=test-dashboard-pw",
          built_image, "sleep", "120"],
         check=True, capture_output=True, timeout=30,
     )
@@ -182,13 +182,13 @@ def test_dashboard_restarts_after_crash(
     """
     subprocess.run(
         ["docker", "run", "-d", "--name", container_name,
-         "-e", "HERMES_DASHBOARD=1",
+         "-e", "XIAOBAN_DASHBOARD=1",
          # Default bind is 0.0.0.0; register the basic password provider so
          # the auth gate has a provider and the supervised dashboard binds.
          # See test_dashboard_slot_reports_up_when_enabled for the full
          # rationale.
-         "-e", "HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin",
-         "-e", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=test-dashboard-pw",
+         "-e", "XIAOBAN_DASHBOARD_BASIC_AUTH_USERNAME=admin",
+         "-e", "XIAOBAN_DASHBOARD_BASIC_AUTH_PASSWORD=test-dashboard-pw",
          built_image, "sleep", "120"],
         check=True, capture_output=True, timeout=30,
     )
@@ -213,8 +213,8 @@ def test_dashboard_restarts_after_crash(
         time.sleep(0.5)
     assert first_pid is not None, "Could not capture initial dashboard PID"
 
-    # Kill the dashboard. The dashboard process runs as hermes, so the
-    # hermes user can kill it (same UID).
+    # Kill the dashboard. The dashboard process runs as xiaoban, so the
+    # xiaoban user can kill it (same UID).
     docker_exec(container_name, "kill", "-9", first_pid)
 
     # s6 backs off ~1s before restart; allow up to 15s for the new
@@ -235,7 +235,7 @@ def test_dashboard_restarts_after_crash(
 # ---------------------------------------------------------------------------
 # OAuth auth-gate behaviour — regression guard for the dashboard-insecure
 # auto-injection bug. Pre-fix, the s6 run script appended `--insecure`
-# whenever `HERMES_DASHBOARD_HOST` was non-loopback, silently disabling
+# whenever `XIAOBAN_DASHBOARD_HOST` was non-loopback, silently disabling
 # the OAuth gate on every container-deployed dashboard. The matching
 # static-text guard lives in tests/test_docker_home_override_scripts.py;
 # this is the behavioural end-to-end check.
@@ -282,7 +282,7 @@ except urllib.error.HTTPError as h:
     # single bash string stays clean. The 'PY' delimiter is quoted to
     # disable shell expansion inside the heredoc body.
     probe = (
-        "/opt/hermes/.venv/bin/python - <<'PY'\n"
+        "/opt/xiaoban/.venv/bin/python - <<'PY'\n"
         f"{py_program}"
         "PY"
     )
@@ -313,7 +313,7 @@ def test_dashboard_oauth_gate_engages_on_non_loopback_bind(
     """The s6 dashboard run script must NOT auto-add ``--insecure`` when the
     dashboard binds to ``0.0.0.0``. The OAuth auth gate engages on its own
     when a ``DashboardAuthProvider`` is registered (the bundled nous
-    provider activates whenever ``HERMES_DASHBOARD_OAUTH_CLIENT_ID`` is
+    provider activates whenever ``XIAOBAN_DASHBOARD_OAUTH_CLIENT_ID`` is
     set).
 
     Regression guard for the wildcard-subdomain rollout where every
@@ -340,9 +340,9 @@ def test_dashboard_oauth_gate_engages_on_non_loopback_bind(
     """
     subprocess.run(
         ["docker", "run", "-d", "--name", container_name,
-         "-e", "HERMES_DASHBOARD=1",
-         "-e", "HERMES_DASHBOARD_HOST=0.0.0.0",
-         "-e", "HERMES_DASHBOARD_OAUTH_CLIENT_ID=agent:test-instance",
+         "-e", "XIAOBAN_DASHBOARD=1",
+         "-e", "XIAOBAN_DASHBOARD_HOST=0.0.0.0",
+         "-e", "XIAOBAN_DASHBOARD_OAUTH_CLIENT_ID=agent:test-instance",
          built_image, "sleep", "120"],
         check=True, capture_output=True, timeout=30,
     )
@@ -357,7 +357,7 @@ def test_dashboard_oauth_gate_engages_on_non_loopback_bind(
     provider_names = [p.get("name") for p in payload.get("providers", [])]
     assert "nous" in provider_names, (
         "Bundled dashboard_auth/nous provider should register when "
-        f"HERMES_DASHBOARD_OAUTH_CLIENT_ID is set. Got: {payload!r}"
+        f"XIAOBAN_DASHBOARD_OAUTH_CLIENT_ID is set. Got: {payload!r}"
     )
 
     # (2) A gated route (``/api/sessions``) returns 401 to an
@@ -365,7 +365,7 @@ def test_dashboard_oauth_gate_engages_on_non_loopback_bind(
     status_code, body = _http_probe(container_name, "/api/sessions")
     assert status_code == 401, (
         "OAuth gate must intercept gated /api/* routes on 0.0.0.0 bind "
-        "when a provider is registered and HERMES_DASHBOARD_INSECURE "
+        "when a provider is registered and XIAOBAN_DASHBOARD_INSECURE "
         f"is unset. Got: status={status_code} body={body!r}"
     )
 
@@ -391,7 +391,7 @@ def test_dashboard_oauth_gate_engages_on_non_loopback_bind(
 def test_dashboard_insecure_env_var_no_longer_bypasses_gate(
     built_image: str, container_name: str,
 ) -> None:
-    """``HERMES_DASHBOARD_INSECURE=1`` NO LONGER disables the auth gate
+    """``XIAOBAN_DASHBOARD_INSECURE=1`` NO LONGER disables the auth gate
     (June 2026 hardening). With insecure set on a 0.0.0.0 bind and NO auth
     provider registered, start_server fails closed — the dashboard never
     binds, so ``/api/status`` is unreachable. This proves the unauthenticated
@@ -400,9 +400,9 @@ def test_dashboard_insecure_env_var_no_longer_bypasses_gate(
     """
     subprocess.run(
         ["docker", "run", "-d", "--name", container_name,
-         "-e", "HERMES_DASHBOARD=1",
-         "-e", "HERMES_DASHBOARD_HOST=0.0.0.0",
-         "-e", "HERMES_DASHBOARD_INSECURE=1",
+         "-e", "XIAOBAN_DASHBOARD=1",
+         "-e", "XIAOBAN_DASHBOARD_HOST=0.0.0.0",
+         "-e", "XIAOBAN_DASHBOARD_INSECURE=1",
          built_image, "sleep", "120"],
         check=True, capture_output=True, timeout=30,
     )

@@ -39,7 +39,7 @@ def _make_event(text):
 
 def _fake_switch_result():
     """Build a successful ModelSwitchResult that bypasses real provider resolution."""
-    from hermes_cli.model_switch import ModelSwitchResult
+    from xiaoban_cli.model_switch import ModelSwitchResult
 
     return ModelSwitchResult(
         success=True,
@@ -58,23 +58,23 @@ def _setup_isolated_home(tmp_path, monkeypatch, model_yaml_value):
     """Write a config.yaml with the given ``model:`` value and stub the heavy bits."""
     import gateway.run as gateway_run
 
-    hermes_home = tmp_path / ".hermes"
-    hermes_home.mkdir()
-    cfg_path = hermes_home / "config.yaml"
+    xiaoban_home = tmp_path / ".xiaoban"
+    xiaoban_home.mkdir()
+    cfg_path = xiaoban_home / "config.yaml"
     cfg_path.write_text(
         yaml.safe_dump({"model": model_yaml_value, "providers": {}}),
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+    monkeypatch.setattr(gateway_run, "_xiaoban_home", xiaoban_home)
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
     monkeypatch.setattr(
-        "hermes_cli.model_switch.switch_model",
+        "xiaoban_cli.model_switch.switch_model",
         lambda **kw: _fake_switch_result(),
     )
-    # save_config writes to ``get_hermes_home() / config.yaml`` — point it here.
-    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: hermes_home)
-    monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: hermes_home)
+    # save_config writes to ``get_xiaoban_home() / config.yaml`` — point it here.
+    monkeypatch.setattr("xiaoban_constants.get_xiaoban_home", lambda: xiaoban_home)
+    monkeypatch.setattr("xiaoban_cli.config.get_xiaoban_home", lambda: xiaoban_home)
     return cfg_path
 
 
@@ -112,19 +112,19 @@ async def test_model_global_persists_when_config_has_missing_model(tmp_path, mon
     """
     import gateway.run as gateway_run
 
-    hermes_home = tmp_path / ".hermes"
-    hermes_home.mkdir()
-    cfg_path = hermes_home / "config.yaml"
+    xiaoban_home = tmp_path / ".xiaoban"
+    xiaoban_home.mkdir()
+    cfg_path = xiaoban_home / "config.yaml"
     cfg_path.write_text(yaml.safe_dump({"providers": {}}), encoding="utf-8")
 
-    monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+    monkeypatch.setattr(gateway_run, "_xiaoban_home", xiaoban_home)
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
     monkeypatch.setattr(
-        "hermes_cli.model_switch.switch_model",
+        "xiaoban_cli.model_switch.switch_model",
         lambda **kw: _fake_switch_result(),
     )
-    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: hermes_home)
-    monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: hermes_home)
+    monkeypatch.setattr("xiaoban_constants.get_xiaoban_home", lambda: xiaoban_home)
+    monkeypatch.setattr("xiaoban_cli.config.get_xiaoban_home", lambda: xiaoban_home)
 
     result = await _make_runner()._handle_model_command(
         _make_event("/model gpt-5.5 --global")

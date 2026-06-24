@@ -55,7 +55,7 @@ Xiaoban-Agent 功能丰富——CLI 助手、Telegram/Discord 机器人、任务
 4. [Telegram 配置](/user-guide/messaging/telegram)
 5. [Discord 配置](/user-guide/messaging/discord)
 6. [语音模式](/user-guide/features/voice-mode)
-7. [在 Hermes 中使用语音模式](/guides/use-voice-mode-with-hermes)
+7. [在 Xiaoban 中使用语音模式](/guides/use-voice-mode-with-xiaoban)
 8. [安全](/user-guide/security)
 
 完整项目示例请参阅：
@@ -81,7 +81,7 @@ Cron 任务让 Xiaoban-Agent 按计划执行任务——每日摘要、定期检
 通过自定义工具和可复用技能包扩展 Xiaoban-Agent。
 
 1. [插件](/user-guide/features/plugins)
-2. [构建 Hermes 插件](/guides/build-a-hermes-plugin)
+2. [构建 Xiaoban 插件](/guides/build-a-xiaoban-plugin)
 3. [工具概览](/user-guide/features/tools)
 4. [技能概览](/user-guide/features/skills)
 5. [MCP（模型上下文协议）](/user-guide/features/mcp)
@@ -90,7 +90,7 @@ Cron 任务让 Xiaoban-Agent 按计划执行任务——每日摘要、定期检
 8. [创建技能](/developer-guide/creating-skills)
 
 :::tip
-对于大多数自定义工具的创建，建议从插件开始。[添加工具](/developer-guide/adding-tools)页面面向 Hermes 核心内置开发，而非常规用户/自定义工具路径。
+对于大多数自定义工具的创建，建议从插件开始。[添加工具](/developer-guide/adding-tools)页面面向 Xiaoban 核心内置开发，而非常规用户/自定义工具路径。
 :::
 
 ### "我想训练模型"
@@ -131,7 +131,7 @@ Cron 任务让 Xiaoban-Agent 按计划执行任务——每日摘要、定期检
 | **MCP** | 通过模型上下文协议连接外部工具服务器 | [MCP](/user-guide/features/mcp) |
 | **Cron** | 调度周期性 agent 任务 | [Cron](/user-guide/features/cron) |
 | **委派** | 生成子 agent 以并行处理工作 | [委派](/user-guide/features/delegation) |
-| **代码执行** | 运行以编程方式调用 Hermes 工具的 Python 脚本 | [代码执行](/user-guide/features/code-execution) |
+| **代码执行** | 运行以编程方式调用 Xiaoban 工具的 Python 脚本 | [代码执行](/user-guide/features/code-execution) |
 | **浏览器** | 网页浏览与抓取 | [浏览器](/user-guide/features/browser) |
 | **Hooks** | 事件驱动的回调与中间件 | [Hooks](/user-guide/features/hooks) |
 | **批处理** | 批量处理多个输入 | [批处理](/user-guide/features/batch-processing) |

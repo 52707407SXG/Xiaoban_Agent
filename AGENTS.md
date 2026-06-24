@@ -6,7 +6,7 @@ This repository is the My Stand native Xiaoban-Agent.
 
 Do not rebuild Xiaoban from scratch.
 
-Xiaoban-Agent is a Hermes-runtime fork:
+Xiaoban-Agent is a Xiaoban-runtime fork:
 
 - Keep the mature runtime chassis: loop, providers, tools, skills, gateway,
   memory, cron, logs, approvals, session recovery.
@@ -14,7 +14,7 @@ Xiaoban-Agent is a Hermes-runtime fork:
 - Patch stable runtime extension points only when needed.
 - Avoid broad rewrites of the runtime core.
 
-User-facing identity is Xiaoban / 站小伴 / 小伴. Hermes is only the internal
+User-facing identity is Xiaoban / 站小伴 / 小伴. Xiaoban is only the internal
 runtime lineage and compatibility layer.
 
 ## My Stand Hard Rules
@@ -36,7 +36,7 @@ runtime lineage and compatibility layer.
 ## Engineering Rules
 
 - Prefer localized additions under `xiaoban/`.
-- Preserve upstream-compatible runtime imports such as `hermes_cli` until a
+- Preserve upstream-compatible runtime imports such as `xiaoban_cli` until a
   deliberate namespace migration is planned.
 - Keep user-visible docs, prompts, CLI output, and setup text Xiaoban-branded.
 - Keep secrets out of Git, prompts, logs, fixtures, and tests.
@@ -63,6 +63,6 @@ dependencies is available.
 ## Key Docs
 
 - `XIAOBAN_TRANSFORMATION_TRACKER.md`
-- `docs/xiaoban-hermes-fork-strategy.md`
+- `docs/xiaoban-xiaoban-fork-strategy.md`
 - `docs/mmcc-v0.1-agent-plugin-alignment.md`
 

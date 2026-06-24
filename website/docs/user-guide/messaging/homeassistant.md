@@ -25,7 +25,7 @@ Xiaoban-Agent integrates with [Home Assistant](https://www.home-assistant.io/) i
 ### 2. Configure Environment Variables
 
 ```bash
-# Add to ~/.hermes/.env
+# Add to ~/.xiaoban/.env
 
 # Required: your Long-Lived Access Token
 HASS_TOKEN=your-long-lived-access-token
@@ -130,7 +130,7 @@ The Home Assistant gateway adapter connects via WebSocket and subscribes to `sta
 By default, **no events are forwarded**. You must configure at least one of `watch_domains`, `watch_entities`, or `watch_all` to receive events. Without filters, a warning is logged at startup and all state changes are silently dropped.
 :::
 
-Configure which events the agent sees in `~/.hermes/config.yaml` under the Home Assistant platform's `extra` section:
+Configure which events the agent sees in `~/.xiaoban/config.yaml` under the Home Assistant platform's `extra` section:
 
 ```yaml
 platforms:
@@ -254,8 +254,8 @@ Agent automatically:
 ## Troubleshooting
 
 **Environment variables not picked up.**
-The adapter reads credentials from `~/.hermes/.env` (auto-merged at startup) or
-from `config.yaml`. Double-check the file lives under the active Hermes profile
+The adapter reads credentials from `~/.xiaoban/.env` (auto-merged at startup) or
+from `config.yaml`. Double-check the file lives under the active Xiaoban profile
 home and that there's no stray quoting around the URL/token. Restart the gateway
 after editing — env changes are only applied on process start.
 
@@ -265,5 +265,5 @@ The token must be a *Long-Lived Access Token* created from your HA user profile
 page (**Profile → Security → Long-lived access tokens**). Short-lived UI
 session tokens won't work. Also verify the base URL includes the scheme and
 port (e.g. `http://homeassistant.local:8123`) and is reachable from the host
-running Hermes — `curl -H "Authorization: Bearer <token>" <url>/api/` should
+running Xiaoban — `curl -H "Authorization: Bearer <token>" <url>/api/` should
 return `{"message": "API running."}`.

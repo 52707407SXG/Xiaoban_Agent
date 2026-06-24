@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Rewrite user-visible Hermes branding in Python comments and strings.
+"""Rewrite user-visible Xiaoban branding in Python comments and strings.
 
-This intentionally leaves identifiers such as ``hermes_cli`` intact so the
+This intentionally leaves identifiers such as ``xiaoban_cli`` intact so the
 runtime chassis keeps working while public surfaces become Xiaoban.
 """
 
@@ -14,41 +14,41 @@ from pathlib import Path
 
 
 REPLACEMENTS = [
-    ("hermes-agent", "xiaoban-agent"),
-    ("Hermes Agent", "Xiaoban-Agent"),
-    ("Hermes CLI", "Xiaoban CLI"),
-    ("Hermes WebUI", "Xiaoban WebUI"),
-    ("Hermes Desktop", "Xiaoban Desktop"),
-    ("Hermes desktop", "Xiaoban desktop"),
-    ("Hermes app", "Xiaoban app"),
-    ("Hermes App", "Xiaoban App"),
-    ("Hermes process", "Xiaoban runtime process"),
-    ("Hermes processes", "Xiaoban runtime processes"),
-    ("Hermes itself", "Xiaoban runtime"),
-    ("Hermes checkout", "Xiaoban checkout"),
-    ("Hermes repository", "Xiaoban repository"),
-    ("official Hermes", "official Xiaoban"),
-    ("Hermes URL", "Xiaoban URL"),
-    ("Hermes log", "Xiaoban log"),
-    ("Hermes logs", "Xiaoban logs"),
-    ("Hermes behaves", "Xiaoban behaves"),
-    ("Hermes only", "Xiaoban only"),
-    ("Hermes isn't", "Xiaoban isn't"),
-    ("with Hermes", "with Xiaoban"),
-    ("using Hermes", "using Xiaoban"),
-    ("for Hermes", "for Xiaoban"),
-    ("from Hermes", "from Xiaoban"),
-    ("to Hermes", "to Xiaoban"),
-    ("Hermes ", "Xiaoban "),
-    (" Hermes", " Xiaoban"),
-    ("`hermes`", "`xiaoban`"),
-    ("`hermes ", "`xiaoban "),
-    ("hermes setup", "xiaoban setup"),
-    ("hermes version", "xiaoban version"),
-    ("hermes update", "xiaoban update"),
-    ("hermes logs", "xiaoban logs"),
-    ("hermes gateway", "xiaoban gateway"),
-    ("hermes dashboard", "xiaoban dashboard"),
+    ("xiaoban-agent", "xiaoban-agent"),
+    ("Xiaoban Agent", "Xiaoban-Agent"),
+    ("Xiaoban CLI", "Xiaoban CLI"),
+    ("Xiaoban WebUI", "Xiaoban WebUI"),
+    ("Xiaoban Desktop", "Xiaoban Desktop"),
+    ("Xiaoban desktop", "Xiaoban desktop"),
+    ("Xiaoban app", "Xiaoban app"),
+    ("Xiaoban App", "Xiaoban App"),
+    ("Xiaoban process", "Xiaoban runtime process"),
+    ("Xiaoban processes", "Xiaoban runtime processes"),
+    ("Xiaoban itself", "Xiaoban runtime"),
+    ("Xiaoban checkout", "Xiaoban checkout"),
+    ("Xiaoban repository", "Xiaoban repository"),
+    ("official Xiaoban", "official Xiaoban"),
+    ("Xiaoban URL", "Xiaoban URL"),
+    ("Xiaoban log", "Xiaoban log"),
+    ("Xiaoban logs", "Xiaoban logs"),
+    ("Xiaoban behaves", "Xiaoban behaves"),
+    ("Xiaoban only", "Xiaoban only"),
+    ("Xiaoban isn't", "Xiaoban isn't"),
+    ("with Xiaoban", "with Xiaoban"),
+    ("using Xiaoban", "using Xiaoban"),
+    ("for Xiaoban", "for Xiaoban"),
+    ("from Xiaoban", "from Xiaoban"),
+    ("to Xiaoban", "to Xiaoban"),
+    ("Xiaoban ", "Xiaoban "),
+    (" Xiaoban", " Xiaoban"),
+    ("`xiaoban`", "`xiaoban`"),
+    ("`xiaoban ", "`xiaoban "),
+    ("xiaoban setup", "xiaoban setup"),
+    ("xiaoban version", "xiaoban version"),
+    ("xiaoban update", "xiaoban update"),
+    ("xiaoban logs", "xiaoban logs"),
+    ("xiaoban gateway", "xiaoban gateway"),
+    ("xiaoban dashboard", "xiaoban dashboard"),
 ]
 
 
@@ -106,7 +106,7 @@ def iter_python_files(paths: list[Path]):
 
 
 def main(argv: list[str]) -> int:
-    roots = [Path(arg) for arg in argv[1:]] or [Path("agent"), Path("hermes_cli")]
+    roots = [Path(arg) for arg in argv[1:]] or [Path("agent"), Path("xiaoban_cli")]
     changed = []
     for path in iter_python_files(roots):
         if rewrite_python(path):

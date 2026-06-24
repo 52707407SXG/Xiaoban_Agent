@@ -6,7 +6,7 @@ author: Mibay (Mibayy), Xiaoban-Agent
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
-  hermes:
+  xiaoban:
     tags: [Stocks, Finance, Market, Crypto, Investing]
     category: finance
     related_skills: [dcf-model, comps-analysis, lbo-model]
@@ -37,7 +37,7 @@ fields come back null. Free key: https://www.alphavantage.co/support/#api-key
 Invoke through the `terminal` tool. Once installed:
 
 ```
-SCRIPT=~/.hermes/skills/finance/stocks/scripts/stocks_client.py
+SCRIPT=~/.xiaoban/skills/finance/stocks/scripts/stocks_client.py
 python3 $SCRIPT quote AAPL
 ```
 
@@ -89,7 +89,7 @@ Crypto prices. Pass `BTC` (the script appends `-USD` automatically).
 ## Verification
 
 ```
-python3 ~/.hermes/skills/finance/stocks/scripts/stocks_client.py quote AAPL
+python3 ~/.xiaoban/skills/finance/stocks/scripts/stocks_client.py quote AAPL
 ```
 
 Returns a JSON object with `symbol: "AAPL"` and a numeric `price` field.

@@ -4,7 +4,7 @@
 # Differences from docker-compose.yml:
 #   - Removes `network_mode: host` (not supported on Docker Desktop for Windows)
 #   - Uses explicit port mappings instead
-#   - Uses Windows-style volume path for ~/.hermes
+#   - Uses Windows-style volume path for ~/.xiaoban
 #
 # Usage:
 #   docker compose -f docker-compose.windows.yml up -d
@@ -12,27 +12,27 @@
 services:
   gateway:
     image: 52707407SXG/xiaoban-agent:latest
-    container_name: hermes
+    container_name: xiaoban
     restart: unless-stopped
     volumes:
-      - ${USERPROFILE}/.hermes:/opt/data
+      - ${USERPROFILE}/.xiaoban:/opt/data
     environment:
-      - HERMES_UID=10000
-      - HERMES_GID=10000
+      - XIAOBAN_UID=10000
+      - XIAOBAN_GID=10000
     command: ["gateway", "run"]
 
   dashboard:
     image: 52707407SXG/xiaoban-agent:latest
-    container_name: hermes-dashboard
+    container_name: xiaoban-dashboard
     restart: unless-stopped
     depends_on:
       - gateway
     volumes:
-      - ${USERPROFILE}/.hermes:/opt/data
+      - ${USERPROFILE}/.xiaoban:/opt/data
     environment:
-      - HERMES_UID=10000
-      - HERMES_GID=10000
-      - HERMES_DASHBOARD_HOST=0.0.0.0
+      - XIAOBAN_UID=10000
+      - XIAOBAN_GID=10000
+      - XIAOBAN_DASHBOARD_HOST=0.0.0.0
     ports:
       - "127.0.0.1:9119:9119"
     command: ["dashboard", "--host", "0.0.0.0", "--port", "9119", "--no-open", "--insecure"]

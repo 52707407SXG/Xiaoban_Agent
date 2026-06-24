@@ -1,22 +1,22 @@
 """Contract test: the s6-overlay stage2 hook must NOT stamp the install method
-into the shared $HERMES_HOME, and must heal a stale 'docker' stamp left there
+into the shared $XIAOBAN_HOME, and must heal a stale 'docker' stamp left there
 by older images.
 
-Background (shared-$HERMES_HOME bug)
+Background (shared-$XIAOBAN_HOME bug)
 ------------------------------------
-$HERMES_HOME (/opt/data) is a DATA volume that users commonly bind-mount from
-the host (``~/.hermes:/opt/data``) and sometimes share with a host-side
-Desktop/CLI install. Older images wrote ``printf 'docker' > $HERMES_HOME/.install_method``
+$XIAOBAN_HOME (/opt/data) is a DATA volume that users commonly bind-mount from
+the host (``~/.xiaoban:/opt/data``) and sometimes share with a host-side
+Desktop/CLI install. Older images wrote ``printf 'docker' > $XIAOBAN_HOME/.install_method``
 at boot, which clobbered the host install's own marker — so the host's in-app
 updater read 'docker' and refused to run ``xiaoban update`` ("doesn't apply
 inside the Docker container").
 
 The fix scopes the stamp to the install tree (baked at
-``/opt/hermes/.install_method`` in the Dockerfile, read first by
+``/opt/xiaoban/.install_method`` in the Dockerfile, read first by
 ``detect_install_method``). stage2 must therefore:
 
-  * NOT write the 'docker' stamp into $HERMES_HOME any more, and
-  * proactively remove a stale 'docker' stamp from $HERMES_HOME so homes
+  * NOT write the 'docker' stamp into $XIAOBAN_HOME any more, and
+  * proactively remove a stale 'docker' stamp from $XIAOBAN_HOME so homes
     already poisoned by an older image self-heal on the next boot.
 """
 from __future__ import annotations
@@ -40,18 +40,18 @@ def stage2_text() -> str:
 def test_stage2_does_not_write_install_method_into_home(stage2_text: str) -> None:
     # No write/tee of the home-scoped install-method stamp anywhere.
     assert not re.search(
-        r"(tee|>)\s*\"?\$HERMES_HOME/\.install_method", stage2_text
+        r"(tee|>)\s*\"?\$XIAOBAN_HOME/\.install_method", stage2_text
     ), (
-        "stage2 must not stamp $HERMES_HOME/.install_method — that data dir "
+        "stage2 must not stamp $XIAOBAN_HOME/.install_method — that data dir "
         "may be shared with a host install whose marker would be clobbered"
     )
 
 
 def test_stage2_heals_stale_docker_home_stamp(stage2_text: str) -> None:
-    # It must remove a stale 'docker' stamp from $HERMES_HOME so already
+    # It must remove a stale 'docker' stamp from $XIAOBAN_HOME so already
     # poisoned shared homes recover.
-    assert 'rm -f "$HERMES_HOME/.install_method"' in stage2_text, (
-        "stage2 must remove a stale 'docker' stamp from $HERMES_HOME to heal "
+    assert 'rm -f "$XIAOBAN_HOME/.install_method"' in stage2_text, (
+        "stage2 must remove a stale 'docker' stamp from $XIAOBAN_HOME to heal "
         "homes poisoned by older images"
     )
     # The removal must be guarded on the value being 'docker' so we never

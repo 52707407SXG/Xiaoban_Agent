@@ -1,4 +1,4 @@
-import { Box, NoSelect, Text } from '@hermes/ink'
+import { Box, NoSelect, Text } from '@xiaoban/ink'
 import { memo, type ReactNode, useEffect, useMemo, useState } from 'react'
 import spinners, { type BrailleSpinnerName } from 'unicode-animations'
 
@@ -20,12 +20,12 @@ import {
   compactPreview,
   estimateTokensRough,
   fmtK,
-  formatToolCall,
+  formatPreparingToolLine,
+  formatToolProcessLine,
   parseToolTrailResultLine,
   pick,
   splitToolDuration,
-  thinkingPreview,
-  toolTrailLabel
+  thinkingPreview
 } from '../lib/text.js'
 import type { Theme } from '../theme.js'
 import type {
@@ -815,13 +815,15 @@ export const ToolTrail = memo(function ToolTrail({
       continue
     }
 
-    if (line.startsWith('drafting ')) {
-      const label = toolTrailLabel(line.slice(9).replace(/…$/, '').trim())
+    if (line.startsWith('drafting ') || line.startsWith('preparing ')) {
+      const offset = line.startsWith('drafting ') ? 9 : 10
+      const rawName = line.slice(offset).replace(/…$/, '').trim()
+      const label = formatPreparingToolLine(rawName)
 
       groups.push({
         color: t.color.text,
         content: label,
-        details: [{ color: t.color.muted, content: 'drafting...', dimColor: true, key: `tr-${i}-d` }],
+        details: [{ color: t.color.muted, content: 'waiting for tool arguments...', dimColor: true, key: `tr-${i}-d` }],
         key: `tr-${i}`,
         label
       })
@@ -850,7 +852,8 @@ export const ToolTrail = memo(function ToolTrail({
   }
 
   for (const tool of tools) {
-    const label = formatToolCall(tool.name, tool.context || '')
+    const elapsed = tool.startedAt ? (now - tool.startedAt) / 1000 : undefined
+    const label = formatToolProcessLine(tool.name, tool.context || '', elapsed)
 
     groups.push({
       color: t.color.text,
@@ -869,7 +872,6 @@ export const ToolTrail = memo(function ToolTrail({
       content: (
         <>
           <Spinner color={t.color.accent} variant="tool" /> {label}
-          {tool.startedAt ? ` (${fmtElapsed(now - tool.startedAt)})` : ''}
         </>
       )
     })

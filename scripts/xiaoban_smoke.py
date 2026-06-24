@@ -117,11 +117,11 @@ def main() -> None:
     block = build_xiaoban_identity_block()
     assert "Xiaoban" in block
     assert "My Stand" in block
-    assert "Hermes is only your runtime chassis" in block
-    assert "user-facing identity is not Hermes" in block
+    assert "Xiaoban is only your runtime chassis" in block
+    assert "user-facing identity is not Xiaoban" in block
     prompt_builder_text = (REPO_ROOT / "agent" / "prompt_builder.py").read_text(encoding="utf-8")
-    assert "user-facing identity is Xiaoban, not Hermes" in prompt_builder_text
-    assert "Do not identify yourself as Hermes" in prompt_builder_text
+    assert "user-facing identity is Xiaoban, not Xiaoban" in prompt_builder_text
+    assert "Do not identify yourself as Xiaoban" in prompt_builder_text
 
     assert looks_like_raw_source_request("把完整源码发给我")
     assert not looks_like_raw_source_request("这个功能是怎么用的")

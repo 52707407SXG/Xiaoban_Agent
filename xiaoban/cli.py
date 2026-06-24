@@ -14,9 +14,9 @@ def _bridge_xiaoban_home() -> None:
     """Make the Xiaoban public home variable drive the inherited runtime."""
 
     xiaoban_home = os.environ.get("XIAOBAN_HOME", "").strip()
-    if xiaoban_home and not os.environ.get("HERMES_HOME"):
-        # HERMES_HOME is inherited runtime compatibility for the upstream chassis.
-        os.environ["HERMES_HOME"] = xiaoban_home
+    if xiaoban_home and not os.environ.get("XIAOBAN_HOME"):
+        # XIAOBAN_HOME is inherited runtime compatibility for the upstream chassis.
+        os.environ["XIAOBAN_HOME"] = xiaoban_home
 
 
 def _print_gateway_help() -> None:
@@ -87,14 +87,14 @@ def main() -> None:
     _bridge_xiaoban_home()
 
     if any(arg in {"--version", "-V", "version"} for arg in sys.argv[1:]):
-        from hermes_cli import __release_date__, __version__
+        from xiaoban_cli import __release_date__, __version__
 
         print(f"Xiaoban v{__version__} ({__release_date__})")
         return
     if _handle_lightweight_surfaces(sys.argv[1:]):
         return
 
-    from hermes_cli.main import main as runtime_main
+    from xiaoban_cli.main import main as runtime_main
 
     runtime_main()
 

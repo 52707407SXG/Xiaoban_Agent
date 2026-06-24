@@ -6,7 +6,7 @@ author: Xiaoban-Agent
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
-  hermes:
+  xiaoban:
     tags: [cloudflare, workers, wrangler, deploy, temporary, agent, serverless, web-development]
     category: web-development
 ---

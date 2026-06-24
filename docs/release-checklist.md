@@ -22,9 +22,9 @@ pytest tests/xiaoban
 ## Branding
 
 - User-facing identity says Xiaoban-Agent / 小伴.
-- Internal architecture may say Hermes runtime fork or chassis.
-- Public docs must not present Xiaoban as generic Hermes.
-- `HERMES_HOME` may appear only as legacy runtime compatibility.
+- Internal architecture may say Xiaoban runtime fork or chassis.
+- Public docs must not present Xiaoban as generic Xiaoban.
+- `XIAOBAN_HOME` may appear only as legacy runtime compatibility.
 
 ## Default Channels
 

@@ -26,7 +26,7 @@ ASCII art：pyfiglet、cowsay、boxes、image-to-ascii。
 ## 参考：完整 SKILL.md
 
 :::info
-以下是 Hermes 在触发此 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。
+以下是 Xiaoban 在触发此 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时所看到的指令内容。
 :::
 
 # ASCII Art Skill
@@ -172,9 +172,9 @@ boxes -l                                       # List all 70+ designs
 ### 与 pyfiglet 或 asciified 组合使用
 
 ```bash
-python3 -m pyfiglet "HERMES" -f slant | boxes -d stone
+python3 -m pyfiglet "XIAOBAN" -f slant | boxes -d stone
 # Or without pyfiglet installed:
-curl -s "https://asciified.thelicato.io/api/v2/ascii?text=HERMES&font=Slant" | boxes -d stone
+curl -s "https://asciified.thelicato.io/api/v2/ascii?text=XIAOBAN&font=Slant" | boxes -d stone
 ```
 
 ## 工具 5：TOIlet（彩色文字艺术）

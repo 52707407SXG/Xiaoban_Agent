@@ -366,7 +366,7 @@ def build_turn_context(
     # Plugin hook: pre_llm_call (context injected into user message, not system prompt).
     plugin_user_context = ""
     try:
-        from hermes_cli.plugins import invoke_hook as _invoke_hook
+        from xiaoban_cli.plugins import invoke_hook as _invoke_hook
         _pre_results = _invoke_hook(
             "pre_llm_call",
             session_id=agent.session_id,
@@ -389,6 +389,27 @@ def build_turn_context(
             plugin_user_context = "\n\n".join(_ctx_parts)
     except Exception as exc:
         logger.warning("pre_llm_call hook failed: %s", exc)
+
+    # Auto-loaded task skills: web/API chat surfaces often need a clean
+    # evidence workflow before the model burns turns on generic search.  This
+    # context is injected into the current turn only, like plugin context, so it
+    # does not mutate the cached system prompt or persisted transcript.
+    try:
+        from agent.auto_skill_context import collect_matching_skill_context
+
+        _auto_skill_context = collect_matching_skill_context(
+            original_user_message,
+            available_tools=getattr(agent, "valid_tool_names", None),
+            available_toolsets=getattr(agent, "enabled_toolsets", None),
+        )
+        if _auto_skill_context:
+            plugin_user_context = (
+                f"{_auto_skill_context}\n\n{plugin_user_context}"
+                if plugin_user_context
+                else _auto_skill_context
+            )
+    except Exception as exc:
+        logger.warning("auto skill context failed: %s", exc)
 
     # Per-turn file-mutation verifier state.
     agent._turn_failed_file_mutations = {}

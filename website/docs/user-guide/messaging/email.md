@@ -6,7 +6,7 @@ description: "Set up Xiaoban-Agent as an email assistant via IMAP/SMTP"
 
 # Email Setup
 
-Hermes can receive and reply to emails using standard IMAP and SMTP protocols. Send an email to the agent's address and it replies in-thread — no special client or bot API needed. Works with Gmail, Outlook, Yahoo, Fastmail, or any provider that supports IMAP/SMTP.
+Xiaoban can receive and reply to emails using standard IMAP and SMTP protocols. Send an email to the agent's address and it replies in-thread — no special client or bot API needed. Works with Gmail, Outlook, Yahoo, Fastmail, or any provider that supports IMAP/SMTP.
 
 :::info Gateway adapter only: no external dependencies
 This page covers the Email gateway adapter, which uses Python's built-in `imaplib`, `smtplib`, and `email` modules. No additional packages or external services are required for this gateway path.
@@ -16,14 +16,14 @@ This is separate from the bundled [Himalaya email skill](/docs/user-guide/skills
 
 | Use case | What to configure | External dependency |
 |---|---|---|
-| Let people email the Hermes agent and receive replies | Email gateway adapter on this page | None beyond an IMAP/SMTP email account |
+| Let people email the Xiaoban agent and receive replies | Email gateway adapter on this page | None beyond an IMAP/SMTP email account |
 | Let the agent inspect, compose, move, and manage mailbox messages from terminal tools | Himalaya email skill | `himalaya` CLI and `~/.config/himalaya/config.toml` |
 
 ---
 
 ## Prerequisites
 
-- **A dedicated email account** for your Hermes agent (don't use your personal email)
+- **A dedicated email account** for your Xiaoban agent (don't use your personal email)
 - **IMAP enabled** on the email account
 - **An app password** if using Gmail or another provider with 2FA
 
@@ -50,7 +50,7 @@ Most email providers support IMAP/SMTP. Check your provider's documentation for:
 
 ---
 
-## Step 1: Configure Hermes
+## Step 1: Configure Xiaoban
 
 The easiest way:
 
@@ -62,11 +62,11 @@ Select **Email** from the platform menu. The wizard prompts for your email addre
 
 ### Manual Configuration
 
-Add to `~/.hermes/.env`:
+Add to `~/.xiaoban/.env`:
 
 ```bash
 # Required
-EMAIL_ADDRESS=hermes@gmail.com
+EMAIL_ADDRESS=xiaoban@gmail.com
 EMAIL_PASSWORD=abcd efgh ijkl mnop    # App password (not your regular password)
 EMAIL_IMAP_HOST=imap.gmail.com
 EMAIL_SMTP_HOST=smtp.gmail.com
@@ -150,7 +150,7 @@ Email access is stricter by default than chat-style platforms:
 4. **`platforms.email.unauthorized_dm_behavior: pair`** → unknown senders receive a pairing code
 
 :::warning
-**Use a dedicated inbox and configure `EMAIL_ALLOWED_USERS` for normal operation.** Email pairing is opt-in because shared inboxes often contain unrelated unread messages, and Hermes should not reply to those contacts by default.
+**Use a dedicated inbox and configure `EMAIL_ALLOWED_USERS` for normal operation.** Email pairing is opt-in because shared inboxes often contain unrelated unread messages, and Xiaoban should not reply to those contacts by default.
 :::
 
 ---
@@ -177,7 +177,7 @@ Email access is stricter by default than chat-style platforms:
 
 - Use **App Passwords** instead of your main password (required for Gmail with 2FA)
 - Set `EMAIL_ALLOWED_USERS` to restrict who can interact with the agent
-- The password is stored in `~/.hermes/.env` — protect this file (`chmod 600`)
+- The password is stored in `~/.xiaoban/.env` — protect this file (`chmod 600`)
 - IMAP uses SSL (port 993) and SMTP uses STARTTLS (port 587) by default — connections are encrypted
 
 ---

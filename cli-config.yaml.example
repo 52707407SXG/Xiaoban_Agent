@@ -94,11 +94,11 @@ model:
 # client rebuilds during credential rotation.  For OpenAI-wire chat
 # completions (streaming and non-streaming) the configured value is also
 # used as the per-request ``timeout=`` kwarg so it wins over the legacy
-# HERMES_API_TIMEOUT env var (which still applies when no config is set).
+# XIAOBAN_API_TIMEOUT env var (which still applies when no config is set).
 # ``stale_timeout_seconds`` controls the non-streaming stale-call detector and
-# wins over the legacy HERMES_API_CALL_STALE_TIMEOUT env var. Leaving these
-# unset keeps the legacy defaults (HERMES_API_TIMEOUT=1800s,
-# HERMES_API_CALL_STALE_TIMEOUT=90s, native Anthropic 900s). The
+# wins over the legacy XIAOBAN_API_CALL_STALE_TIMEOUT env var. Leaving these
+# unset keeps the legacy defaults (XIAOBAN_API_TIMEOUT=1800s,
+# XIAOBAN_API_CALL_STALE_TIMEOUT=90s, native Anthropic 900s). The
 # implicit non-stream stale detector is auto-disabled for local endpoints
 # and can scale upward for very large contexts.
 #
@@ -188,16 +188,16 @@ model:
 # Commands run directly on your machine in the current directory
 # -----------------------------------------------------------------------------
 # Working directory behavior:
-#   - CLI (`hermes` command): Uses "." (current directory where you run hermes)
+#   - CLI (`xiaoban` command): Uses "." (current directory where you run xiaoban)
 #   - Gateway/messaging/cron: Uses terminal.cwd here; legacy .env cwd values are deprecated
 terminal:
   backend: "local"
   cwd: "."  # For local backend: "." = current directory. Ignored for remote backends unless a backend documents otherwise.
   timeout: 180
   # HOME policy for tool subprocesses:
-  #   auto    - default: host uses your real HOME; containers use the legacy runtime compatibility HERMES_HOME/home
+  #   auto    - default: host uses your real HOME; containers use the legacy runtime compatibility XIAOBAN_HOME/home
   #   real    - force your real OS-user HOME
-  #   profile - force the legacy runtime compatibility HERMES_HOME/home for strict per-profile CLI config isolation
+  #   profile - force the legacy runtime compatibility XIAOBAN_HOME/home for strict per-profile CLI config isolation
   home_mode: "auto"
   docker_mount_cwd_to_workspace: false  # SECURITY: off by default. Opt in to mount the launch cwd into Docker /workspace.
   lifetime_seconds: 300
@@ -673,7 +673,7 @@ agent:
 # Platform Toolsets (per-platform tool configuration)
 # =============================================================================
 # Override which toolsets are available on each platform.
-# Xiaoban defaults are intentionally My Stand focused. Other Hermes-runtime
+# Xiaoban defaults are intentionally My Stand focused. Other Xiaoban-runtime
 # platform adapters may remain in the codebase, but they are opt-in and are
 # not part of the default My Stand deployment surface.
 #
@@ -1166,14 +1166,14 @@ display:
 # stdout the script may return JSON that either blocks the tool call or
 # injects context into the next LLM call.
 #
-# Valid events (mirror hermes_cli.plugins.VALID_HOOKS):
+# Valid events (mirror xiaoban_cli.plugins.VALID_HOOKS):
 #   pre_tool_call, post_tool_call, pre_llm_call, post_llm_call,
 #   pre_api_request, post_api_request, on_session_start, on_session_end,
 #   on_session_finalize, on_session_reset, subagent_stop
 #
 # First-use consent: each (event, command) pair prompts once on a TTY, then
 # is persisted to ~/.xiaoban/shell-hooks-allowlist.json.  Non-interactive
-# runs (gateway, cron) need --accept-hooks, HERMES_ACCEPT_HOOKS=1, or the
+# runs (gateway, cron) need --accept-hooks, XIAOBAN_ACCEPT_HOOKS=1, or the
 # hooks_auto_accept key below.
 #
 # See website/docs/user-guide/features/hooks.md for the full JSON wire
@@ -1199,7 +1199,7 @@ display:
 # Update Behavior
 # =============================================================================
 updates:
-  # Create a full legacy runtime compatibility HERMES_HOME zip before every `xiaoban update`.
+  # Create a full legacy runtime compatibility XIAOBAN_HOME zip before every `xiaoban update`.
   # Backups land in ~/.xiaoban/backups/ and can be restored with `xiaoban import`.
   # Off by default because large homes can add minutes to every update.
   pre_update_backup: false
@@ -1223,9 +1223,9 @@ updates:
 # The bundled Nous Portal plugin reads these on startup; settings here are
 # the canonical surface. Each can be overridden by an environment variable:
 #
-#   dashboard.oauth.client_id   <-  HERMES_DASHBOARD_OAUTH_CLIENT_ID
-#   dashboard.oauth.portal_url  <-  HERMES_DASHBOARD_PORTAL_URL
-#   dashboard.public_url        <-  HERMES_DASHBOARD_PUBLIC_URL
+#   dashboard.oauth.client_id   <-  XIAOBAN_DASHBOARD_OAUTH_CLIENT_ID
+#   dashboard.oauth.portal_url  <-  XIAOBAN_DASHBOARD_PORTAL_URL
+#   dashboard.public_url        <-  XIAOBAN_DASHBOARD_PUBLIC_URL
 #
 # Env wins when set to a non-empty value. This is what Fly.io's platform-
 # secret injection uses to push per-deploy client_ids without needing to
@@ -1248,7 +1248,7 @@ updates:
 #   # full proxy header chains).
 #   #
 #   # When set, the value is the complete authority: scheme + host +
-#   # optional path prefix (e.g. "https://example.com/hermes"). The OAuth
+#   # optional path prefix (e.g. "https://example.com/xiaoban"). The OAuth
 #   # callback URL becomes "<public_url>/auth/callback" — X-Forwarded-Prefix
 #   # is IGNORED on this code path because the operator has explicitly
 #   # declared the public URL and we no longer need to guess.
@@ -1256,4 +1256,4 @@ updates:
 #   # Leave empty to use the existing proxy-header reconstruction (the
 #   # default — works on Fly.io out of the box).
 #   #
-#   #   public_url: "https://example.com/hermes"
+#   #   public_url: "https://example.com/xiaoban"

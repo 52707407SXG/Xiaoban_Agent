@@ -171,7 +171,7 @@ export default function SystemPage() {
 
   const [importPath, setImportPath] = useState("");
   // Restore-from-backup is destructive (overwrites the live config) and the
-  // spawned `hermes import` runs non-interactively (stdin is /dev/null), so
+  // spawned `xiaoban import` runs non-interactively (stdin is /dev/null), so
   // its CLI "Continue? [y/N]" prompt would auto-abort. The dashboard owns the
   // consent: confirm here, then call the endpoint with force=true.
   const [importConfirmOpen, setImportConfirmOpen] = useState(false);
@@ -209,7 +209,7 @@ export default function SystemPage() {
       api.getPortal(),
       // Cached (non-forced) check so the version row shows update status on
       // load without a separate effect / a forced network round-trip.
-      api.checkHermesUpdate(false),
+      api.checkXiaobanUpdate(false),
     ])
       .then(([s, st, m, p, c, h, cur, prt, upd]) => {
         if (s.status === "fulfilled") setStatus(s.value);
@@ -386,10 +386,10 @@ export default function SystemPage() {
   // ── Update check / apply ───────────────────────────────────────────
   const checkForUpdate = useCallback(
     async (force = false) => {
-      if (status?.can_update_hermes === false) return;
+      if (status?.can_update_xiaoban === false) return;
       setCheckingUpdate(true);
       try {
-        const info = await api.checkHermesUpdate(force);
+        const info = await api.checkXiaobanUpdate(force);
         setUpdateInfo(info);
         if (force) {
           if (info.update_available) {
@@ -411,22 +411,22 @@ export default function SystemPage() {
         setCheckingUpdate(false);
       }
     },
-    [showToast, status?.can_update_hermes],
+    [showToast, status?.can_update_xiaoban],
   );
 
   // Auto-check (cached) runs inside loadAll on mount; this is the
   // user-triggered forced re-check from the "Check for updates" button.
   const applyUpdate = async () => {
     setUpdateConfirmOpen(false);
-    if (status?.can_update_hermes === false) {
+    if (status?.can_update_xiaoban === false) {
       showToast(
-        "Hermes updates are managed outside this dashboard.",
+        "Xiaoban updates are managed outside this dashboard.",
         "success",
       );
       return;
     }
     try {
-      const resp = await api.updateHermes();
+      const resp = await api.updateXiaoban();
       if (!resp.ok) {
         showToast(
           resp.message ??
@@ -435,7 +435,7 @@ export default function SystemPage() {
         );
         return;
       }
-      setActiveAction(resp.name ?? "hermes-update");
+      setActiveAction(resp.name ?? "xiaoban-update");
       showToast("Update started", "success");
     } catch (e) {
       showToast(`Update failed: ${e}`, "error");
@@ -511,7 +511,7 @@ export default function SystemPage() {
   }
 
   const gatewayRunning = status?.gateway_running;
-  const canUpdateHermes = status?.can_update_hermes !== false;
+  const canUpdateXiaoban = status?.can_update_xiaoban !== false;
   const validEvents = hooks?.valid_events?.length
     ? hooks.valid_events
     : HOOK_EVENTS_FALLBACK;
@@ -521,10 +521,10 @@ export default function SystemPage() {
       <Toast toast={toast} />
 
       <ConfirmDialog
-        open={canUpdateHermes && updateConfirmOpen}
+        open={canUpdateXiaoban && updateConfirmOpen}
         onCancel={() => setUpdateConfirmOpen(false)}
         onConfirm={() => void applyUpdate()}
-        title="Update Hermes?"
+        title="Update Xiaoban?"
         description={
           updateInfo && updateInfo.behind && updateInfo.behind > 0
             ? `This will run 'xiaoban update' (${updateInfo.update_command}) and pull ${updateInfo.behind} new commit${updateInfo.behind === 1 ? "" : "s"}. The gateway restarts when the update finishes; the current session keeps its prompt cache until then.`
@@ -697,10 +697,10 @@ export default function SystemPage() {
                 <div>{stats?.python_impl} {stats?.python_version}</div>
               </div>
               <div>
-                <div className="text-xs uppercase tracking-wider text-muted-foreground">Hermes</div>
+                <div className="text-xs uppercase tracking-wider text-muted-foreground">Xiaoban</div>
                 <div className="flex items-center gap-2">
-                  <span>v{stats?.hermes_version}</span>
-                  {canUpdateHermes &&
+                  <span>v{stats?.xiaoban_version}</span>
+                  {canUpdateXiaoban &&
                     updateInfo &&
                     (updateInfo.update_available ? (
                       <Badge tone="warning">
@@ -761,7 +761,7 @@ export default function SystemPage() {
                 CPU / memory / disk metrics.
               </p>
             )}
-            {canUpdateHermes && (
+            {canUpdateXiaoban && (
               <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border pt-4">
                 <Button
                   size="sm"
@@ -846,7 +846,7 @@ export default function SystemPage() {
             )}
             {!portal?.logged_in && (
               <p className="text-xs text-muted-foreground">
-                Log in with <span className="font-mono">hermes portal</span>.
+                Log in with <span className="font-mono">xiaoban portal</span>.
               </p>
             )}
           </CardContent>
@@ -954,7 +954,7 @@ export default function SystemPage() {
               </Link>
               <span className="ml-auto">
                 New credentials:{" "}
-                <span className="font-mono">hermes memory setup</span>
+                <span className="font-mono">xiaoban memory setup</span>
               </span>
             </div>
 
@@ -1076,7 +1076,7 @@ export default function SystemPage() {
                   <span className="text-sm font-medium">Share debug report</span>
                   <span className="text-xs text-muted-foreground max-w-prose">
                     Uploads system info + logs to a public paste service and
-                    returns links to send the Hermes team. Pastes auto-delete
+                    returns links to send the Xiaoban team. Pastes auto-delete
                     after 6 hours.
                   </span>
                 </div>
@@ -1190,7 +1190,7 @@ export default function SystemPage() {
           <CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-end">
             <div className="grid gap-2 flex-1">
               <Label htmlFor="import-path">Restore from backup archive</Label>
-              <Input id="import-path" value={importPath} onChange={(e) => setImportPath(e.target.value)} placeholder="/path/to/hermes-backup.zip" />
+              <Input id="import-path" value={importPath} onChange={(e) => setImportPath(e.target.value)} placeholder="/path/to/xiaoban-backup.zip" />
             </div>
             <Button
               size="sm"
@@ -1206,7 +1206,7 @@ export default function SystemPage() {
             <ConfirmDialog
               open={importConfirmOpen}
               title="Restore from backup?"
-              description={`This will overwrite your current Hermes configuration, skills, sessions, and data with the contents of ${importPath.trim() || "the archive"}. This cannot be undone.`}
+              description={`This will overwrite your current Xiaoban configuration, skills, sessions, and data with the contents of ${importPath.trim() || "the archive"}. This cannot be undone.`}
               destructive
               confirmLabel="Restore"
               cancelLabel="Cancel"

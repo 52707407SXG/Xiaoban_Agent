@@ -28,12 +28,12 @@ def _check_config():
     if not CANVAS_BASE_URL:
         missing.append("CANVAS_BASE_URL")
     if missing:
-        hermes_env = os.path.join(
-            os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")), ".env"
+        xiaoban_env = os.path.join(
+            os.environ.get("XIAOBAN_HOME", os.path.expanduser("~/.xiaoban")), ".env"
         )
         print(
             f"Missing required environment variables: {', '.join(missing)}\n"
-            f"Set them in {hermes_env} or export them in your shell.\n"
+            f"Set them in {xiaoban_env} or export them in your shell.\n"
             "See the canvas skill SKILL.md for setup instructions.",
             file=sys.stderr,
         )

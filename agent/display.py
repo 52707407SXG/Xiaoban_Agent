@@ -45,7 +45,7 @@ def _diff_ansi() -> dict[str, str]:
     plus = "\033[38;2;255;255;255;48;2;20;90;20m"
 
     try:
-        from hermes_cli.skin_engine import get_active_skin
+        from xiaoban_cli.skin_engine import get_active_skin
         skin = get_active_skin()
 
         def _hex_fg(key: str, fallback_rgb: tuple[int, int, int]) -> str:
@@ -120,7 +120,7 @@ def get_tool_preview_max_len() -> int:
 def _get_skin():
     """Get the active skin config, or None if not available."""
     try:
-        from hermes_cli.skin_engine import get_active_skin
+        from xiaoban_cli.skin_engine import get_active_skin
         return get_active_skin()
     except Exception:
         return None
@@ -158,6 +158,86 @@ def get_tool_emoji(tool_name: str, default: str = "⚡") -> str:
         pass
     # 3. Hardcoded fallback
     return default
+
+
+def get_tool_action_verb(tool_name: str) -> str:
+    """Return the short action label used in process-progress rows."""
+    actions = {
+        "web_search": "search",
+        "search": "search",
+        "web_extract": "fetch",
+        "terminal": "run",
+        "execute_code": "exec",
+        "read_file": "read",
+        "write_file": "write",
+        "patch": "patch",
+        "search_files": "grep",
+        "browser_navigate": "navigate",
+        "browser_snapshot": "snapshot",
+        "browser_click": "click",
+        "browser_type": "type",
+        "browser_scroll": "scroll",
+        "browser_back": "back",
+        "browser_press": "press",
+        "browser_get_images": "images",
+        "browser_vision": "vision",
+        "vision_analyze": "vision",
+        "todo": "plan",
+        "session_search": "recall",
+        "memory": "memory",
+        "skills_list": "skills",
+        "skill_view": "skill",
+        "skill_manage": "skill",
+        "image_generate": "create",
+        "text_to_speech": "speak",
+        "mixture_of_agents": "reason",
+        "send_message": "send",
+        "cronjob": "cron",
+        "delegate_task": "delegate",
+        "clarify": "clarify",
+        "process": "process",
+    }
+    return actions.get(tool_name, tool_name.replace("_", " "))
+
+
+def get_tool_action_icon(tool_name: str) -> str:
+    """Return the icon used in process-progress rows."""
+    icons = {
+        "web_search": "🔍",
+        "search": "🔍",
+        "web_extract": "📄",
+        "terminal": "💻",
+        "execute_code": "🐍",
+        "read_file": "📄",
+        "write_file": "✍️",
+        "patch": "🔧",
+        "search_files": "🔎",
+        "browser_navigate": "🌐",
+        "browser_snapshot": "📸",
+        "browser_click": "👆",
+        "browser_type": "⌨️",
+        "browser_scroll": "↕",
+        "browser_back": "◀",
+        "browser_press": "⌨️",
+        "browser_get_images": "🖼️",
+        "browser_vision": "👁️",
+        "vision_analyze": "👁️",
+        "todo": "📋",
+        "session_search": "🔍",
+        "memory": "🧠",
+        "skills_list": "📚",
+        "skill_view": "📚",
+        "skill_manage": "📚",
+        "image_generate": "🎨",
+        "text_to_speech": "🔊",
+        "mixture_of_agents": "🧠",
+        "send_message": "📨",
+        "cronjob": "⏰",
+        "delegate_task": "🤝",
+        "clarify": "?",
+        "process": "⚙️",
+    }
+    return icons.get(tool_name, "⚙️")
 
 
 # =========================================================================
@@ -749,7 +829,7 @@ class KawaiiSpinner:
         wings = skin.get_spinner_wings() if skin else []
 
         while self.running:
-            if os.getenv("HERMES_SPINNER_PAUSE"):
+            if os.getenv("XIAOBAN_SPINNER_PAUSE"):
                 time.sleep(0.1)
                 continue
             frame = self.spinner_frames[self.frame_idx % len(self.spinner_frames)]
@@ -943,7 +1023,7 @@ def get_cute_tool_message(
             return _wrap(f"┊ 📄 fetch     {_trunc(domain, 35)}{extra}  {dur}")
         return _wrap(f"┊ 📄 fetch     pages  {dur}")
     if tool_name == "terminal":
-        return _wrap(f"┊ 💻 $         {_trunc(args.get('command', ''), 42)}  {dur}")
+        return _wrap(f"┊ 💻 run       {_trunc(args.get('command', ''), 42)}  {dur}")
     if tool_name == "process":
         action = args.get("action", "?")
         sid = args.get("session_id", "")[:12]
@@ -951,7 +1031,7 @@ def get_cute_tool_message(
                   "wait": f"wait {sid}", "kill": f"kill {sid}", "write": f"write {sid}", "submit": f"submit {sid}"}
         return _wrap(f"┊ ⚙️  proc      {labels.get(action, f'{action} {sid}')}  {dur}")
     if tool_name == "read_file":
-        return _wrap(f"┊ 📖 read      {_path(args.get('path', ''))}  {dur}")
+        return _wrap(f"┊ 📄 read      {_path(args.get('path', ''))}  {dur}")
     if tool_name == "write_file":
         return _wrap(f"┊ ✍️  write     {_path(args.get('path', ''))}  {dur}")
     if tool_name == "patch":
@@ -1064,11 +1144,9 @@ def get_cute_tool_message(
         return _wrap(f"┊ 🔀 delegate  {_trunc(args.get('goal', ''), 35)}  {dur}")
 
     preview = build_tool_preview(tool_name, args) or ""
-    return _wrap(f"┊ ⚡ {tool_name[:9]:9} {_trunc(preview, 35)}  {dur}")
+    return _wrap(f"┊ ⚡ {get_tool_action_verb(tool_name)[:9]:9} {_trunc(preview, 35)}  {dur}")
 
 
 # =========================================================================
 # Honcho session line (one-liner with clickable OSC 8 hyperlink)
 # =========================================================================
-
-

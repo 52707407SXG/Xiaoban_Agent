@@ -25,7 +25,7 @@ Canvas LMS 集成 — 使用 API token（令牌）认证获取已注册课程和
 ## 参考：完整 SKILL.md
 
 :::info
-以下是 Hermes 在触发此 skill 时加载的完整 skill 定义。这是 skill 激活时 agent 所看到的指令内容。
+以下是 Xiaoban 在触发此 skill 时加载的完整 skill 定义。这是 skill 激活时 agent 所看到的指令内容。
 :::
 
 # Canvas LMS — 课程与作业访问
@@ -42,7 +42,7 @@ Canvas LMS 集成 — 使用 API token（令牌）认证获取已注册课程和
 2. 进入 **Account → Settings**（点击个人头像，然后点击 Settings）
 3. 滚动到 **Approved Integrations**，点击 **+ New Access Token**
 4. 为 token 命名（例如 "Xiaoban-Agent"），设置可选的过期时间，然后点击 **Generate Token**
-5. 复制 token 并添加到 `~/.hermes/.env`：
+5. 复制 token 并添加到 `~/.xiaoban/.env`：
 
 ```
 CANVAS_API_TOKEN=your_token_here
@@ -54,7 +54,7 @@ base URL 即你登录 Canvas 后浏览器地址栏中显示的地址（末尾不
 ## 使用方法
 
 ```bash
-CANVAS="python $HERMES_HOME/skills/productivity/canvas/scripts/canvas_api.py"
+CANVAS="python $XIAOBAN_HOME/skills/productivity/canvas/scripts/canvas_api.py"
 
 # 列出所有已激活的课程
 $CANVAS list_courses --enrollment-state active

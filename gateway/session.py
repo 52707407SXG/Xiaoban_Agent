@@ -67,7 +67,7 @@ from .whatsapp_identity import (
 from utils import atomic_replace
 
 # Session keys/ids flow into filesystem paths downstream (e.g.
-# ``sessions_dir / f"{session_id}.json"`` in hermes_state, request-dump
+# ``sessions_dir / f"{session_id}.json"`` in xiaoban_state, request-dump
 # filenames in agent_runtime_helpers). Any value that could escape the
 # sessions directory as a path must be rejected at the entry boundary.
 # Rejects: parent traversal (``..``), a path separator anywhere (``/`` or
@@ -250,8 +250,8 @@ def _discord_tools_loaded() -> bool:
     if not (os.environ.get("DISCORD_BOT_TOKEN") or "").strip():
         return False
     try:
-        from hermes_cli.config import load_config
-        from hermes_cli.tools_config import _get_platform_tools
+        from xiaoban_cli.config import load_config
+        from xiaoban_cli.tools_config import _get_platform_tools
         cfg = load_config()
         enabled = _get_platform_tools(cfg, "discord", include_default_mcp_servers=False)
         return "discord" in enabled or "discord_admin" in enabled
@@ -442,7 +442,7 @@ def build_session_context_prompt(
     lines.append("")
     lines.append("**Delivery options for scheduled tasks:**")
 
-    from hermes_constants import display_hermes_home
+    from xiaoban_constants import display_xiaoban_home
 
     # Origin delivery
     if context.source.platform == Platform.LOCAL:
@@ -455,7 +455,7 @@ def build_session_context_prompt(
 
     # Local always available
     lines.append(
-        f"- `\"local\"` → Save to local files only ({display_hermes_home()}/cron/output/)"
+        f"- `\"local\"` → Save to local files only ({display_xiaoban_home()}/cron/output/)"
     )
 
     # Platform home channels
@@ -786,7 +786,7 @@ class SessionStore:
         # Initialize SQLite session database
         self._db = None
         try:
-            from hermes_state import SessionDB
+            from xiaoban_state import SessionDB
             self._db = SessionDB()
         except Exception as e:
             print(f"[gateway] Warning: SQLite session store unavailable, falling back to JSONL: {e}")
@@ -855,7 +855,7 @@ class SessionStore:
         if source is not None and source.profile:
             return source.profile
         try:
-            from hermes_cli.profiles import get_active_profile_name
+            from xiaoban_cli.profiles import get_active_profile_name
             return get_active_profile_name() or "default"
         except Exception:
             return None

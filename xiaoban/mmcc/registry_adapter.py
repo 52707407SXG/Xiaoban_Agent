@@ -1,4 +1,4 @@
-"""Adapt MMCC tools into Hermes-compatible tool schemas."""
+"""Adapt MMCC tools into Xiaoban-compatible tool schemas."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def register_mmcc_tools(
     toolset: str = "xiaoban-mmcc",
     enabled_module_ids: set[str] | frozenset[str] | None = None,
 ) -> list[str]:
-    """Register MMCC tools into a Hermes-compatible ToolRegistry instance.
+    """Register MMCC tools into a Xiaoban-compatible ToolRegistry instance.
 
     The registry object is intentionally structural: it only needs a
     ``register(...)`` method matching ``tools.registry.ToolRegistry``. This keeps
@@ -100,7 +100,7 @@ def make_gateway_handler(
     principal_resolver: Callable[[dict[str, Any]], XiaobanPrincipal],
     gateway_call: Callable[[str, str, dict[str, Any]], dict[str, Any]],
 ) -> Callable[[dict[str, Any]], str]:
-    """Create a Hermes registry handler for an MMCC module tool.
+    """Create a Xiaoban registry handler for an MMCC module tool.
 
     The handler enforces Xiaoban policy before delegating to a future My Stand
     module tool gateway. It never imports a module's internal implementation.

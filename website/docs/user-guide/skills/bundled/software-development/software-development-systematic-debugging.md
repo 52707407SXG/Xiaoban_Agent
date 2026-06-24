@@ -26,7 +26,7 @@ description: "4-phase root cause debugging: understand bugs before fixing"
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # Systematic Debugging
@@ -337,7 +337,7 @@ If you catch yourself thinking:
 
 ### Investigation Tools
 
-Use these Hermes tools during Phase 1:
+Use these Xiaoban tools during Phase 1:
 
 - **`search_files`** — Find error strings, trace function calls, locate patterns
 - **`read_file`** — Read source code with line numbers for precise analysis

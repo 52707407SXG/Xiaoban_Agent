@@ -25,7 +25,7 @@ Search/download GIFs from Tenor via curl + jq.
 ## Reference: full SKILL.md
 
 :::info
-The following is the complete skill definition that Hermes loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
+The following is the complete skill definition that Xiaoban loads when this skill is triggered. This is what the agent sees as instructions when the skill is active.
 :::
 
 # GIF Search (Tenor API)
@@ -38,7 +38,7 @@ Useful for finding reaction GIFs, creating visual content, and sending GIFs in c
 
 ## Setup
 
-Set your Tenor API key in your environment (add to `${HERMES_HOME:-~/.hermes}/.env`):
+Set your Tenor API key in your environment (add to `${XIAOBAN_HOME:-~/.xiaoban}/.env`):
 
 ```bash
 TENOR_API_KEY=your_key_here
@@ -103,4 +103,4 @@ Each result has multiple formats under `.media_formats`:
 
 - URL-encode the query: spaces as `+`, special chars as `%XX`
 - For sending in chat, `tinygif` URLs are lighter weight
-- GIF URLs can be used directly in markdown: `![alt](https://github.com/52707407SXG/Xiaoban-Agent/blob/main/skills/media/gif-search/url)`
+- GIF URLs can be used directly in markdown: `![alt](https://github.com/52707407SXG/Xiaoban_Agent/blob/main/skills/media/gif-search/url)`

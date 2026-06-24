@@ -4,7 +4,7 @@
 **Audience:** the NAS-side implementer of the `agent-cron` endpoints
 (`nous-account-service`) and anyone debugging the managed-cron path.
 
-Chronos lets a hosted Hermes gateway **scale to zero** while idle and still
+Chronos lets a hosted Xiaoban gateway **scale to zero** while idle and still
 fire cron jobs. Instead of an in-process 60-second ticker, the agent asks NAS
 to arm exactly **one external one-shot per job at that job's real next-fire
 time**. NAS calls the agent back at fire time over an authenticated webhook;
@@ -115,7 +115,7 @@ Arm (or re-arm, idempotently) exactly one one-shot for a job.
 ## Inbound `POST /api/cron/fire`  (NAS → agent) — agent side, already implemented
 
 This is the agent endpoint NAS calls in Endpoint 3 step 3. Served by the
-**dashboard app** (`hermes_cli/web_server.py`) — the agent's always-reachable
+**dashboard app** (`xiaoban_cli/web_server.py`) — the agent's always-reachable
 public HTTP surface on hosted deployments (the gateway may be idle/scaled down);
 it is in `PUBLIC_API_PATHS` so the dashboard cookie gate lets the bearer-JWT
 callback through to the verifier. (Also registered on the optional
@@ -157,7 +157,7 @@ callback through to the verifier. (Also registered on the optional
   `get_job` returns `None` after the final fire → the agent does **not** re-arm
   → the schedule stops cleanly with no orphaned one-shot.
 - **Multi-replica agents:** the store CAS makes the fire at-most-once across N
-  gateway replicas sharing one `HERMES_HOME` — exactly one replica runs each
+  gateway replicas sharing one `XIAOBAN_HOME` — exactly one replica runs each
   fire.
 
 ## Reconcile (self-healing)

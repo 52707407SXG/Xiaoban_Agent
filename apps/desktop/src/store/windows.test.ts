@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { canOpenSessionWindow, openNewSessionInNewWindow, openSessionInNewWindow } from './windows'
 
-const desktopWindow = window as unknown as { hermesDesktop?: Window['hermesDesktop'] }
-const initialHermesDesktop = desktopWindow.hermesDesktop
+const desktopWindow = window as unknown as { xiaobanDesktop?: Window['xiaobanDesktop'] }
+const initialXiaobanDesktop = desktopWindow.xiaobanDesktop
 
 const notifyError = vi.fn()
 
@@ -12,13 +12,13 @@ vi.mock('./notifications', () => ({
 }))
 
 function installBridge(
-  openSessionWindow?: Window['hermesDesktop']['openSessionWindow'],
-  openNewSessionWindow?: Window['hermesDesktop']['openNewSessionWindow']
+  openSessionWindow?: Window['xiaobanDesktop']['openSessionWindow'],
+  openNewSessionWindow?: Window['xiaobanDesktop']['openNewSessionWindow']
 ) {
-  desktopWindow.hermesDesktop = {
+  desktopWindow.xiaobanDesktop = {
     ...(openSessionWindow ? { openSessionWindow } : {}),
     ...(openNewSessionWindow ? { openNewSessionWindow } : {})
-  } as unknown as Window['hermesDesktop']
+  } as unknown as Window['xiaobanDesktop']
 }
 
 beforeEach(() => {
@@ -26,16 +26,16 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  if (initialHermesDesktop) {
-    desktopWindow.hermesDesktop = initialHermesDesktop
+  if (initialXiaobanDesktop) {
+    desktopWindow.xiaobanDesktop = initialXiaobanDesktop
   } else {
-    delete desktopWindow.hermesDesktop
+    delete desktopWindow.xiaobanDesktop
   }
 })
 
 describe('canOpenSessionWindow', () => {
   it('is false when the desktop bridge is absent', () => {
-    delete desktopWindow.hermesDesktop
+    delete desktopWindow.xiaobanDesktop
     expect(canOpenSessionWindow()).toBe(false)
   })
 
@@ -62,7 +62,7 @@ describe('openSessionInNewWindow', () => {
   })
 
   it('no-ops gracefully when the bridge is absent (web fallback)', async () => {
-    delete desktopWindow.hermesDesktop
+    delete desktopWindow.xiaobanDesktop
 
     await openSessionInNewWindow('s1')
 
@@ -108,7 +108,7 @@ describe('openSessionInNewWindow', () => {
 
 describe('openNewSessionInNewWindow', () => {
   it('no-ops gracefully when the bridge is absent (web fallback)', async () => {
-    delete desktopWindow.hermesDesktop
+    delete desktopWindow.xiaobanDesktop
 
     await openNewSessionInNewWindow()
 

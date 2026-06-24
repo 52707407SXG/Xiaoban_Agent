@@ -2,9 +2,9 @@
 
 Xiaoban seeds its credential pool from many places:
 
-    env:<VAR>     — os.environ / ~/.hermes/.env
+    env:<VAR>     — os.environ / ~/.xiaoban/.env
     claude_code   — ~/.claude/.credentials.json
-    hermes_pkce   — ~/.hermes/.anthropic_oauth.json
+    xiaoban_pkce   — ~/.xiaoban/.anthropic_oauth.json
     device_code   — auth.json providers.<provider> (nous, openai-codex, ...)
     qwen-cli      — ~/.qwen/oauth_creds.json
     gh_cli        — gh auth token
@@ -21,7 +21,7 @@ unify here is **removal**:
 Before this module, every source had an ad-hoc removal branch in
 ``auth_remove_command``, and several sources had no branch at all — so
 ``auth remove`` silently reverted on the next ``load_pool()`` call for
-qwen-cli, nous device_code (partial), hermes_pkce, copilot gh_cli, and
+qwen-cli, nous device_code (partial), xiaoban_pkce, copilot gh_cli, and
 custom-config sources.
 
 Now every source registers a ``RemovalStep`` that does exactly three things
@@ -144,12 +144,12 @@ def _remove_env_source(provider: str, removed) -> RemovalResult:
     """env:<VAR> — the most common case.
 
     Handles three user situations:
-      1. Var lives only in ~/.hermes/.env  → clear it
+      1. Var lives only in ~/.xiaoban/.env  → clear it
       2. Var lives only in the user's shell (shell profile, systemd
          EnvironmentFile, launchd plist) → hint them where to unset it
       3. Var lives in both → clear from .env, hint about shell
     """
-    from hermes_cli.config import get_env_path, remove_env_value
+    from xiaoban_cli.config import get_env_path, remove_env_value
 
     result = RemovalResult()
     env_var = removed.source[len("env:"):]
@@ -177,11 +177,11 @@ def _remove_env_source(provider: str, removed) -> RemovalResult:
     if shell_exported:
         result.hints.extend([
             f"Note: {env_var} is still set in your shell environment "
-            f"(not in ~/.hermes/.env).",
+            f"(not in ~/.xiaoban/.env).",
             "  Unset it there (shell profile, systemd EnvironmentFile, "
             "launchd plist, etc.) or it will keep being visible to Xiaoban.",
-            f"  The pool entry is now suppressed — Hermes will ignore "
-            f"{env_var} until you run `hermes auth add {provider}`.",
+            f"  The pool entry is now suppressed — Xiaoban will ignore "
+            f"{env_var} until you run `xiaoban auth add {provider}`.",
         ])
     else:
         result.hints.append(
@@ -204,12 +204,12 @@ def _remove_claude_code(provider: str, removed) -> RemovalResult:
     ])
 
 
-def _remove_hermes_pkce(provider: str, removed) -> RemovalResult:
-    """~/.hermes/.anthropic_oauth.json is ours — delete it outright."""
-    from hermes_constants import get_hermes_home
+def _remove_xiaoban_pkce(provider: str, removed) -> RemovalResult:
+    """~/.xiaoban/.anthropic_oauth.json is ours — delete it outright."""
+    from xiaoban_constants import get_xiaoban_home
 
     result = RemovalResult()
-    oauth_file = get_hermes_home() / ".anthropic_oauth.json"
+    oauth_file = get_xiaoban_home() / ".anthropic_oauth.json"
     if oauth_file.exists():
         try:
             oauth_file.unlink()
@@ -221,7 +221,7 @@ def _remove_hermes_pkce(provider: str, removed) -> RemovalResult:
 
 def _clear_auth_store_provider(provider: str) -> bool:
     """Delete auth_store.providers[provider].  Returns True if deleted."""
-    from hermes_cli.auth import (
+    from xiaoban_cli.auth import (
         _auth_store_lock,
         _load_auth_store,
         _save_auth_store,
@@ -307,7 +307,7 @@ def _remove_codex_device_code(provider: str, removed) -> RemovalResult:
     that canonical key here; the central dispatcher also suppresses
     ``removed.source`` which is fine — belt-and-suspenders, idempotent.
     """
-    from hermes_cli.auth import suppress_credential_source
+    from xiaoban_cli.auth import suppress_credential_source
 
     result = RemovalResult()
     if _clear_auth_store_provider(provider):
@@ -354,7 +354,7 @@ def _remove_copilot_gh(provider: str, removed) -> RemovalResult:
     # the pool entry.  The central dispatcher in auth_remove_command will
     # ALSO suppress removed.source, but it's idempotent so double-calling
     # is harmless.
-    from hermes_cli.auth import suppress_credential_source
+    from xiaoban_cli.auth import suppress_credential_source
     suppress_credential_source(provider, "gh_cli")
     for env_var in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
         suppress_credential_source(provider, f"env:{env_var}")
@@ -407,9 +407,9 @@ def _register_all_sources() -> None:
         description="~/.claude/.credentials.json",
     ))
     register(RemovalStep(
-        provider="anthropic", source_id="hermes_pkce",
-        remove_fn=_remove_hermes_pkce,
-        description="~/.hermes/.anthropic_oauth.json",
+        provider="anthropic", source_id="xiaoban_pkce",
+        remove_fn=_remove_xiaoban_pkce,
+        description="~/.xiaoban/.anthropic_oauth.json",
     ))
     register(RemovalStep(
         provider="nous", source_id="device_code",

@@ -68,7 +68,7 @@ def _check_config_surface() -> None:
     assert "weixin: [xiaoban-weixin]" in config_text
     assert "feishu: [xiaoban-feishu]" in config_text
     assert "telegram: [xiaoban-telegram]" not in config_text
-    assert "legacy runtime compatibility HERMES_HOME" in config_text
+    assert "legacy runtime compatibility XIAOBAN_HOME" in config_text
 
 
 def _check_xiaoban_home_and_user_surfaces() -> None:
@@ -76,8 +76,8 @@ def _check_xiaoban_home_and_user_surfaces() -> None:
         home = Path(tmp) / "state"
         doctor = _run("./bin/xiaoban", "doctor", env={"XIAOBAN_HOME": str(home)})
         assert f"XIAOBAN_HOME: {home}" in doctor
-        assert "~/.hermes" not in doctor
-        assert "hermes doctor" not in doctor
+        assert "~/.xiaoban" not in doctor
+        assert "xiaoban doctor" not in doctor
         assert "Installed entrypoint xiaoban" in doctor
         assert "Default My Stand channels" in doctor
 
@@ -103,7 +103,7 @@ def _check_systemd_execstart() -> None:
     assert "python -m xiaoban.cli gateway run --replace --accept-hooks" in execstart
     assert " --host " not in execstart and " --port " not in execstart
     assert "Environment=XIAOBAN_HOME=/var/lib/xiaoban-agent" in text
-    assert "Environment=HERMES_HOME=/var/lib/xiaoban-agent" in text
+    assert "Environment=XIAOBAN_HOME=/var/lib/xiaoban-agent" in text
 
 
 def _check_mmcc_fixtures() -> None:

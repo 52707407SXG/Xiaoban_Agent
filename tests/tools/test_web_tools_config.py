@@ -137,14 +137,14 @@ class TestFirecrawlClientConfig:
                     api_url="https://firecrawl-gateway.nousresearch.com",
                 )
 
-    def test_nous_auth_token_respects_hermes_home_override(self, tmp_path):
-        """Auth lookup should read from HERMES_HOME/auth.json, not ~/.hermes/auth.json."""
+    def test_nous_auth_token_respects_xiaoban_home_override(self, tmp_path):
+        """Auth lookup should read from XIAOBAN_HOME/auth.json, not ~/.xiaoban/auth.json."""
         real_home = tmp_path / "real-home"
-        (real_home / ".hermes").mkdir(parents=True)
+        (real_home / ".xiaoban").mkdir(parents=True)
 
-        hermes_home = tmp_path / "hermes-home"
-        hermes_home.mkdir()
-        (hermes_home / "auth.json").write_text(json.dumps({
+        xiaoban_home = tmp_path / "xiaoban-home"
+        xiaoban_home.mkdir()
+        (xiaoban_home / "auth.json").write_text(json.dumps({
             "providers": {
                 "nous": {
                     "access_token": "nous-token",
@@ -154,7 +154,7 @@ class TestFirecrawlClientConfig:
 
         with patch.dict(os.environ, {
             "HOME": str(real_home),
-            "HERMES_HOME": str(hermes_home),
+            "XIAOBAN_HOME": str(xiaoban_home),
         }, clear=False):
             import tools.web_tools
             importlib.reload(tools.web_tools)
@@ -657,7 +657,7 @@ class TestCheckWebApiKey:
         monkeypatch,
     ):
         monkeypatch.delenv("TOOL_GATEWAY_USER_TOKEN", raising=False)
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("XIAOBAN_HOME", str(tmp_path))
         expired_at = "2000-01-01T00:00:00+00:00"
         (tmp_path / "auth.json").write_text(json.dumps({
             "providers": {
@@ -675,7 +675,7 @@ class TestCheckWebApiKey:
             return "fresh-token"
 
         monkeypatch.setattr(
-            "hermes_cli.auth.resolve_nous_access_token",
+            "xiaoban_cli.auth.resolve_nous_access_token",
             _record_refresh,
         )
 

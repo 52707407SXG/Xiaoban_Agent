@@ -15,7 +15,7 @@
  *   GET  /health         - Health check
  *
  * Usage:
- *   node bridge.js --port 3000 --session ~/.hermes/whatsapp/session
+ *   node bridge.js --port 3000 --session ~/.xiaoban/whatsapp/session
  */
 
 import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } from '@whiskeysockets/baileys';
@@ -45,16 +45,16 @@ const WHATSAPP_DEBUG =
   ['1', 'true', 'yes', 'on'].includes(process.env.WHATSAPP_DEBUG.toLowerCase());
 
 const PORT = parseInt(getArg('port', '3000'), 10);
-const SESSION_DIR = getArg('session', path.join(process.env.HOME || '~', '.hermes', 'whatsapp', 'session'));
+const SESSION_DIR = getArg('session', path.join(process.env.HOME || '~', '.xiaoban', 'whatsapp', 'session'));
 // Cache directories: the Python gateway passes the profile-aware paths via
-// env (HERMES_HOME-aware, new cache/ layout).  Fall back to the legacy
+// env (XIAOBAN_HOME-aware, new cache/ layout).  Fall back to the legacy
 // hardcoded locations for bridges launched outside the gateway.
-const IMAGE_CACHE_DIR = process.env.HERMES_IMAGE_CACHE_DIR
-  || path.join(process.env.HOME || '~', '.hermes', 'image_cache');
-const DOCUMENT_CACHE_DIR = process.env.HERMES_DOCUMENT_CACHE_DIR
-  || path.join(process.env.HOME || '~', '.hermes', 'document_cache');
-const AUDIO_CACHE_DIR = process.env.HERMES_AUDIO_CACHE_DIR
-  || path.join(process.env.HOME || '~', '.hermes', 'audio_cache');
+const IMAGE_CACHE_DIR = process.env.XIAOBAN_IMAGE_CACHE_DIR
+  || path.join(process.env.HOME || '~', '.xiaoban', 'image_cache');
+const DOCUMENT_CACHE_DIR = process.env.XIAOBAN_DOCUMENT_CACHE_DIR
+  || path.join(process.env.HOME || '~', '.xiaoban', 'document_cache');
+const AUDIO_CACHE_DIR = process.env.XIAOBAN_AUDIO_CACHE_DIR
+  || path.join(process.env.HOME || '~', '.xiaoban', 'audio_cache');
 
 // Self-hash of this script file.  Reported in /health so the Python gateway
 // can detect a running bridge that predates the current bridge.js and
@@ -420,7 +420,7 @@ async function startSocket() {
         body = `[${mediaType} received]`;
       }
 
-      // Ignore Hermes' own reply messages in self-chat mode to avoid loops.
+      // Ignore Xiaoban' own reply messages in self-chat mode to avoid loops.
       if (msg.key.fromMe && ((REPLY_PREFIX && body.startsWith(REPLY_PREFIX)) || recentlySentIds.has(msg.key.id))) {
         if (WHATSAPP_DEBUG) {
           try { console.log(JSON.stringify({ event: 'ignored', reason: 'agent_echo', chatId, messageId: msg.key.id })); } catch {}
@@ -632,7 +632,7 @@ app.post('/send-media', async (req, res) => {
         const needsConversion = !['ogg', 'opus'].includes(ext);
         let tmpPath = null;
         if (needsConversion) {
-          tmpPath = path.join(tmpdir(), `hermes_voice_${randomBytes(6).toString('hex')}.ogg`);
+          tmpPath = path.join(tmpdir(), `xiaoban_voice_${randomBytes(6).toString('hex')}.ogg`);
           try {
             execSync(
               `ffmpeg -y -i ${JSON.stringify(filePath)} -ar 48000 -ac 1 -c:a libopus ${JSON.stringify(tmpPath)}`,
