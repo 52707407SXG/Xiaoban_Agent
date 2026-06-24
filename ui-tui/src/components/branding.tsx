@@ -308,7 +308,7 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
               <Text />
               <Text color={t.color.accent} wrap="truncate-end">
                 {modelName}
-                <Text color={t.color.muted}> · API</Text>
+                <Text color={t.color.muted}> · API Usage Billing</Text>
               </Text>
               <Text color={t.color.muted} wrap="truncate-end">
                 {info.cwd || process.cwd()}
@@ -330,7 +330,7 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
               <ArtLines lines={heroLines} />
               <Text color={t.color.accent} wrap="truncate-end">
                 {modelName}
-                <Text color={t.color.muted}> · API</Text>
+                <Text color={t.color.muted}> · API Usage Billing</Text>
               </Text>
               <Text color={t.color.muted} wrap="truncate-end">
                 {info.cwd || process.cwd()}
