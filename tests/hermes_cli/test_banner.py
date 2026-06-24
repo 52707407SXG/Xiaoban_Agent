@@ -48,8 +48,8 @@ def test_build_welcome_banner_uses_claude_style_xiaoban_card():
     assert f"Xiaoban v{banner.VERSION}" in output
     assert "Welcome back!" in output
     assert "My Stand" in output
-    assert "██╔████╔██║" in output
-    assert "deepseek-v4-pro · API Usage Billing" in output
+    assert "██║╚████╔╝██║" in output
+    assert "deepseek-v4-pro · API" in output
     assert "/tmp/project" in output
     assert "Tips for getting started" in output
     assert "Recent activity" in output

@@ -86,13 +86,14 @@ RELEASE_DATE = getattr(_ROOT, "__release_date__")
 
 XIAOBAN_AGENT_LOGO = """[bold #C7A06A]Xiaoban[/]"""
 
-XIAOBAN_MARK = """[#C7A06A]                My Stand              [/]
-[#F4E7C1]              ███╗   ███╗             [/]
-[#F4E7C1]              ████╗ ████║             [/]
-[#F4E7C1]              ██╔████╔██║             [/]
-[#F4E7C1]              ██║╚██╔╝██║             [/]
-[#F4E7C1]              ██║ ╚═╝ ██║             [/]
-[#F4E7C1]              ╚═╝     ╚═╝             [/]"""
+XIAOBAN_MARK = """[#C7A06A]          My Stand          [/]
+[#F4E7C1]      ███╗     ███╗      [/]
+[#F4E7C1]      ████╗   ████║      [/]
+[#F4E7C1]      ██╔██╗ ██╔██║      [/]
+[#F4E7C1]      ██║╚████╔╝██║      [/]
+[#F4E7C1]      ██║ ╚██╔╝ ██║      [/]
+[#F4E7C1]      ██║  ╚═╝  ██║      [/]
+[#F4E7C1]      ╚═╝       ╚═╝      [/]"""
 
 # =========================================================================
 # Skills scanning
@@ -626,7 +627,7 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
     if len(model_short) > 28:
         model_short = model_short[:25] + "..."
     ctx_str = f" [dim {dim}]·[/] [dim {dim}]{_format_context_length(context_length)} context[/]" if context_length else ""
-    left_lines.append(f"[{accent}]{model_short}[/]{ctx_str} [dim {dim}]·[/] [dim {dim}]API Usage Billing[/]")
+    left_lines.append(f"[{accent}]{model_short}[/]{ctx_str} [dim {dim}]·[/] [dim {dim}]API[/]")
 
     if _runtime_env("YOLO_MODE"):
         left_lines.append(f"[bold red]⚠ YOLO mode[/] [dim {dim}]— all approval prompts bypassed[/]")
