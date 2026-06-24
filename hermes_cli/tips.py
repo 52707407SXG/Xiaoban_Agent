@@ -377,7 +377,7 @@ TIPS = [
 
     # --- TUI & Dashboard ---
     'HERMES_TUI_RESUME=1 auto-re-attaches to the most recent TUI session on launch — handy after SSH drops.',
-    "HERMES_TUI_THEME=light|dark|<hex> forces the TUI theme on terminals that don't set COLORFGBG.",
+    "XIAOBAN_TUI_THEME=light|dark|<hex> forces the TUI theme; legacy HERMES_TUI_THEME still works.",
     'Ctrl+G or Ctrl+X Ctrl+E in the TUI opens the input buffer in $EDITOR for long multi-line prompts.',
     'The TUI renders LaTeX inline — $E=mc^2$ becomes Unicode math instead of raw TeX.',
     'xiaoban dashboard launches a local web UI at 127.0.0.1:9119 — zero data leaves localhost.',
@@ -482,4 +482,5 @@ def get_random_tip(exclude_recent: int = 0) -> str:
         exclude_recent: not used currently; reserved for future
             deduplication across sessions.
     """
-    return random.choice(TIPS)
+    visible_tips = [tip for tip in TIPS if "hermes" not in tip.lower()]
+    return random.choice(visible_tips or TIPS)

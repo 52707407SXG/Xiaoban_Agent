@@ -7,7 +7,7 @@ def test_format_banner_version_label_without_git_state():
     with patch.object(banner, "get_git_banner_state", return_value=None):
         value = banner.format_banner_version_label()
 
-    assert value == f"Xiaoban-Agent v{banner.VERSION} ({banner.RELEASE_DATE})"
+    assert value == f"Xiaoban v{banner.VERSION}"
 
 
 def test_format_banner_version_label_on_upstream_main():
@@ -20,8 +20,7 @@ def test_format_banner_version_label_on_upstream_main():
     ):
         value = banner.format_banner_version_label()
 
-    assert value.endswith("· upstream b2f477a3")
-    assert "local" not in value
+    assert value == f"Xiaoban v{banner.VERSION}"
 
 
 def test_format_banner_version_label_with_carried_commits():
@@ -34,9 +33,7 @@ def test_format_banner_version_label_with_carried_commits():
     ):
         value = banner.format_banner_version_label()
 
-    assert "upstream b2f477a3" in value
-    assert "local af8aad31" in value
-    assert "+3 carried commits" in value
+    assert value == f"Xiaoban v{banner.VERSION}"
 
 
 def test_get_git_banner_state_reads_origin_and_head(tmp_path):

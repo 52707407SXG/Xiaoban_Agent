@@ -17,29 +17,29 @@ All fields are optional. Missing values inherit from the ``default`` skin.
 
     # Colors: hex values for Rich markup (banner, UI, response box)
     colors:
-      banner_border: "#CD7F32"            # Panel border color
-      banner_title: "#FFD700"             # Panel title text color
-      banner_accent: "#FFBF00"            # Section headers (Available Tools, etc.)
-      banner_dim: "#B8860B"               # Dim/muted text (separators, labels)
-      banner_text: "#FFF8DC"              # Body text (tool names, skill names)
-      ui_accent: "#FFBF00"               # General UI accent
-      ui_label: "#DAA520"                # UI labels (warm gold; teal clashed w/ default banner gold)
+      banner_border: "#8B5E34"            # Panel border color
+      banner_title: "#C7A06A"             # Panel title text color
+      banner_accent: "#C7A06A"            # Section headers
+      banner_dim: "#8A6A4A"               # Dim/muted text (separators, labels)
+      banner_text: "#E9DEC8"              # Body text
+      ui_accent: "#C7A06A"               # General UI accent
+      ui_label: "#C7A06A"                # UI labels
       ui_ok: "#4caf50"                   # Success indicators
       ui_error: "#ef5350"                # Error indicators
       ui_warn: "#ffa726"                 # Warning indicators
-      prompt: "#FFF8DC"                  # Prompt text color
-      input_rule: "#CD7F32"              # Input area horizontal rule
-      response_border: "#FFD700"         # Response box border (ANSI)
+      prompt: "#E9DEC8"                  # Prompt text color
+      input_rule: "#8B5E34"              # Input area horizontal rule
+      response_border: "#8B5E34"         # Response box border (ANSI)
       status_bar_bg: "#1a1a2e"           # Status bar background
       status_bar_text: "#C0C0C0"         # Status bar default text
-      status_bar_strong: "#FFD700"       # Status bar highlighted text
+      status_bar_strong: "#C7A06A"       # Status bar highlighted text
       status_bar_dim: "#8B8682"          # Status bar separators/muted text
       status_bar_good: "#8FBC8F"         # Healthy context usage
-      status_bar_warn: "#FFD700"         # Warning context usage
+      status_bar_warn: "#C7A06A"         # Warning context usage
       status_bar_bad: "#FF8C00"          # High context usage
       status_bar_critical: "#FF6B6B"     # Critical context usage
-      session_label: "#DAA520"           # Session label color
-      session_border: "#8B8682"          # Session ID dim color
+      session_label: "#C7A06A"           # Session label color
+      session_border: "#8A6A4A"          # Session ID dim color
       status_bar_bg: "#1a1a2e"          # TUI status/usage bar background
       voice_status_bg: "#1a1a2e"        # TUI voice status background
       selection_bg: "#333355"           # TUI mouse-selection highlight background
@@ -65,10 +65,10 @@ All fields are optional. Missing values inherit from the ``default`` skin.
 
     # Branding: text strings used throughout the CLI
     branding:
-      agent_name: "Xiaoban-Agent"          # Banner title, status display
+      agent_name: "Xiaoban"          # Banner title, status display
       welcome: "Welcome message"          # Shown at CLI startup
-      goodbye: "Goodbye! ⚕"              # Shown on exit
-      response_label: " ⚕ Xiaoban "       # Response box header label
+      goodbye: "Goodbye!"                # Shown on exit
+      response_label: " Xiaoban "        # Response box header label
       prompt_symbol: "❯"                 # Input prompt symbol (bare token; renderers add trailing space)
       help_header: "(^_^)? Commands"      # /help header text
 
@@ -89,8 +89,8 @@ USAGE
     from hermes_cli.skin_engine import get_active_skin, list_skins, set_active_skin
 
     skin = get_active_skin()
-    print(skin.colors["banner_title"])    # "#FFD700"
-    print(skin.get_branding("agent_name"))  # "Xiaoban-Agent"
+    print(skin.colors["banner_title"])    # "#C7A06A"
+    print(skin.get_branding("agent_name"))  # "Xiaoban"
 
     set_active_skin("ares")               # Switch to built-in ares skin
     set_active_skin("mytheme")            # Switch to user skin from ~/.hermes/skins/
@@ -98,7 +98,7 @@ USAGE
 BUILT-IN SKINS
 ==============
 
-- ``default`` — Classic Xiaoban gold/kawaii (the current look)
+- ``default`` — My Stand Xiaoban brown frame and cream mark
 - ``ares``    — Crimson/bronze war-god theme with custom spinner wings
 - ``mono``    — Clean grayscale monochrome
 - ``slate``   — Cool blue developer-focused theme
@@ -136,8 +136,8 @@ class SkinConfig:
     branding: Dict[str, str] = field(default_factory=dict)
     tool_prefix: str = "┊"
     tool_emojis: Dict[str, str] = field(default_factory=dict)  # per-tool emoji overrides
-    banner_logo: str = ""    # Rich-markup ASCII art logo (replaces HERMES_AGENT_LOGO)
-    banner_hero: str = ""    # Rich-markup hero art (replaces HERMES_CADUCEUS)
+    banner_logo: str = ""    # Rich-markup ASCII art logo
+    banner_hero: str = ""    # Rich-markup My Stand mark
 
     def get_color(self, key: str, fallback: str = "") -> str:
         """Get a color value with fallback."""
@@ -164,31 +164,31 @@ class SkinConfig:
 _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
     "default": {
         "name": "default",
-        "description": "Classic Xiaoban — gold and kawaii",
+        "description": "My Stand Xiaoban — brown frame and cream mark",
         "colors": {
-            "banner_border": "#CD7F32",
-            "banner_title": "#FFD700",
-            "banner_accent": "#FFBF00",
-            "banner_dim": "#B8860B",
-            "banner_text": "#FFF8DC",
-            "ui_accent": "#FFBF00",
-            "ui_label": "#DAA520",
+            "banner_border": "#8B5E34",
+            "banner_title": "#C7A06A",
+            "banner_accent": "#C7A06A",
+            "banner_dim": "#8A6A4A",
+            "banner_text": "#E9DEC8",
+            "ui_accent": "#C7A06A",
+            "ui_label": "#C7A06A",
             "ui_ok": "#4caf50",
             "ui_error": "#ef5350",
             "ui_warn": "#ffa726",
-            "prompt": "#FFF8DC",
-            "input_rule": "#CD7F32",
-            "response_border": "#FFD700",
-            "status_bar_bg": "#1a1a2e",
-            "session_label": "#DAA520",
-            "session_border": "#8B8682",
+            "prompt": "#E9DEC8",
+            "input_rule": "#8B5E34",
+            "response_border": "#8B5E34",
+            "status_bar_bg": "#0F172A",
+            "session_label": "#8A6A4A",
+            "session_border": "#8B5E34",
         },
         "spinner": {
             # Empty = use hardcoded defaults in display.py
         },
         "branding": {
-            "agent_name": "Xiaoban-Agent",
-            "welcome": "Welcome to Xiaoban-Agent! Type your message or /help for commands.",
+            "agent_name": "Xiaoban",
+            "welcome": "Welcome to Xiaoban! Type your message or /help for commands.",
             "goodbye": "Goodbye! ⚕",
             "response_label": " ⚕ Xiaoban ",
             "prompt_symbol": "❯",
@@ -298,8 +298,8 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         },
         "spinner": {},
         "branding": {
-            "agent_name": "Xiaoban-Agent",
-            "welcome": "Welcome to Xiaoban-Agent! Type your message or /help for commands.",
+            "agent_name": "Xiaoban",
+            "welcome": "Welcome to Xiaoban! Type your message or /help for commands.",
             "goodbye": "Goodbye! ⚕",
             "response_label": " ⚕ Xiaoban ",
             "prompt_symbol": "❯",
@@ -337,8 +337,8 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         },
         "spinner": {},
         "branding": {
-            "agent_name": "Xiaoban-Agent",
-            "welcome": "Welcome to Xiaoban-Agent! Type your message or /help for commands.",
+            "agent_name": "Xiaoban",
+            "welcome": "Welcome to Xiaoban! Type your message or /help for commands.",
             "goodbye": "Goodbye! ⚕",
             "response_label": " ⚕ Xiaoban ",
             "prompt_symbol": "❯",
@@ -374,8 +374,8 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         },
         "spinner": {},
         "branding": {
-            "agent_name": "Xiaoban-Agent",
-            "welcome": "Welcome to Xiaoban-Agent! Type your message or /help for commands.",
+            "agent_name": "Xiaoban",
+            "welcome": "Welcome to Xiaoban! Type your message or /help for commands.",
             "goodbye": "Goodbye! ⚕",
             "response_label": " ⚕ Xiaoban ",
             "prompt_symbol": "❯",
@@ -411,8 +411,8 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         },
         "spinner": {},
         "branding": {
-            "agent_name": "Xiaoban-Agent",
-            "welcome": "Welcome to Xiaoban-Agent! Type your message or /help for commands.",
+            "agent_name": "Xiaoban",
+            "welcome": "Welcome to Xiaoban! Type your message or /help for commands.",
             "goodbye": "Goodbye! \u2695",
             "response_label": " \u2695 Xiaoban ",
             "prompt_symbol": "\u276f",
@@ -859,14 +859,14 @@ def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
     # color schemes).  Skins can opt into a colored prompt by setting
     # `prompt` explicitly in their YAML.
     prompt = skin.get_color("prompt", "")
-    input_rule = skin.get_color("input_rule", "#CD7F32")
-    title = skin.get_color("banner_title", "#FFD700")
-    text = skin.get_color("banner_text", "#FFF8DC")
+    input_rule = skin.get_color("input_rule", "#8B5E34")
+    title = skin.get_color("banner_title", "#C7A06A")
+    text = skin.get_color("banner_text", "#E9DEC8")
     dim = skin.get_color("banner_dim", "#555555")
     label = skin.get_color("ui_label", title)
-    warn = skin.get_color("ui_warn", "#FF8C00")
+    warn = skin.get_color("ui_warn", "#F59E0B")
     error = skin.get_color("ui_error", "#FF6B6B")
-    status_bg = skin.get_color("status_bar_bg", "#1a1a2e")
+    status_bg = skin.get_color("status_bar_bg", "#0F172A")
     status_text = skin.get_color("status_bar_text", text)
     status_strong = skin.get_color("status_bar_strong", title)
     status_dim = skin.get_color("status_bar_dim", dim)

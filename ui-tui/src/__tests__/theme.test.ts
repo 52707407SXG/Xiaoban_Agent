@@ -43,7 +43,8 @@ describe('DEFAULT_THEME', () => {
   it('has brand defaults', async () => {
     const { DEFAULT_THEME } = await importThemeWithCleanEnv()
 
-    expect(DEFAULT_THEME.brand.name).toBe('Xiaoban-Agent')
+    expect(DEFAULT_THEME.brand.name).toBe('Xiaoban')
+    expect(DEFAULT_THEME.brand.icon).toBe('M')
     expect(DEFAULT_THEME.brand.prompt).toBe('❯')
     expect(DEFAULT_THEME.brand.tool).toBe('┊')
   })
@@ -51,7 +52,7 @@ describe('DEFAULT_THEME', () => {
   it('has color palette', async () => {
     const { DEFAULT_THEME } = await importThemeWithCleanEnv()
 
-    expect(DEFAULT_THEME.color.primary).toBe('#FFD700')
+    expect(DEFAULT_THEME.color.primary).toBe('#C7A06A')
     expect(DEFAULT_THEME.color.error).toBe('#ef5350')
   })
 })

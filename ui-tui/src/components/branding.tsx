@@ -2,7 +2,7 @@ import { Box, Text, useStdout } from '@hermes/ink'
 import { useEffect, useState } from 'react'
 import unicodeSpinners from 'unicode-animations'
 
-import { artWidth, caduceus, CADUCEUS_WIDTH, logo, LOGO_WIDTH } from '../banner.js'
+import { artWidth, heroMark, HERO_MARK_WIDTH, logo, LOGO_WIDTH } from '../banner.js'
 import { flat } from '../lib/text.js'
 import type { Theme } from '../theme.js'
 import type { PanelSection, SessionInfo } from '../types.js'
@@ -44,9 +44,9 @@ export function ArtLines({ lines }: { lines: [string, string][] }) {
 // Terminals can't scale glyphs, so "responsive" means picking a layout that
 // fits the available columns. Thresholds are picked so each tier reads
 // comfortably without forcing wrap or truncation drift on box-drawing edges.
-const TAG_FULL = 'Nous Research · Messenger of the Digital Gods'
-const TAG_MID = 'Messenger of the Digital Gods'
-const TAG_TINY = 'Nous Research'
+const TAG_FULL = 'My Stand native agent'
+const TAG_MID = 'Native agent'
+const TAG_TINY = 'My Stand'
 const HIDE_BELOW = 34
 const COMPACT_FROM = 58
 
@@ -160,15 +160,15 @@ const TOOLSETS_MAX = 8
 export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
   const term = useStdout().stdout?.columns ?? 100
   const cols = Math.max(20, Math.min(term, maxWidth ?? term))
-  const heroLines = caduceus(t.color, t.bannerHero || undefined)
-  const leftW = Math.min((artWidth(heroLines) || CADUCEUS_WIDTH) + 4, Math.floor(cols * 0.4))
-  const wide = cols >= 90 && leftW + 40 < cols
+  const heroLines = heroMark(t.color, t.bannerHero || undefined)
+  const leftW = Math.min((artWidth(heroLines) || HERO_MARK_WIDTH) + 4, Math.floor(cols * 0.42))
+  const wide = cols >= 82 && leftW + 34 < cols
   const w = Math.max(20, wide ? cols - leftW - 14 : cols - 12)
   const lineBudget = Math.max(12, w - 2)
   const strip = (s: string) => (s.endsWith('_tools') ? s.slice(0, -6) : s)
 
   // ── Local collapse state for each section ──
-  const [toolsOpen, setToolsOpen] = useState(true)
+  const [toolsOpen, setToolsOpen] = useState(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [systemOpen, setSystemOpen] = useState(false)
   const [mcpOpen, setMcpOpen] = useState(false)
@@ -289,122 +289,62 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
     )
   }
 
+  const modelName = info.model.split('/').pop() ?? info.model
+  const title = `${t.brand.name}${info.version ? ` v${info.version}` : ''}`
+
   return (
-    <Box borderColor={t.color.border} borderStyle="round" marginBottom={1} paddingX={2} paddingY={1}>
-      {wide && (
-        <Box flexDirection="column" marginRight={2} width={leftW}>
-          <ArtLines lines={heroLines} />
-          <Text />
+    <Box borderColor={t.color.border} borderStyle="round" flexDirection="column" marginBottom={1} paddingX={2} paddingY={1}>
+      <Text bold color={t.color.primary} wrap="truncate-end">
+        {title}
+      </Text>
 
-          <Text color={t.color.accent}>
-            {info.model.split('/').pop()}
-            <Text color={t.color.muted}> · Nous Research</Text>
-          </Text>
-
-          <Text color={t.color.muted} wrap="truncate-end">
-            {info.cwd || process.cwd()}
-          </Text>
-
-          {sid && (
-            <Text>
-              <Text color={t.color.sessionLabel}>Session: </Text>
-              <Text color={t.color.sessionBorder}>{sid}</Text>
-            </Text>
-          )}
-        </Box>
-      )}
-
-      <Box flexDirection="column" width={w}>
-        {wide ? (
-          <Box justifyContent="center" marginBottom={1}>
-            <Text bold color={t.color.primary}>
-              {t.brand.name}
-              {info.version ? ` v${info.version}` : ''}
-              {info.release_date ? ` (${info.release_date})` : ''}
-            </Text>
-          </Box>
-        ) : (
-          // Narrow layout hides the hero column; surface model/cwd/session
-          // here so they aren't lost.
-          <Box flexDirection="column" marginBottom={1}>
-            <Text color={t.color.accent} wrap="truncate-end">
-              {info.model.split('/').pop()}
-              <Text color={t.color.muted}> · Nous Research</Text>
-            </Text>
-            <Text color={t.color.muted} wrap="truncate-end">
-              {info.cwd || process.cwd()}
-            </Text>
-            {sid && (
-              <Text wrap="truncate-end">
-                <Text color={t.color.sessionLabel}>Session: </Text>
-                <Text color={t.color.sessionBorder}>{sid}</Text>
+      <Box marginTop={1}>
+        {wide && (
+          <>
+            <Box flexDirection="column" marginRight={2} width={leftW}>
+              <Text color={t.color.text}>{centerIn('Welcome back!', leftW)}</Text>
+              <Text />
+              <ArtLines lines={heroLines} />
+              <Text />
+              <Text color={t.color.accent} wrap="truncate-end">
+                {modelName}
+                <Text color={t.color.muted}> · API Usage Billing</Text>
               </Text>
-            )}
-          </Box>
+              <Text color={t.color.muted} wrap="truncate-end">
+                {info.cwd || process.cwd()}
+              </Text>
+            </Box>
+
+            <Box flexDirection="column" marginRight={2}>
+              {Array.from({ length: 9 }).map((_, i) => (
+                <Text color={t.color.border} key={i}>│</Text>
+              ))}
+            </Box>
+          </>
         )}
 
-        {/* ── Tools (expanded by default) ── */}
-        <Box flexDirection="column" marginTop={1}>
-          <CollapseToggle
-            onToggle={() => setToolsOpen(v => !v)}
-            open={toolsOpen}
-            t={t}
-            title="Available Tools"
-          />
-          {toolsOpen && toolsBody()}
-        </Box>
+        <Box flexDirection="column" width={w}>
+          {!wide && (
+            <>
+              <Text color={t.color.text}>Welcome back!</Text>
+              <ArtLines lines={heroLines} />
+              <Text color={t.color.accent} wrap="truncate-end">
+                {modelName}
+                <Text color={t.color.muted}> · API Usage Billing</Text>
+              </Text>
+              <Text color={t.color.muted} wrap="truncate-end">
+                {info.cwd || process.cwd()}
+              </Text>
+              <Text />
+            </>
+          )}
 
-        {/* ── Skills (collapsed by default) ── */}
-        <Box flexDirection="column" marginTop={1}>
-          <CollapseToggle
-            count={skillsTotal}
-            onToggle={() => setSkillsOpen(v => !v)}
-            open={skillsOpen}
-            suffix={skillsCatCount > 0 ? `in ${skillsCatCount} categor${skillsCatCount === 1 ? 'y' : 'ies'}` : undefined}
-            t={t}
-            title="Available Skills"
-          />
-          {skillsOpen && skillsBody()}
-        </Box>
-
-        {/* ── System Prompt (collapsed by default) ── */}
-        {sysPromptLen > 0 && (
-          <Box flexDirection="column" marginTop={1}>
-            <CollapseToggle
-              onToggle={() => setSystemOpen(v => !v)}
-              open={systemOpen}
-              suffix={`— ${sysPromptLen.toLocaleString()} chars`}
-              t={t}
-              title="System Prompt"
-            />
-            {systemOpen && systemBody()}
-          </Box>
-        )}
-
-        {/* ── MCP Servers (collapsed by default) ── */}
-        {mcpServers.length > 0 && (
-          <Box flexDirection="column" marginTop={1}>
-            <CollapseToggle
-              count={mcpConnected}
-              onToggle={() => setMcpOpen(v => !v)}
-              open={mcpOpen}
-              suffix="connected"
-              t={t}
-              title="MCP Servers"
-            />
-            {mcpOpen && mcpBody()}
-          </Box>
-        )}
-
-        <Text />
-
-        <Text color={t.color.text}>
-          {toolsTotal} tools{' · '}
-          {skillsTotal} skills
-          {mcpConnected ? ` · ${mcpConnected} MCP` : ''}
-          {' · '}
-          <Text color={t.color.muted}>/help for commands</Text>
-        </Text>
+          <Text bold color={t.color.primary}>Tips for getting started</Text>
+          <Text color={t.color.text} wrap="truncate-end">Run /help to see Xiaoban commands</Text>
+          <Text color={t.color.text} wrap="truncate-end">Run /new to start a clean session</Text>
+          <Text color={t.color.border}>{'─'.repeat(Math.min(64, Math.max(12, w - 2)))}</Text>
+          <Text bold color={t.color.primary}>Recent activity</Text>
+          <Text color={t.color.muted}>No recent activity</Text>
 
         {typeof info.update_behind === 'number' && info.update_behind > 0 && (
           <Text bold color={t.color.warn}>
@@ -423,6 +363,7 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
           </Text>
         )}
       </Box>
+    </Box>
     </Box>
   )
 }

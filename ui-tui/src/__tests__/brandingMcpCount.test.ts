@@ -8,14 +8,9 @@ import { SessionPanel } from '../components/branding.js'
 import { DEFAULT_THEME } from '../theme.js'
 import type { McpServerStatus, SessionInfo } from '../types.js'
 
-// Invariant under test: the TUI banner's MCP headline counts *connected*
-// servers, never configured-but-disabled ones. This mirrors the classic CLI
-// banner (`mcp_connected = sum(1 for s in mcp_status if s["connected"])` in
-// hermes_cli/banner.py) and the "connected" label on the MCP collapse toggle.
-//
-// Regression: branding.tsx used the raw `info.mcp_servers.length`, so a
-// disabled `linear` server alongside a connected `nous-support` server made
-// the TUI report "2 MCP" while the classic CLI correctly reported "1 MCP".
+// Startup branding should stay focused on the Xiaoban welcome card. Tool,
+// skill, and MCP details belong behind commands/diagnostics, not on the first
+// screen.
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -50,7 +45,7 @@ const baseInfo = (mcp_servers: McpServerStatus[]): SessionInfo => ({
   tools: { file: ['read_file', 'write_file'] }
 })
 
-async function renderFooter(info: SessionInfo): Promise<string> {
+async function renderFrame(info: SessionInfo): Promise<string> {
   const streams = makeStreams()
 
   const instance = renderSync(React.createElement(SessionPanel, { info, sid: 'test', t: DEFAULT_THEME }), {
@@ -72,40 +67,25 @@ async function renderFooter(info: SessionInfo): Promise<string> {
   }
 }
 
-describe('branding MCP headline count', () => {
-  it('counts only connected servers, not configured-but-disabled ones', async () => {
-    const frame = await renderFooter(
+describe('startup branding card', () => {
+  it('shows the Xiaoban card without tool or MCP counters', async () => {
+    const frame = await renderFrame(
       baseInfo([
-        mcp({ connected: true, name: 'nous-support', status: 'connected', tools: 6 }),
+        mcp({ connected: true, name: 'xiaoban-support', status: 'connected', tools: 6 }),
         mcp({ connected: false, disabled: true, name: 'linear', status: 'disabled' })
       ])
     )
 
-    // One connected server → "1 MCP", never "2 MCP".
-    expect(frame).toContain('1 MCP')
-    expect(frame).not.toContain('2 MCP')
-  })
-
-  it('drops the MCP segment entirely when no server is connected', async () => {
-    const frame = await renderFooter(
-      baseInfo([mcp({ connected: false, disabled: true, name: 'linear', status: 'disabled' })])
-    )
-
-    // Matches the classic CLI, which only appends "· N MCP" when N > 0.
+    expect(frame).toContain('Xiaoban')
+    expect(frame).toContain('Welcome back!')
+    expect(frame).toContain('My Stand')
+    expect(frame).toContain('Tips for getting started')
+    expect(frame).toContain('Recent activity')
+    expect(frame).not.toContain('Available Tools')
+    expect(frame).not.toContain('Available Skills')
     expect(frame).not.toContain('MCP servers')
     expect(frame).not.toMatch(/\d MCP\b/)
-  })
-
-  it('counts every connected server when several are connected', async () => {
-    const frame = await renderFooter(
-      baseInfo([
-        mcp({ connected: true, name: 'alpha', status: 'connected' }),
-        mcp({ connected: true, name: 'beta', status: 'connected' }),
-        mcp({ connected: false, disabled: true, name: 'gamma', status: 'disabled' })
-      ])
-    )
-
-    expect(frame).toContain('2 MCP')
-    expect(frame).not.toContain('3 MCP')
+    expect(frame).not.toMatch(/\d tools\b/)
+    expect(frame).not.toMatch(/\d skills\b/)
   })
 })
