@@ -100,6 +100,10 @@ class TestXiaobanOperatingPolicy:
         assert "Clean web research workflow" in stable
         assert "internal evidence ledger" in stable
         assert "Do not present a stale snippet" in stable
+        assert "Link and article reading" in stable
+        assert "mp.weixin.qq.com are especially tool-first" in stable
+        assert "use mystand_parse when available" in stable
+        assert "If no tool was called or the tool result is empty" in stable
         assert "# Xiaoban agentic workflow principles" in stable
         assert "latest user message and this-turn evidence override old topic drift" in stable
         assert "anchor the reasoning to the user's default Beijing time" in stable
