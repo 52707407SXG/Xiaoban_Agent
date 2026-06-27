@@ -104,6 +104,10 @@ class TestXiaobanOperatingPolicy:
         assert "mp.weixin.qq.com are especially tool-first" in stable
         assert "use mystand_parse when available" in stable
         assert "If no tool was called or the tool result is empty" in stable
+        assert "External account OAuth flows" in stable
+        assert "agently-cli auth login" in stable
+        assert "Do not run these commands as foreground terminal calls" in stable
+        assert "Do not start a fresh login flow unless" in stable
         assert "# Xiaoban agentic workflow principles" in stable
         assert "latest user message and this-turn evidence override old topic drift" in stable
         assert "anchor the reasoning to the user's default Beijing time" in stable

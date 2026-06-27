@@ -1,15 +1,13 @@
 """Tests for the async-delivery capability gate (issue #10760).
 
-Stateless request/response adapters (the API server / WebUI path) cannot route
-a background completion back to the agent after a turn ends — there is no
-persistent channel and ``APIServerAdapter.send()`` is a no-op stub. So tools
-that promise async delivery (``terminal`` notify_on_complete / watch_patterns,
-``delegate_task`` background=True) must refuse the promise on that path instead
-of silently registering a watcher that never fires.
+Plain request/response API-server turns cannot route a background completion
+back to the agent after a turn ends. API hosts that open the session-events
+channel can opt in per request; everyone else must still refuse the async
+promise instead of silently registering a watcher that never fires.
 
 This is wired through:
   - ``BasePlatformAdapter.supports_async_delivery`` (default True)
-  - ``APIServerAdapter.supports_async_delivery = False``
+  - ``APIServerAdapter.supports_async_delivery = True`` plus per-turn binding
   - ``gateway.session_context._SESSION_ASYNC_DELIVERY`` contextvar +
     ``async_delivery_supported()`` helper, bound per-session.
 
@@ -96,15 +94,15 @@ class TestAdapterCapabilityFlag:
 
         assert BasePlatformAdapter.supports_async_delivery is True
 
-    def test_api_server_false(self):
+    def test_api_server_has_delivery_channel_when_opted_in(self):
         from gateway.platforms.api_server import APIServerAdapter
 
-        assert APIServerAdapter.supports_async_delivery is False
+        assert APIServerAdapter.supports_async_delivery is True
 
-    def test_api_server_bind_chokepoint_hardwires_no_delivery(self):
+    def test_api_server_bind_chokepoint_defaults_no_delivery(self):
         """Every API-server agent-entry path binds through
-        _bind_api_server_session, which hardwires async_delivery=False — a new
-        route physically cannot reintroduce the silent no-op (#10760)."""
+        _bind_api_server_session, which defaults async_delivery=False — a new
+        route cannot accidentally promise delivery without opting in."""
         from gateway.platforms.api_server import APIServerAdapter
         from gateway.session_context import clear_session_vars, get_session_env
 
@@ -114,6 +112,23 @@ class TestAdapterCapabilityFlag:
         try:
             assert async_delivery_supported() is False
             assert get_session_env("XIAOBAN_SESSION_PLATFORM") == "api_server"
+        finally:
+            clear_session_vars(tokens)
+
+    def test_api_server_bind_chokepoint_can_opt_in_session_events(self):
+        from gateway.platforms.api_server import APIServerAdapter
+        from gateway.session_context import clear_session_vars, get_session_env
+
+        tokens = APIServerAdapter._bind_api_server_session(
+            chat_id="c1",
+            session_key="sk1",
+            session_id="sid1",
+            async_delivery=True,
+        )
+        try:
+            assert async_delivery_supported() is True
+            assert get_session_env("XIAOBAN_SESSION_PLATFORM") == "api_server"
+            assert get_session_env("XIAOBAN_SESSION_CHAT_ID") == "c1"
         finally:
             clear_session_vars(tokens)
 

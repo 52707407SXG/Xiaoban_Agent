@@ -165,6 +165,40 @@ class TestResponseStore:
         store = ResponseStore(max_size=10)
         assert store.delete("resp_missing") is False
 
+
+class TestAPIServerSessionEvents:
+    @pytest.mark.asyncio
+    async def test_send_queues_assistant_message_event(self):
+        adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"key": "sk-test"}))
+
+        result = await adapter.send("web:company:user:chat", "授权成功。")
+
+        assert result.success is True
+        events = adapter._session_event_snapshot("web:company:user:chat", since=0)
+        assert len(events) == 1
+        assert events[0]["event"] == "assistant.message"
+        assert events[0]["message"]["role"] == "assistant"
+        assert events[0]["message"]["content"] == "授权成功。"
+        assert events[0]["seq"] > 0
+
+    def test_session_events_requested_requires_explicit_header(self):
+        adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"key": "sk-test"}))
+        request = MagicMock()
+        request.headers = {}
+        assert adapter._session_events_requested(request) is False
+
+        request.headers = {"X-Xiaoban-Async-Delivery": "session-events"}
+        assert adapter._session_events_requested(request) is True
+
+    def test_session_event_snapshot_filters_by_sequence(self):
+        adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"key": "sk-test"}))
+        first = adapter._enqueue_session_event("s1", "assistant.message", {"message": {"content": "one"}})
+        second = adapter._enqueue_session_event("s1", "assistant.message", {"message": {"content": "two"}})
+
+        events = adapter._session_event_snapshot("s1", since=int(first["seq"]))
+
+        assert [event["id"] for event in events] == [second["id"]]
+
     def test_delete_clears_conversation_mapping(self):
         """Deleting a response also removes conversation mappings that reference it."""
         store = ResponseStore(max_size=10)
@@ -2751,18 +2785,20 @@ class TestMultipleSystemMessages:
 
 
 # ---------------------------------------------------------------------------
-# send() method (not used but required by base)
+# send() method queues API-server session events
 # ---------------------------------------------------------------------------
 
 
 class TestSendMethod:
     @pytest.mark.asyncio
-    async def test_send_returns_not_supported(self):
+    async def test_send_queues_session_event(self):
         config = PlatformConfig(enabled=True)
         adapter = APIServerAdapter(config)
         result = await adapter.send("chat1", "hello")
-        assert result.success is False
-        assert "HTTP request/response" in result.error
+        assert result.success is True
+        events = adapter._session_event_snapshot("chat1", since=0)
+        assert len(events) == 1
+        assert events[0]["message"]["content"] == "hello"
 
 
 # ---------------------------------------------------------------------------

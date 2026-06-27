@@ -14,6 +14,8 @@ Exposes an HTTP server with endpoints:
 - GET  /api/sessions/{session_id}/messages — read session message history
 - POST /api/sessions/{session_id}/fork — branch a session using SessionDB lineage
 - POST /api/sessions/{session_id}/chat[/stream] — chat with a persisted session
+- GET  /api/sessions/{session_id}/events — poll async session messages
+- GET  /api/sessions/{session_id}/events/stream — SSE stream async session messages
 - POST /v1/runs                    — start a run, returns run_id immediately (202)
 - GET  /v1/runs/{run_id}           — retrieve current run status
 - GET  /v1/runs/{run_id}/events    — SSE stream of structured lifecycle events
@@ -32,6 +34,7 @@ Requires:
 """
 
 import asyncio
+from collections import deque
 from datetime import datetime, time as dt_time, timedelta, timezone
 import hashlib
 import hmac
@@ -44,7 +47,7 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
@@ -106,6 +109,10 @@ MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
 DEFAULT_USER_TIMEZONE = "Asia/Shanghai"
 DEFAULT_USER_LOCALE = "zh-CN"
+SESSION_EVENT_BUFFER_LIMIT = 100
+SESSION_EVENT_SESSION_LIMIT = 500
+SESSION_EVENT_TTL_SECONDS = 6 * 60 * 60
+SESSION_EVENT_SSE_KEEPALIVE_SECONDS = 25.0
 
 _LOCAL_PATH_RE = re.compile(
     r"(?<![:/\w])/(?:root|opt|srv|var|etc)(?:/[^\s`'\"<>()\[\]{}，。；;]*)*"
@@ -1290,15 +1297,10 @@ class APIServerAdapter(BasePlatformAdapter):
     and routes them through xiaoban-agent's AIAgent.
     """
 
-    # Stateless request/response: every route (the OpenAI-spec
-    # /v1/chat/completions and /v1/responses, and the proprietary /v1/runs SSE
-    # stream) tears down its channel when the turn ends. There is no persistent
-    # outbound channel to push a background completion to a client that already
-    # received its response, and ``send()`` is a no-op stub. So async-delivery
-    # tools (terminal notify_on_complete / watch_patterns, delegate_task
-    # background=True) must NOT promise delivery on this path — see
-    # ``async_delivery_supported()``.
-    supports_async_delivery: bool = False
+    # API-server delivery is opt-in per request. Regular request/response
+    # clients stay synchronous, while hosts that open the session-events channel
+    # can receive background completion turns after the first HTTP response.
+    supports_async_delivery: bool = True
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.API_SERVER)
@@ -1342,6 +1344,12 @@ class APIServerAdapter(BasePlatformAdapter):
         # Number of in-flight runs on the non-streaming chat/responses paths
         # (the /v1/runs path tracks its own in-flight set via _run_streams).
         self._inflight_agent_runs: int = 0
+        # Session event buffers used by API hosts that opt into async delivery.
+        # Keyed by the public session/chat id supplied by X-Xiaoban-Session-Id.
+        self._session_event_buffers: Dict[str, Deque[Dict[str, Any]]] = {}
+        self._session_event_waiters: Dict[str, List["asyncio.Queue[Dict[str, Any]]"]] = {}
+        self._session_event_touched: Dict[str, float] = {}
+        self._session_event_seq: int = 0
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -1513,6 +1521,171 @@ class APIServerAdapter(BasePlatformAdapter):
             {"error": {"message": "Invalid API key", "type": "invalid_request_error", "code": "invalid_api_key"}},
             status=401,
         )
+
+    # ------------------------------------------------------------------
+    # Session event delivery helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _session_events_requested(request: "web.Request") -> bool:
+        """Whether this request opted into post-response session delivery."""
+        raw = (
+            request.headers.get("X-Xiaoban-Async-Delivery")
+            or request.headers.get("X-Xiaoban-Session-Events")
+            or ""
+        )
+        value = raw.strip().lower()
+        return value in {"1", "true", "yes", "on", "session-events", "session_events"}
+
+    @staticmethod
+    def _parse_event_since(request: "web.Request") -> int:
+        raw = request.query.get("since", "0")
+        try:
+            value = int(str(raw).strip() or "0")
+        except (TypeError, ValueError):
+            return 0
+        return max(0, value)
+
+    def _prune_session_events(self, *, now: Optional[float] = None) -> None:
+        current = time.time() if now is None else now
+        stale = [
+            session_id
+            for session_id, touched in self._session_event_touched.items()
+            if current - touched > SESSION_EVENT_TTL_SECONDS
+            and not self._session_event_waiters.get(session_id)
+        ]
+        for session_id in stale:
+            self._session_event_buffers.pop(session_id, None)
+            self._session_event_touched.pop(session_id, None)
+            self._session_event_waiters.pop(session_id, None)
+
+        if len(self._session_event_buffers) <= SESSION_EVENT_SESSION_LIMIT:
+            return
+        ordered = sorted(self._session_event_touched.items(), key=lambda item: item[1])
+        overflow = max(0, len(self._session_event_buffers) - SESSION_EVENT_SESSION_LIMIT)
+        for session_id, _touched in ordered[:overflow]:
+            if self._session_event_waiters.get(session_id):
+                continue
+            self._session_event_buffers.pop(session_id, None)
+            self._session_event_touched.pop(session_id, None)
+
+    def _session_event_snapshot(self, session_id: str, since: int = 0) -> List[Dict[str, Any]]:
+        clean_session_id = str(session_id or "").strip()
+        if not clean_session_id:
+            return []
+        self._prune_session_events()
+        buffer = self._session_event_buffers.get(clean_session_id)
+        if not buffer:
+            return []
+        return [dict(event) for event in buffer if int(event.get("seq") or 0) > since]
+
+    def _enqueue_session_event(
+        self,
+        session_id: str,
+        event_type: str,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        clean_session_id = str(session_id or "").strip()
+        if not clean_session_id:
+            raise ValueError("session_id is required")
+        self._prune_session_events()
+        self._session_event_seq += 1
+        seq = self._session_event_seq
+        event = {
+            "object": "xiaoban.session.event",
+            "id": f"evt_{uuid.uuid4().hex}",
+            "event": event_type,
+            "seq": seq,
+            "session_id": clean_session_id,
+            "created_at": time.time(),
+            **payload,
+        }
+        buffer = self._session_event_buffers.get(clean_session_id)
+        if buffer is None:
+            buffer = deque(maxlen=SESSION_EVENT_BUFFER_LIMIT)
+            self._session_event_buffers[clean_session_id] = buffer
+        buffer.append(event)
+        self._session_event_touched[clean_session_id] = float(event["created_at"])
+        for waiter in list(self._session_event_waiters.get(clean_session_id, [])):
+            try:
+                waiter.put_nowait(event)
+            except Exception:
+                pass
+        return event
+
+    async def _write_session_event_sse(
+        self,
+        response: "web.StreamResponse",
+        event: Dict[str, Any],
+    ) -> None:
+        name = str(event.get("event") or "message").replace("\n", " ").replace("\r", " ")
+        seq = int(event.get("seq") or 0)
+        payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+        await response.write(f"event: {name}\nid: {seq}\ndata: {payload}\n\n".encode("utf-8"))
+
+    async def _handle_session_events(self, request: "web.Request") -> "web.Response":
+        """GET /api/sessions/{session_id}/events — poll async session messages."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        session_id = request.match_info["session_id"]
+        since = self._parse_event_since(request)
+        events = self._session_event_snapshot(session_id, since)
+        last_seq = since
+        for event in events:
+            last_seq = max(last_seq, int(event.get("seq") or 0))
+        return web.json_response({
+            "object": "xiaoban.session.events",
+            "session_id": session_id,
+            "events": events,
+            "last_seq": last_seq,
+        })
+
+    async def _handle_session_events_stream(self, request: "web.Request") -> "web.StreamResponse":
+        """GET /api/sessions/{session_id}/events/stream — SSE async session messages."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        session_id = request.match_info["session_id"]
+        since = self._parse_event_since(request)
+        response = web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers={
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache, no-store",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        await response.prepare(request)
+
+        for event in self._session_event_snapshot(session_id, since):
+            await self._write_session_event_sse(response, event)
+            since = max(since, int(event.get("seq") or 0))
+
+        q: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue()
+        self._session_event_waiters.setdefault(session_id, []).append(q)
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=SESSION_EVENT_SSE_KEEPALIVE_SECONDS)
+                except asyncio.TimeoutError:
+                    await response.write(b": keepalive\n\n")
+                    continue
+                if int(event.get("seq") or 0) <= since:
+                    continue
+                await self._write_session_event_sse(response, event)
+                since = max(since, int(event.get("seq") or 0))
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        finally:
+            waiters = self._session_event_waiters.get(session_id)
+            if waiters and q in waiters:
+                waiters.remove(q)
+            if waiters == []:
+                self._session_event_waiters.pop(session_id, None)
+        return response
 
     # ------------------------------------------------------------------
     # Session header helpers
@@ -1795,6 +1968,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 "session_resources": True,
                 "session_chat": True,
                 "session_chat_streaming": True,
+                "session_events": True,
+                "session_events_streaming": True,
                 "session_fork": True,
                 "admin_config_rw": False,
                 "jobs_admin": False,
@@ -1828,6 +2003,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 "session_fork": {"method": "POST", "path": "/api/sessions/{session_id}/fork"},
                 "session_chat": {"method": "POST", "path": "/api/sessions/{session_id}/chat"},
                 "session_chat_stream": {"method": "POST", "path": "/api/sessions/{session_id}/chat/stream"},
+                "session_events": {"method": "GET", "path": "/api/sessions/{session_id}/events"},
+                "session_events_stream": {"method": "GET", "path": "/api/sessions/{session_id}/events/stream"},
             },
         })
 
@@ -2198,6 +2375,7 @@ class APIServerAdapter(BasePlatformAdapter):
             session_id=session_id,
             gateway_session_key=gateway_session_key,
             request_headers=request.headers,
+            async_delivery=self._session_events_requested(request),
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
         final_response = _guard_evidence_backed_response(
@@ -2299,6 +2477,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_progress_callback=_tool_progress,
                     gateway_session_key=gateway_session_key,
                     request_headers=request.headers,
+                    async_delivery=self._session_events_requested(request),
                 )
                 final_response = _guard_evidence_backed_response(
                     result.get("final_response", "") if isinstance(result, dict) else "",
@@ -2582,6 +2761,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
                 request_headers=request.headers,
+                async_delivery=self._session_events_requested(request),
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -2606,6 +2786,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
                 request_headers=request.headers,
+                async_delivery=self._session_events_requested(request),
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -3682,6 +3863,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
                 request_headers=request.headers,
+                async_delivery=self._session_events_requested(request),
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -3716,6 +3898,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
                 request_headers=request.headers,
+                async_delivery=self._session_events_requested(request),
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -4316,16 +4499,16 @@ class APIServerAdapter(BasePlatformAdapter):
         chat_id: str = "",
         session_key: str = "",
         session_id: str = "",
+        async_delivery: bool = False,
     ) -> list:
         """Bind session contextvars for an API-server agent run.
 
         This is the SINGLE structural chokepoint every API-server agent-entry
         path must use to seed session context — it hardwires
-        ``platform="api_server"`` and ``async_delivery=False`` so a new route
-        physically cannot reintroduce the silent-no-op bug (#10760) by
-        forgetting to mark the channel as non-delivering. There is no
-        ``async_delivery`` parameter to get wrong; the stateless HTTP path can
-        never wake the agent after the turn ends, on ANY route.
+        ``platform="api_server"`` and keeps ``async_delivery=False`` by default.
+        Hosts that also subscribe to ``/api/sessions/{session_id}/events`` may
+        opt in with ``X-Xiaoban-Async-Delivery: session-events`` so background
+        tool completions can re-enter the agent and be queued for that session.
 
         Returns reset tokens; pass them to ``clear_session_vars`` in a
         ``finally`` block (the binding is request-scoped and must not outlive
@@ -4339,7 +4522,7 @@ class APIServerAdapter(BasePlatformAdapter):
             chat_id=chat_id,
             session_key=session_key,
             session_id=session_id,
-            async_delivery=False,
+            async_delivery=bool(async_delivery),
         )
 
     async def _run_agent(
@@ -4355,6 +4538,7 @@ class APIServerAdapter(BasePlatformAdapter):
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
         request_headers: Any = None,
+        async_delivery: bool = False,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -4380,6 +4564,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 chat_id=session_id or "",
                 session_key=gateway_session_key or session_id or "",
                 session_id=session_id or "",
+                async_delivery=async_delivery,
             )
             try:
                 agent = self._create_agent(
@@ -4659,7 +4844,10 @@ class APIServerAdapter(BasePlatformAdapter):
                         # environment state.
                         approval_token = set_current_session_key(approval_session_key)
                         session_tokens = self._bind_api_server_session(
+                            chat_id=session_id or "",
                             session_key=approval_session_key,
+                            session_id=session_id or "",
+                            async_delivery=self._session_events_requested(request),
                         )
                         register_gateway_notify(approval_session_key, _approval_notify)
                         r = agent.run_conversation(
@@ -5057,6 +5245,8 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/api/sessions/{session_id}/fork", self._handle_fork_session)
             self._app.router.add_post("/api/sessions/{session_id}/chat", self._handle_session_chat)
             self._app.router.add_post("/api/sessions/{session_id}/chat/stream", self._handle_session_chat_stream)
+            self._app.router.add_get("/api/sessions/{session_id}/events", self._handle_session_events)
+            self._app.router.add_get("/api/sessions/{session_id}/events/stream", self._handle_session_events_stream)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/v1/responses", self._handle_responses)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
@@ -5220,9 +5410,33 @@ class APIServerAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """
-        Not used — HTTP request/response cycle handles delivery directly.
+        Queue an assistant message for API-server hosts that subscribe to the
+        session-events channel.
         """
-        return SendResult(success=False, error="API server uses HTTP request/response, not send()")
+        clean_chat_id = str(chat_id or "").strip()
+        text = str(content or "").strip()
+        if not clean_chat_id:
+            return SendResult(success=False, error="Missing API-server chat/session id")
+        if not text:
+            return SendResult(success=False, error="Empty API-server message content")
+        message_id = f"msg_{uuid.uuid4().hex}"
+        try:
+            event = self._enqueue_session_event(
+                clean_chat_id,
+                "assistant.message",
+                {
+                    "message": {
+                        "id": message_id,
+                        "role": "assistant",
+                        "content": _sanitize_user_visible_text(text),
+                    },
+                    "reply_to": reply_to,
+                    "metadata": metadata or {},
+                },
+            )
+        except Exception as exc:
+            return SendResult(success=False, error=str(exc))
+        return SendResult(success=True, message_id=message_id, raw_response=event)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Return basic info about the API server."""
