@@ -53,6 +53,22 @@ def _build_runner(monkeypatch, tmp_path, mode: str) -> GatewayRunner:
     return runner
 
 
+def _build_api_server_runner(monkeypatch, tmp_path, mode: str) -> GatewayRunner:
+    (tmp_path / "config.yaml").write_text(
+        f"display:\n  background_process_notifications: {mode}\n",
+        encoding="utf-8",
+    )
+
+    import gateway.run as gateway_run
+
+    monkeypatch.setattr(gateway_run, "_xiaoban_home", tmp_path)
+
+    runner = GatewayRunner(GatewayConfig())
+    adapter = SimpleNamespace(send=AsyncMock(), handle_message=AsyncMock())
+    runner.adapters[Platform.API_SERVER] = adapter
+    return runner
+
+
 def _watcher_dict(session_id="proc_test", thread_id=""):
     d = {
         "session_id": session_id,
@@ -358,6 +374,50 @@ async def test_agent_notification_no_message_id_is_tolerated(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_api_server_completion_queues_session_event_without_home_channel_prompt(
+    monkeypatch, tmp_path
+):
+    """API-server has its own session-events delivery channel. A completed
+    background process should be queued directly to that channel instead of
+    being re-injected as a platform message, which would trigger /sethome
+    prompts and can lose the process output."""
+    import tools.process_registry as pr_module
+
+    sessions = [SimpleNamespace(
+        output_buffer="XIAOBAN_ASYNC_NOTIFY_OK\n",
+        exited=True,
+        exit_code=0,
+        command="sleep 1 && echo XIAOBAN_ASYNC_NOTIFY_OK",
+    )]
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_api_server_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.API_SERVER]
+
+    watcher = {
+        "session_id": "proc_api_server_direct",
+        "check_interval": 0,
+        "session_key": "web:company:user:chat",
+        "platform": "api_server",
+        "chat_id": "web:company:user:chat",
+        "notify_on_complete": True,
+    }
+    await runner._run_process_watcher(watcher)
+
+    adapter.handle_message.assert_not_awaited()
+    adapter.send.assert_awaited_once()
+    kwargs = adapter.send.await_args.kwargs
+    assert kwargs["chat_id"] == "web:company:user:chat"
+    assert "后台进程 proc_api_server_direct 已完成" in kwargs["content"]
+    assert "XIAOBAN_ASYNC_NOTIFY_OK" in kwargs["content"]
+    assert kwargs["metadata"]["kind"] == "background_process_completion"
+
+
+@pytest.mark.asyncio
 async def test_inject_watch_notification_carries_message_id_reply_anchor(monkeypatch, tmp_path):
     from gateway.session import SessionSource
 
@@ -410,6 +470,27 @@ def test_build_process_event_source_falls_back_to_session_key_chat_type(monkeypa
     assert source.thread_id == "42"
     assert source.user_id == "123"
     assert source.user_name == "Emiliyan"
+
+
+def test_build_process_event_source_defaults_api_server_chat_type(monkeypatch, tmp_path):
+    """API-server watcher metadata uses the raw session id, not a parsed
+    platform session key. It must still route to the APIServerAdapter."""
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+
+    evt = {
+        "session_id": "proc_api_server",
+        "session_key": "web:company:user:chat",
+        "platform": "api_server",
+        "chat_id": "web:company:user:chat",
+        "notify_on_complete": True,
+    }
+
+    source = runner._build_process_event_source(evt)
+
+    assert source is not None
+    assert source.platform == Platform.API_SERVER
+    assert source.chat_id == "web:company:user:chat"
+    assert source.chat_type == "dm"
 
 
 def test_build_process_event_source_uses_cached_live_source_before_session_key_parse(
@@ -513,6 +594,47 @@ def test_build_process_event_source_returns_none_for_short_session_key(monkeypat
     }
     source = runner._build_process_event_source(evt)
     assert source is None
+
+
+@pytest.mark.asyncio
+async def test_process_watcher_dispatcher_claims_pending_watchers(monkeypatch, tmp_path):
+    """API-server turns do not pass through the normal gateway post-turn drain,
+    so the idle dispatcher must start pending watcher tasks by itself."""
+    import tools.process_registry as pr_module
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    runner._running = True
+    pr_module.process_registry.pending_watchers = [
+        {
+            "session_id": "proc_api_server_dispatch",
+            "check_interval": 0,
+            "platform": "api_server",
+            "chat_id": "web:company:user:chat",
+            "notify_on_complete": True,
+        }
+    ]
+    claimed = asyncio.Event()
+    claimed_watchers = []
+
+    async def _fake_run_process_watcher(watcher):
+        claimed_watchers.append(watcher)
+        claimed.set()
+
+    monkeypatch.setattr(runner, "_run_process_watcher", _fake_run_process_watcher)
+    task = asyncio.create_task(runner._process_watcher_dispatcher(interval=0.01, initial_delay=0))
+    try:
+        await asyncio.wait_for(claimed.wait(), timeout=1)
+    finally:
+        runner._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        pr_module.process_registry.pending_watchers = []
+
+    assert claimed_watchers[0]["session_id"] == "proc_api_server_dispatch"
+    assert pr_module.process_registry.pending_watchers == []
 
 
 # ---------------------------------------------------------------------------

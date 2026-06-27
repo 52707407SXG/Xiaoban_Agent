@@ -5930,9 +5930,49 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # idle case where the subagent finishes with no agent turn running.
         asyncio.create_task(self._async_delegation_watcher())
 
+        # Start a general pending-process watcher dispatcher. Normal gateway
+        # turns also drain pending_watchers after each agent run, but API-server
+        # turns run inside the adapter and never pass through that post-turn
+        # hook. This loop makes API-server notify_on_complete delivery real
+        # instead of leaving watcher registrations stranded until some other
+        # platform message happens to arrive.
+        asyncio.create_task(self._process_watcher_dispatcher())
+
         logger.info("Press Ctrl+C to stop")
         
         return True
+
+    async def _process_watcher_dispatcher(
+        self,
+        interval: float = 1.0,
+        initial_delay: float = 1.0,
+    ) -> None:
+        """Continuously start pending background-process watcher tasks.
+
+        ``terminal(background=True, notify_on_complete=True)`` records watcher
+        requests in ``process_registry.pending_watchers``. The historical drain
+        ran only after a gateway message turn finished, which misses API-server
+        runs because their agent execution is owned by the HTTP adapter. This
+        dispatcher covers idle and API-server cases while staying harmless for
+        normal gateway turns: both drains atomically detach the current list, so
+        each watcher is claimed by at most one path.
+        """
+        await asyncio.sleep(max(0.0, initial_delay))
+        while self._running:
+            try:
+                from tools.process_registry import process_registry
+
+                watchers = process_registry.pending_watchers
+                process_registry.pending_watchers = []
+                for i, watcher in enumerate(watchers):
+                    asyncio.create_task(self._run_process_watcher(watcher))
+                    if i % 100 == 99:
+                        await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("Process watcher dispatcher tick error: %s", exc, exc_info=True)
+            await asyncio.sleep(interval)
 
     async def _handoff_watcher(self, interval: float = 2.0) -> None:
         """Background task that processes pending CLI→gateway session handoffs.
@@ -13060,6 +13100,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         platform_name = str(evt.get("platform") or derived_platform or "").strip().lower()
         chat_type = str(evt.get("chat_type") or derived_chat_type or "").strip().lower()
         chat_id = str(evt.get("chat_id") or derived_chat_id or "").strip()
+        if platform_name == "api_server" and chat_id and not chat_type:
+            chat_type = "dm"
         if not platform_name or not chat_type or not chat_id:
             return None
 
@@ -13306,6 +13348,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             break
                     if adapter and source.chat_id:
                         try:
+                            if source.platform == Platform.API_SERVER:
+                                direct_text = (
+                                    f"后台进程 {session_id} 已完成（退出码 {session.exit_code}）。\n"
+                                    f"命令：{session.command}\n"
+                                    f"输出：\n{_out}"
+                                ).strip()
+                                logger.info(
+                                    "Process %s finished — queueing API-server session event for %s",
+                                    session_id,
+                                    source.chat_id,
+                                )
+                                await adapter.send(
+                                    chat_id=source.chat_id,
+                                    content=direct_text,
+                                    metadata={
+                                        "kind": "background_process_completion",
+                                        "session_id": session_id,
+                                        "exit_code": session.exit_code,
+                                    },
+                                )
+                                break
                             synth_event = MessageEvent(
                                 text=synth_text,
                                 message_type=MessageType.TEXT,

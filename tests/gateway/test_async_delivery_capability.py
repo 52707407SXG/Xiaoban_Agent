@@ -214,6 +214,32 @@ class TestTerminalNotifyGate:
         assert len(process_registry.pending_watchers) == 1
         assert process_registry.pending_watchers[0]["platform"] == "telegram"
 
+    def test_api_server_opt_in_registers_watcher_for_session_events(self):
+        """My Stand opts API-server turns into session-events delivery, so
+        terminal notify_on_complete must register a watcher instead of falling
+        back to manual polling."""
+        from tools.process_registry import process_registry
+
+        tokens = set_session_vars(
+            platform="api_server",
+            chat_id="web:company:user:chat",
+            session_key="web:company:user:chat",
+            session_id="web:company:user:chat",
+            async_delivery=True,
+        )
+        try:
+            d = self._run_bg("sleep 30 && echo DONE")
+        finally:
+            clear_session_vars(tokens)
+
+        assert d.get("notify_on_complete") is True
+        assert not d.get("notify_unsupported")
+        assert len(process_registry.pending_watchers) == 1
+        watcher = process_registry.pending_watchers[0]
+        assert watcher["platform"] == "api_server"
+        assert watcher["chat_id"] == "web:company:user:chat"
+        assert watcher["session_key"] == "web:company:user:chat"
+
     def test_cli_stays_supported(self):
         """CLI delivers via the in-process completion_queue: notify stays on,
         no false 'unsupported' note, and no pending_watcher (empty platform)."""
