@@ -1099,6 +1099,86 @@ class TestChatCompletionsEndpoint:
             assert data["choices"][0]["message"]["content"] == mock_result["final_response"]
 
     @pytest.mark.asyncio
+    async def test_wechat_article_answer_without_tool_evidence_fails_closed(self, adapter):
+        """URL/article reading must not return model-invented content without tool evidence."""
+        mock_result = {
+            "final_response": "这篇文章主要讲 Hermes 的 MoA 混合 Agent 模式。",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    mock_result,
+                    {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "xiaoban-agent",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "总结这篇公众号：https://mp.weixin.qq.com/s/pbHlRqN_w1RLXnC_IgC8Ag",
+                            }
+                        ],
+                    },
+                )
+
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["choices"][0]["message"]["content"] == (
+                "我还没有成功读取到这个链接的正文，所以不能总结或分析里面的内容。"
+            )
+
+    @pytest.mark.asyncio
+    async def test_wechat_article_answer_with_tool_evidence_passes(self, adapter):
+        mock_result = {
+            "final_response": "这篇文章主要讲 Hermes 的 MoA 混合 Agent 模式。",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "call_1", "function": {"name": "mystand_parse", "arguments": "{}"}},
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": '{"success": true, "title": "Hermes MoA", "text": "正文内容..."}',
+                },
+            ],
+            "api_calls": 1,
+        }
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    mock_result,
+                    {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "xiaoban-agent",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "总结这篇公众号：https://mp.weixin.qq.com/s/pbHlRqN_w1RLXnC_IgC8Ag",
+                            }
+                        ],
+                    },
+                )
+
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["choices"][0]["message"]["content"] == mock_result["final_response"]
+
+    @pytest.mark.asyncio
     async def test_stream_task_done_callback_enqueues_eos_for_chat_completions(self, adapter):
         """Regression guard for #24451: completion callback must signal SSE EOS."""
         app = _create_app(adapter)

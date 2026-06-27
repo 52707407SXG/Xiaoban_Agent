@@ -111,6 +111,72 @@ _LOCAL_PATH_RE = re.compile(
     r"(?<![:/\w])/(?:root|opt|srv|var|etc)(?:/[^\s`'\"<>()\[\]{}，。；;]*)*"
 )
 _LOCAL_FILE_URL_RE = re.compile(r"file://[^\s`'\"<>()\[\]{}，。；;]*", re.IGNORECASE)
+_HTTP_URL_RE = re.compile(r"https?://[^\s`'\"<>()\[\]{}，。；;]+", re.IGNORECASE)
+_URL_READ_KEYWORD_RE = re.compile(
+    r"(读|看|读取|打开|总结|概括|分析|讨论|评价|解释|讲讲|看看|文章|链接|公众号|网页|"
+    r"read|open|summari[sz]e|analy[sz]e|article|link|webpage|url)",
+    re.IGNORECASE,
+)
+_IMAGE_READ_KEYWORD_RE = re.compile(
+    r"(这张图|那张图|上面.*图|刚才.*图|图里|图中|图片里|截图里|照片里|看图|识图|"
+    r"识别.*(?:图片|截图|照片|画面)|描述.*(?:图片|截图|照片|画面)|"
+    r"画面.*(?:什么|内容)|what.*(?:image|photo|picture|screenshot)|"
+    r"describe.*(?:image|photo|picture|screenshot))",
+    re.IGNORECASE,
+)
+_TOOL_FAILURE_MARKER_RE = re.compile(
+    r"(error|failed|failure|exception|traceback|timeout|captcha|forbidden|unauthorized|"
+    r"login required|access denied|无法|失败|报错|超时|验证码|登录|无权限|403|401)",
+    re.IGNORECASE,
+)
+_SOURCE_MENTION_REQUEST_RE = re.compile(
+    r"(?:文章|文中|正文|链接|里面|里边|里头)[^，。；;?？！!\n]{0,24}提到(?:的|了)?"
+    r"(?P<tail>[^，。；;?？！!\n]{2,80})",
+    re.IGNORECASE,
+)
+_SOURCE_ABSENCE_MARKER_RE = re.compile(
+    r"(没(?:有)?提到|未提到|没有找到|未找到|不涉及|无(?:相关)?内容|不沾边|链接发错|"
+    r"does not mention|not mentioned|no mention|not in the article)",
+    re.IGNORECASE,
+)
+_URL_EVIDENCE_TOOLS = {
+    "mystand_parse",
+    "mystand_parser",
+    "web_extract",
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_vision",
+}
+_IMAGE_EVIDENCE_TOOLS = {
+    "vision_analyze",
+    "browser_vision",
+    "ocr_image",
+    "mystand_parse",
+    "mystand_parser",
+}
+_URL_EVIDENCE_FAILURE = "我还没有成功读取到这个链接的正文，所以不能总结或分析里面的内容。"
+_IMAGE_EVIDENCE_FAILURE = "我现在没有成功看到这张图片的内容，所以不能描述画面或识别图片细节。"
+_URL_UNSUPPORTED_MENTION_FAILURE = "我已读取到这个链接，但正文里没有找到你说的这项内容，所以不能按文章内容展开分析。"
+_SOURCE_TERM_STOPWORDS = {
+    "这篇",
+    "这篇文章",
+    "文章",
+    "里面",
+    "里边",
+    "里头",
+    "提到",
+    "提到的",
+    "如何",
+    "怎么",
+    "怎样",
+    "看看",
+    "分析",
+    "分析一下",
+    "一下",
+    "这个",
+    "那个",
+    "内容",
+}
 
 
 def _sanitize_user_visible_text(text: Any) -> str:
@@ -127,6 +193,219 @@ def _sanitize_user_visible_text(text: Any) -> str:
     value = _LOCAL_FILE_URL_RE.sub("本地文件链接", value)
     value = _LOCAL_PATH_RE.sub("本地路径", value)
     return value
+
+
+def _content_to_visible_text(content: Any) -> str:
+    """Extract user-visible text from chat/responses content shapes."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            ptype = str(part.get("type") or "").strip().lower()
+            if ptype in _TEXT_PART_TYPES:
+                parts.append(str(part.get("text") or ""))
+        return "\n".join(p for p in parts if p)
+    return str(content or "")
+
+
+def _content_has_image_part(content: Any) -> bool:
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict):
+                ptype = str(part.get("type") or "").strip().lower()
+                if ptype in _IMAGE_PART_TYPES:
+                    return True
+    return False
+
+
+def _latest_turn_requires_url_evidence(user_message: Any) -> bool:
+    text = _content_to_visible_text(user_message)
+    urls = _HTTP_URL_RE.findall(text)
+    if not urls:
+        return False
+    if any("mp.weixin.qq.com" in url.lower() for url in urls):
+        return True
+    return bool(_URL_READ_KEYWORD_RE.search(text))
+
+
+def _latest_turn_requires_image_evidence(user_message: Any) -> bool:
+    text = _content_to_visible_text(user_message)
+    if _content_has_image_part(user_message):
+        return False
+    return bool(_IMAGE_READ_KEYWORD_RE.search(text))
+
+
+def _conversation_has_image_input(
+    user_message: Any,
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    if _content_has_image_part(user_message):
+        return True
+    for msg in reversed(conversation_history or []):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "user" and _content_has_image_part(msg.get("content")):
+            return True
+    return False
+
+
+def _safe_tool_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    try:
+        return json.dumps(content, ensure_ascii=False, default=str)
+    except Exception:
+        return str(content or "")
+
+
+def _tool_result_looks_successful(content: Any) -> bool:
+    text = _safe_tool_content(content).strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if '"success": true' in lowered or "'success': true" in lowered:
+        return True
+    if _TOOL_FAILURE_MARKER_RE.search(text):
+        return False
+    return len(text) >= 20
+
+
+def _source_text_for_evidence_tools(result: Any, evidence_tools: set[str]) -> str:
+    if not isinstance(result, dict):
+        return ""
+    messages = result.get("messages")
+    if not isinstance(messages, list):
+        return ""
+
+    call_names: Dict[str, str] = {}
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for call in msg.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") or {}
+            name = str(function.get("name") or call.get("name") or "")
+            call_id = str(call.get("id") or "")
+            if call_id and name:
+                call_names[call_id] = name
+
+    parts: List[str] = []
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            continue
+        tool_name = str(msg.get("name") or "")
+        call_id = str(msg.get("tool_call_id") or "")
+        if call_id and not tool_name:
+            tool_name = call_names.get(call_id, "")
+        content = msg.get("content")
+        if tool_name in evidence_tools and _tool_result_looks_successful(content):
+            parts.append(_safe_tool_content(content))
+    return "\n".join(parts)
+
+
+def _extract_source_mention_terms(user_message: Any) -> List[str]:
+    text = _HTTP_URL_RE.sub("", _content_to_visible_text(user_message))
+    match = _SOURCE_MENTION_REQUEST_RE.search(text)
+    if not match:
+        return []
+    tail = match.group("tail")
+    tail = re.sub(r"(如何|怎么|怎样|请.*|帮我.*|分析.*|评价.*|看法.*)$", "", tail).strip()
+    raw_terms = re.findall(r"20\d{2}|[A-Za-z][A-Za-z0-9_-]{1,}|[\u4e00-\u9fff]{2,}", tail)
+    terms: List[str] = []
+    for term in raw_terms:
+        term = term.strip()
+        if not term or term in _SOURCE_TERM_STOPWORDS:
+            continue
+        if len(term) > 12:
+            for chunk in re.findall(r"[\u4e00-\u9fff]{2,4}", term):
+                if chunk not in _SOURCE_TERM_STOPWORDS:
+                    terms.append(chunk)
+            continue
+        terms.append(term)
+    return terms[:8]
+
+
+def _needs_source_absence_guard(user_message: Any, final_text: str, source_text: str) -> bool:
+    terms = _extract_source_mention_terms(user_message)
+    if not terms or not source_text:
+        return False
+    if _SOURCE_ABSENCE_MARKER_RE.search(final_text):
+        return False
+    source_lower = source_text.lower()
+    return not any(term.lower() in source_lower for term in terms)
+
+
+def _has_successful_tool_evidence(result: Any, evidence_tools: set[str]) -> bool:
+    if not isinstance(result, dict):
+        return False
+    messages = result.get("messages")
+    if not isinstance(messages, list):
+        return False
+
+    call_names: Dict[str, str] = {}
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for call in msg.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") or {}
+            name = str(function.get("name") or call.get("name") or "")
+            call_id = str(call.get("id") or "")
+            if call_id and name:
+                call_names[call_id] = name
+
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            continue
+        tool_name = str(msg.get("name") or "")
+        call_id = str(msg.get("tool_call_id") or "")
+        if call_id and not tool_name:
+            tool_name = call_names.get(call_id, "")
+        if tool_name in evidence_tools and _tool_result_looks_successful(msg.get("content")):
+            return True
+    return False
+
+
+def _guard_evidence_backed_response(
+    text: Any,
+    *,
+    user_message: Any,
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+    result: Any = None,
+) -> str:
+    """Fail closed for URL/image reading when the turn has no real evidence.
+
+    This is an API egress guard, not a prompt preference. If Xiaoban did not
+    actually read a link or see an image, user-visible output must say that
+    plainly instead of describing unobserved content.
+    """
+    final_text = _sanitize_user_visible_text(text)
+    if not final_text:
+        return final_text
+
+    url_required = _latest_turn_requires_url_evidence(user_message)
+    image_required = _latest_turn_requires_image_evidence(user_message)
+    if not url_required and not image_required:
+        return final_text
+
+    if url_required:
+        if not _has_successful_tool_evidence(result, _URL_EVIDENCE_TOOLS):
+            return _URL_EVIDENCE_FAILURE
+        source_text = _source_text_for_evidence_tools(result, _URL_EVIDENCE_TOOLS)
+        if _needs_source_absence_guard(user_message, final_text, source_text):
+            return _URL_UNSUPPORTED_MENTION_FAILURE
+
+    image_has_input = _conversation_has_image_input(user_message, conversation_history)
+    image_has_tool = _has_successful_tool_evidence(result, _IMAGE_EVIDENCE_TOOLS)
+    if image_required and not (image_has_input or image_has_tool):
+        return _IMAGE_EVIDENCE_FAILURE
+
+    return final_text
 
 
 def _normalize_timezone_name(value: Any, default: str = DEFAULT_USER_TIMEZONE) -> str:
@@ -1921,7 +2200,12 @@ class APIServerAdapter(BasePlatformAdapter):
             request_headers=request.headers,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
-        final_response = _sanitize_user_visible_text(result.get("final_response", "") if isinstance(result, dict) else "")
+        final_response = _guard_evidence_backed_response(
+            result.get("final_response", "") if isinstance(result, dict) else "",
+            user_message=user_message,
+            conversation_history=history,
+            result=result,
+        )
         headers = {"X-Xiaoban-Session-Id": effective_session_id or session_id}
         if gateway_session_key:
             headers["X-Xiaoban-Session-Key"] = gateway_session_key
@@ -1962,6 +2246,10 @@ class APIServerAdapter(BasePlatformAdapter):
         message_id = f"msg_{uuid.uuid4().hex}"
         run_id = f"run_{uuid.uuid4().hex}"
         seq = 0
+        guard_stream_deltas = (
+            _latest_turn_requires_url_evidence(user_message)
+            or _latest_turn_requires_image_evidence(user_message)
+        )
 
         def _event_payload(name: str, payload: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
             nonlocal seq
@@ -1987,7 +2275,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 pass
 
         def _delta(delta: str) -> None:
-            if delta:
+            if delta and not guard_stream_deltas:
                 _enqueue("assistant.delta", {"message_id": message_id, "delta": _sanitize_user_visible_text(delta)})
 
         def _tool_progress(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs) -> None:
@@ -2012,7 +2300,12 @@ class APIServerAdapter(BasePlatformAdapter):
                     gateway_session_key=gateway_session_key,
                     request_headers=request.headers,
                 )
-                final_response = _sanitize_user_visible_text(result.get("final_response", "") if isinstance(result, dict) else "")
+                final_response = _guard_evidence_backed_response(
+                    result.get("final_response", "") if isinstance(result, dict) else "",
+                    user_message=user_message,
+                    conversation_history=history,
+                    result=result,
+                )
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
                 turn_messages = self._turn_transcript_messages(history, user_message, result) if isinstance(result, dict) else []
                 await queue.put(_event_payload("assistant.completed", {
@@ -2205,6 +2498,10 @@ class APIServerAdapter(BasePlatformAdapter):
         if stream:
             import queue as _q
             _stream_q: _q.Queue = _q.Queue()
+            guard_stream_deltas = (
+                _latest_turn_requires_url_evidence(user_message)
+                or _latest_turn_requires_image_evidence(user_message)
+            )
 
             def _on_delta(delta):
                 # Filter out None — the agent fires stream_delta_callback(None)
@@ -2214,7 +2511,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 # response, causing Open WebUI (and similar frontends) to miss
                 # the final answer after tool calls.  The SSE loop detects
                 # completion via agent_task.done() instead.
-                if delta is not None:
+                if delta is not None and not guard_stream_deltas:
                     _stream_q.put(_sanitize_user_visible_text(delta))
 
             # Track which tool_call_ids we've emitted a "running" lifecycle
@@ -2294,6 +2591,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 request, completion_id, model_name, created, _stream_q,
                 agent_task, agent_ref, session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                evidence_guard_context={
+                    "user_message": user_message,
+                    "conversation_history": history,
+                } if guard_stream_deltas else None,
             )
 
         # Non-streaming: run the agent (with optional Idempotency-Key)
@@ -2328,7 +2629,12 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=500,
                 )
 
-        final_response = _sanitize_user_visible_text(result.get("final_response") or "")
+        final_response = _guard_evidence_backed_response(
+            result.get("final_response") or "",
+            user_message=user_message,
+            conversation_history=history,
+            result=result,
+        )
         is_partial = bool(result.get("partial"))
         is_failed = bool(result.get("failed"))
         completed = bool(result.get("completed", True))
@@ -2411,6 +2717,7 @@ class APIServerAdapter(BasePlatformAdapter):
         self, request: "web.Request", completion_id: str, model: str,
         created: int, stream_q, agent_task, agent_ref=None, session_id: str = None,
         gateway_session_key: str = None,
+        evidence_guard_context: Optional[Dict[str, Any]] = None,
     ) -> "web.StreamResponse":
         """Write real streaming SSE from agent's stream_delta_callback queue.
 
@@ -2529,11 +2836,27 @@ class APIServerAdapter(BasePlatformAdapter):
 
             # Get usage from completed agent
             usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+            guarded_final = ""
             try:
                 result, agent_usage = await agent_task
                 usage = agent_usage or usage
+                if evidence_guard_context is not None:
+                    guarded_final = _guard_evidence_backed_response(
+                        result.get("final_response", "") if isinstance(result, dict) else "",
+                        user_message=evidence_guard_context.get("user_message", ""),
+                        conversation_history=evidence_guard_context.get("conversation_history") or [],
+                        result=result,
+                    )
             except Exception as exc:
                 logger.warning("Agent task %s failed, usage data lost: %s", completion_id, exc)
+
+            if guarded_final:
+                content_chunk = {
+                    "id": completion_id, "object": "chat.completion.chunk",
+                    "created": created, "model": model,
+                    "choices": [{"index": 0, "delta": {"content": guarded_final}, "finish_reason": None}],
+                }
+                await response.write(f"data: {json.dumps(content_chunk)}\n\n".encode())
 
             # Finish chunk
             finish_chunk = {
@@ -2997,7 +3320,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 # deltas were streamed (e.g. some providers only emit
                 # the full response at the end), emit a single fallback
                 # delta so Responses clients still receive a live text part.
-                agent_final = _sanitize_user_visible_text(result.get("final_response", "") if isinstance(result, dict) else "")
+                agent_final = _guard_evidence_backed_response(
+                    result.get("final_response", "") if isinstance(result, dict) else "",
+                    user_message=user_message,
+                    conversation_history=conversation_history,
+                    result=result,
+                )
                 if agent_final and not final_text_parts:
                     await _emit_text_delta(agent_final)
                 if agent_final and not final_response_text:
@@ -3303,12 +3631,16 @@ class APIServerAdapter(BasePlatformAdapter):
             # calls in real time.  See _write_sse_responses for details.
             import queue as _q
             _stream_q: _q.Queue = _q.Queue()
+            guard_stream_deltas = (
+                _latest_turn_requires_url_evidence(user_message)
+                or _latest_turn_requires_image_evidence(user_message)
+            )
 
             def _on_delta(delta):
                 # None from the agent is a CLI box-close signal, not EOS.
                 # Forwarding would kill the SSE stream prematurely; the
                 # SSE writer detects completion via agent_task.done().
-                if delta is not None:
+                if delta is not None and not guard_stream_deltas:
                     _stream_q.put(_sanitize_user_visible_text(delta))
 
             def _on_tool_progress(event_type, name, preview, args, **kwargs):
@@ -3410,9 +3742,17 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=500,
                 )
 
-        final_response = _sanitize_user_visible_text(result.get("final_response", ""))
+        final_response = _guard_evidence_backed_response(
+            result.get("final_response", ""),
+            user_message=user_message,
+            conversation_history=conversation_history,
+            result=result,
+        )
         if not final_response:
             final_response = _sanitize_user_visible_text(result.get("error", "(No response generated)"))
+        if isinstance(result, dict):
+            result = dict(result)
+            result["final_response"] = final_response
 
         response_id = f"resp_{uuid.uuid4().hex[:28]}"
         created_at = int(time.time())
@@ -4367,7 +4707,12 @@ class APIServerAdapter(BasePlatformAdapter):
                         last_event="run.failed",
                     )
                 else:
-                    final_response = _sanitize_user_visible_text(result.get("final_response", "") if isinstance(result, dict) else "")
+                    final_response = _guard_evidence_backed_response(
+                        result.get("final_response", "") if isinstance(result, dict) else "",
+                        user_message=user_message,
+                        conversation_history=conversation_history,
+                        result=result,
+                    )
                     q.put_nowait({
                         "event": "run.completed",
                         "run_id": run_id,
