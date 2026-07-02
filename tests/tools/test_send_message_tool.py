@@ -27,6 +27,7 @@ def _reset_signal_scheduler():
 
 from gateway.config import Platform
 from tools.send_message_tool import (
+    _email_send_denied_for_current_session,
     _is_telegram_thread_not_found,
     _parse_target_ref,
     _send_matrix_via_adapter,
@@ -113,6 +114,31 @@ class _patch_discord_sender:
         if self._entry is not None:
             self._entry.standalone_sender_fn = self._original
         return False
+
+
+def test_api_server_email_delivery_is_limited_to_gangge():
+    from gateway.session_context import clear_session_vars, set_session_vars
+
+    tokens = set_session_vars(platform="api_server", user_id="ZYJ005")
+    try:
+        denied = _email_send_denied_for_current_session()
+    finally:
+        clear_session_vars(tokens)
+
+    assert denied is not None
+    assert "52707407" in denied["error"]
+
+
+def test_api_server_email_delivery_allows_gangge():
+    from gateway.session_context import clear_session_vars, set_session_vars
+
+    tokens = set_session_vars(platform="api_server", user_id="52707407")
+    try:
+        denied = _email_send_denied_for_current_session()
+    finally:
+        clear_session_vars(tokens)
+
+    assert denied is None
 
 
 def _slack_entry():

@@ -65,6 +65,13 @@ class TestApiServerPlatformConfig:
 
 
 class TestApiServerAdapterToolset:
+    def test_header_value_falls_back_to_case_insensitive_dict_lookup(self):
+        from gateway.platforms.api_server import APIServerAdapter
+
+        headers = {"x-xiaoban-toolset-policy": "mystand-broker-basic"}
+
+        assert APIServerAdapter._header_value(headers, "X-Xiaoban-Toolset-Policy") == "mystand-broker-basic"
+
     @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
     def test_create_agent_reads_config_toolsets(self):
         """API server resolves toolsets from config like all other platforms."""
@@ -124,3 +131,31 @@ class TestApiServerAdapterToolset:
             call_kwargs = mock_agent_cls.call_args
             toolsets = call_kwargs.kwargs.get("enabled_toolsets")
             assert sorted(toolsets) == ["terminal", "web"]
+
+    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
+    def test_create_agent_respects_mystand_basic_override(self):
+        """My Stand broker accounts get only basic web/parser tools."""
+        from gateway.platforms.api_server import APIServerAdapter
+        from gateway.config import PlatformConfig
+
+        adapter = APIServerAdapter(PlatformConfig())
+
+        with patch("gateway.run._resolve_runtime_agent_kwargs") as mock_kwargs, \
+             patch("gateway.run._resolve_gateway_model") as mock_model, \
+             patch("gateway.run._load_gateway_config") as mock_config, \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+
+            mock_kwargs.return_value = {"api_key": "test-key", "base_url": None,
+                                        "provider": None, "api_mode": None,
+                                        "command": None, "args": []}
+            mock_model.return_value = "test/model"
+            mock_config.return_value = {
+                "platform_toolsets": {"api_server": ["xiaoban-api-server"]}
+            }
+            mock_agent_cls.return_value = MagicMock()
+
+            adapter._create_agent(enabled_toolsets_override=["web", "mystand_parser"])
+
+            mock_agent_cls.assert_called_once()
+            call_kwargs = mock_agent_cls.call_args
+            assert call_kwargs.kwargs.get("enabled_toolsets") == ["mystand_parser", "web"]

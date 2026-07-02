@@ -69,6 +69,7 @@ _URL_SECRET_QUERY_RE = re.compile(
     r"([?&](?:access_token|api[_-]?key|auth[_-]?token|token|signature|sig)=)([^&#\s]+)",
     re.IGNORECASE,
 )
+_MYSTAND_EMAIL_OWNER_USER_ID = "52707407"
 _GENERIC_SECRET_ASSIGN_RE = re.compile(
     r"\b(access_token|api[_-]?key|auth[_-]?token|signature|sig)\s*=\s*([^\s,;]+)",
     re.IGNORECASE,
@@ -86,6 +87,22 @@ def _sanitize_error_text(text) -> str:
 def _error(message: str) -> dict:
     """Build a standardized error payload with redacted content."""
     return {"error": _sanitize_error_text(message)}
+
+
+def _email_send_denied_for_current_session() -> dict | None:
+    """Block My Stand web-channel email delivery for non-owner accounts."""
+    try:
+        from gateway.session_context import get_session_env
+        session_platform = get_session_env("XIAOBAN_SESSION_PLATFORM", "").strip().lower()
+        session_user_id = get_session_env("XIAOBAN_SESSION_USER_ID", "").strip().upper()
+    except Exception:
+        return None
+
+    if session_platform != "api_server":
+        return None
+    if session_user_id == _MYSTAND_EMAIL_OWNER_USER_ID:
+        return None
+    return _error("邮件功能只对刚哥主账号 52707407 开放，当前账号不能发送、查询或处理邮件。")
 
 
 def _display_chat_id(platform_name: str, chat_id: str) -> str:
@@ -723,6 +740,10 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     from gateway.config import Platform
 
     media_files = media_files or []
+    if platform == Platform.EMAIL:
+        denied = _email_send_denied_for_current_session()
+        if denied is not None:
+            return denied
 
     # Weixin handles text/media delivery inside its native helper and does not
     # need the optional platform adapter imports below. Keep this branch early

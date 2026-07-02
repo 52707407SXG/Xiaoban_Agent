@@ -1783,6 +1783,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        enabled_toolsets_override: Optional[List[str]] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1815,7 +1816,11 @@ class APIServerAdapter(BasePlatformAdapter):
         model = _resolve_gateway_model()
 
         user_config = _load_gateway_config()
-        enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+        enabled_toolsets = (
+            sorted(str(item).strip() for item in enabled_toolsets_override if str(item).strip())
+            if enabled_toolsets_override is not None
+            else sorted(_get_platform_tools(user_config, "api_server"))
+        )
         configured_system_prompt = str(
             cfg_get(user_config, "agent", "system_prompt", default="") or ""
         ).strip()
@@ -4499,6 +4504,7 @@ class APIServerAdapter(BasePlatformAdapter):
         chat_id: str = "",
         session_key: str = "",
         session_id: str = "",
+        user_id: str = "",
         async_delivery: bool = False,
     ) -> list:
         """Bind session contextvars for an API-server agent run.
@@ -4520,10 +4526,37 @@ class APIServerAdapter(BasePlatformAdapter):
         return set_session_vars(
             platform="api_server",
             chat_id=chat_id,
+            user_id=user_id,
             session_key=session_key,
             session_id=session_id,
             async_delivery=bool(async_delivery),
         )
+
+    @staticmethod
+    def _header_value(headers: Any, name: str) -> str:
+        if headers is None:
+            return ""
+        try:
+            direct_value = str(headers.get(name, "") or "").strip()
+            if direct_value:
+                return direct_value
+        except Exception:
+            pass
+        try:
+            normalized_name = str(name or "").strip().lower()
+            for key, value in headers.items():
+                if str(key or "").strip().lower() == normalized_name:
+                    return str(value or "").strip()
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _toolsets_for_request_policy(policy: str) -> Optional[List[str]]:
+        normalized = str(policy or "").strip().lower()
+        if normalized == "mystand-broker-basic":
+            return ["web", "mystand_parser"]
+        return None
 
     async def _run_agent(
         self,
@@ -4556,6 +4589,10 @@ class APIServerAdapter(BasePlatformAdapter):
             ephemeral_system_prompt,
             headers=request_headers,
         )
+        request_user_id = self._header_value(request_headers, "X-Xiaoban-User-Id")
+        enabled_toolsets_override = self._toolsets_for_request_policy(
+            self._header_value(request_headers, "X-Xiaoban-Toolset-Policy")
+        )
 
         def _run():
             from gateway.session_context import clear_session_vars
@@ -4564,6 +4601,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 chat_id=session_id or "",
                 session_key=gateway_session_key or session_id or "",
                 session_id=session_id or "",
+                user_id=request_user_id,
                 async_delivery=async_delivery,
             )
             try:
@@ -4575,6 +4613,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_start_callback=tool_start_callback,
                     tool_complete_callback=tool_complete_callback,
                     gateway_session_key=gateway_session_key,
+                    enabled_toolsets_override=enabled_toolsets_override,
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent
