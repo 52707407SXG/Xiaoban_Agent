@@ -196,6 +196,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "file_readonly": {
+        "description": "Read-only file evidence tools: read and search files without write or patch access",
+        "tools": ["read_file", "search_files"],
+        "includes": []
+    },
+
     "mystand_parser": {
         "description": "My Stand parser tool for documents, spreadsheets, images, audio attachments, and supported URLs",
         "tools": ["mystand_parse"],

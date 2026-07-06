@@ -5,6 +5,18 @@ from unittest.mock import patch, MagicMock
 from toolsets import resolve_toolset, get_toolset, validate_toolset
 
 
+class TestReadOnlyFileToolset:
+    def test_file_readonly_contains_no_write_tools(self):
+        tools = resolve_toolset("file_readonly")
+
+        assert "read_file" in tools
+        assert "search_files" in tools
+        assert "write_file" not in tools
+        assert "patch" not in tools
+        assert "terminal" not in tools
+        assert "execute_code" not in tools
+
+
 class TestXiaobanApiServerToolset:
     """Tests for the xiaoban-api-server toolset definition."""
 

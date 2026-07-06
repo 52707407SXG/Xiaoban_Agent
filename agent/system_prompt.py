@@ -50,6 +50,7 @@ from agent.xiaoban_operating_policy import (
     XIAOBAN_AGENTIC_WORKFLOW_POLICY,
     XIAOBAN_DEEPSEEK_EXECUTION_GUIDANCE,
     XIAOBAN_EXPLICIT_LEARN_POLICY,
+    XIAOBAN_MYSTAND_SECURITY_BOUNDARY_POLICY,
     XIAOBAN_OPERATING_POLICY,
     XIAOBAN_VERIFICATION_BACKFILL_POLICY,
 )
@@ -210,6 +211,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # short user turns, uploaded files, evidence lookup, and high-risk actions
     # from being handled as ordinary chat.
     stable_parts.append(XIAOBAN_OPERATING_POLICY)
+    stable_parts.append(XIAOBAN_MYSTAND_SECURITY_BOUNDARY_POLICY)
     stable_parts.append(XIAOBAN_AGENTIC_WORKFLOW_POLICY)
     stable_parts.append(XIAOBAN_VERIFICATION_BACKFILL_POLICY)
     stable_parts.append(XIAOBAN_EXPLICIT_LEARN_POLICY)
