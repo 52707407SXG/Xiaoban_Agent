@@ -8153,6 +8153,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "skills":
             return await self._handle_skills_command(event)
 
+        if canonical == "learn":
+            # Explicit skill learning: rewrite the command into a normal agent
+            # turn and fall through so the live agent gathers sources and calls
+            # skill_manage. This keeps role alternation intact and works on the
+            # web/desktop-pet gateway without a separate engine.
+            from agent.learn_prompt import build_learn_prompt
+
+            _learn_req = event.get_command_args().strip()
+            _ack = (
+                "Learning a skill from what you described..."
+                if _learn_req
+                else "Learning a skill from this conversation..."
+            )
+            try:
+                adapter = self.adapters.get(source.platform)
+                if adapter:
+                    _ack_meta = self._thread_metadata_for_source(source)
+                    await adapter.send(str(source.chat_id), _ack, metadata=_ack_meta)
+            except Exception:
+                logger.debug("learn ack send failed", exc_info=True)
+            try:
+                event.text = build_learn_prompt(_learn_req)
+            except Exception:
+                return "Could not start /learn. Please try again."
+
         if canonical == "fast":
             return await self._handle_fast_command(event)
 

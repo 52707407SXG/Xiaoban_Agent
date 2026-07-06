@@ -157,7 +157,10 @@ TOOLSETS = {
     },
     
     "moa": {
-        "description": "Advanced reasoning and problem-solving tools",
+        "description": (
+            "Advanced multi-model review for explicit MoA/deep-review tasks. "
+            "Off by default; avoid sending private My Stand data unless redacted."
+        ),
         "tools": ["mixture_of_agents"],
         "includes": []
     },

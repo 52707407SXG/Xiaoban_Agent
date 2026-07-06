@@ -111,6 +111,14 @@ class TestXiaobanOperatingPolicy:
         assert "# Xiaoban agentic workflow principles" in stable
         assert "latest user message and this-turn evidence override old topic drift" in stable
         assert "anchor the reasoning to the user's default Beijing time" in stable
+        assert "# Xiaoban pre-final verification policy" in stable
+        assert "do not claim completion unless a concrete check passed" in stable
+        assert "# Xiaoban explicit skill learning policy" in stable
+        assert "Do not create, edit, or stage reusable skills from ordinary conversation" in stable
+        assert "or '/learn'" in stable
+        assert "# Xiaoban advanced MoA policy" in stable
+        assert "not the default way to answer in the My Stand or desktop-pet chat window" in stable
+        assert "Before using MoA on private My Stand data" in stable
 
     def test_deepseek_gets_xiaoban_execution_discipline(self):
         agent = _make_agent(

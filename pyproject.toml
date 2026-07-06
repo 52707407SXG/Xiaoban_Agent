@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xiaoban-agent"
-version = "0.17.0"
+version = "0.17.1"
 description = "My Stand native Xiaoban Agent — a server-side Agent brain adapted from a mature agent runtime"
 readme = "README.md"
 # Upper bound is load-bearing, not cosmetic. uv resolves the project's

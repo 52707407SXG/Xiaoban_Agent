@@ -46,9 +46,12 @@ from agent.prompt_builder import (
 )
 from agent.runtime_cwd import resolve_context_cwd
 from agent.xiaoban_operating_policy import (
+    XIAOBAN_ADVANCED_MOA_POLICY,
     XIAOBAN_AGENTIC_WORKFLOW_POLICY,
     XIAOBAN_DEEPSEEK_EXECUTION_GUIDANCE,
+    XIAOBAN_EXPLICIT_LEARN_POLICY,
     XIAOBAN_OPERATING_POLICY,
+    XIAOBAN_VERIFICATION_BACKFILL_POLICY,
 )
 
 
@@ -208,6 +211,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # from being handled as ordinary chat.
     stable_parts.append(XIAOBAN_OPERATING_POLICY)
     stable_parts.append(XIAOBAN_AGENTIC_WORKFLOW_POLICY)
+    stable_parts.append(XIAOBAN_VERIFICATION_BACKFILL_POLICY)
+    stable_parts.append(XIAOBAN_EXPLICIT_LEARN_POLICY)
+    stable_parts.append(XIAOBAN_ADVANCED_MOA_POLICY)
 
     # Universal task-completion / no-fabrication guidance.  Applied to ALL
     # models regardless of tool_use_enforcement gating — the failure modes
