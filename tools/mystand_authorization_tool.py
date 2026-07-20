@@ -43,13 +43,12 @@ _WRITE_ACTIONS = {
     "knowledge-graph.add-edge",
 }
 _EXPLICIT_CONFIRMATION = "确认写入"
-_POSITIVE_CONFIRMATION_RE = re.compile(
-    r"(?:^|[，,。；;：:\s]|我)确认写入(?:$|[，,。！!；;\s])"
-)
-_NEGATED_CONFIRMATION_RE = re.compile(
-    r"(?:不|别|不要|暂不|先不|取消|不能|无法|不想|不同意|不允许|还没|没有|尚未|"
-    r"并非|不是|不算|不代表|未|没)[^，,。！？；;\n]{0,16}确认写入|"
-    r"确认写入[^。！\n]{0,24}(?:吗|么|是不是|是什么意思|怎么说|如何|？|\?)"
+_EXPLICIT_CONFIRMATION_REPLY_RE = re.compile(
+    r"(?:"
+    r"(?:我\s*)?确认写入"
+    r"|"
+    r"预览(?:内容)?没问题[，,\s]*(?:我\s*)?确认写入"
+    r")[。！!]?"
 )
 
 
@@ -68,8 +67,10 @@ MYSTAND_AUTHORIZATION_SCHEMA = {
         "First call preview_write with an internal AUTH whose canWrite is true, "
         "the target's current expected_version, and a fresh idempotency_key. "
         "Show the returned exact preview to the user and stop. Call commit_write "
-        "only in a later user message whose actual text explicitly contains "
-        "'确认写入'; reuse the preview_token and idempotency_key. Never invent "
+        "only in a later user message whose complete reply is an unambiguous "
+        "standalone confirmation such as '确认写入' or '预览没问题，确认写入'; "
+        "reuse the preview_token and idempotency_key. Never infer confirmation "
+        "from quoted text, questions, button labels, or analysis, never invent "
         "confirmation, never commit in the preview turn, and never describe a "
         "successful write unless the receipt says verified=true."
     ),
@@ -326,12 +327,9 @@ def mystand_authorization_tool_handler(args, **_kwargs):
             if not session["message_id"] or not session["session_id"]:
                 return _error("当前请求缺少可信 messageId 或 sessionId，不能提交写入。", code="trusted_write_context_required", status=409)
             current_user_message = get_session_user_message().strip()
-            if (
-                not _POSITIVE_CONFIRMATION_RE.search(current_user_message)
-                or _NEGATED_CONFIRMATION_RE.search(current_user_message)
-            ):
+            if not _EXPLICIT_CONFIRMATION_REPLY_RE.fullmatch(current_user_message):
                 return _error(
-                    "只有用户在预览后的新消息里明确说“确认写入”，才能提交。",
+                    "只有用户在预览后的新消息里，用独立回复明确说“确认写入”，才能提交。",
                     code="explicit_user_confirmation_required",
                     status=409,
                 )

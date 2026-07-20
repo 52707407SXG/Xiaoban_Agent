@@ -251,6 +251,10 @@ def test_preview_rejects_unknown_write_action_before_transport(internal_calls):
         "我说“确认写入”是什么意思？",
         "确认写入是不是就会立即改资料？",
         "请解释确认写入",
+        "按钮文案：确认写入，分析安全问题",
+        "如果我说确认写入，你就会修改吗？",
+        "引用原话“确认写入”",
+        "确认写入，然后把安全问题也分析一下",
     ],
 )
 def test_commit_rejects_missing_negated_or_question_confirmation(
