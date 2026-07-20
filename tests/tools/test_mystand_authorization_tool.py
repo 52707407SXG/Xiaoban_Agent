@@ -246,6 +246,11 @@ def test_preview_rejects_unknown_write_action_before_transport(internal_calls):
         "我没有确认写入",
         "我尚未确认写入",
         "确认写入吗？",
+        "这不是确认写入",
+        "这不算确认写入",
+        "我说“确认写入”是什么意思？",
+        "确认写入是不是就会立即改资料？",
+        "请解释确认写入",
     ],
 )
 def test_commit_rejects_missing_negated_or_question_confirmation(

@@ -43,10 +43,13 @@ _WRITE_ACTIONS = {
     "knowledge-graph.add-edge",
 }
 _EXPLICIT_CONFIRMATION = "确认写入"
+_POSITIVE_CONFIRMATION_RE = re.compile(
+    r"(?:^|[，,。；;：:\s]|我)确认写入(?:$|[，,。！!；;\s])"
+)
 _NEGATED_CONFIRMATION_RE = re.compile(
-    r"(?:不|别|不要|暂不|先不|取消|不能|无法|不想|不同意|不允许|还没|没有|尚未|未|没)"
-    r"(?:再|现在|立即|正式|最终|明确|执行|同意)?确认写入|"
-    r"确认写入.{0,8}(?:吗|么|？|\?)"
+    r"(?:不|别|不要|暂不|先不|取消|不能|无法|不想|不同意|不允许|还没|没有|尚未|"
+    r"并非|不是|不算|不代表|未|没)[^，,。！？；;\n]{0,16}确认写入|"
+    r"确认写入[^。！\n]{0,24}(?:吗|么|是不是|是什么意思|怎么说|如何|？|\?)"
 )
 
 
@@ -324,7 +327,7 @@ def mystand_authorization_tool_handler(args, **_kwargs):
                 return _error("当前请求缺少可信 messageId 或 sessionId，不能提交写入。", code="trusted_write_context_required", status=409)
             current_user_message = get_session_user_message().strip()
             if (
-                _EXPLICIT_CONFIRMATION not in current_user_message
+                not _POSITIVE_CONFIRMATION_RE.search(current_user_message)
                 or _NEGATED_CONFIRMATION_RE.search(current_user_message)
             ):
                 return _error(
