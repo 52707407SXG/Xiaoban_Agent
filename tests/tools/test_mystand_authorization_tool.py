@@ -59,6 +59,7 @@ def test_schema_exposes_only_fixed_operations_and_write_actions():
     assert operation["enum"] == ["list", "resolve", "preview_write", "commit_write"]
     assert set(action["enum"]) == {
         "note.append-content",
+        "property-note.append-text-block",
         "profile-card.update-field",
         "knowledge-graph.add-node",
         "knowledge-graph.update-node",

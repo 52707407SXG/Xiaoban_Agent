@@ -36,6 +36,7 @@ _OPERATIONS = {
 }
 _WRITE_ACTIONS = {
     "note.append-content",
+    "property-note.append-text-block",
     "profile-card.update-field",
     "knowledge-graph.add-node",
     "knowledge-graph.update-node",
@@ -60,7 +61,7 @@ MYSTAND_AUTHORIZATION_SCHEMA = {
         "resolve re-checks the supplied AUTH/OUT permission before returning "
         "content. A feature explanation does not need this tool; real user data "
         "does.\n\n"
-        "WRITES: OUT can never write. Only five fixed actions are supported. "
+        "WRITES: OUT can never write. Only the fixed allowlisted actions are supported. "
         "First call preview_write with an internal AUTH whose canWrite is true, "
         "the target's current expected_version, and a fresh idempotency_key. "
         "Show the returned exact preview to the user and stop. Call commit_write "
