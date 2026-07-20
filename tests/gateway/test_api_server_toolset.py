@@ -17,6 +17,14 @@ class TestReadOnlyFileToolset:
         assert "execute_code" not in tools
 
 
+class TestMystandAuthorizationToolset:
+    def test_toolset_contains_only_server_enforced_bridge(self):
+        assert resolve_toolset("mystand_authorization") == [
+            "mystand_authorization"
+        ]
+        assert validate_toolset("mystand_authorization")
+
+
 class TestXiaobanApiServerToolset:
     """Tests for the xiaoban-api-server toolset definition."""
 
@@ -84,18 +92,25 @@ class TestApiServerAdapterToolset:
 
         assert APIServerAdapter._header_value(headers, "X-Xiaoban-Toolset-Policy") == "mystand-broker-basic"
 
-    def test_mystand_broker_research_policy_is_read_only_and_delegated(self):
+    def test_mystand_broker_policies_include_auth_bridge_without_server_tools(self):
         from gateway.platforms.api_server import APIServerAdapter
 
-        toolsets = APIServerAdapter._toolsets_for_request_policy(
-            "mystand-broker-research"
-        )
+        basic = APIServerAdapter._toolsets_for_request_policy("mystand-broker-basic")
+        research = APIServerAdapter._toolsets_for_request_policy("mystand-broker-research")
 
-        assert toolsets == ["web", "mystand_parser", "skills", "delegation"]
-        assert "terminal" not in toolsets
-        assert "file" not in toolsets
-        assert "memory" not in toolsets
-        assert "session_search" not in toolsets
+        assert basic == ["web", "mystand_parser", "mystand_authorization"]
+        assert research == [
+            "web",
+            "mystand_parser",
+            "mystand_authorization",
+            "skills",
+            "delegation",
+        ]
+        for toolsets in (basic, research):
+            assert "terminal" not in toolsets
+            assert "file" not in toolsets
+            assert "memory" not in toolsets
+            assert "session_search" not in toolsets
 
     @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
     def test_create_agent_reads_config_toolsets(self):
@@ -159,7 +174,7 @@ class TestApiServerAdapterToolset:
 
     @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
     def test_create_agent_respects_mystand_basic_override(self):
-        """My Stand broker accounts get only basic web/parser tools."""
+        """My Stand broker accounts get web/parser plus the AUTH-gated bridge."""
         from gateway.platforms.api_server import APIServerAdapter
         from gateway.config import PlatformConfig
 
@@ -179,8 +194,18 @@ class TestApiServerAdapterToolset:
             }
             mock_agent_cls.return_value = MagicMock()
 
-            adapter._create_agent(enabled_toolsets_override=["web", "mystand_parser"])
+            adapter._create_agent(
+                enabled_toolsets_override=[
+                    "web",
+                    "mystand_parser",
+                    "mystand_authorization",
+                ]
+            )
 
             mock_agent_cls.assert_called_once()
             call_kwargs = mock_agent_cls.call_args
-            assert call_kwargs.kwargs.get("enabled_toolsets") == ["mystand_parser", "web"]
+            assert call_kwargs.kwargs.get("enabled_toolsets") == [
+                "mystand_authorization",
+                "mystand_parser",
+                "web",
+            ]

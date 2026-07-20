@@ -8,8 +8,10 @@ from gateway.run import GatewayRunner
 from gateway.session import SessionContext, SessionSource
 from gateway.session_context import (
     get_session_env,
+    get_session_user_message,
     set_session_vars,
     clear_session_vars,
+    _SESSION_USER_MESSAGE,
     _VAR_MAP,
     _UNSET,
 )
@@ -28,6 +30,7 @@ def _reset_contextvars():
     for var in _VAR_MAP.values():
         # Can't use var.reset() without a token; just set back to sentinel.
         var.set(_UNSET)
+    _SESSION_USER_MESSAGE.set(_UNSET)
 
 
 def test_set_session_env_sets_contextvars(monkeypatch):
@@ -214,6 +217,27 @@ def test_session_id_set_via_contextvars(monkeypatch):
 
     clear_session_vars(tokens)
     assert get_session_env("XIAOBAN_SESSION_ID") == ""
+
+
+def test_user_message_is_private_in_process_context_only(monkeypatch):
+    """Confirmation text must never become a subprocess environment variable."""
+    from tools.environments.local import _make_run_env
+
+    monkeypatch.delenv("XIAOBAN_SESSION_USER_MESSAGE", raising=False)
+    tokens = set_session_vars(
+        platform="api_server",
+        user_id="ZYJ005",
+        message_id="msg-001",
+        user_message="预览没问题，确认写入",
+    )
+    try:
+        assert get_session_user_message() == "预览没问题，确认写入"
+        assert "XIAOBAN_SESSION_USER_MESSAGE" not in _VAR_MAP
+        assert "XIAOBAN_SESSION_USER_MESSAGE" not in _make_run_env({})
+    finally:
+        clear_session_vars(tokens)
+
+    assert get_session_user_message() == ""
 
 
 def test_set_session_env_includes_session_key():

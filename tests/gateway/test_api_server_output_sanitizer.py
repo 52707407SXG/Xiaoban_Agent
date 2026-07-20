@@ -126,6 +126,41 @@ def test_evidence_guard_blocks_image_description_without_image_or_vision():
     assert guarded == "我现在没有成功看到这张图片的内容，所以不能描述画面或识别图片细节。"
 
 
+def test_evidence_guard_does_not_treat_knowledge_graph_as_image_request():
+    for question in (
+        "知识图谱是什么？",
+        "你知道咱们站的知识图谱吗？",
+        "如果给你权限，你能帮我组知识图谱吗？",
+        "知识图谱怎么用",
+        "看看知识图谱",
+        "图谱里有哪些功能",
+        "图形中心怎么用",
+        "图表怎么看",
+    ):
+        guarded = _guard_evidence_backed_response(
+            "My Stand 已有知识图谱功能，我先按站内说明讲清楚。",
+            user_message=question,
+            conversation_history=[],
+            result={"messages": []},
+        )
+        assert guarded == "My Stand 已有知识图谱功能，我先按站内说明讲清楚。"
+
+
+def test_evidence_guard_still_treats_explicit_image_requests_as_visual():
+    for question in (
+        "请帮我识图",
+        "帮我看图",
+        "知识图谱旁边这张图是什么",
+    ):
+        guarded = _guard_evidence_backed_response(
+            "这是一张楼盘平面图。",
+            user_message=question,
+            conversation_history=[],
+            result={"messages": []},
+        )
+        assert guarded == "我现在没有成功看到这张图片的内容，所以不能描述画面或识别图片细节。"
+
+
 def test_evidence_guard_allows_image_description_with_image_input():
     user_message = [
         {"type": "text", "text": "这张图片里是什么？"},

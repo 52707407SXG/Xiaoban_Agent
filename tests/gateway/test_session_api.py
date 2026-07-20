@@ -90,14 +90,26 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
             self.session_id = session_id
 
         def run_conversation(self, user_message, conversation_history, task_id):
-            from gateway.session_context import get_session_env
+            from gateway.session_context import (
+                get_session_env,
+                get_session_user_message,
+            )
             from tools.environments.local import _make_run_env
 
+            child_env = _make_run_env({})
             observed["task_id"] = task_id
             observed["context_session_id"] = get_session_env("XIAOBAN_SESSION_ID")
             observed["context_platform"] = get_session_env("XIAOBAN_SESSION_PLATFORM")
             observed["context_session_key"] = get_session_env("XIAOBAN_SESSION_KEY")
-            observed["child_session_id"] = _make_run_env({}).get("XIAOBAN_SESSION_ID")
+            observed["context_user_id"] = get_session_env("XIAOBAN_SESSION_USER_ID")
+            observed["context_message_id"] = get_session_env("XIAOBAN_SESSION_MESSAGE_ID")
+            observed["trusted_user_message"] = get_session_user_message()
+            observed["child_session_id"] = child_env.get("XIAOBAN_SESSION_ID")
+            observed["child_user_id"] = child_env.get("XIAOBAN_SESSION_USER_ID")
+            observed["child_message_id"] = child_env.get("XIAOBAN_SESSION_MESSAGE_ID")
+            observed["child_user_message"] = child_env.get(
+                "XIAOBAN_SESSION_USER_MESSAGE"
+            )
             return {"final_response": "ok"}
 
     def fake_create_agent(**kwargs):
@@ -110,6 +122,10 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
         conversation_history=[],
         session_id="request-session",
         gateway_session_key="request-key",
+        request_headers={
+            "x-xiaoban-user-id": "ZYJ005",
+            "X-Xiaoban-Message-Id": "msg-001",
+        },
     )
 
     assert result["session_id"] == "request-session"
@@ -119,7 +135,13 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
         "context_session_id": "request-session",
         "context_platform": "api_server",
         "context_session_key": "request-key",
+        "context_user_id": "ZYJ005",
+        "context_message_id": "msg-001",
+        "trusted_user_message": "hello",
         "child_session_id": "request-session",
+        "child_user_id": "ZYJ005",
+        "child_message_id": "msg-001",
+        "child_user_message": None,
     }
 
 

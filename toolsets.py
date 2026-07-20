@@ -207,6 +207,12 @@ TOOLSETS = {
         "tools": ["mystand_parse"],
         "includes": []
     },
+
+    "mystand_authorization": {
+        "description": "My Stand server-enforced AUTH/OUT reads and preview-confirm-verify writes",
+        "tools": ["mystand_authorization"],
+        "includes": []
+    },
     
     "tts": {
         "description": "Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, OpenAI, or xAI",

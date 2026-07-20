@@ -125,10 +125,18 @@ _URL_READ_KEYWORD_RE = re.compile(
     re.IGNORECASE,
 )
 _IMAGE_READ_KEYWORD_RE = re.compile(
-    r"(这张图|那张图|上面.*图|刚才.*图|图里|图中|图片里|截图里|照片里|看图|识图|"
+    r"(这张图|那张图|上面.*图|刚才.*图|图里|图中|图片里|截图里|照片里|看图(?!谱|表|形)|(?<!知)识图(?!谱)|"
     r"识别.*(?:图片|截图|照片|画面)|描述.*(?:图片|截图|照片|画面)|"
     r"画面.*(?:什么|内容)|what.*(?:image|photo|picture|screenshot)|"
     r"describe.*(?:image|photo|picture|screenshot))",
+    re.IGNORECASE,
+)
+_MYSTAND_GRAPH_PRODUCT_TERM_RE = re.compile(
+    r"(?:知识图谱|看图谱|图谱|图形中心|图表)",
+    re.IGNORECASE,
+)
+_EXPLICIT_VISUAL_MEDIA_TERM_RE = re.compile(
+    r"(?:图片|截图|照片|画面|图像|户型图|image|photo|picture|screenshot)",
     re.IGNORECASE,
 )
 _TOOL_FAILURE_MARKER_RE = re.compile(
@@ -242,6 +250,14 @@ def _latest_turn_requires_image_evidence(user_message: Any) -> bool:
     text = _content_to_visible_text(user_message)
     if _content_has_image_part(user_message):
         return False
+    if (
+        _MYSTAND_GRAPH_PRODUCT_TERM_RE.search(text)
+        and not _EXPLICIT_VISUAL_MEDIA_TERM_RE.search(text)
+    ):
+        # Remove the product phrase and evaluate what remains.  This avoids
+        # treating "看图谱" as "看图", while still catching a second, real
+        # visual request such as "知识图谱旁边这张图是什么".
+        text = _MYSTAND_GRAPH_PRODUCT_TERM_RE.sub(" ", text)
     return bool(_IMAGE_READ_KEYWORD_RE.search(text))
 
 
@@ -4505,6 +4521,8 @@ class APIServerAdapter(BasePlatformAdapter):
         session_key: str = "",
         session_id: str = "",
         user_id: str = "",
+        message_id: str = "",
+        user_message: str = "",
         async_delivery: bool = False,
     ) -> list:
         """Bind session contextvars for an API-server agent run.
@@ -4527,6 +4545,8 @@ class APIServerAdapter(BasePlatformAdapter):
             platform="api_server",
             chat_id=chat_id,
             user_id=user_id,
+            message_id=message_id,
+            user_message=user_message,
             session_key=session_key,
             session_id=session_id,
             async_delivery=bool(async_delivery),
@@ -4555,9 +4575,9 @@ class APIServerAdapter(BasePlatformAdapter):
     def _toolsets_for_request_policy(policy: str) -> Optional[List[str]]:
         normalized = str(policy or "").strip().lower()
         if normalized == "mystand-broker-basic":
-            return ["web", "mystand_parser"]
+            return ["web", "mystand_parser", "mystand_authorization"]
         if normalized == "mystand-broker-research":
-            return ["web", "mystand_parser", "skills", "delegation"]
+            return ["web", "mystand_parser", "mystand_authorization", "skills", "delegation"]
         return None
 
     async def _run_agent(
@@ -4592,6 +4612,7 @@ class APIServerAdapter(BasePlatformAdapter):
             headers=request_headers,
         )
         request_user_id = self._header_value(request_headers, "X-Xiaoban-User-Id")
+        request_message_id = self._header_value(request_headers, "X-Xiaoban-Message-Id")
         enabled_toolsets_override = self._toolsets_for_request_policy(
             self._header_value(request_headers, "X-Xiaoban-Toolset-Policy")
         )
@@ -4604,6 +4625,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 session_key=gateway_session_key or session_id or "",
                 session_id=session_id or "",
                 user_id=request_user_id,
+                message_id=request_message_id,
+                user_message=user_message if isinstance(user_message, str) else "",
                 async_delivery=async_delivery,
             )
             try:

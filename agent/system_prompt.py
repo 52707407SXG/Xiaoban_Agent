@@ -51,6 +51,7 @@ from agent.xiaoban_operating_policy import (
     XIAOBAN_DEEPSEEK_EXECUTION_GUIDANCE,
     XIAOBAN_EXPLICIT_LEARN_POLICY,
     XIAOBAN_MYSTAND_SECURITY_BOUNDARY_POLICY,
+    XIAOBAN_MYSTAND_FEATURE_REASONING_POLICY,
     XIAOBAN_OPERATING_POLICY,
     XIAOBAN_VERIFICATION_BACKFILL_POLICY,
 )
@@ -212,6 +213,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # from being handled as ordinary chat.
     stable_parts.append(XIAOBAN_OPERATING_POLICY)
     stable_parts.append(XIAOBAN_MYSTAND_SECURITY_BOUNDARY_POLICY)
+    stable_parts.append(XIAOBAN_MYSTAND_FEATURE_REASONING_POLICY)
     stable_parts.append(XIAOBAN_AGENTIC_WORKFLOW_POLICY)
     stable_parts.append(XIAOBAN_VERIFICATION_BACKFILL_POLICY)
     stable_parts.append(XIAOBAN_EXPLICIT_LEARN_POLICY)
@@ -309,7 +311,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             # existing tools, replies with plans instead of executing).
             if "gpt" in _model_lower or "codex" in _model_lower or "grok" in _model_lower:
                 stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
-            if any(name in _model_lower for name in ("deepseek", "qwen", "glm")):
+            if any(name in _model_lower for name in ("deepseek", "qwen", "glm", "kimi", "k3")):
                 stable_parts.append(XIAOBAN_DEEPSEEK_EXECUTION_GUIDANCE)
 
     has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])

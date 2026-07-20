@@ -1460,6 +1460,10 @@ class TestToolUseEnforcementGuidance:
     def test_enforcement_models_includes_deepseek(self):
         assert "deepseek" in TOOL_USE_ENFORCEMENT_MODELS
 
+    def test_enforcement_models_includes_kimi_k3(self):
+        assert "kimi" in TOOL_USE_ENFORCEMENT_MODELS
+        assert "k3" in TOOL_USE_ENFORCEMENT_MODELS
+
     def test_enforcement_models_is_tuple(self):
         assert isinstance(TOOL_USE_ENFORCEMENT_MODELS, tuple)
 
@@ -1545,5 +1549,4 @@ class TestParallelToolCallGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
 

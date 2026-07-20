@@ -1244,6 +1244,19 @@ class TestToolUseEnforcementConfig:
         prompt = agent._build_system_prompt()
         assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
 
+    def test_auto_injects_for_kimi_k3(self):
+        """Kimi K3 gets the same act-with-tools discipline as other tool-capable models."""
+        from agent.prompt_builder import TOOL_USE_ENFORCEMENT_GUIDANCE
+        from agent.xiaoban_operating_policy import (
+            XIAOBAN_DEEPSEEK_EXECUTION_GUIDANCE,
+            XIAOBAN_MYSTAND_FEATURE_REASONING_POLICY,
+        )
+        agent = self._make_agent(model="k3", tool_use_enforcement="auto")
+        prompt = agent._build_system_prompt()
+        assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
+        assert XIAOBAN_DEEPSEEK_EXECUTION_GUIDANCE in prompt
+        assert XIAOBAN_MYSTAND_FEATURE_REASONING_POLICY in prompt
+
     def test_auto_injects_execution_guidance_for_grok(self):
         """Grok also gets OPENAI_MODEL_EXECUTION_GUIDANCE (verification,
         mandatory_tool_use, act_dont_ask). Same failure modes as GPT in

@@ -61,6 +61,10 @@ _SESSION_ID: ContextVar = ContextVar("XIAOBAN_SESSION_ID", default=_UNSET)
 # so background-process notifications stay inside the originating Telegram
 # private-chat topic (those lanes route only with thread id + reply anchor).
 _SESSION_MESSAGE_ID: ContextVar = ContextVar("XIAOBAN_SESSION_MESSAGE_ID", default=_UNSET)
+# Latest human message for the active turn.  Deliberately not exposed through
+# _VAR_MAP or subprocess environments; only trusted in-process gates (such as
+# the My Stand write-confirmation tool) may inspect it.
+_SESSION_USER_MESSAGE: ContextVar = ContextVar("XIAOBAN_SESSION_USER_MESSAGE", default=_UNSET)
 
 # Whether the current session's delivery channel can route an ASYNC completion
 # back to the agent AFTER the current turn ends (i.e. wake a fresh turn).
@@ -132,6 +136,7 @@ def set_session_vars(
     session_key: str = "",
     session_id: str = "",
     message_id: str = "",
+    user_message: str = "",
     cwd: str = "",
     async_delivery: bool = True,
 ) -> list:
@@ -161,6 +166,7 @@ def set_session_vars(
         _SESSION_KEY.set(session_key),
         _SESSION_ID.set(session_id),
         _SESSION_MESSAGE_ID.set(message_id),
+        _SESSION_USER_MESSAGE.set(user_message),
         _SESSION_ASYNC_DELIVERY.set(bool(async_delivery)),
     ]
     try:
@@ -194,6 +200,7 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_KEY,
         _SESSION_ID,
         _SESSION_MESSAGE_ID,
+        _SESSION_USER_MESSAGE,
     ):
         var.set("")
     # Reset async-delivery capability to the "never set" sentinel rather than a
@@ -207,6 +214,14 @@ def clear_session_vars(tokens: list) -> None:
         clear_session_cwd()
     except Exception:
         pass
+
+
+def get_session_user_message() -> str:
+    """Return the latest human message without exporting it to child processes."""
+    value = _SESSION_USER_MESSAGE.get()
+    if value is _UNSET:
+        return ""
+    return str(value or "")
 
 
 def get_session_env(name: str, default: str = "") -> str:
