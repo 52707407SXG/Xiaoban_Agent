@@ -4556,6 +4556,8 @@ class APIServerAdapter(BasePlatformAdapter):
         normalized = str(policy or "").strip().lower()
         if normalized == "mystand-broker-basic":
             return ["web", "mystand_parser"]
+        if normalized == "mystand-broker-research":
+            return ["web", "mystand_parser", "skills", "delegation"]
         return None
 
     async def _run_agent(

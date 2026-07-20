@@ -84,6 +84,19 @@ class TestApiServerAdapterToolset:
 
         assert APIServerAdapter._header_value(headers, "X-Xiaoban-Toolset-Policy") == "mystand-broker-basic"
 
+    def test_mystand_broker_research_policy_is_read_only_and_delegated(self):
+        from gateway.platforms.api_server import APIServerAdapter
+
+        toolsets = APIServerAdapter._toolsets_for_request_policy(
+            "mystand-broker-research"
+        )
+
+        assert toolsets == ["web", "mystand_parser", "skills", "delegation"]
+        assert "terminal" not in toolsets
+        assert "file" not in toolsets
+        assert "memory" not in toolsets
+        assert "session_search" not in toolsets
+
     @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
     def test_create_agent_reads_config_toolsets(self):
         """API server resolves toolsets from config like all other platforms."""
