@@ -107,7 +107,6 @@ class TestApiServerAdapterToolset:
             "web",
             "mystand_parser",
             "mystand_authorization",
-            "delegation",
         ]
         assert owner == basic
         assert owner_research == research
@@ -175,6 +174,7 @@ class TestApiServerAdapterToolset:
             "skill_manage",
             "memory",
             "session_search",
+            "delegate_task",
         }
         assert resolved.isdisjoint(forbidden)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -80,3 +81,39 @@ def test_langfuse_hooks_are_inert_for_mystand(monkeypatch):
         clear_session_vars(tokens)
 
     assert calls == []
+
+
+def test_langfuse_hooks_remain_inert_in_propagated_delegate_thread(monkeypatch):
+    import plugins.observability.langfuse as langfuse
+    from tools.thread_context import propagate_context_to_thread
+
+    calls = []
+    monkeypatch.setattr(langfuse, "_get_langfuse", lambda: calls.append("client") or object())
+
+    def child_hooks():
+        langfuse.on_pre_llm_request(request_messages=[{"role": "user", "content": "secret"}])
+        langfuse.on_post_tool_call(tool_name="web_search", result="secret")
+
+    tokens = set_session_vars(source="mystand")
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(propagate_context_to_thread(child_hooks)).result(timeout=5)
+    finally:
+        clear_session_vars(tokens)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "result", "expected"),
+    [
+        ("web_search", {"success": True, "items": []}, False),
+        ("web_search", {"success": False, "error": "upstream unavailable"}, True),
+        ("terminal", {"exit_code": 7, "output": ""}, True),
+        ("terminal", {"exit_code": 0, "output": "ok"}, False),
+    ],
+)
+def test_mystand_tool_result_status_uses_real_result(tool_name, result, expected):
+    from gateway.platforms.api_server import _mystand_tool_result_failed
+
+    assert _mystand_tool_result_failed(tool_name, result) is expected

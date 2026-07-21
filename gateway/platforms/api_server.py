@@ -67,6 +67,31 @@ from gateway.platforms.base import (
 logger = logging.getLogger(__name__)
 
 
+def _mystand_tool_result_failed(tool_name: Any, tool_result: Any) -> bool:
+    """Classify a tool result without ever adding its contents to telemetry."""
+    try:
+        from agent.display import _detect_tool_failure
+
+        normalized_result = tool_result
+        if tool_result is not None and not isinstance(tool_result, str):
+            normalized_result = json.dumps(
+                tool_result,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        failed, _suffix = _detect_tool_failure(
+            str(tool_name or "unknown"),
+            normalized_result,
+        )
+        return bool(failed)
+    except Exception:
+        # Optional metadata must never break the request, but it must also not
+        # turn an unclassifiable result into a false success signal.
+        return True
+
+
 def _xiaoban_version() -> str:
     """Return the xiaoban-agent version string, or "dev" if it can't be resolved.
 
@@ -125,14 +150,12 @@ _MYSTAND_REQUEST_TOOLSETS = {
         "web",
         "mystand_parser",
         "mystand_authorization",
-        "delegation",
     ],
     "mystand-owner": ["web", "mystand_parser", "mystand_authorization"],
     "mystand-owner-research": [
         "web",
         "mystand_parser",
         "mystand_authorization",
-        "delegation",
     ],
 }
 _MYSTAND_REQUEST_TOOL_NAMES = {
@@ -147,7 +170,6 @@ _MYSTAND_REQUEST_TOOL_NAMES = {
         "web_extract",
         "mystand_parse",
         "mystand_authorization",
-        "delegate_task",
     },
     "mystand-owner": {
         "web_search",
@@ -160,7 +182,6 @@ _MYSTAND_REQUEST_TOOL_NAMES = {
         "web_extract",
         "mystand_parse",
         "mystand_authorization",
-        "delegate_task",
     },
 }
 
@@ -1236,12 +1257,22 @@ else:
     security_headers_middleware = None  # type: ignore[assignment]
 
 
+class IdempotencyConflictError(ValueError):
+    """Raised when one idempotency key is reused for a different request."""
+
+
+class CompletionStoppedError(RuntimeError):
+    """Raised when a trusted delivery is stopped before agent execution."""
+
+
 class _IdempotencyCache:
     """In-memory idempotency cache with TTL and basic LRU semantics."""
     def __init__(self, max_items: int = 1000, ttl_seconds: int = 300):
         from collections import OrderedDict
         self._store = OrderedDict()
         self._inflight: Dict[tuple[str, str], "asyncio.Task[Any]"] = {}
+        self._agent_refs: Dict[tuple[str, str], list] = {}
+        self._stopped: Dict[str, float] = {}
         self._ttl = ttl_seconds
         self._max = max_items
 
@@ -1252,12 +1283,37 @@ class _IdempotencyCache:
             self._store.pop(k, None)
         while len(self._store) > self._max:
             self._store.popitem(last=False)
+        self._stopped = {
+            key: expires_at
+            for key, expires_at in self._stopped.items()
+            if expires_at > now
+        }
+        while len(self._stopped) > self._max:
+            oldest = min(self._stopped, key=self._stopped.get)
+            self._stopped.pop(oldest, None)
 
-    async def get_or_set(self, key: str, fingerprint: str, compute_coro):
+    def lookup_state(self, key: str, fingerprint: str) -> str:
+        """Return missing, reusable, or conflict for a scoped request key."""
         self._purge()
         item = self._store.get(key)
-        if item and item["fp"] == fingerprint:
+        if item:
+            return "reusable" if item["fp"] == fingerprint else "conflict"
+        for existing_key, existing_fingerprint in self._inflight:
+            if existing_key == key:
+                return "reusable" if existing_fingerprint == fingerprint else "conflict"
+        return "missing"
+
+    async def get_or_set(self, key: str, fingerprint: str, compute_coro, agent_ref=None):
+        state = self.lookup_state(key, fingerprint)
+        if state == "conflict":
+            raise IdempotencyConflictError("idempotency key was reused with a different request")
+        item = self._store.get(key)
+        if item:
             return item["resp"]
+        if key in self._stopped and agent_ref is not None:
+            while len(agent_ref) < 2:
+                agent_ref.append(False)
+            agent_ref[1] = True
 
         inflight_key = (key, fingerprint)
         task = self._inflight.get(inflight_key)
@@ -1271,14 +1327,42 @@ class _IdempotencyCache:
 
             task = asyncio.create_task(_compute_and_store())
             self._inflight[inflight_key] = task
+            if agent_ref is not None:
+                self._agent_refs[inflight_key] = agent_ref
 
             def _clear_inflight(done_task: "asyncio.Task[Any]") -> None:
                 if self._inflight.get(inflight_key) is done_task:
                     self._inflight.pop(inflight_key, None)
+                    self._agent_refs.pop(inflight_key, None)
 
             task.add_done_callback(_clear_inflight)
 
         return await asyncio.shield(task)
+
+    def stop(self, key: str) -> bool:
+        """Interrupt the one in-flight computation for a scoped key."""
+        self._purge()
+        if key in self._store:
+            return False
+        matches = [item for item in self._inflight if item[0] == key]
+        # Record a short-lived tombstone even before the completion request
+        # reaches this process. This closes the create/stop HTTP race without
+        # cancelling an unrelated account or attempt (the key is HMAC-scoped).
+        self._stopped[key] = time.time() + self._ttl
+        for inflight_key in matches:
+            agent_ref = self._agent_refs.get(inflight_key)
+            if agent_ref is None:
+                continue
+            while len(agent_ref) < 2:
+                agent_ref.append(False)
+            agent_ref[1] = True
+            agent = agent_ref[0]
+            if agent is not None:
+                try:
+                    agent.interrupt("Stop requested via My Stand delivery")
+                except Exception:
+                    logger.warning("Failed to interrupt idempotent API run", exc_info=False)
+        return True
 
 
 _idem_cache = _IdempotencyCache()
@@ -2640,11 +2724,14 @@ class APIServerAdapter(BasePlatformAdapter):
         if policy_err is not None:
             return policy_err
         mystand_request = self._header_present(request.headers, "X-Xiaoban-Toolset-Policy")
-
-        # Bound total in-flight agent runs (configurable; #7483).
-        limited = self._concurrency_limited_response()
-        if limited is not None:
-            return limited
+        if mystand_request and not self._api_key:
+            return web.json_response(
+                _openai_error(
+                    "My Stand requests require configured API authentication",
+                    code="mystand_auth_unavailable",
+                ),
+                status=503,
+            )
 
         # Parse request body
         try:
@@ -2761,6 +2848,17 @@ class APIServerAdapter(BasePlatformAdapter):
         created = int(time.time())
 
         if stream:
+            if request.headers.get("Idempotency-Key"):
+                return web.json_response(
+                    _openai_error(
+                        "Idempotency-Key is not supported for streaming chat completions",
+                        code="idempotency_stream_unsupported",
+                    ),
+                    status=409,
+                )
+            limited = self._concurrency_limited_response()
+            if limited is not None:
+                return limited
             import queue as _q
             _stream_q: _q.Queue = _q.Queue()
             guard_stream_deltas = (
@@ -2868,22 +2966,81 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         # Non-streaming: run the agent (with optional Idempotency-Key)
+        agent_ref = [None, False]
+
         async def _compute_completion():
-            return await self._run_agent(
-                user_message=user_message,
-                conversation_history=history,
-                ephemeral_system_prompt=system_prompt,
-                session_id=session_id,
-                gateway_session_key=gateway_session_key,
-                request_headers=request.headers,
-                async_delivery=self._session_events_requested(request),
-            )
+            if agent_ref[1]:
+                return (
+                    {
+                        "final_response": "",
+                        "completed": False,
+                        "failed": True,
+                        "interrupted": True,
+                        "error": "completion stopped",
+                    },
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
+            try:
+                result, usage = await self._run_agent(
+                    user_message=user_message,
+                    conversation_history=history,
+                    ephemeral_system_prompt=system_prompt,
+                    session_id=session_id,
+                    gateway_session_key=gateway_session_key,
+                    request_headers=request.headers,
+                    async_delivery=self._session_events_requested(request),
+                    agent_ref=agent_ref,
+                )
+                if agent_ref[1]:
+                    result = dict(result or {})
+                    result.update({
+                        "final_response": "",
+                        "completed": False,
+                        "failed": True,
+                        "interrupted": True,
+                        "error": "completion stopped",
+                    })
+                return result, usage
+            except CompletionStoppedError:
+                return (
+                    {
+                        "final_response": "",
+                        "completed": False,
+                        "failed": True,
+                        "interrupted": True,
+                        "error": "completion stopped",
+                    },
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
 
         idempotency_key = request.headers.get("Idempotency-Key")
         if idempotency_key:
-            fp = _make_request_fingerprint(body, keys=["model", "messages", "tools", "tool_choice", "stream"])
             try:
-                result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_completion)
+                scoped_key = self._scoped_idempotency_key(request.headers, idempotency_key)
+                fp = self._chat_idempotency_fingerprint(body, request.headers)
+                state = _idem_cache.lookup_state(scoped_key, fp)
+                if state == "conflict":
+                    raise IdempotencyConflictError("idempotency key conflict")
+                if state == "missing":
+                    limited = self._concurrency_limited_response()
+                    if limited is not None:
+                        return limited
+                result, usage = await _idem_cache.get_or_set(
+                    scoped_key,
+                    fp,
+                    _compute_completion,
+                    agent_ref=agent_ref,
+                )
+            except InvalidToolsetPolicy as e:
+                return web.json_response(
+                    _openai_error(str(e), code="invalid_idempotency_scope"),
+                    status=400,
+                )
+            except IdempotencyConflictError as e:
+                return web.json_response(
+                    _openai_error(str(e), code="idempotency_conflict"),
+                    status=409,
+                )
             except Exception as e:
                 logger.error("Error running agent for chat completions: %s", e, exc_info=True)
                 return web.json_response(
@@ -2891,6 +3048,9 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=500,
                 )
         else:
+            limited = self._concurrency_limited_response()
+            if limited is not None:
+                return limited
             try:
                 result, usage = await _compute_completion()
             except Exception as e:
@@ -2908,8 +3068,27 @@ class APIServerAdapter(BasePlatformAdapter):
         )
         is_partial = bool(result.get("partial"))
         is_failed = bool(result.get("failed"))
+        is_interrupted = bool(result.get("interrupted"))
         completed = bool(result.get("completed", True))
         err_msg = result.get("error")
+
+        if is_interrupted:
+            stopped_body = _openai_error(
+                "Completion stopped by request",
+                err_type="request_stopped",
+                code="completion_stopped",
+            )
+            stopped_body["error"]["xiaoban"] = {
+                "completed": False,
+                "partial": False,
+                "failed": True,
+                "interrupted": True,
+            }
+            return web.json_response(
+                stopped_body,
+                status=409,
+                headers={"X-Xiaoban-Session-Id": result.get("session_id", session_id)},
+            )
 
         # Decide finish_reason. OpenAI uses "length" for truncation, "stop"
         # for normal completion, and downstream SDKs accept "error" / custom
@@ -2983,6 +3162,45 @@ class APIServerAdapter(BasePlatformAdapter):
                 response_headers["X-Xiaoban-Error"] = err_msg[:200]
 
         return web.json_response(response_data, headers=response_headers)
+
+    async def _handle_stop_idempotent_chat_completion(self, request: "web.Request") -> "web.Response":
+        """Stop one trusted My Stand non-stream completion by delivery key."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        policy_err = self._request_toolset_policy_error(request.headers)
+        if policy_err is not None:
+            return policy_err
+        if not self._header_present(request.headers, "X-Xiaoban-Toolset-Policy"):
+            return web.json_response(
+                _openai_error("My Stand tool policy is required", code="mystand_policy_required"),
+                status=403,
+            )
+        if not self._api_key:
+            return web.json_response(
+                _openai_error(
+                    "My Stand requests require configured API authentication",
+                    code="mystand_auth_unavailable",
+                ),
+                status=503,
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(_openai_error("Invalid JSON"), status=400)
+        if not isinstance(body, dict):
+            return web.json_response(_openai_error("JSON body must be an object"), status=400)
+        raw_key = str(body.get("idempotency_key") or request.headers.get("Idempotency-Key") or "").strip()
+        try:
+            scoped_key = self._scoped_idempotency_key(request.headers, raw_key)
+        except InvalidToolsetPolicy as exc:
+            return web.json_response(_openai_error(str(exc), code="invalid_idempotency_key"), status=400)
+        if not _idem_cache.stop(scoped_key):
+            return web.json_response(
+                _openai_error("No active completion for this delivery", code="completion_not_running"),
+                status=404,
+            )
+        return web.json_response({"ok": True, "status": "stopping"}, status=202)
 
     async def _write_sse_chat_completion(
         self, request: "web.Request", completion_id: str, model: str,
@@ -3788,6 +4006,25 @@ class APIServerAdapter(BasePlatformAdapter):
         policy_err = self._request_toolset_policy_error(request.headers)
         if policy_err is not None:
             return policy_err
+        if self._header_present(request.headers, "X-Xiaoban-Toolset-Policy") and not self._api_key:
+            return web.json_response(
+                _openai_error(
+                    "My Stand requests require configured API authentication",
+                    code="mystand_auth_unavailable",
+                ),
+                status=503,
+            )
+        if (
+            self._header_present(request.headers, "X-Xiaoban-Toolset-Policy")
+            and request.headers.get("Idempotency-Key")
+        ):
+            return web.json_response(
+                _openai_error(
+                    "My Stand idempotent delivery must use /v1/chat/completions",
+                    code="mystand_responses_idempotency_unsupported",
+                ),
+                status=409,
+            )
 
         # Bound total in-flight agent runs (configurable; #7483).
         limited = self._concurrency_limited_response()
@@ -3900,6 +4137,14 @@ class APIServerAdapter(BasePlatformAdapter):
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
         if stream:
+            if request.headers.get("Idempotency-Key"):
+                return web.json_response(
+                    _openai_error(
+                        "Idempotency-Key is not supported for streaming responses",
+                        code="idempotency_stream_unsupported",
+                    ),
+                    status=409,
+                )
             # Streaming branch — emit OpenAI Responses SSE events as the
             # agent runs so frontends can render text deltas and tool
             # calls in real time.  See _write_sse_responses for details.
@@ -4002,6 +4247,11 @@ class APIServerAdapter(BasePlatformAdapter):
             )
             try:
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_response)
+            except IdempotencyConflictError as e:
+                return web.json_response(
+                    _openai_error(str(e), code="idempotency_conflict"),
+                    status=409,
+                )
             except Exception as e:
                 logger.error("Error running agent for responses: %s", e, exc_info=True)
                 return web.json_response(
@@ -4664,6 +4914,14 @@ class APIServerAdapter(BasePlatformAdapter):
         toolsets = _MYSTAND_REQUEST_TOOLSETS.get(normalized)
         return list(toolsets) if toolsets is not None else None
 
+    @staticmethod
+    def _mystand_memory_scope_secret() -> str:
+        """Return the dedicated stable HMAC key, never the rotatable API key."""
+        value = str(os.getenv("XIAOBAN_MYSTAND_MEMORY_SCOPE_SECRET", "") or "").strip()
+        if len(value) < 32 or len(value) > 256 or re.search(r"[\r\n\x00]", value):
+            return ""
+        return value
+
     @classmethod
     def _toolsets_for_request_headers(cls, headers: Any) -> Optional[List[str]]:
         """Resolve the My Stand tool policy, preserving headerless API clients.
@@ -4713,14 +4971,91 @@ class APIServerAdapter(BasePlatformAdapter):
         mode = cls._header_value(headers, "X-Xiaoban-Memory-Mode").lower() or "disabled"
         if mode == "disabled" and not site_id:
             return "", user_id, mode
+        if mode == "user" and not cls._mystand_memory_scope_secret():
+            raise InvalidToolsetPolicy("My Stand memory scope secret is unavailable")
         from plugins.memory.holographic.scope import validate_memory_scope
 
         return validate_memory_scope(site_id, user_id, mode)
+
+    def _scoped_idempotency_key(self, headers: Any, raw_key: str) -> str:
+        """Scope My Stand keys to a trusted site/account without storing IDs."""
+        key = str(raw_key or "").strip()
+        if not key or len(key) > 512 or re.search(r"[\r\n\x00]", key):
+            raise InvalidToolsetPolicy("Invalid Idempotency-Key")
+        if not self._header_present(headers, "X-Xiaoban-Toolset-Policy"):
+            return f"api:{key}"
+        self._toolsets_for_request_headers(headers)
+        site_id = self._header_value(headers, "X-Xiaoban-Site-Id")
+        user_id = self._header_value(headers, "X-Xiaoban-User-Id")
+        attempt = self._header_value(headers, "X-Xiaoban-Attempt") or "0"
+        if not re.fullmatch(r"[A-Za-z0-9._:@-]{1,120}", site_id):
+            raise InvalidToolsetPolicy("My Stand idempotency requires a site identity")
+        if not re.fullmatch(r"[0-9]{1,9}", attempt):
+            raise InvalidToolsetPolicy("Invalid X-Xiaoban-Attempt")
+        if not self._api_key:
+            raise InvalidToolsetPolicy("My Stand idempotency requires API authentication")
+        secret = self._api_key.encode("utf-8")
+        payload = f"mystand-idempotency-v1\0{site_id}\0{user_id}\0{key}\0{attempt}".encode("utf-8")
+        return f"mystand:{hmac.new(secret, payload, hashlib.sha256).hexdigest()}"
+
+    @classmethod
+    def _chat_idempotency_fingerprint(cls, body: Dict[str, Any], headers: Any) -> str:
+        """Bind cached output to every trusted header that can affect a run."""
+        names = (
+            "X-Xiaoban-Site-Id",
+            "X-Xiaoban-User-Id",
+            "X-Xiaoban-Toolset-Policy",
+            "X-Xiaoban-Memory-Mode",
+            "X-Xiaoban-Session-Key",
+            "X-Xiaoban-Session-Id",
+            "X-Xiaoban-Message-Id",
+            "X-Xiaoban-Reasoning-Mode",
+            "X-Xiaoban-Attempt",
+            "X-Xiaoban-Email-Allowed",
+            "X-Xiaoban-Async-Delivery",
+            "X-Xiaoban-Session-Events",
+            "X-Xiaoban-User-Timezone",
+            "X-User-Timezone",
+            "X-Xiaoban-User-Locale",
+            "X-User-Locale",
+        )
+        mystand_request = cls._header_present(headers, "X-Xiaoban-Toolset-Policy")
+        if mystand_request:
+            request_fingerprint = cls._header_value(
+                headers,
+                "X-Xiaoban-Request-Fingerprint",
+            ).lower()
+            if not re.fullmatch(r"[a-f0-9]{64}", request_fingerprint):
+                raise InvalidToolsetPolicy(
+                    "My Stand idempotency requires a valid request fingerprint"
+                )
+            # My Stand's ledger fingerprint is computed from the stable user
+            # request before the server adds a current-time system message.
+            # Trust that authenticated digest while still binding every
+            # execution header and stable body option to this cache entry.
+            body_identity: Any = {
+                "request_fingerprint": request_fingerprint,
+                "options": {
+                    key: value
+                    for key, value in body.items()
+                    if key != "messages"
+                },
+            }
+        else:
+            body_identity = body
+        canonical = {
+            "body": body_identity,
+            "headers": {name.lower(): cls._header_value(headers, name) for name in names},
+        }
+        encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     @classmethod
     def _request_toolset_policy_error(cls, headers: Any) -> Optional["web.Response"]:
         try:
             cls._toolsets_for_request_headers(headers)
+            if cls._header_value(headers, "X-Xiaoban-Memory-Mode").lower() == "user":
+                cls._mystand_memory_identity(headers)
         except InvalidToolsetPolicy as exc:
             return web.json_response(
                 _openai_error(str(exc), code="invalid_toolset_policy"),
@@ -4751,7 +5086,8 @@ class APIServerAdapter(BasePlatformAdapter):
         user_message: Any,
     ) -> tuple[str, int]:
         """Read only the current account's explicitly managed memory facts."""
-        if identity is None or identity[2] != "user" or not self._api_key:
+        memory_secret = self._mystand_memory_scope_secret()
+        if identity is None or identity[2] != "user" or not self._api_key or not memory_secret:
             return "", 0
         query = self._memory_query_text(user_message).strip()
         if not query:
@@ -4760,7 +5096,7 @@ class APIServerAdapter(BasePlatformAdapter):
         from plugins.memory.holographic.scope import open_scoped_memory_store
 
         store = open_scoped_memory_store(
-            secret=self._api_key,
+            secret=memory_secret,
             site_id=identity[0],
             user_id=identity[1],
         )
@@ -4794,7 +5130,8 @@ class APIServerAdapter(BasePlatformAdapter):
             identity = self._mystand_memory_identity(request.headers)
         except (InvalidToolsetPolicy, ValueError):
             return web.json_response({"error": "invalid_memory_scope"}, status=400)
-        if identity is None or identity[2] != "user" or not self._api_key:
+        memory_secret = self._mystand_memory_scope_secret()
+        if identity is None or identity[2] != "user" or not self._api_key or not memory_secret:
             return web.json_response({"error": "memory_disabled"}, status=403)
 
         body: dict[str, Any] = {}
@@ -4810,7 +5147,7 @@ class APIServerAdapter(BasePlatformAdapter):
             from plugins.memory.holographic.scope import open_scoped_memory_store
 
             store = open_scoped_memory_store(
-                secret=self._api_key,
+                secret=memory_secret,
                 site_id=identity[0],
                 user_id=identity[1],
             )
@@ -4823,19 +5160,6 @@ class APIServerAdapter(BasePlatformAdapter):
                     return 200, {"ok": True, "facts": store.list_facts(limit=limit)}
 
                 action = str(body.get("action", "")).strip().lower()
-                if action == "add":
-                    content = str(body.get("content", "")).strip()
-                    category = str(body.get("category", "general")).strip()
-                    tags = str(body.get("tags", "")).strip()
-                    if not content or len(content) > 2000:
-                        return 400, {"error": "invalid_content"}
-                    if category not in {"user_pref", "project", "tool", "general"}:
-                        return 400, {"error": "invalid_category"}
-                    if len(tags) > 300:
-                        return 400, {"error": "invalid_tags"}
-                    fact_id = store.add_fact(content, category=category, tags=tags)
-                    return 200, {"ok": True, "factId": fact_id}
-
                 if action in {"update", "delete"}:
                     raw_fact_id = body.get("factId")
                     if isinstance(raw_fact_id, bool):
@@ -4938,13 +5262,14 @@ class APIServerAdapter(BasePlatformAdapter):
         def _traced_tool_complete(tool_call_id, function_name, function_args, function_result):
             started = tool_started_at.pop(str(tool_call_id), None) if tool_call_id else None
             duration_ms = max(0, int((time.monotonic() - started) * 1000)) if started else 0
+            tool_failed = _mystand_tool_result_failed(function_name, function_result)
             if metadata_trace is not None:
                 metadata_trace.safe_emit(
                     "tool_completed",
-                    status="completed",
+                    status="failed" if tool_failed else "completed",
                     tool_name=str(function_name or "unknown"),
                     tool_duration_ms=duration_ms,
-                    success=True,
+                    success=not tool_failed,
                 )
             if original_tool_complete_callback is not None:
                 original_tool_complete_callback(
@@ -5009,6 +5334,11 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent
+                    if len(agent_ref) > 1 and agent_ref[1]:
+                        try:
+                            agent.interrupt("Stop requested via My Stand delivery")
+                        finally:
+                            raise CompletionStoppedError("request stopped before execution")
                 effective_task_id = session_id or str(uuid.uuid4())
                 result = agent.run_conversation(
                     user_message=user_message,
@@ -5020,6 +5350,15 @@ class APIServerAdapter(BasePlatformAdapter):
                     "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                     "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
                 }
+                if agent_ref is not None and len(agent_ref) > 1 and agent_ref[1]:
+                    result = dict(result or {})
+                    result.update({
+                        "final_response": "",
+                        "completed": False,
+                        "failed": True,
+                        "interrupted": True,
+                        "error": "completion stopped",
+                    })
                 # Include the effective session ID in the result so callers
                 # (e.g. X-Xiaoban-Session-Id header) can track compression-
                 # triggered session rotations. (#16938)
@@ -5027,22 +5366,51 @@ class APIServerAdapter(BasePlatformAdapter):
                 if isinstance(_eff_sid, str) and _eff_sid:
                     result["session_id"] = _eff_sid
                 if metadata_trace is not None:
-                    completed_fields: dict[str, Any] = {
-                        "status": "completed",
-                        "duration_ms": metadata_trace.elapsed_ms(),
-                        "tool_count": tool_count,
-                        "memory_enabled": bool(memory_identity and memory_identity[2] == "user"),
-                        "memory_hit_count": memory_hit_count,
-                        "input_tokens": usage["input_tokens"],
-                        "output_tokens": usage["output_tokens"],
-                        "total_tokens": usage["total_tokens"],
-                    }
-                    if getattr(agent, "provider", ""):
-                        completed_fields["provider"] = agent.provider
-                    if getattr(agent, "model", ""):
-                        completed_fields["model"] = agent.model
-                    metadata_trace.safe_emit("request_completed", **completed_fields)
+                    result_interrupted = isinstance(result, dict) and bool(result.get("interrupted"))
+                    result_partial = isinstance(result, dict) and bool(result.get("partial"))
+                    result_failed = isinstance(result, dict) and bool(result.get("failed"))
+                    result_completed = isinstance(result, dict) and bool(result.get("completed", True))
+                    if result_interrupted or result_partial or result_failed or not result_completed:
+                        metadata_trace.safe_emit(
+                            "request_failed",
+                            status="failed",
+                            duration_ms=metadata_trace.elapsed_ms(),
+                            tool_count=tool_count,
+                            error_code=(
+                                "completion_stopped"
+                                if result_interrupted
+                                else "output_truncated"
+                                if result_partial
+                                else "agent_error"
+                            ),
+                        )
+                    else:
+                        completed_fields: dict[str, Any] = {
+                            "status": "completed",
+                            "duration_ms": metadata_trace.elapsed_ms(),
+                            "tool_count": tool_count,
+                            "memory_enabled": bool(memory_identity and memory_identity[2] == "user"),
+                            "memory_hit_count": memory_hit_count,
+                            "input_tokens": usage["input_tokens"],
+                            "output_tokens": usage["output_tokens"],
+                            "total_tokens": usage["total_tokens"],
+                        }
+                        if getattr(agent, "provider", ""):
+                            completed_fields["provider"] = agent.provider
+                        if getattr(agent, "model", ""):
+                            completed_fields["model"] = agent.model
+                        metadata_trace.safe_emit("request_completed", **completed_fields)
                 return result, usage
+            except CompletionStoppedError:
+                if metadata_trace is not None:
+                    metadata_trace.safe_emit(
+                        "request_failed",
+                        status="failed",
+                        duration_ms=metadata_trace.elapsed_ms(),
+                        tool_count=tool_count,
+                        error_code="completion_stopped",
+                    )
+                raise
             except Exception:
                 if metadata_trace is not None:
                     metadata_trace.safe_emit(
@@ -5135,6 +5503,14 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
+        if self._header_present(request.headers, "X-Xiaoban-Toolset-Policy"):
+            return web.json_response(
+                _openai_error(
+                    "My Stand requests must use /v1/chat/completions",
+                    code="mystand_runs_unsupported",
+                ),
+                status=409,
+            )
 
         # Long-term memory scope header (see chat_completions for details).
         gateway_session_key, key_err = self._parse_session_key_header(request)
@@ -5723,6 +6099,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/api/sessions/{session_id}/events", self._handle_session_events)
             self._app.router.add_get("/api/sessions/{session_id}/events/stream", self._handle_session_events_stream)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
+            self._app.router.add_post("/v1/chat/completions/stop", self._handle_stop_idempotent_chat_completion)
             self._app.router.add_post("/v1/responses", self._handle_responses)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
             self._app.router.add_delete("/v1/responses/{response_id}", self._handle_delete_response)

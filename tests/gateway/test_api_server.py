@@ -14,6 +14,7 @@ Tests cover:
 
 import asyncio
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 import stat
@@ -28,6 +29,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.api_server import (
     APIServerAdapter,
+    CompletionStoppedError,
+    IdempotencyConflictError,
     ResponseStore,
     _IdempotencyCache,
     _build_api_temporal_context,
@@ -286,7 +289,7 @@ class TestIdempotencyCache:
         assert first_result == second_result == ("response", {"total_tokens": 1})
 
     @pytest.mark.asyncio
-    async def test_different_fingerprint_does_not_reuse_inflight_task(self):
+    async def test_different_fingerprint_is_rejected_without_second_run(self):
         cache = _IdempotencyCache()
         gate = asyncio.Event()
         started = asyncio.Event()
@@ -295,22 +298,39 @@ class TestIdempotencyCache:
         async def compute():
             nonlocal calls
             calls += 1
-            result = calls
-            if calls == 2:
-                started.set()
+            started.set()
             await gate.wait()
-            return result
+            return calls
 
         first = asyncio.create_task(cache.get_or_set("idem-key", "fp-1", compute))
-        second = asyncio.create_task(cache.get_or_set("idem-key", "fp-2", compute))
-
         await started.wait()
-        assert calls == 2
+        with pytest.raises(IdempotencyConflictError):
+            await cache.get_or_set("idem-key", "fp-2", compute)
+        assert calls == 1
 
         gate.set()
-        results = await asyncio.gather(first, second)
+        assert await first == 1
 
-        assert sorted(results) == [1, 2]
+    @pytest.mark.asyncio
+    async def test_stop_interrupts_only_the_matching_inflight_key(self):
+        cache = _IdempotencyCache()
+        gate = asyncio.Event()
+        agent = MagicMock()
+        agent_ref = [agent, False]
+
+        async def compute():
+            await gate.wait()
+            return "done"
+
+        task = asyncio.create_task(cache.get_or_set("scoped-key", "fp-1", compute, agent_ref=agent_ref))
+        await asyncio.sleep(0)
+        assert cache.stop("other-key") is True
+        agent.interrupt.assert_not_called()
+        assert cache.stop("scoped-key") is True
+        assert agent_ref[1] is True
+        agent.interrupt.assert_called_once_with("Stop requested via My Stand delivery")
+        gate.set()
+        assert await task == "done"
 
     @pytest.mark.asyncio
     async def test_cancelled_waiter_does_not_drop_shared_inflight_task(self):
@@ -598,11 +618,39 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_get("/v1/capabilities", adapter._handle_capabilities)
     app.router.add_get("/v1/skills", adapter._handle_skills)
     app.router.add_get("/v1/toolsets", adapter._handle_toolsets)
+    app.router.add_get("/v1/mystand/memory", adapter._handle_mystand_memory)
+    app.router.add_post("/v1/mystand/memory", adapter._handle_mystand_memory)
     app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
+    app.router.add_post("/v1/chat/completions/stop", adapter._handle_stop_idempotent_chat_completion)
     app.router.add_post("/v1/responses", adapter._handle_responses)
+    app.router.add_post("/v1/runs", adapter._handle_runs)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
     app.router.add_delete("/v1/responses/{response_id}", adapter._handle_delete_response)
     return app
+
+
+def _mystand_idempotent_headers(
+    key: str,
+    *,
+    user: str = "alice",
+    attempt: str = "1",
+    request_fingerprint: str | None = None,
+) -> dict[str, str]:
+    return {
+        "Authorization": "Bearer sk-secret",
+        "Idempotency-Key": key,
+        "X-Xiaoban-Site-Id": "mystand-test-site",
+        "X-Xiaoban-User-Id": user,
+        "X-Xiaoban-Toolset-Policy": "mystand-broker-basic",
+        "X-Xiaoban-Memory-Mode": "disabled",
+        "X-Xiaoban-Session-Key": f"session-{user}",
+        "X-Xiaoban-Session-Id": f"session-{user}",
+        "X-Xiaoban-Message-Id": f"message-{key}",
+        "X-Xiaoban-Attempt": attempt,
+        "X-Xiaoban-Request-Fingerprint": request_fingerprint or hashlib.sha256(
+            f"request:{key}".encode("utf-8")
+        ).hexdigest(),
+    }
 
 
 @pytest.fixture
@@ -648,6 +696,76 @@ class TestAgentExecution:
             conversation_history=[],
             task_id="session-123",
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("agent_result", "expected_error_code"),
+        [
+            ({"final_response": "", "failed": True}, "agent_error"),
+            ({"final_response": "partial", "partial": True}, "output_truncated"),
+            ({"final_response": "", "completed": False}, "agent_error"),
+        ],
+    )
+    async def test_mystand_structured_non_success_emits_failed_metadata(
+        self,
+        auth_adapter,
+        agent_result,
+        expected_error_code,
+    ):
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = dict(agent_result)
+        mock_agent.session_prompt_tokens = 1
+        mock_agent.session_completion_tokens = 2
+        mock_agent.session_total_tokens = 3
+        metadata_trace = MagicMock()
+        metadata_trace.elapsed_ms.return_value = 7
+
+        with (
+            patch.object(auth_adapter, "_create_agent", return_value=mock_agent),
+            patch(
+                "xiaoban.observability.mystand_metadata.MystandMetadataTrace",
+                return_value=metadata_trace,
+            ),
+        ):
+            await auth_adapter._run_agent(
+                user_message="hello",
+                conversation_history=[],
+                session_id="session-structured-failure",
+                request_headers=_mystand_idempotent_headers("metadata-structured-failure"),
+            )
+
+        emitted = metadata_trace.safe_emit.call_args_list
+        assert [call.args[0] for call in emitted] == ["request_started", "request_failed"]
+        assert emitted[-1].kwargs["status"] == "failed"
+        assert emitted[-1].kwargs["error_code"] == expected_error_code
+
+    @pytest.mark.asyncio
+    async def test_completion_stopped_error_emits_stop_metadata_once(self, auth_adapter):
+        mock_agent = MagicMock()
+        metadata_trace = MagicMock()
+        metadata_trace.elapsed_ms.return_value = 9
+        agent_ref = [None, True]
+
+        with (
+            patch.object(auth_adapter, "_create_agent", return_value=mock_agent),
+            patch(
+                "xiaoban.observability.mystand_metadata.MystandMetadataTrace",
+                return_value=metadata_trace,
+            ),
+        ):
+            with pytest.raises(CompletionStoppedError):
+                await auth_adapter._run_agent(
+                    user_message="hello",
+                    conversation_history=[],
+                    session_id="session-stopped-before-execution",
+                    request_headers=_mystand_idempotent_headers("metadata-stopped"),
+                    agent_ref=agent_ref,
+                )
+
+        mock_agent.interrupt.assert_called_once_with("Stop requested via My Stand delivery")
+        emitted = metadata_trace.safe_emit.call_args_list
+        assert [call.args[0] for call in emitted] == ["request_started", "request_failed"]
+        assert emitted[-1].kwargs["error_code"] == "completion_stopped"
 
 
 # ---------------------------------------------------------------------------
@@ -1037,6 +1155,353 @@ class TestToolsetsEndpoint:
 
 
 class TestChatCompletionsEndpoint:
+    def test_mystand_idempotency_key_is_account_scoped(self, auth_adapter):
+        first = auth_adapter._scoped_idempotency_key(_mystand_idempotent_headers("delivery-1", user="alice"), "delivery-1")
+        same = auth_adapter._scoped_idempotency_key(_mystand_idempotent_headers("delivery-1", user="alice"), "delivery-1")
+        other = auth_adapter._scoped_idempotency_key(_mystand_idempotent_headers("delivery-1", user="bob"), "delivery-1")
+        next_attempt = auth_adapter._scoped_idempotency_key(_mystand_idempotent_headers("delivery-1", user="alice", attempt="2"), "delivery-1")
+
+        assert first == same
+        assert first != other
+        assert first != next_attempt
+        assert "alice" not in first
+        assert "mystand-test-site" not in first
+
+    @pytest.mark.asyncio
+    async def test_mystand_request_fails_closed_without_api_authentication(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                response = await cli.post(
+                    "/v1/chat/completions",
+                    headers=_mystand_idempotent_headers("missing-server-auth"),
+                    json={"model": "test", "messages": [{"role": "user", "content": "hello"}]},
+                )
+                data = await response.json()
+
+        assert response.status == 503
+        assert data["error"]["code"] == "mystand_auth_unavailable"
+        mock_run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stream_with_idempotency_key_fails_closed(self, auth_adapter):
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers=_mystand_idempotent_headers("stream-delivery"),
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "stream": True,
+                    },
+                )
+                response_data = await resp.json()
+
+        assert resp.status == 409
+        assert response_data["error"]["code"] == "idempotency_stream_unsupported"
+        mock_run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_mystand_delivery_uses_stable_ledger_fingerprint(self, auth_adapter):
+        app = _create_app(auth_adapter)
+        gate = asyncio.Event()
+        started = asyncio.Event()
+        key = f"delivery-{uuid.uuid4().hex}"
+        body = {
+            "model": "test",
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+
+        async def _mock_run_agent(**_kwargs):
+            started.set()
+            await gate.wait()
+            return (
+                {"final_response": "done", "messages": [], "api_calls": 1},
+                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", side_effect=_mock_run_agent) as mock_run:
+                first = asyncio.create_task(cli.post(
+                    "/v1/chat/completions",
+                    headers=_mystand_idempotent_headers(key),
+                    json=body,
+                ))
+                await started.wait()
+                second = asyncio.create_task(cli.post(
+                    "/v1/chat/completions",
+                    headers=_mystand_idempotent_headers(key),
+                    json={
+                        **body,
+                        "messages": [
+                            {"role": "system", "content": "server time: later"},
+                            {"role": "user", "content": "hello"},
+                        ],
+                    },
+                ))
+                await asyncio.sleep(0)
+                assert mock_run.call_count == 1
+                gate.set()
+                first_resp, second_resp = await asyncio.gather(first, second)
+                assert first_resp.status == second_resp.status == 200
+                await first_resp.read()
+                await second_resp.read()
+
+                conflict = await cli.post(
+                    "/v1/chat/completions",
+                    headers=_mystand_idempotent_headers(
+                        key,
+                        request_fingerprint=hashlib.sha256(b"changed-ledger-request").hexdigest(),
+                    ),
+                    json={**body, "messages": [{"role": "user", "content": "changed"}]},
+                )
+                conflict_data = await conflict.json()
+                changed_context_headers = {
+                    **_mystand_idempotent_headers(key),
+                    "X-Xiaoban-User-Timezone": "America/New_York",
+                }
+                context_conflict = await cli.post(
+                    "/v1/chat/completions",
+                    headers=changed_context_headers,
+                    json=body,
+                )
+                context_conflict_data = await context_conflict.json()
+
+        assert conflict.status == 409
+        assert conflict_data["error"]["code"] == "idempotency_conflict"
+        assert context_conflict.status == 409
+        assert context_conflict_data["error"]["code"] == "idempotency_conflict"
+        assert mock_run.call_count == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("request_fingerprint", [None, "not-a-sha256", "f" * 63])
+    async def test_mystand_idempotency_requires_valid_ledger_fingerprint(
+        self,
+        auth_adapter,
+        request_fingerprint,
+    ):
+        key = f"delivery-invalid-fingerprint-{uuid.uuid4().hex}"
+        headers = _mystand_idempotent_headers(key)
+        if request_fingerprint is None:
+            headers.pop("X-Xiaoban-Request-Fingerprint")
+        else:
+            headers["X-Xiaoban-Request-Fingerprint"] = request_fingerprint
+
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                response = await cli.post(
+                    "/v1/chat/completions",
+                    headers=headers,
+                    json={"model": "test", "messages": [{"role": "user", "content": "hello"}]},
+                )
+                data = await response.json()
+
+        assert response.status == 400
+        assert data["error"]["code"] == "invalid_idempotency_scope"
+        mock_run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mystand_runs_fail_closed_before_agent_creation(self, auth_adapter):
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_create_agent") as mock_create_agent:
+                response = await cli.post(
+                    "/v1/runs",
+                    headers=_mystand_idempotent_headers("runs-not-supported"),
+                    json={"input": "private request"},
+                )
+                data = await response.json()
+
+        assert response.status == 409
+        assert data["error"]["code"] == "mystand_runs_unsupported"
+        mock_create_agent.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mystand_memory_http_is_account_scoped_and_cannot_add(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+    ):
+        from plugins.memory.holographic.scope import open_scoped_memory_store
+
+        secret = "stable-memory-scope-secret-for-tests-20260721"
+        monkeypatch.setenv("XIAOBAN_MYSTAND_MEMORY_SCOPE_SECRET", secret)
+        monkeypatch.setenv("XIAOBAN_HOME", str(tmp_path))
+        store = open_scoped_memory_store(
+            secret=secret,
+            site_id="mystand-test-site",
+            user_id="alice",
+            xiaoban_home=tmp_path,
+        )
+        try:
+            fact_id = store.add_fact("alice private preference", category="user_pref")
+        finally:
+            store.close()
+
+        alice_headers = {
+            **_mystand_idempotent_headers("memory-alice", user="alice"),
+            "X-Xiaoban-Memory-Mode": "user",
+        }
+        bob_headers = {
+            **_mystand_idempotent_headers("memory-bob", user="bob"),
+            "X-Xiaoban-Memory-Mode": "user",
+        }
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            alice = await cli.get("/v1/mystand/memory", headers=alice_headers)
+            alice_data = await alice.json()
+            bob = await cli.get("/v1/mystand/memory", headers=bob_headers)
+            bob_data = await bob.json()
+            forged_update = await cli.post(
+                "/v1/mystand/memory",
+                headers=bob_headers,
+                json={"action": "update", "factId": fact_id, "content": "forged"},
+            )
+            active_add = await cli.post(
+                "/v1/mystand/memory",
+                headers=alice_headers,
+                json={"action": "add", "content": "must not be accepted"},
+            )
+            active_add_data = await active_add.json()
+
+        assert alice.status == 200
+        assert [fact["content"] for fact in alice_data["facts"]] == ["alice private preference"]
+        assert bob.status == 200
+        assert bob_data["facts"] == []
+        assert forged_update.status == 404
+        assert active_add.status == 400
+        assert active_add_data["error"] == "invalid_action"
+
+    @pytest.mark.asyncio
+    async def test_mystand_user_memory_fails_closed_without_stable_secret(
+        self,
+        auth_adapter,
+        monkeypatch,
+    ):
+        monkeypatch.delenv("XIAOBAN_MYSTAND_MEMORY_SCOPE_SECRET", raising=False)
+        headers = {
+            **_mystand_idempotent_headers("memory-no-secret"),
+            "X-Xiaoban-Memory-Mode": "user",
+        }
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            response = await cli.get("/v1/mystand/memory", headers=headers)
+            response_data = await response.json()
+
+        assert response.status == 400
+        assert response_data["error"] == "invalid_memory_scope"
+
+    @pytest.mark.asyncio
+    async def test_stop_interrupts_matching_mystand_delivery(self, auth_adapter):
+        app = _create_app(auth_adapter)
+        gate = asyncio.Event()
+        started = asyncio.Event()
+        agent = MagicMock()
+        key = f"delivery-stop-{uuid.uuid4().hex}"
+        headers = _mystand_idempotent_headers(key)
+
+        async def _mock_run_agent(**kwargs):
+            kwargs["agent_ref"][0] = agent
+            started.set()
+            await gate.wait()
+            return (
+                {
+                    "final_response": "agent ignored interrupt and returned success",
+                    "messages": [],
+                    "api_calls": 1,
+                    "completed": True,
+                    "failed": False,
+                    "interrupted": False,
+                },
+                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", side_effect=_mock_run_agent) as mock_run:
+                completion = asyncio.create_task(cli.post(
+                    "/v1/chat/completions",
+                    headers=headers,
+                    json={"model": "test", "messages": [{"role": "user", "content": "hello"}]},
+                ))
+                await started.wait()
+                stopped = await cli.post(
+                    "/v1/chat/completions/stop",
+                    headers=headers,
+                    json={"idempotency_key": key},
+                )
+                assert stopped.status == 202
+                agent.interrupt.assert_called_once_with("Stop requested via My Stand delivery")
+                gate.set()
+                completion_response = await completion
+                completion_data = await completion_response.json()
+                replay = await cli.post(
+                    "/v1/chat/completions",
+                    headers=headers,
+                    json={"model": "test", "messages": [{"role": "user", "content": "hello"}]},
+                )
+                replay_data = await replay.json()
+
+        assert completion_response.status == 409
+        assert completion_data["error"]["code"] == "completion_stopped"
+        assert replay.status == 409
+        assert replay_data["error"]["code"] == "completion_stopped"
+        assert mock_run.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_stop_before_completion_request_prevents_agent_start(self, auth_adapter):
+        app = _create_app(auth_adapter)
+        key = f"delivery-stop-before-start-{uuid.uuid4().hex}"
+        headers = _mystand_idempotent_headers(key)
+
+        async with TestClient(TestServer(app)) as cli:
+            stopped = await cli.post(
+                "/v1/chat/completions/stop",
+                headers=headers,
+                json={"idempotency_key": key},
+            )
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                completion = await cli.post(
+                    "/v1/chat/completions",
+                    headers=headers,
+                    json={"model": "test", "messages": [{"role": "user", "content": "hello"}]},
+                )
+                completion_data = await completion.json()
+
+        assert stopped.status == 202
+        assert completion.status == 409
+        assert completion_data["error"]["code"] == "completion_stopped"
+        mock_run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mystand_responses_idempotency_fails_closed_for_every_account(self, auth_adapter):
+        app = _create_app(auth_adapter)
+        body = {"model": "test", "input": "same private question"}
+        key = f"responses-{uuid.uuid4().hex}"
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                first = await cli.post(
+                    "/v1/responses",
+                    headers=_mystand_idempotent_headers(key, user="alice"),
+                    json=body,
+                )
+                first_data = await first.json()
+                second = await cli.post(
+                    "/v1/responses",
+                    headers=_mystand_idempotent_headers(key, user="bob"),
+                    json=body,
+                )
+                second_data = await second.json()
+
+        assert first.status == second.status == 409
+        assert first_data["error"]["code"] == "mystand_responses_idempotency_unsupported"
+        assert second_data["error"]["code"] == "mystand_responses_idempotency_unsupported"
+        mock_run.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_invalid_json_returns_400(self, adapter):
         app = _create_app(adapter)
@@ -2237,6 +2702,33 @@ class TestResponsesEndpoint:
                 )
 
             assert resp.status == 500
+
+    @pytest.mark.asyncio
+    async def test_idempotency_key_reuse_with_different_request_returns_409(self, adapter):
+        app = _create_app(adapter)
+        key = f"responses-conflict-{uuid.uuid4().hex}"
+        mock_result = {"final_response": "Done", "messages": [], "api_calls": 1}
+        usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, usage)
+                first = await cli.post(
+                    "/v1/responses",
+                    headers={"Idempotency-Key": key},
+                    json={"model": "test", "input": "first request"},
+                )
+                second = await cli.post(
+                    "/v1/responses",
+                    headers={"Idempotency-Key": key},
+                    json={"model": "test", "input": "different request"},
+                )
+                second_data = await second.json()
+
+        assert first.status == 200
+        assert second.status == 409
+        assert second_data["error"]["code"] == "idempotency_conflict"
+        assert mock_run.call_count == 1
 
     @pytest.mark.asyncio
     async def test_invalid_input_type_returns_400(self, adapter):

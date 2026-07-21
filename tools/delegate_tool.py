@@ -38,6 +38,8 @@ from toolsets import TOOLSETS
 _RUNTIME_PROVIDER_CUSTOM = "custom"
 from tools import file_state
 from tools.terminal_tool import set_approval_callback as _set_subagent_approval_cb
+from tools.terminal_tool import set_sudo_password_callback as _set_subagent_sudo_cb
+from tools.thread_context import propagate_context_to_thread
 from utils import base_url_hostname, is_truthy_value
 
 
@@ -1631,6 +1633,7 @@ def _run_single_child(
         # result(timeout=None) blocks until the child finishes). Stuck-child
         # protection comes from the heartbeat staleness monitor instead.
         child_timeout = _get_child_timeout()
+        _subagent_approval_cb = _get_subagent_approval_callback()
         _timeout_executor = ThreadPoolExecutor(
             max_workers=1,
             # Install a non-interactive approval callback in the worker thread
@@ -1638,7 +1641,7 @@ def _run_single_child(
             # input() and deadlock the parent's prompt_toolkit TUI.
             # Callback (deny vs approve) is governed by delegation.subagent_auto_approve.
             initializer=_set_subagent_approval_cb,
-            initargs=(_get_subagent_approval_callback(),),
+            initargs=(_subagent_approval_cb,),
         )
         # Capture the worker thread so the timeout diagnostic can dump its
         # Python stack (see #14726 — 0-API-call hangs are opaque without it).
@@ -1656,6 +1659,13 @@ def _run_single_child(
                 logger.debug("Child text relay failed: %s", e)
 
         def _run_with_thread_capture():
+            # propagate_context_to_thread carries the gateway ContextVars into
+            # this worker, but it also carries the parent's interactive TLS
+            # callbacks.  Re-assert the existing subagent policy here so a
+            # delegated child never inherits the parent's approval or sudo
+            # capability.  Default remains non-interactive auto-deny.
+            _set_subagent_approval_cb(_subagent_approval_cb)
+            _set_subagent_sudo_cb(None)
             _worker_thread_holder["t"] = threading.current_thread()
             return child.run_conversation(
                 user_message=goal,
@@ -1663,7 +1673,9 @@ def _run_single_child(
                 stream_callback=_relay_child_text,
             )
 
-        _child_future = _timeout_executor.submit(_run_with_thread_capture)
+        _child_future = _timeout_executor.submit(
+            propagate_context_to_thread(_run_with_thread_capture)
+        )
         try:
             result = _child_future.result(timeout=child_timeout)
         except Exception as _timeout_exc:
@@ -2277,7 +2289,7 @@ def delegate_task(
                 futures = {}
                 for i, t, child in children:
                     future = executor.submit(
-                        _run_single_child,
+                        propagate_context_to_thread(_run_single_child),
                         task_index=i,
                         goal=t["goal"],
                         child=child,

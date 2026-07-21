@@ -92,14 +92,14 @@ class TestCliSkinPromptIntegration:
 
 
 class TestCompactBannerSkinIntegration:
-    def test_default_compact_banner_keeps_legacy_nous_xiaoban_branding(self):
+    def test_default_compact_banner_uses_mystand_native_branding(self):
         set_active_skin("default")
 
         with patch("cli.shutil.get_terminal_size", return_value=SimpleNamespace(columns=90)), \
              patch.dict(_build_compact_banner.__globals__, {"format_banner_version_label": lambda: "Xiaoban-Agent v0.1.0 (test)"}):
             banner = _build_compact_banner()
 
-        assert "NOUS XIAOBAN" in banner
+        assert "Xiaoban - My Stand native agent" in banner
 
     def test_poseidon_compact_banner_uses_skin_branding_instead_of_nous_xiaoban(self):
         set_active_skin("poseidon")

@@ -111,6 +111,73 @@ def test_completion_event_lands_on_shared_queue_with_session_key():
     assert evt["delegation_id"] == res["delegation_id"]
 
 
+def test_async_single_worker_inherits_mystand_session_context():
+    from gateway.session_context import (
+        clear_session_vars,
+        get_session_env,
+        set_session_vars,
+    )
+
+    seen = []
+
+    def runner():
+        seen.append(get_session_env("XIAOBAN_SESSION_SOURCE"))
+        return {"status": "completed", "summary": "done"}
+
+    tokens = set_session_vars(source="mystand", user_id="agent-a")
+    try:
+        res = ad.dispatch_async_delegation(
+            goal="g",
+            context=None,
+            toolsets=None,
+            role="leaf",
+            model="m",
+            session_key="session-a",
+            runner=runner,
+        )
+    finally:
+        clear_session_vars(tokens)
+
+    assert res["status"] == "dispatched"
+    assert _drain_one() is not None
+    assert seen == ["mystand"]
+
+
+def test_async_batch_worker_inherits_mystand_session_context():
+    from gateway.session_context import (
+        clear_session_vars,
+        get_session_env,
+        set_session_vars,
+    )
+
+    seen = []
+
+    def runner():
+        seen.append(get_session_env("XIAOBAN_SESSION_SOURCE"))
+        return {
+            "results": [{"status": "completed", "summary": "done"}],
+            "total_duration_seconds": 0.1,
+        }
+
+    tokens = set_session_vars(source="mystand", user_id="agent-a")
+    try:
+        res = ad.dispatch_async_delegation_batch(
+            goals=["g"],
+            context=None,
+            toolsets=None,
+            role="leaf",
+            model="m",
+            session_key="session-a",
+            runner=runner,
+        )
+    finally:
+        clear_session_vars(tokens)
+
+    assert res["status"] == "dispatched"
+    assert _drain_one() is not None
+    assert seen == ["mystand"]
+
+
 def test_rich_reinjection_block_is_self_contained():
     def runner():
         return {"status": "completed", "summary": "The answer is 42.",
@@ -587,5 +654,4 @@ def test_gateway_cli_origin_event_left_unrouted():
     evt = _make_async_evt(session_key="")
     runner._enrich_async_delegation_routing(evt)
     assert "platform" not in evt
-
 

@@ -217,6 +217,41 @@ class TestDelegateTask(unittest.TestCase):
         self.assertIn("total_duration_seconds", result)
 
     @patch("tools.delegate_tool._run_single_child")
+    def test_batch_workers_inherit_mystand_session_context(self, mock_run):
+        from gateway.session_context import (
+            clear_session_vars,
+            get_session_env,
+            set_session_vars,
+        )
+
+        seen_sources = []
+
+        def _run_in_worker(task_index, **_kwargs):
+            seen_sources.append(get_session_env("XIAOBAN_SESSION_SOURCE"))
+            return {
+                "task_index": task_index,
+                "status": "completed",
+                "summary": "Done",
+                "api_calls": 1,
+                "duration_seconds": 0.1,
+            }
+
+        mock_run.side_effect = _run_in_worker
+        tokens = set_session_vars(source="mystand", user_id="agent-a")
+        try:
+            result = json.loads(
+                delegate_task(
+                    tasks=[{"goal": "A"}, {"goal": "B"}],
+                    parent_agent=_make_mock_parent(),
+                )
+            )
+        finally:
+            clear_session_vars(tokens)
+
+        self.assertEqual(len(result["results"]), 2)
+        self.assertEqual(seen_sources, ["mystand", "mystand"])
+
+    @patch("tools.delegate_tool._run_single_child")
     def test_batch_mode_accepts_json_string_tasks(self, mock_run):
         mock_run.side_effect = [
             {
@@ -2746,6 +2781,65 @@ class TestSubagentApprovalCallback(unittest.TestCase):
         self.assertEqual(seen, [_subagent_auto_deny])
         # Parent's callback slot is still empty (TLS isolates threads).
         self.assertIsNone(_get_approval_callback())
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_child_inherits_mystand_context_but_not_parent_privilege_callbacks(
+        self, _mock_cfg
+    ):
+        from gateway.session_context import (
+            clear_session_vars,
+            get_session_env,
+            set_session_vars,
+        )
+        from tools.delegate_tool import _run_single_child, _subagent_auto_deny
+        from tools.terminal_tool import (
+            _get_approval_callback,
+            _get_sudo_password_callback,
+            set_approval_callback,
+            set_sudo_password_callback,
+        )
+
+        parent_approval = lambda *_args, **_kwargs: "once"
+        parent_sudo = lambda: "secret"
+        set_approval_callback(parent_approval)
+        set_sudo_password_callback(parent_sudo)
+        tokens = set_session_vars(source="mystand", user_id="agent-a")
+        seen = {}
+
+        child = MagicMock()
+        child._credential_pool = None
+        child._subagent_id = None
+        child.tool_progress_callback = None
+
+        def _run(**_kwargs):
+            seen["source"] = get_session_env("XIAOBAN_SESSION_SOURCE")
+            seen["approval"] = _get_approval_callback()
+            seen["sudo"] = _get_sudo_password_callback()
+            return {
+                "final_response": "done",
+                "completed": True,
+                "interrupted": False,
+                "api_calls": 1,
+                "messages": [],
+            }
+
+        child.run_conversation.side_effect = _run
+        try:
+            result = _run_single_child(
+                task_index=0,
+                goal="Check privacy",
+                child=child,
+                parent_agent=_make_mock_parent(),
+            )
+        finally:
+            clear_session_vars(tokens)
+            set_approval_callback(None)
+            set_sudo_password_callback(None)
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(seen["source"], "mystand")
+        self.assertIs(seen["approval"], _subagent_auto_deny)
+        self.assertIsNone(seen["sudo"])
 
 
 class TestFallbackModelInheritance(unittest.TestCase):

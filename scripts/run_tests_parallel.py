@@ -72,7 +72,7 @@ _SKIP_PARTS = {"integration", "e2e", "docker"}
 
 # Per-file wall-clock cap. Override
 # via --file-timeout or XIAOBAN_TEST_FILE_TIMEOUT.
-_DEFAULT_FILE_TIMEOUT_SECONDS = 240.0  # Accommodate test_run_agent.py (~177s on the verified baseline).
+_DEFAULT_FILE_TIMEOUT_SECONDS = 300.0  # Keeps headroom above test_run_agent.py (~229s on a 2-CPU runner).
 
 # Duration cache: maps relative file paths to last-observed subprocess
 # wall-clock seconds. Used by ``--slice`` to distribute files across
