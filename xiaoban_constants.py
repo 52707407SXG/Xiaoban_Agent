@@ -566,12 +566,12 @@ def is_container() -> bool:
     Recognizes Docker (``/.dockerenv``), Podman (``/run/.containerenv``),
     and — via ``/proc/1/cgroup`` — the docker/podman/lxc cgroup-v1 markers.
 
-    cgroup v2 collapses ``/proc/1/cgroup`` to a single ``0::/`` line with no
-    runtime marker, so containerd/CRI-O runtimes (the common case on
-    Kubernetes/k3s) were previously missed. To cover those, also check:
+    cgroup v2 can collapse ``/proc/1/cgroup`` to a line with no runtime marker,
+    so containerd/CRI-O runtimes may otherwise be missed. To cover those, also
+    check:
       * ``KUBERNETES_SERVICE_HOST`` env var — set in every Kubernetes pod.
       * ``kubepods`` / ``containerd`` / ``crio`` markers in ``/proc/1/cgroup``.
-      * the same markers in ``/proc/self/mountinfo`` (cgroup-v2 fallback).
+      * a container-runtime-backed root mount in ``/proc/self/mountinfo``.
 
     Result is cached for the process lifetime.  Import-safe — no heavy deps.
 
@@ -599,15 +599,31 @@ def is_container() -> bool:
                 return True
     except OSError:
         pass
-    # cgroup v2: /proc/1/cgroup is just "0::/" with no marker. The container
-    # runtime still shows up in the mount table (overlay rootfs, runtime mount
-    # paths), so scan mountinfo as a last resort.
+    # cgroup v2: /proc/1/cgroup may have no marker.  A container runtime can
+    # still show up in the current process's root overlay mount.  Only inspect
+    # the record mounted at "/": a regular host running Docker/containerd has
+    # many runtime paths elsewhere in mountinfo and those are not evidence that
+    # this process itself is containerized.
     try:
         with open("/proc/self/mountinfo", "r", encoding="utf-8") as f:
-            mountinfo = f.read()
-            if any(marker in mountinfo for marker in ("kubepods", "containerd", "crio")):
-                _container_detected = True
-                return True
+            for line in f:
+                mount_fields, separator, filesystem_fields = line.partition(" - ")
+                fields = mount_fields.split()
+                filesystem = filesystem_fields.split()
+                if not separator or len(fields) < 5 or len(filesystem) < 2:
+                    continue
+                if fields[4] != "/":
+                    continue
+                filesystem_type = filesystem[0]
+                if filesystem_type not in {"overlay", "fuse.overlayfs"}:
+                    continue
+                root_mount = line.casefold()
+                if any(
+                    marker in root_mount
+                    for marker in ("/docker/", "containerd", "kubepods", "crio", "containers/storage")
+                ):
+                    _container_detected = True
+                    return True
     except OSError:
         pass
     _container_detected = False

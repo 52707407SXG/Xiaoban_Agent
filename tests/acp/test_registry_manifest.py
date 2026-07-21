@@ -39,6 +39,17 @@ def test_agent_json_matches_official_registry_required_fields():
     assert set(data["distribution"]) <= ALLOWED_DISTRIBUTIONS
 
 
+def test_agent_json_presents_xiaoban_as_a_my_stand_native_product():
+    data = _manifest()
+    description = data["description"].casefold()
+
+    assert description.startswith("my stand-native xiaoban")
+    assert "nous" not in description
+    # Upstream authorship and licensing attribution remain explicit metadata.
+    assert data["authors"] == ["Nous Research"]
+    assert data["license"] == "MIT"
+
+
 def test_agent_json_uses_uvx_distribution_without_local_command_fields():
     data = _manifest()
 

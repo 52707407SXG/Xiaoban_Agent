@@ -250,7 +250,7 @@ class TestIsContainer:
         assert is_container() is True
 
     def test_detects_cgroup_v2_via_mountinfo(self, monkeypatch, tmp_path):
-        """cgroup v2 (0::/ only) falls back to containerd marker in mountinfo."""
+        """cgroup v2 falls back to a containerd-backed root overlay mount."""
         import builtins
         self._reset_cache(monkeypatch)
         monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
@@ -272,6 +272,32 @@ class TestIsContainer:
 
         monkeypatch.setattr("builtins.open", _fake_open)
         assert is_container() is True
+
+    def test_ignores_host_container_runtime_mounts(self, monkeypatch, tmp_path):
+        """Nested Docker/containerd mounts do not make the ext4 host a container."""
+        import builtins
+        self._reset_cache(monkeypatch)
+        monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+        monkeypatch.setattr(os.path, "exists", lambda p: False)
+        cgroup_file = tmp_path / "cgroup"
+        cgroup_file.write_text("0::/init.scope\n")
+        mountinfo_file = tmp_path / "mountinfo"
+        mountinfo_file.write_text(
+            "31 1 252:3 / / rw,relatime - ext4 /dev/vda3 rw\n"
+            "886 31 0:47 / /var/lib/docker/rootfs/overlayfs/abc rw,relatime "
+            "- overlay overlay rw,lowerdir=/var/lib/containerd/snapshots/1/fs\n"
+        )
+        _real_open = builtins.open
+
+        def _fake_open(p, *a, **kw):
+            if p == "/proc/1/cgroup":
+                return _real_open(str(cgroup_file), *a, **kw)
+            if p == "/proc/self/mountinfo":
+                return _real_open(str(mountinfo_file), *a, **kw)
+            return _real_open(p, *a, **kw)
+
+        monkeypatch.setattr("builtins.open", _fake_open)
+        assert is_container() is False
 
     def test_caches_result(self, monkeypatch):
         """Second call uses cached value without re-probing."""

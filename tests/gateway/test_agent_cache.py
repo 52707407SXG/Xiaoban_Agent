@@ -9,6 +9,7 @@ Verifies that the agent cache correctly:
 - Preserves frozen system prompt across turns
 """
 
+import os
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -341,12 +342,13 @@ class TestExtractCacheBustingConfig:
         assert sig_honcho != sig_mem0
 
     def test_honcho_cache_busting_config_memoized_by_mtime(self, monkeypatch, tmp_path):
-        """Repeated Honcho extraction for unchanged honcho.json should reuse parse result."""
+        """The memo reuses unchanged config but catches edits within one mtime tick."""
         from types import SimpleNamespace
         from gateway.run import GatewayRunner
 
         config_path = tmp_path / "honcho.json"
         config_path.write_text("{}")
+        initial_stat = config_path.stat()
         parse_calls = []
 
         class FakeConfig:
@@ -376,10 +378,39 @@ class TestExtractCacheBustingConfig:
         assert parse_calls == [config_path]
 
         config_path.write_text("{\n  \"changed\": true\n}")
+        os.utime(
+            config_path,
+            ns=(initial_stat.st_atime_ns, initial_stat.st_mtime_ns),
+        )
+        assert config_path.stat().st_mtime_ns == initial_stat.st_mtime_ns
+        assert config_path.stat().st_size != initial_stat.st_size
         third = GatewayRunner._extract_honcho_cache_busting_config()
 
         assert third == first
         assert parse_calls == [config_path, config_path]
+
+        # Atomic writers can preserve both size and mtime.  The replacement's
+        # inode still makes the composite signature change.
+        before_replace = config_path.stat()
+        replacement_path = tmp_path / "honcho-replacement.json"
+        replacement_path.write_text("{\n  \"changed\": null\n}")
+        assert replacement_path.stat().st_size == before_replace.st_size
+        os.utime(
+            replacement_path,
+            ns=(before_replace.st_atime_ns, before_replace.st_mtime_ns),
+        )
+        replacement_inode = replacement_path.stat().st_ino
+        os.replace(replacement_path, config_path)
+        after_replace = config_path.stat()
+        assert after_replace.st_mtime_ns == before_replace.st_mtime_ns
+        assert after_replace.st_size == before_replace.st_size
+        assert after_replace.st_ino == replacement_inode
+        assert after_replace.st_ino != before_replace.st_ino
+
+        fourth = GatewayRunner._extract_honcho_cache_busting_config()
+
+        assert fourth == first
+        assert parse_calls == [config_path, config_path, config_path]
 
     def test_full_round_trip_busts_cache_on_real_edit(self):
         """End-to-end: simulate a config edit on main and verify the

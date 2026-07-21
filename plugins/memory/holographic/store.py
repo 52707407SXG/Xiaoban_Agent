@@ -3,6 +3,7 @@ SQLite-backed fact store with entity resolution and trust scoring.
 Single-user Xiaoban memory store plugin.
 """
 
+import os
 import re
 import sqlite3
 import threading
@@ -103,12 +104,20 @@ class MemoryStore:
         db_path: "str | Path | None" = None,
         default_trust: float = 0.5,
         hrr_dim: int = 1024,
+        secure_permissions: bool = False,
     ) -> None:
         if db_path is None:
             from xiaoban_constants import get_xiaoban_home
             db_path = str(get_xiaoban_home() / "memory_store.db")
         self.db_path = Path(db_path).expanduser()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._secure_permissions = bool(secure_permissions)
+        self.db_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+            mode=0o700 if self._secure_permissions else 0o777,
+        )
+        if self._secure_permissions:
+            os.chmod(self.db_path.parent, 0o700)
         self.default_trust = _clamp_trust(default_trust)
         self.hrr_dim = hrr_dim
         self._hrr_available = hrr._HAS_NUMPY
@@ -120,6 +129,7 @@ class MemoryStore:
         self._lock = threading.RLock()
         self._conn.row_factory = sqlite3.Row
         self._init_db()
+        self._enforce_secure_permissions()
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -138,6 +148,17 @@ class MemoryStore:
         if "hrr_vector" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
         self._conn.commit()
+        self._enforce_secure_permissions()
+
+    def _enforce_secure_permissions(self) -> None:
+        """Keep account-scoped SQLite files private to the service account."""
+        if not self._secure_permissions:
+            return
+        os.chmod(self.db_path.parent, 0o700)
+        for suffix in ("", "-wal", "-shm"):
+            path = Path(f"{self.db_path}{suffix}")
+            if path.exists():
+                os.chmod(path, 0o600)
 
     # ------------------------------------------------------------------
     # Public API
@@ -570,6 +591,7 @@ class MemoryStore:
     def close(self) -> None:
         """Close the database connection."""
         self._conn.close()
+        self._enforce_secure_permissions()
 
     def __enter__(self) -> "MemoryStore":
         return self

@@ -42,6 +42,8 @@ jobs:
           # If there are no exact matches, the action searches for partial matches of the restore keys.
           # When the action finds a partial match, the most recent cache is restored to the path directory.
           key: test-durations
+          restore-keys: |
+            test-durations-
 
       - name: Install ripgrep (prebuilt binary)
         run: |
@@ -118,11 +120,14 @@ jobs:
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
 
+      - name: Prepare per-slice duration artifact
+        run: cp test_durations.json "test_durations-slice-${{ matrix.slice }}.json"
+
       - name: Upload per-slice durations
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-durations-slice-${{ matrix.slice }}
-          path: test_durations.json
+          path: test_durations-slice-${{ matrix.slice }}.json
           retention-days: 1
 
   # Merge per-slice duration data into a single cache, so future runs
@@ -144,7 +149,7 @@ jobs:
           python3 -c "
           import json, glob, os
           merged = {}
-          for f in glob.glob('durations/*test_durations.json'):
+          for f in glob.glob('durations/test_durations-slice-*.json'):
             with open(f) as fh:
               merged.update(json.load(fh))
           with open('test_durations.json', 'w') as fh:

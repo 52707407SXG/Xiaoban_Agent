@@ -101,6 +101,16 @@ def _debug(message: str) -> None:
         logger.info("Langfuse tracing: %s", message)
 
 
+def _mystand_tracing_blocked() -> bool:
+    """My Stand permits only the local closed-schema metadata trace."""
+    try:
+        from gateway.session_context import get_session_env
+
+        return get_session_env("XIAOBAN_SESSION_SOURCE") == "mystand"
+    except Exception:
+        return False
+
+
 # Sentinel: "_get_langfuse() has tried and failed". Lets us short-circuit
 # every subsequent hook call without re-checking env vars or re-attempting
 # SDK init. Tests clear this by reloading the module via
@@ -779,6 +789,8 @@ def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = 
                     api_call_count: int = 0, messages: Any = None, turn_type: str = "user",
                     conversation_history: Any = None, user_message: Any = None,
                     turn_id: str = "", api_request_id: str = "", **_: Any) -> None:
+    if _mystand_tracing_blocked():
+        return
     # Older Xiaoban branches used pre_llm_call for request-scoped tracing and
     # passed the actual API messages. Current Xiaoban also has a turn-scoped
     # pre_llm_call used for context injection; tracing that hook creates an
@@ -847,6 +859,8 @@ def on_pre_llm_request(
     api_request_id: str = "",
     **_: Any,
 ) -> None:
+    if _mystand_tracing_blocked():
+        return
     client = _get_langfuse()
     if client is None:
         return
@@ -913,6 +927,8 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
                      assistant_tool_call_count: int = 0, assistant_response: Any = None,
                      turn_id: str = "", api_request_id: str = "",
                      **_: Any) -> None:
+    if _mystand_tracing_blocked():
+        return
     client = _get_langfuse()
     if client is None:
         return
@@ -1042,6 +1058,8 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
 def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = "",
                      session_id: str = "", tool_call_id: str = "",
                      turn_id: str = "", api_request_id: str = "", **_: Any) -> None:
+    if _mystand_tracing_blocked():
+        return
     client = _get_langfuse()
     if client is None:
         return
@@ -1074,6 +1092,8 @@ def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = ""
 def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = None,
                       task_id: str = "", session_id: str = "", tool_call_id: str = "",
                       turn_id: str = "", api_request_id: str = "", **_: Any) -> None:
+    if _mystand_tracing_blocked():
+        return
     task_key = _trace_key(
         task_id,
         session_id,

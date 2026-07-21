@@ -207,12 +207,20 @@ def build_turn_context(
     agent.iteration_budget = IterationBudget(agent.max_iterations)
 
     # Log conversation turn start for debugging/observability.
-    _preview_text = summarize_user_message_for_log(user_message)
-    _msg_preview = (_preview_text[:80] + "...") if len(_preview_text) > 80 else _preview_text
-    _msg_preview = _msg_preview.replace("\n", " ")
+    from gateway.session_context import get_session_env
+
+    _mystand_turn = get_session_env("XIAOBAN_SESSION_SOURCE") == "mystand"
+    if _mystand_turn:
+        _msg_preview = "[mystand-content-redacted]"
+        _session_log_value = "mystand"
+    else:
+        _preview_text = summarize_user_message_for_log(user_message)
+        _msg_preview = (_preview_text[:80] + "...") if len(_preview_text) > 80 else _preview_text
+        _msg_preview = _msg_preview.replace("\n", " ")
+        _session_log_value = agent.session_id or "none"
     logger.info(
         "conversation turn: session=%s model=%s provider=%s platform=%s history=%d msg=%r",
-        agent.session_id or "none", agent.model, agent.provider or "unknown",
+        _session_log_value, agent.model, agent.provider or "unknown",
         agent.platform or "unknown", len(conversation_history or []),
         _msg_preview,
     )
