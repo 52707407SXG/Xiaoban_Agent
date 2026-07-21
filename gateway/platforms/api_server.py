@@ -114,6 +114,56 @@ SESSION_EVENT_SESSION_LIMIT = 500
 SESSION_EVENT_TTL_SECONDS = 6 * 60 * 60
 SESSION_EVENT_SSE_KEEPALIVE_SECONDS = 25.0
 
+
+class InvalidToolsetPolicy(ValueError):
+    """Raised before agent creation when a request tool policy is unsafe."""
+
+
+_MYSTAND_REQUEST_TOOLSETS = {
+    "mystand-broker-basic": ["web", "mystand_parser", "mystand_authorization"],
+    "mystand-broker-research": [
+        "web",
+        "mystand_parser",
+        "mystand_authorization",
+        "delegation",
+    ],
+    "mystand-owner": ["web", "mystand_parser", "mystand_authorization"],
+    "mystand-owner-research": [
+        "web",
+        "mystand_parser",
+        "mystand_authorization",
+        "delegation",
+    ],
+}
+_MYSTAND_REQUEST_TOOL_NAMES = {
+    "mystand-broker-basic": {
+        "web_search",
+        "web_extract",
+        "mystand_parse",
+        "mystand_authorization",
+    },
+    "mystand-broker-research": {
+        "web_search",
+        "web_extract",
+        "mystand_parse",
+        "mystand_authorization",
+        "delegate_task",
+    },
+    "mystand-owner": {
+        "web_search",
+        "web_extract",
+        "mystand_parse",
+        "mystand_authorization",
+    },
+    "mystand-owner-research": {
+        "web_search",
+        "web_extract",
+        "mystand_parse",
+        "mystand_authorization",
+        "delegate_task",
+    },
+}
+
 _LOCAL_PATH_RE = re.compile(
     r"(?<![:/\w])/(?:root|opt|srv|var|etc)(?:/[^\s`'\"<>()\[\]{}，。；;]*)*"
 )
@@ -1800,6 +1850,8 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
         enabled_toolsets_override: Optional[List[str]] = None,
+        request_user_id: Optional[str] = None,
+        skip_memory: bool = False,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1870,6 +1922,8 @@ class APIServerAdapter(BasePlatformAdapter):
             fallback_model=fallback_model,
             reasoning_config=reasoning_config,
             gateway_session_key=gateway_session_key,
+            user_id=request_user_id,
+            skip_memory=skip_memory,
         )
         return agent
 
@@ -2372,6 +2426,9 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
+        policy_err = self._request_toolset_policy_error(request.headers)
+        if policy_err is not None:
+            return policy_err
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
@@ -2423,6 +2480,9 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
+        policy_err = self._request_toolset_policy_error(request.headers)
+        if policy_err is not None:
+            return policy_err
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
@@ -2575,6 +2635,9 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
+        policy_err = self._request_toolset_policy_error(request.headers)
+        if policy_err is not None:
+            return policy_err
 
         # Bound total in-flight agent runs (configurable; #7483).
         limited = self._concurrency_limited_response()
@@ -3716,6 +3779,9 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
+        policy_err = self._request_toolset_policy_error(request.headers)
+        if policy_err is not None:
+            return policy_err
 
         # Bound total in-flight agent runs (configurable; #7483).
         limited = self._concurrency_limited_response()
@@ -4572,12 +4638,61 @@ class APIServerAdapter(BasePlatformAdapter):
         return ""
 
     @staticmethod
+    def _header_present(headers: Any, name: str) -> bool:
+        if headers is None:
+            return False
+        normalized_name = str(name or "").strip().lower()
+        try:
+            return any(
+                str(key or "").strip().lower() == normalized_name
+                for key in headers.keys()
+            )
+        except Exception:
+            return False
+
+    @staticmethod
     def _toolsets_for_request_policy(policy: str) -> Optional[List[str]]:
         normalized = str(policy or "").strip().lower()
-        if normalized == "mystand-broker-basic":
-            return ["web", "mystand_parser", "mystand_authorization"]
-        if normalized == "mystand-broker-research":
-            return ["web", "mystand_parser", "mystand_authorization", "skills", "delegation"]
+        toolsets = _MYSTAND_REQUEST_TOOLSETS.get(normalized)
+        return list(toolsets) if toolsets is not None else None
+
+    @classmethod
+    def _toolsets_for_request_headers(cls, headers: Any) -> Optional[List[str]]:
+        """Resolve the My Stand tool policy, preserving headerless API clients.
+
+        A present header is an explicit security boundary: blank, unknown, or
+        drifted policies are rejected before an agent can inherit the global
+        API tool configuration. The resolved tool-name equality check keeps a
+        future toolset/plugin change from silently widening the website grant.
+        """
+        header_name = "X-Xiaoban-Toolset-Policy"
+        if not cls._header_present(headers, header_name):
+            if cls._header_present(headers, "X-Xiaoban-User-Id"):
+                raise InvalidToolsetPolicy("My Stand user identity requires a toolset policy")
+            return None
+        normalized = cls._header_value(headers, header_name).strip().lower()
+        toolsets = cls._toolsets_for_request_policy(normalized)
+        if toolsets is None:
+            raise InvalidToolsetPolicy("Unsupported X-Xiaoban-Toolset-Policy")
+        request_user_id = cls._header_value(headers, "X-Xiaoban-User-Id")
+        if not request_user_id or not re.fullmatch(r"[A-Za-z0-9._:@-]{1,200}", request_user_id):
+            raise InvalidToolsetPolicy("My Stand tool policy requires a valid user identity")
+        from toolsets import resolve_multiple_toolsets
+
+        resolved = set(resolve_multiple_toolsets(toolsets))
+        if resolved != _MYSTAND_REQUEST_TOOL_NAMES[normalized]:
+            raise InvalidToolsetPolicy("Unsafe My Stand toolset configuration")
+        return toolsets
+
+    @classmethod
+    def _request_toolset_policy_error(cls, headers: Any) -> Optional["web.Response"]:
+        try:
+            cls._toolsets_for_request_headers(headers)
+        except InvalidToolsetPolicy as exc:
+            return web.json_response(
+                _openai_error(str(exc), code="invalid_toolset_policy"),
+                status=400,
+            )
         return None
 
     async def _run_agent(
@@ -4613,9 +4728,8 @@ class APIServerAdapter(BasePlatformAdapter):
         )
         request_user_id = self._header_value(request_headers, "X-Xiaoban-User-Id")
         request_message_id = self._header_value(request_headers, "X-Xiaoban-Message-Id")
-        enabled_toolsets_override = self._toolsets_for_request_policy(
-            self._header_value(request_headers, "X-Xiaoban-Toolset-Policy")
-        )
+        enabled_toolsets_override = self._toolsets_for_request_headers(request_headers)
+        mystand_request = enabled_toolsets_override is not None
 
         def _run():
             from gateway.session_context import clear_session_vars
@@ -4639,6 +4753,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_complete_callback=tool_complete_callback,
                     gateway_session_key=gateway_session_key,
                     enabled_toolsets_override=enabled_toolsets_override,
+                    request_user_id=request_user_id or None,
+                    skip_memory=mystand_request,
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent
@@ -4747,6 +4863,16 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        try:
+            enabled_toolsets_override = self._toolsets_for_request_headers(request.headers)
+        except InvalidToolsetPolicy as exc:
+            return web.json_response(
+                _openai_error(str(exc), code="invalid_toolset_policy"),
+                status=400,
+            )
+        request_user_id = self._header_value(request.headers, "X-Xiaoban-User-Id")
+        request_message_id = self._header_value(request.headers, "X-Xiaoban-Message-Id")
+        async_delivery = self._session_events_requested(request)
 
         # Enforce concurrency limit (shared across all agent-serving
         # endpoints; configurable via gateway.api_server.max_concurrent_runs).
@@ -4861,6 +4987,9 @@ class APIServerAdapter(BasePlatformAdapter):
                     stream_delta_callback=_text_cb,
                     tool_progress_callback=event_cb,
                     gateway_session_key=gateway_session_key,
+                    enabled_toolsets_override=enabled_toolsets_override,
+                    request_user_id=request_user_id or None,
+                    skip_memory=enabled_toolsets_override is not None,
                 )
                 self._active_run_agents[run_id] = agent
 
@@ -4911,7 +5040,10 @@ class APIServerAdapter(BasePlatformAdapter):
                             chat_id=session_id or "",
                             session_key=approval_session_key,
                             session_id=session_id or "",
-                            async_delivery=self._session_events_requested(request),
+                            user_id=request_user_id,
+                            message_id=request_message_id,
+                            user_message=user_message if isinstance(user_message, str) else "",
+                            async_delivery=async_delivery,
                         )
                         register_gateway_notify(approval_session_key, _approval_notify)
                         r = agent.run_conversation(

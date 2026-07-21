@@ -25,6 +25,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
       - run: npm run --prefix ${{ matrix.package }} typecheck
 
   # Production build of the desktop renderer. `typecheck` runs `tsc` only,
@@ -42,4 +44,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
       - run: npm run --prefix apps/desktop build

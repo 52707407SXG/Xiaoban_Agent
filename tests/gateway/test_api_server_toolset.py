@@ -1,6 +1,8 @@
 """Tests for xiaoban-api-server toolset and API server tool availability."""
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 
 from toolsets import resolve_toolset, get_toolset, validate_toolset
 
@@ -92,25 +94,97 @@ class TestApiServerAdapterToolset:
 
         assert APIServerAdapter._header_value(headers, "X-Xiaoban-Toolset-Policy") == "mystand-broker-basic"
 
-    def test_mystand_broker_policies_include_auth_bridge_without_server_tools(self):
+    def test_mystand_policies_are_explicit_and_exclude_server_mutation_tools(self):
         from gateway.platforms.api_server import APIServerAdapter
 
         basic = APIServerAdapter._toolsets_for_request_policy("mystand-broker-basic")
         research = APIServerAdapter._toolsets_for_request_policy("mystand-broker-research")
+        owner = APIServerAdapter._toolsets_for_request_policy("mystand-owner")
+        owner_research = APIServerAdapter._toolsets_for_request_policy("mystand-owner-research")
 
         assert basic == ["web", "mystand_parser", "mystand_authorization"]
         assert research == [
             "web",
             "mystand_parser",
             "mystand_authorization",
-            "skills",
             "delegation",
         ]
-        for toolsets in (basic, research):
+        assert owner == basic
+        assert owner_research == research
+        for toolsets in (basic, research, owner, owner_research):
             assert "terminal" not in toolsets
             assert "file" not in toolsets
+            assert "file_readonly" not in toolsets
+            assert "skills" not in toolsets
             assert "memory" not in toolsets
             assert "session_search" not in toolsets
+
+    @pytest.mark.parametrize("policy", ["", "mystand-owner-typo", "unknown", "  "])
+    def test_present_unknown_or_blank_mystand_policy_is_rejected(self, policy):
+        from gateway.platforms.api_server import APIServerAdapter, InvalidToolsetPolicy
+
+        with pytest.raises(InvalidToolsetPolicy):
+            APIServerAdapter._toolsets_for_request_headers(
+                {"x-xiaoban-toolset-policy": policy}
+            )
+
+    def test_missing_policy_header_preserves_non_mystand_api_configuration(self):
+        from gateway.platforms.api_server import APIServerAdapter
+
+        assert APIServerAdapter._toolsets_for_request_headers({}) is None
+
+    def test_mystand_user_header_without_policy_is_rejected(self):
+        from gateway.platforms.api_server import APIServerAdapter, InvalidToolsetPolicy
+
+        with pytest.raises(InvalidToolsetPolicy):
+            APIServerAdapter._toolsets_for_request_headers(
+                {"X-Xiaoban-User-Id": "ZYJ001"}
+            )
+
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            "mystand-broker-basic",
+            "mystand-broker-research",
+            "mystand-owner",
+            "mystand-owner-research",
+        ],
+    )
+    def test_resolved_mystand_tools_exclude_dangerous_capabilities(self, policy):
+        from gateway.platforms.api_server import APIServerAdapter
+        from toolsets import resolve_multiple_toolsets
+
+        toolsets = APIServerAdapter._toolsets_for_request_headers(
+            {
+                "X-Xiaoban-Toolset-Policy": policy,
+                "X-Xiaoban-User-Id": "ZYJ001",
+            }
+        )
+        resolved = set(resolve_multiple_toolsets(toolsets))
+        forbidden = {
+            "terminal",
+            "process",
+            "read_terminal",
+            "read_file",
+            "write_file",
+            "patch",
+            "search_files",
+            "execute_code",
+            "cronjob",
+            "computer_use",
+            "skill_manage",
+            "memory",
+            "session_search",
+        }
+        assert resolved.isdisjoint(forbidden)
+
+    def test_mystand_policy_requires_authenticated_user_identity(self):
+        from gateway.platforms.api_server import APIServerAdapter, InvalidToolsetPolicy
+
+        with pytest.raises(InvalidToolsetPolicy):
+            APIServerAdapter._toolsets_for_request_headers(
+                {"X-Xiaoban-Toolset-Policy": "mystand-owner"}
+            )
 
     @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
     def test_create_agent_reads_config_toolsets(self):

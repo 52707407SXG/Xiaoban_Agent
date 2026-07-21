@@ -100,6 +100,53 @@ def auth_adapter():
 
 class TestStartRun:
     @pytest.mark.asyncio
+    async def test_mystand_run_passes_fail_closed_toolset_override(self, adapter):
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as mock_create:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {"final_response": "done"}
+                mock_agent.session_prompt_tokens = 0
+                mock_agent.session_completion_tokens = 0
+                mock_agent.session_total_tokens = 0
+                mock_create.return_value = mock_agent
+
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={"input": "hello"},
+                    headers={
+                        "X-Xiaoban-Toolset-Policy": "mystand-owner",
+                        "X-Xiaoban-User-Id": "52707407",
+                        "X-Xiaoban-Message-Id": "msg-safe-owner",
+                    },
+                )
+                assert resp.status == 202
+                for _ in range(20):
+                    if mock_create.called:
+                        break
+                    await asyncio.sleep(0.01)
+                assert mock_create.call_args.kwargs["enabled_toolsets_override"] == [
+                    "web",
+                    "mystand_parser",
+                    "mystand_authorization",
+                ]
+                assert mock_create.call_args.kwargs["request_user_id"] == "52707407"
+                assert mock_create.call_args.kwargs["skip_memory"] is True
+
+    @pytest.mark.asyncio
+    async def test_mystand_run_rejects_unknown_toolset_policy_before_allocating_run(self, adapter):
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/runs",
+                json={"input": "hello"},
+                headers={"X-Xiaoban-Toolset-Policy": "mystand-owner-typo"},
+            )
+        assert resp.status == 400
+        assert adapter._run_streams == {}
+        assert adapter._run_statuses == {}
+
+    @pytest.mark.asyncio
     async def test_start_returns_202(self, adapter):
         app = _create_runs_app(adapter)
         async with TestClient(TestServer(app)) as cli:
