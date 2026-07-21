@@ -2188,7 +2188,7 @@
           title: "Apply the selected assignee to all selected tasks.",
         }, tx(t, "apply", "Apply")),
       ),
-      h("label", { className: "hermes-kanban-bulk-reclaim-first", title: "Reclaim any active claims before reassigning" },
+      h("label", { className: "xiaoban-kanban-bulk-reclaim-first", title: "Reclaim any active claims before reassigning" },
         h(Checkbox, {
           checked: reclaimFirst,
           onCheckedChange: function (checked) { setReclaimFirst(checked === true); },
@@ -2538,7 +2538,7 @@
       className: cn(
         "hermes-kanban-card",
         props.selected ? "hermes-kanban-card--selected" : "",
-        props.failed ? "hermes-kanban-card--failed" : "",
+        props.failed ? "xiaoban-kanban-card--failed" : "",
         props.draggingSource ? "hermes-kanban-card--dragging-source" : "",
         stalenessClass(t),
       ),

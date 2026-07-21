@@ -650,10 +650,13 @@ def list_projects(token: str) -> List[Dict[str, Any]]:
 
 
 def find_project_by_name(token: str, name: str) -> Optional[Dict[str, Any]]:
-    """Return the first project whose name matches (case-insensitive)."""
-    target = (name or "").strip().lower()
+    """Return the first project whose name matches case/separator-insensitively."""
+    target = re.sub(r"[\s_-]+", " ", (name or "").strip()).casefold()
     for proj in list_projects(token):
-        if (proj.get("name") or "").strip().lower() == target:
+        candidate = re.sub(
+            r"[\s_-]+", " ", (proj.get("name") or "").strip()
+        ).casefold()
+        if candidate == target:
             return proj
     return None
 

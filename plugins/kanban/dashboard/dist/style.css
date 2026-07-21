@@ -1493,7 +1493,7 @@
   border: 1px solid rgba(255, 107, 61, 0.3);
 }
 /* ---- Partial failure highlight --------------------------------------- */
-.hermes-kanban-card--failed :where(.hermes-kanban-card-content) {
+.xiaoban-kanban-card--failed :where(.hermes-kanban-card-content) {
   box-shadow: 0 0 0 2px var(--color-destructive, #d14a4a) inset,
               0 0 8px color-mix(in srgb, var(--color-destructive, #d14a4a) 30%, transparent);
 }
@@ -1533,7 +1533,7 @@
   padding-left: 0.5rem;
   border-left: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent);
 }
-.hermes-kanban-bulk-reclaim-first {
+.xiaoban-kanban-bulk-reclaim-first {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
