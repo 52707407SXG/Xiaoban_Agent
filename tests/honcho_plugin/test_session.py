@@ -13,6 +13,16 @@ from plugins.memory.honcho.session import (
 from plugins.memory.honcho import HonchoMemoryProvider
 
 
+def _await_mocked_session_init(provider, expected_manager):
+    """Keep mocked dependencies active until fail-open init is fully ready."""
+    if provider._init_thread:
+        provider._init_thread.join(timeout=3.0)
+        assert not provider._init_thread.is_alive(), "mocked session init did not finish"
+    assert provider._session_initialized is True
+    assert provider._init_error == ""
+    assert provider._manager is expected_manager
+
+
 # ---------------------------------------------------------------------------
 # HonchoSession dataclass
 # ---------------------------------------------------------------------------
@@ -940,6 +950,7 @@ class TestDialecticCadenceDefaults:
              patch("plugins.memory.honcho.session.HonchoSessionManager", return_value=mock_manager), \
              patch("xiaoban_constants.get_xiaoban_home", return_value=MagicMock()):
             provider.initialize(session_id="test-session-001")
+            _await_mocked_session_init(provider, mock_manager)
 
         _settle_prewarm(provider)
         return provider
@@ -1011,6 +1022,7 @@ class TestDialecticDepth:
              patch("plugins.memory.honcho.session.HonchoSessionManager", return_value=mock_manager), \
              patch("xiaoban_constants.get_xiaoban_home", return_value=MagicMock()):
             provider.initialize(session_id="test-session-001")
+            _await_mocked_session_init(provider, mock_manager)
 
         _settle_prewarm(provider)
         return provider
@@ -1173,6 +1185,7 @@ class TestTrivialPromptHeuristic:
              patch("plugins.memory.honcho.session.HonchoSessionManager", return_value=mock_manager), \
              patch("xiaoban_constants.get_xiaoban_home", return_value=MagicMock()):
             provider.initialize(session_id="test-session-trivial")
+            _await_mocked_session_init(provider, mock_manager)
         _settle_prewarm(provider)
         return provider
 
@@ -1235,6 +1248,7 @@ class TestDialecticCadenceAdvancesOnSuccess:
              patch("plugins.memory.honcho.session.HonchoSessionManager", return_value=mock_manager), \
              patch("xiaoban_constants.get_xiaoban_home", return_value=MagicMock()):
             provider.initialize(session_id="test-session-retry")
+            _await_mocked_session_init(provider, mock_manager)
         _settle_prewarm(provider)
         return provider
 
@@ -1319,16 +1333,7 @@ class TestSessionStartDialecticPrewarm:
              patch("plugins.memory.honcho.session.HonchoSessionManager", return_value=mock_manager), \
              patch("xiaoban_constants.get_xiaoban_home", return_value=MagicMock()):
             provider.initialize(session_id="test-prewarm")
-            # initialize() only waits briefly for its fail-open background
-            # setup. Keep the dependency patches active until that setup has
-            # published a ready mocked session; waiting only for the later
-            # prewarm thread leaves a scheduler-dependent race here.
-            if provider._init_thread:
-                provider._init_thread.join(timeout=3.0)
-                assert not provider._init_thread.is_alive(), "mocked session init did not finish"
-            assert provider._session_initialized is True
-            assert provider._init_error == ""
-            assert provider._manager is mock_manager
+            _await_mocked_session_init(provider, mock_manager)
         return provider
 
     def test_prewarm_populates_prefetch_result(self):
@@ -1401,6 +1406,7 @@ class TestDialecticLiveness:
              patch("plugins.memory.honcho.session.HonchoSessionManager", return_value=mock_manager), \
              patch("xiaoban_constants.get_xiaoban_home", return_value=MagicMock()):
             provider.initialize(session_id="test-liveness")
+            _await_mocked_session_init(provider, mock_manager)
         _settle_prewarm(provider)
         return provider
 
@@ -1601,8 +1607,9 @@ class TestDialecticLifecycleSmoke:
              patch("plugins.memory.honcho.session.HonchoSessionManager", return_value=mgr), \
              patch("xiaoban_constants.get_xiaoban_home", return_value=MagicMock()):
             provider.initialize(session_id="smoke-test")
+            _await_mocked_session_init(provider, mgr)
+            self._await_thread(provider)
 
-        self._await_thread(provider)
         with provider._prefetch_lock:
             assert provider._prefetch_result.startswith("prewarm"), \
                 "session-start prewarm must land in _prefetch_result"
@@ -1701,6 +1708,7 @@ class TestReasoningHeuristic:
              patch("plugins.memory.honcho.session.HonchoSessionManager", return_value=mock_manager), \
              patch("xiaoban_constants.get_xiaoban_home", return_value=MagicMock()):
             provider.initialize(session_id="test-heuristic")
+            _await_mocked_session_init(provider, mock_manager)
         _settle_prewarm(provider)
         return provider
 
