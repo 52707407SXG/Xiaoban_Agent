@@ -46,7 +46,7 @@ def _run(*cmd: str, env: dict[str, str] | None = None) -> str:
 
 
 def _check_cli() -> None:
-    expected = "Xiaoban-Agent v"
+    expected = "Xiaoban v"
     assert expected in _run(sys.executable, "-m", "xiaoban.cli", "--version")
     assert expected in _run(sys.executable, "bin/xiaoban", "--version")
     assert expected in _run("./bin/xiaoban", "--version")
@@ -76,8 +76,8 @@ def _check_xiaoban_home_and_user_surfaces() -> None:
         home = Path(tmp) / "state"
         doctor = _run("./bin/xiaoban", "doctor", env={"XIAOBAN_HOME": str(home)})
         assert f"XIAOBAN_HOME: {home}" in doctor
-        assert "~/.xiaoban" not in doctor
-        assert "xiaoban doctor" not in doctor
+        assert "~/.hermes" not in doctor
+        assert "hermes doctor" not in doctor
         assert "Installed entrypoint xiaoban" in doctor
         assert "Default My Stand channels" in doctor
 
