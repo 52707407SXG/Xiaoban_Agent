@@ -1802,6 +1802,14 @@ class TestGeneratedUnitUsesDetectedVenv:
 class TestGeneratedUnitIncludesLocalBin:
     """~/.local/bin must be in PATH so uvx/pipx tools are discoverable."""
 
+    def test_inaccessible_target_user_paths_are_omitted(self, monkeypatch):
+        def inaccessible(_path):
+            raise PermissionError("target home is not traversable")
+
+        monkeypatch.setattr(Path, "exists", inaccessible)
+
+        assert gateway_cli._build_user_local_paths(Path("/root"), []) == []
+
     def test_user_unit_includes_local_bin_in_path(self, monkeypatch):
         home = Path.home()
         monkeypatch.setattr(

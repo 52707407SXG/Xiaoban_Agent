@@ -2277,7 +2277,19 @@ def _build_user_local_paths(home: Path, path_entries: list[str]) -> list[str]:
         str(home / "go" / "bin"),  # Go tools
         str(home / ".npm-global" / "bin"),  # npm global packages
     ]
-    return [p for p in candidates if p not in path_entries and Path(p).exists()]
+    existing: list[str] = []
+    for candidate in candidates:
+        if candidate in path_entries:
+            continue
+        try:
+            if Path(candidate).exists():
+                existing.append(candidate)
+        except OSError:
+            # A non-root installer may generate a unit for a target user whose
+            # home is intentionally not traversable (for example /root).
+            # Optional user-local bins must not block the unit itself.
+            continue
+    return existing
 
 
 def _build_wsl_interop_paths(path_entries: list[str]) -> list[str]:
