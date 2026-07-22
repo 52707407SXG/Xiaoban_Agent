@@ -119,6 +119,8 @@ def test_returned_list_is_a_copy(xiaoban_home_with_config):
 
 def test_cache_key_is_per_config_path(tmp_path, monkeypatch):
     """Two different XIAOBAN_HOMEs keep separate cache entries."""
+    from agent import skill_utils
+
     home_a = tmp_path / "home_a" / ".xiaoban"
     home_a.mkdir(parents=True)
     ext_a = tmp_path / "ext_a"
@@ -136,6 +138,15 @@ def test_cache_key_is_per_config_path(tmp_path, monkeypatch):
     )
 
     _external_dirs_cache_clear()
+    parse_count = 0
+    real_yaml_load = skill_utils.yaml_load
+
+    def counting_yaml_load(text):
+        nonlocal parse_count
+        parse_count += 1
+        return real_yaml_load(text)
+
+    monkeypatch.setattr(skill_utils, "yaml_load", counting_yaml_load)
 
     monkeypatch.setenv("XIAOBAN_HOME", str(home_a))
     assert get_external_skills_dirs() == [ext_a.resolve()]
@@ -146,3 +157,6 @@ def test_cache_key_is_per_config_path(tmp_path, monkeypatch):
     # And switching back still works — both entries coexist in the cache.
     monkeypatch.setenv("XIAOBAN_HOME", str(home_a))
     assert get_external_skills_dirs() == [ext_a.resolve()]
+    monkeypatch.setenv("XIAOBAN_HOME", str(home_b))
+    assert get_external_skills_dirs() == [ext_b.resolve()]
+    assert parse_count == 2

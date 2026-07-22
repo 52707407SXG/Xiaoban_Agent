@@ -143,6 +143,15 @@ skills:
     monkeypatch.setattr(skill_utils, "yaml_load", counting_yaml_load)
 
     assert get_disabled_skill_names() == {"hidden-skill"}
+    import os
+
+    original_stat = config_path.stat()
+    future_mtime_ns = original_stat.st_mtime_ns + 10_000_000_000
+    os.utime(
+        config_path,
+        ns=(original_stat.st_atime_ns, future_mtime_ns),
+    )
+    assert config_path.stat().st_mtime_ns == future_mtime_ns
     assert get_external_skills_dirs() == [external.resolve()]
     assert resolve_skill_config_values([
         {"key": "wiki.path", "description": "Wiki path"}
@@ -151,7 +160,7 @@ skills:
 
 
 def test_skill_config_raw_cache_invalidates_on_config_edit(tmp_path, monkeypatch):
-    """Editing config.yaml should invalidate the shared raw config cache."""
+    """Same-size edits must invalidate even when file timestamps collide."""
     from agent import skill_utils
 
     xiaoban_home = tmp_path / ".xiaoban"
@@ -163,11 +172,83 @@ def test_skill_config_raw_cache_invalidates_on_config_edit(tmp_path, monkeypatch
     skill_utils._external_dirs_cache_clear()
     assert get_disabled_skill_names() == {"old-skill"}
 
+    original_stat = config_path.stat()
     config_path.write_text("skills:\n  disabled: [new-skill]\n", encoding="utf-8")
     import os
-    os.utime(config_path, None)
+
+    os.utime(
+        config_path,
+        ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+    )
+    edited_stat = config_path.stat()
+    assert edited_stat.st_mtime_ns == original_stat.st_mtime_ns
+    assert edited_stat.st_size == original_stat.st_size
 
     assert get_disabled_skill_names() == {"new-skill"}
+
+
+def test_external_dirs_cache_invalidates_on_same_stat_edit(tmp_path, monkeypatch):
+    """External skill dirs must use the same content revision as raw config."""
+    from agent import skill_utils
+
+    xiaoban_home = tmp_path / ".xiaoban"
+    xiaoban_home.mkdir()
+    old_external = tmp_path / "ext-old"
+    new_external = tmp_path / "ext-new"
+    old_external.mkdir()
+    new_external.mkdir()
+    config_path = xiaoban_home / "config.yaml"
+    old_content = f"skills:\n  external_dirs: [{old_external}]\n"
+    new_content = f"skills:\n  external_dirs: [{new_external}]\n"
+    assert len(old_content) == len(new_content)
+    config_path.write_text(old_content, encoding="utf-8")
+
+    monkeypatch.setenv("XIAOBAN_HOME", str(xiaoban_home))
+    skill_utils._external_dirs_cache_clear()
+    assert get_external_skills_dirs() == [old_external.resolve()]
+
+    original_stat = config_path.stat()
+    config_path.write_text(new_content, encoding="utf-8")
+    import os
+
+    os.utime(
+        config_path,
+        ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+    )
+    edited_stat = config_path.stat()
+    assert edited_stat.st_mtime_ns == original_stat.st_mtime_ns
+    assert edited_stat.st_size == original_stat.st_size
+
+    assert get_external_skills_dirs() == [new_external.resolve()]
+
+
+def test_invalid_skill_config_does_not_fall_back_to_cached_values(
+    tmp_path, monkeypatch
+):
+    """An edit-in-progress parse error must fail open, not serve stale config."""
+    from agent import skill_utils
+
+    xiaoban_home = tmp_path / ".xiaoban"
+    xiaoban_home.mkdir()
+    external = tmp_path / "external-skills"
+    external.mkdir()
+    config_path = xiaoban_home / "config.yaml"
+    config_path.write_text(
+        f"skills:\n  disabled: [old-skill]\n  external_dirs: [{external}]\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("XIAOBAN_HOME", str(xiaoban_home))
+    skill_utils._external_dirs_cache_clear()
+    assert get_disabled_skill_names() == {"old-skill"}
+    assert get_external_skills_dirs() == [external.resolve()]
+
+    config_path.write_text("skills: [", encoding="utf-8")
+
+    assert get_disabled_skill_names() == set()
+    assert get_external_skills_dirs() == []
+
+
 def test_iter_skill_index_files_prunes_skill_support_dirs(tmp_path):
     """Archived package SKILL.md files under support dirs are not active skills."""
     real = tmp_path / "umbrella"
