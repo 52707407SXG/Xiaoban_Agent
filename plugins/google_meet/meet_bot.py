@@ -813,8 +813,9 @@ def _looks_like_human_speaker(speaker: str, bot_guest_name: str) -> bool:
     """
     if not speaker or not speaker.strip():
         return False
-    spk = speaker.strip().lower()
-    if spk in {"unknown", "you", bot_guest_name.strip().lower()}:
+    spk = re.sub(r"[\W_]+", "", speaker.casefold())
+    bot_name = re.sub(r"[\W_]+", "", (bot_guest_name or "").casefold())
+    if not spk or spk in {"unknown", "you", bot_name}:
         return False
     return True
 
