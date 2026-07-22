@@ -15,6 +15,7 @@ from plugins.memory.honcho import HonchoMemoryProvider
 
 def _await_mocked_session_init(provider, expected_manager):
     """Keep mocked dependencies active until fail-open init is fully ready."""
+    # This only stabilizes fixture lifetime; production initialization stays fail-open.
     if provider._init_thread:
         provider._init_thread.join(timeout=3.0)
         assert not provider._init_thread.is_alive(), "mocked session init did not finish"
