@@ -60,6 +60,12 @@ pip install -r requirements-dev.txt
 pytest tests/xiaoban
 ```
 
+Windows 用户请使用仓库内的 PowerShell 安装脚本：
+
+```powershell
+.\\scripts\\install.ps1
+```
+
 ## 关键边界
 
 - 不直接读写 My Stand SQLite、WAL、file-storage。
