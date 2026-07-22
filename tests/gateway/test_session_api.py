@@ -125,6 +125,7 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
         request_headers={
             "x-xiaoban-user-id": "ZYJ005",
             "X-Xiaoban-Message-Id": "msg-001",
+            "X-Xiaoban-Toolset-Policy": "mystand-broker-basic",
         },
     )
 
