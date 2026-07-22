@@ -1319,6 +1319,16 @@ class TestSessionStartDialecticPrewarm:
              patch("plugins.memory.honcho.session.HonchoSessionManager", return_value=mock_manager), \
              patch("xiaoban_constants.get_xiaoban_home", return_value=MagicMock()):
             provider.initialize(session_id="test-prewarm")
+            # initialize() only waits briefly for its fail-open background
+            # setup. Keep the dependency patches active until that setup has
+            # published a ready mocked session; waiting only for the later
+            # prewarm thread leaves a scheduler-dependent race here.
+            if provider._init_thread:
+                provider._init_thread.join(timeout=3.0)
+                assert not provider._init_thread.is_alive(), "mocked session init did not finish"
+            assert provider._session_initialized is True
+            assert provider._init_error == ""
+            assert provider._manager is mock_manager
         return provider
 
     def test_prewarm_populates_prefetch_result(self):
