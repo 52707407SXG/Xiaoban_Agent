@@ -21,6 +21,7 @@ POSIX-only: Windows has its own grandchild lifecycle (no shared session,
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import subprocess
 import sys
@@ -61,6 +62,32 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def test_github_failure_annotation_exposes_pytest_node(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    runner_path = repo_root / "scripts" / "run_tests_parallel.py"
+    spec = importlib.util.spec_from_file_location("run_tests_parallel_probe", runner_path)
+    assert spec and spec.loader
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    runner._print_inline_failure(
+        repo_root / "tests" / "example" / "test_probe.py",
+        "1 failed in 0.1s\n"
+        "FAILED tests/example/test_probe.py::test_ci_only - AssertionError: probe\n",
+        repo_root,
+        [],
+    )
+
+    assert (
+        "::error file=tests/example/test_probe.py,title=Pytest file failed::"
+        "tests/example/test_probe.py::test_ci_only"
+    ) in capsys.readouterr().out
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only probe")

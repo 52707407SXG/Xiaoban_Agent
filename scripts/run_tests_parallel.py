@@ -491,6 +491,36 @@ def _print_inline_failure(
     print(f"  ╚╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍╍", flush=True)
     print(flush=True)
 
+    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+        nodes: List[str] = []
+        for line in output.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("FAILED "):
+                node = stripped.removeprefix("FAILED ").split(" - ", 1)[0].strip()
+            elif stripped.startswith("ERROR "):
+                node = stripped.removeprefix("ERROR ").split(" - ", 1)[0].strip()
+            else:
+                continue
+            if node and node not in nodes:
+                nodes.append(node)
+
+        message = ", ".join(nodes[:8]) or f"pytest exited non-zero in {rel}"
+        if len(nodes) > 8:
+            message += f", plus {len(nodes) - 8} more"
+
+        def escape_command(value: str, *, property_value: bool = False) -> str:
+            escaped = value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+            if property_value:
+                escaped = escaped.replace(":", "%3A").replace(",", "%2C")
+            return escaped
+
+        annotation_file = escape_command(rel, property_value=True)
+        annotation_message = escape_command(message)
+        print(
+            f"::error file={annotation_file},title=Pytest file failed::{annotation_message}",
+            flush=True,
+        )
+
 
 def _load_durations(repo_root: Path) -> dict[str, float]:
     """Read the duration cache from the repo root.
