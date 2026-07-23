@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -60,12 +61,18 @@ MYSTAND_AUTHORIZATION_SCHEMA = {
         "commit supported My Stand writes. Never read a database or local file "
         "instead.\n\n"
         "READS: list returns only the current user's authorization index. "
-        "After mystand_resource_index finds a resource, resolve it with the exact "
-        "resource_uid; the server exchanges that opaque node for the current "
-        "user's Xiaoban-bound default AUTH. Never pass resource_uid, source_id, "
+        "For a content question that names a resource, prefer one resolve call "
+        "with resource_query plus query; resource_query must reuse the resource-name "
+        "wording present in the current trusted user message. This bridge silently searches the current "
+        "user's resource index, requires one unambiguous match, and then resolves "
+        "its Xiaoban-bound default AUTH. If mystand_resource_index already found a "
+        "resource, resolve it with the exact resource_uid. Never pass resource_uid, source_id, "
         "KGREF, OUT, or module IDs as authorization_id. Direct AUTH/OUT resolve "
         "remains supported and is re-checked before content is returned. A feature "
-        "explanation does not need this tool; real user data does.\n\n"
+        "explanation does not need this tool; real user data does. Resource discovery, "
+        "index maps, AUTH IDs, internal queries, retries, truncation, and tool output "
+        "are private backend details: never narrate them to the user; answer naturally "
+        "from the final authorized result.\n\n"
         "WRITES: OUT can never write. Only the fixed allowlisted actions are supported. "
         "First call preview_write with an internal AUTH whose canWrite is true, "
         "the target's current expected_version, and a fresh idempotency_key. "
@@ -93,9 +100,22 @@ MYSTAND_AUTHORIZATION_SCHEMA = {
                 "type": "string",
                 "description": "Exact opaque resourceUid returned by mystand_resource_index. Preferred for resolve after an index lookup; never reinterpret it as authorization_id.",
             },
+            "resource_query": {
+                "type": "string",
+                "description": "Safe resource-title search text for one-call resolve when the user names a resource but no resource_uid is known.",
+            },
+            "module_id": {
+                "type": "string",
+                "description": "Optional module filter used only with resource_query, such as property-dev.",
+            },
             "query": {
                 "type": "string",
-                "description": "Optional list search text.",
+                "description": (
+                    "List: optional authorization-title search. Resolve: the user's exact "
+                    "question or locator text so the authorized source can return only the "
+                    "matching row, section, or node. If omitted on resolve, the current "
+                    "trusted user message is used automatically."
+                ),
             },
             "source_type": {
                 "type": "string",
@@ -284,6 +304,302 @@ def _require_text(args: dict, key: str) -> str:
     return value
 
 
+def _strip_resource_title_suffix(value: str) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    folded = text.casefold()
+    if folded.endswith("楼盘md"):
+        return text[: -len("楼盘md")].strip()
+    for suffix in ("markdown", "md"):
+        if not folded.endswith(suffix):
+            continue
+        prefix = text[: -len(suffix)]
+        if prefix and (prefix[-1].isspace() or "\u4e00" <= prefix[-1] <= "\u9fff"):
+            return prefix.strip()
+    return text
+
+
+def _resource_title_key(value: str) -> str:
+    text = _strip_resource_title_suffix(value).casefold()
+    text = re.sub(r"[\s\-_—–/／·,，.。()（）【】\[\]]+", "", text)
+    return text
+
+
+def _resource_search_text(value: str) -> str:
+    return _strip_resource_title_suffix(value)
+
+
+def _resource_query_is_specific(value: str) -> bool:
+    key = _resource_title_key(value)
+    if any("\u4e00" <= char <= "\u9fff" for char in key):
+        return len(key) >= 2
+    return len(key) >= 3
+
+
+def _resource_query_match_occurrences(
+    resource_query: str,
+    user_message: str,
+) -> list[tuple[int, bool]]:
+    needle = unicodedata.normalize("NFKC", str(resource_query or "")).casefold().strip()
+    haystack = unicodedata.normalize("NFKC", str(user_message or "")).casefold()
+    if not needle or not haystack:
+        return []
+    location_or_fact = (
+        r"(?:"
+        r"[零〇○一二两三四五六七八九十百\d]{1,4}\s*"
+        r"(?:栋|幢|座|号楼|单元)"
+        r"|查|查看|查询|找|读取|看看|看一下"
+        r"|业主|联系人|姓名|名字|电话|手机|联系方式"
+        r"|车位|停车|面积|建面|价格|报价|总价|单价|租金"
+        r"|内容|资料|情况|信息|有没有|有无|是否|这套|房源|房子"
+        r")"
+    )
+    connected_fact = rf"(?:的|里面|里|中)(?:的)?{location_or_fact}"
+    occurrences = []
+    offset = 0
+    while True:
+        index = haystack.find(needle, offset)
+        if index < 0:
+            return occurrences
+        prefix = haystack[:index].rstrip()
+        suffix = haystack[index + len(needle):].lstrip()
+        previous = prefix[-1:] if prefix else ""
+        before_ok = (
+            not prefix
+            or not (previous.isalnum() or "\u4e00" <= previous <= "\u9fff")
+            or re.search(
+                r"(?:请|麻烦|帮我|帮忙)?"
+                r"(?:查一下|查|查看|查询|搜索|找|打开|读取|看看|看一下)"
+                r"(?:一下)?$",
+                prefix,
+            )
+            is not None
+            or prefix.endswith("楼盘md")
+        )
+        after_ok = (
+            not suffix
+            or not (suffix[0].isalnum() or "\u4e00" <= suffix[0] <= "\u9fff")
+            or re.match(rf"^{location_or_fact}", suffix) is not None
+            or re.match(rf"^{connected_fact}", suffix) is not None
+            or re.match(
+                r"^(?:楼盘)?\s*(?:md|markdown)"
+                r"(?=$|[\s,，。；;])",
+                suffix,
+            )
+            is not None
+            or re.match(
+                rf"^(?:楼盘)?\s*(?:md|markdown)\s*{connected_fact}",
+                suffix,
+            )
+            is not None
+            or re.match(
+                r"^(?:楼盘)?\s*(?:md|markdown)\s*"
+                r"[零〇○一二两三四五六七八九十百\d]{1,4}\s*"
+                r"(?:栋|幢|座|号楼|单元)",
+                suffix,
+            )
+            is not None
+            or re.match(
+                r"^(?:[零〇○一二两三四五六七八九十百\d]{1,4})\s*(?:栋|幢|座|号楼|单元)",
+                suffix,
+            )
+            is not None
+        )
+        if before_ok and after_ok:
+            clause_start = max(
+                (
+                    haystack.rfind(separator, 0, index)
+                    for separator in ("，", ",", "。", "；", ";", "\n")
+                ),
+                default=-1,
+            )
+            local_prefix = haystack[clause_start + 1:index]
+            negated_prefix = re.search(
+                r"(?:不要|别|不查|不看|不找|不打开|不读取|排除|忽略|不是|并非)"
+                r"(?:\s|帮我|帮忙|再|先|去|给我|查一下|查|查看|查询|搜索|找|"
+                r"打开|读取|看看|看一下)*$",
+                local_prefix,
+            )
+            negated_suffix = re.match(r"^\s*(?:以外|之外|除外)", suffix)
+            occurrences.append(
+                (index, negated_prefix is not None or negated_suffix is not None)
+            )
+        offset = index + 1
+
+
+def _resource_query_latest_affirmative_index(
+    resource_query: str,
+    user_message: str,
+) -> int | None:
+    occurrences = _resource_query_match_occurrences(resource_query, user_message)
+    if not occurrences or occurrences[-1][1]:
+        return None
+    latest_index = occurrences[-1][0]
+    normalized_title = unicodedata.normalize(
+        "NFKC",
+        str(resource_query or ""),
+    ).casefold().strip()
+    normalized_message = unicodedata.normalize(
+        "NFKC",
+        str(user_message or ""),
+    ).casefold()
+    trailing_text = normalized_message[latest_index + len(normalized_title):]
+    deictic = r"(?:这|那|该|它|刚才|之前|前面|后面|前者|后者|最后|最终|前|后)"
+    cancellation = r"(?:不|别|甭|无需|无须|排除|忽略|取消|去掉)"
+    deictic_cancellation = (
+        re.search(
+            rf"{deictic}[^，,。；;\n]{{0,20}}{cancellation}",
+            trailing_text,
+        )
+        or re.search(
+            rf"{cancellation}[^，,。；;\n]{{0,20}}{deictic}",
+            trailing_text,
+        )
+    )
+    if deictic_cancellation is not None:
+        return None
+    return latest_index
+
+
+def _resource_query_matches_user_phrase(resource_query: str, user_message: str) -> bool:
+    return _resource_query_latest_affirmative_index(
+        resource_query,
+        user_message,
+    ) is not None
+
+
+def _resolve_resource_query(
+    resource_query: str,
+    module_id: str,
+    session: dict,
+    trusted_user_message: str,
+) -> tuple[str, str]:
+    query_key = _resource_title_key(resource_query)
+    search_text = _resource_search_text(resource_query)
+    if not query_key or not search_text:
+        return "", _error(
+            "资料名称无效。",
+            code="resource_query_not_found",
+            status=404,
+        )
+    items = []
+    cursor = ""
+    has_more = False
+    for _page in range(5):
+        raw = _post_internal(
+            "/api/xiaoban/internal/resource-index",
+            {
+                "operation": "list_resources",
+                "moduleId": module_id[:80],
+                "query": search_text[:240],
+                "status": "all",
+                "cursor": cursor,
+                "limit": 100,
+            },
+            session=session,
+        )
+        try:
+            result = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return "", _error(
+                "My Stand 资料定位结果无效。",
+                code="resource_query_failed",
+                status=502,
+            )
+        if not result.get("ok"):
+            return "", raw
+        items.extend(
+            item for item in result.get("items", []) if isinstance(item, dict)
+        )
+        has_more = result.get("hasMore") is True
+        if not has_more:
+            break
+        next_cursor = str(result.get("nextCursor") or "").strip()
+        if not next_cursor or next_cursor == cursor:
+            return "", _error(
+                "My Stand 资料索引分页结果无效。",
+                code="resource_query_failed",
+                status=502,
+            )
+        cursor = next_cursor
+    raw_partial = [
+        item
+        for item in items
+        if query_key in _resource_title_key(item.get("safeLabel", ""))
+    ]
+    raw_candidates = raw_partial
+    verified_candidates = []
+    for item in raw_candidates:
+        match_index = _resource_query_latest_affirmative_index(
+            _strip_resource_title_suffix(item.get("safeLabel", "")),
+            trusted_user_message,
+        )
+        if match_index is not None:
+            verified_candidates.append((item, match_index))
+    candidates = []
+    if verified_candidates:
+        latest_mention = max(match_index for _item, match_index in verified_candidates)
+        latest_candidates = [
+            item
+            for item, match_index in verified_candidates
+            if match_index == latest_mention
+        ]
+        most_specific = max(
+            len(_resource_title_key(item.get("safeLabel", "")))
+            for item in latest_candidates
+        )
+        candidates = [
+            item
+            for item in latest_candidates
+            if len(_resource_title_key(item.get("safeLabel", ""))) == most_specific
+        ]
+    if not candidates:
+        if raw_candidates:
+            labels = [
+                str(item.get("safeLabel") or "")[:120]
+                for item in raw_candidates[:8]
+            ]
+            return "", _json_result(
+                {
+                    "ok": False,
+                    "status": 409,
+                    "code": "resource_query_ambiguous",
+                    "error": "资料名称还不够完整，请按列表补充完整名称。",
+                    "candidates": labels,
+                }
+            )
+        return "", _error(
+            "没有找到名称匹配的可用资料。",
+            code="resource_query_not_found",
+            status=404,
+        )
+    if len(candidates) != 1 or has_more:
+        labels = [str(item.get("safeLabel") or "")[:120] for item in candidates[:8]]
+        return "", _json_result(
+            {
+                "ok": False,
+                "status": 409,
+                "code": "resource_query_ambiguous",
+                "error": "资料名称对应多项结果，请补充更完整的资料名称。",
+                "candidates": labels,
+            }
+        )
+    selected = candidates[0]
+    if selected.get("canRead") is not True:
+        return "", _error(
+            "这份资料当前未授权给小伴读取。",
+            code="resource_query_not_readable",
+            status=403,
+        )
+    resource_uid = str(selected.get("resourceUid") or "").strip()
+    if not resource_uid:
+        return "", _error(
+            "资料索引缺少可解析节点。",
+            code="resource_query_failed",
+            status=502,
+        )
+    return resource_uid, ""
+
+
 def mystand_authorization_tool_handler(args, **_kwargs):
     operation = str(args.get("operation") or "").strip()
     if operation not in _OPERATIONS:
@@ -312,8 +628,43 @@ def mystand_authorization_tool_handler(args, **_kwargs):
         elif operation == "resolve":
             resource_uid = str(args.get("resource_uid") or "").strip()
             authorization_id = str(args.get("authorization_id") or "").strip()
+            resource_query = str(args.get("resource_query") or "").strip()
+            trusted_user_message = get_session_user_message().strip()
+            if not resource_uid and not authorization_id and not resource_query:
+                raise ValueError("缺少 resource_uid、resource_query 或 authorization_id")
             if not resource_uid and not authorization_id:
-                raise ValueError("缺少 resource_uid 或 authorization_id")
+                if not trusted_user_message:
+                    return _error(
+                        "当前用户消息没有可验证的资料名称。",
+                        code="trusted_resource_query_required",
+                        status=409,
+                    )
+                if not _resource_query_is_specific(resource_query):
+                    return _error(
+                        "资料名称过短，不能安全定位。",
+                        code="resource_query_too_short",
+                        status=409,
+                    )
+                if not _resource_query_matches_user_phrase(
+                    resource_query,
+                    trusted_user_message,
+                ):
+                    return _error(
+                        "资料名称必须直接来自用户当前消息。",
+                        code="resource_query_not_in_user_message",
+                        status=409,
+                    )
+                resource_uid, lookup_error = _resolve_resource_query(
+                    resource_query,
+                    str(args.get("module_id") or "").strip(),
+                    session,
+                    trusted_user_message,
+                )
+                if lookup_error:
+                    return lookup_error
+            query = trusted_user_message
+            if not query:
+                query = str(args.get("query") or "").strip()
             body.update(
                 {
                     **(
@@ -326,6 +677,7 @@ def mystand_authorization_tool_handler(args, **_kwargs):
                         if args.get("media_mode") == "include"
                         else "summary"
                     ),
+                    "query": query[:1200],
                 }
             )
         elif operation == "preview_write":

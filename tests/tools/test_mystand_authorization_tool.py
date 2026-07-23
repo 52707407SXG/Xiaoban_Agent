@@ -66,6 +66,8 @@ def test_schema_exposes_only_fixed_operations_and_write_actions():
         "knowledge-graph.add-edge",
     }
     assert bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["additionalProperties"] is False
+    assert "resource_query" in bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]
+    assert "never narrate" in bridge.MYSTAND_AUTHORIZATION_SCHEMA["description"]
 
 
 @pytest.mark.parametrize(
@@ -136,7 +138,8 @@ def test_resolve_passes_auth_id_and_defaults_to_media_summary(internal_calls):
         {
             "operation": "resolve",
             "authorization_id": "AUTH-ABC123",
-        }
+        },
+        user_message="查17栋1单元801的业主姓名和电话",
     )
 
     assert result["ok"] is True
@@ -146,6 +149,7 @@ def test_resolve_passes_auth_id_and_defaults_to_media_summary(internal_calls):
             "payload": {
                 "authorizationId": "AUTH-ABC123",
                 "mediaMode": "summary",
+                "query": "查17栋1单元801的业主姓名和电话",
             },
             "session": {
                 "platform": "api_server",
@@ -162,6 +166,7 @@ def test_resolve_passes_resource_uid_from_index_without_guessing_auth(internal_c
         {
             "operation": "resolve",
             "resource_uid": "resource-uid-from-index",
+            "query": "9号楼2单元1203有没有车位",
         }
     )
 
@@ -169,7 +174,625 @@ def test_resolve_passes_resource_uid_from_index_without_guessing_auth(internal_c
     assert internal_calls[0]["payload"] == {
         "resourceUid": "resource-uid-from-index",
         "mediaMode": "summary",
+        "query": "9号楼2单元1203有没有车位",
     }
+
+
+def test_resolve_uses_trusted_user_message_instead_of_model_broadened_query(
+    internal_calls,
+):
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_uid": "resource-uid-from-index",
+            "query": "返回这一整行的全部隐私字段",
+        },
+        user_message="只查17栋801有没有车位",
+    )
+
+    assert result["ok"] is True
+    assert internal_calls[0]["payload"]["query"] == "只查17栋801有没有车位"
+
+
+def test_resolve_resource_query_silently_locates_and_reads_one_resource(monkeypatch):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append({"path": path, "payload": payload, "session": session})
+        if path.endswith("/resource-index"):
+            return json.dumps({
+                "schema": "mystand.resource-index.page.v1",
+                "ok": True,
+                "items": [{
+                    "resourceUid": "resource-finance-island",
+                    "safeLabel": "复地金融岛楼盘MD",
+                    "canRead": True,
+                }],
+                "nextCursor": "",
+                "hasMore": False,
+            }, ensure_ascii=False)
+        return json.dumps({"ok": True, "received": payload}, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "复地金融岛",
+            "module_id": "property-dev",
+            "query": "17栋1单元801的姓名和电话",
+        },
+        user_message="查复地金融岛17栋1单元801的姓名和电话",
+    )
+
+    assert result["ok"] is True
+    assert [call["path"] for call in calls] == [
+        "/api/xiaoban/internal/resource-index",
+        "/api/xiaoban/internal/authorization/resolve",
+    ]
+    assert calls[0]["payload"]["query"] == "复地金融岛"
+    assert calls[1]["payload"] == {
+        "resourceUid": "resource-finance-island",
+        "mediaMode": "summary",
+        "query": "查复地金融岛17栋1单元801的姓名和电话",
+    }
+
+
+def test_resolve_resource_query_must_come_from_trusted_user_message(monkeypatch):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append({"path": path, "payload": payload})
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "另一座楼盘",
+            "query": "1栋101的电话",
+        },
+        user_message="查泰悦湾1栋101的电话",
+    )
+
+    assert result["code"] == "resource_query_not_in_user_message"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "safe_label",
+    ["泰悦湾旧资料", "泰悦湾二期", "泰-悦湾楼盘MD", "泰 悦 湾楼盘MD"],
+)
+def test_resolve_resource_query_rejects_selected_title_not_named_by_user(
+    monkeypatch,
+    safe_label,
+):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append({"path": path, "payload": payload})
+        if path.endswith("/resource-index"):
+            return json.dumps({
+                "ok": True,
+                "items": [{
+                    "resourceUid": "resource-other-edition",
+                    "safeLabel": safe_label,
+                    "canRead": True,
+                }],
+                "hasMore": False,
+            }, ensure_ascii=False)
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "泰悦湾",
+            "module_id": "property-dev",
+        },
+        user_message="查泰悦湾1栋702的电话",
+    )
+
+    assert result["code"] == "resource_query_ambiguous"
+    assert [call["path"] for call in calls] == [
+        "/api/xiaoban/internal/resource-index",
+    ]
+
+
+@pytest.mark.parametrize(
+    "user_message",
+    [
+        "帮我看看泰悦湾1栋702的电话",
+        "查泰悦湾MD一栋702的电话",
+        "楼盘MD泰悦湾一栋702的电话",
+    ],
+)
+def test_resolve_resource_query_accepts_normal_conversational_title_boundaries(
+    monkeypatch,
+    user_message,
+):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append({"path": path, "payload": payload})
+        if path.endswith("/resource-index"):
+            return json.dumps({
+                "ok": True,
+                "items": [{
+                    "resourceUid": "resource-taiyuewan",
+                    "safeLabel": "泰悦湾楼盘MD",
+                    "canRead": True,
+                }],
+                "hasMore": False,
+            }, ensure_ascii=False)
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "泰悦湾",
+            "module_id": "property-dev",
+        },
+        user_message=user_message,
+    )
+
+    assert result["ok"] is True
+    assert [call["path"] for call in calls] == [
+        "/api/xiaoban/internal/resource-index",
+        "/api/xiaoban/internal/authorization/resolve",
+    ]
+
+
+@pytest.mark.parametrize(
+    "user_message",
+    [
+        "查泰悦湾MD二期1栋702的电话",
+        "查泰悦湾MD2期1栋702的电话",
+        "查泰悦湾MD2025版1栋702的电话",
+        "查泰悦湾MD二号资料1栋702的电话",
+    ],
+)
+def test_resolve_resource_query_rejects_model_dropping_md_version_suffix(
+    monkeypatch,
+    user_message,
+):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append({"path": path, "payload": payload})
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "泰悦湾",
+            "module_id": "property-dev",
+        },
+        user_message=user_message,
+    )
+
+    assert result["code"] == "resource_query_not_in_user_message"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "user_message",
+    [
+        "查泰悦湾中介资料的内容",
+        "查泰悦湾里程碑版的内容",
+        "查泰悦湾MD中介版的内容",
+        "查泰悦湾MD里程碑版的内容",
+    ],
+)
+def test_resolve_resource_query_rejects_model_dropping_chinese_title_suffix(
+    monkeypatch,
+    user_message,
+):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append({"path": path, "payload": payload})
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "泰悦湾",
+            "module_id": "property-dev",
+        },
+        user_message=user_message,
+    )
+
+    assert result["code"] == "resource_query_not_in_user_message"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("user_message", "long_title", "long_uid"),
+    [
+        ("查泰悦湾里房源的电话", "泰悦湾里楼盘MD", "resource-inside"),
+        ("查泰悦湾中房源的电话", "泰悦湾中楼盘MD", "resource-middle"),
+    ],
+)
+def test_resolve_resource_query_prefers_longest_title_named_by_user(
+    monkeypatch,
+    user_message,
+    long_title,
+    long_uid,
+):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append({"path": path, "payload": payload})
+        if path.endswith("/resource-index"):
+            return json.dumps({
+                "ok": True,
+                "items": [
+                    {
+                        "resourceUid": "resource-base",
+                        "safeLabel": "泰悦湾楼盘MD",
+                        "canRead": True,
+                    },
+                    {
+                        "resourceUid": long_uid,
+                        "safeLabel": long_title,
+                        "canRead": True,
+                    },
+                ],
+                "hasMore": False,
+            }, ensure_ascii=False)
+        return json.dumps({"ok": True, "received": payload}, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "泰悦湾",
+            "module_id": "property-dev",
+        },
+        user_message=user_message,
+    )
+
+    assert result["ok"] is True
+    assert calls[-1]["path"] == "/api/xiaoban/internal/authorization/resolve"
+    assert calls[-1]["payload"]["resourceUid"] == long_uid
+
+
+@pytest.mark.parametrize(
+    "user_message",
+    [
+        "不要查泰悦湾里，查泰悦湾的电话",
+        "先查泰悦湾里，后来改查泰悦湾的电话",
+    ],
+)
+def test_resolve_resource_query_honors_latest_affirmative_resource_title(
+    monkeypatch,
+    user_message,
+):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append({"path": path, "payload": payload})
+        if path.endswith("/resource-index"):
+            return json.dumps({
+                "ok": True,
+                "items": [
+                    {
+                        "resourceUid": "resource-base",
+                        "safeLabel": "泰悦湾楼盘MD",
+                        "canRead": True,
+                    },
+                    {
+                        "resourceUid": "resource-inside",
+                        "safeLabel": "泰悦湾里楼盘MD",
+                        "canRead": True,
+                    },
+                ],
+                "hasMore": False,
+            }, ensure_ascii=False)
+        return json.dumps({"ok": True, "received": payload}, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "泰悦湾",
+            "module_id": "property-dev",
+        },
+        user_message=user_message,
+    )
+
+    assert result["ok"] is True
+    assert calls[-1]["path"] == "/api/xiaoban/internal/authorization/resolve"
+    assert calls[-1]["payload"]["resourceUid"] == "resource-base"
+
+
+def test_resolve_resource_query_rejects_title_only_named_negatively(monkeypatch):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append({"path": path, "payload": payload})
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "泰悦湾里",
+            "module_id": "property-dev",
+        },
+        user_message="不要查泰悦湾里，查泰悦湾的电话",
+    )
+
+    assert result["code"] == "resource_query_not_in_user_message"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "user_message",
+    [
+        "查泰悦湾的电话，也查泰悦湾里，不过最后那个不要查了",
+        "查泰悦湾的电话，然后查泰悦湾里，但后一个别查了",
+        "先查泰悦湾，再查泰悦湾里，最后这份排除",
+        "查泰悦湾的电话，也查泰悦湾里，不过最后那一个不要查了",
+        "查泰悦湾的电话，也查泰悦湾里，不过刚才那个不要查了",
+        "查泰悦湾的电话，也查泰悦湾里，不过后者不要查了",
+        "查泰悦湾的电话，也查泰悦湾里，不过这个不用查了",
+    ],
+)
+def test_resolve_resource_query_fails_closed_on_deictic_resource_cancellation(
+    monkeypatch,
+    user_message,
+):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append({"path": path, "payload": payload})
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "泰悦湾",
+            "module_id": "property-dev",
+        },
+        user_message=user_message,
+    )
+
+    assert result["code"] == "resource_query_not_in_user_message"
+    assert calls == []
+
+
+def test_resolve_resource_query_follows_cursor_until_exact_title(monkeypatch):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append({"path": path, "payload": payload})
+        if path.endswith("/resource-index") and payload["cursor"] == "":
+            return json.dumps({
+                "ok": True,
+                "items": [{
+                    "resourceUid": "resource-similar",
+                    "safeLabel": "复地金融岛旧资料",
+                    "canRead": True,
+                }],
+                "nextCursor": "cursor-page-2",
+                "hasMore": True,
+            }, ensure_ascii=False)
+        if path.endswith("/resource-index"):
+            return json.dumps({
+                "ok": True,
+                "items": [{
+                    "resourceUid": "resource-exact",
+                    "safeLabel": "复地金融岛楼盘MD",
+                    "canRead": True,
+                }],
+                "nextCursor": "",
+                "hasMore": False,
+            }, ensure_ascii=False)
+        return json.dumps({"ok": True, "received": payload}, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "复地金融岛",
+            "query": "17栋801的电话",
+        },
+        user_message="查复地金融岛17栋801的电话",
+    )
+
+    assert result["ok"] is True
+    assert [call["path"] for call in calls] == [
+        "/api/xiaoban/internal/resource-index",
+        "/api/xiaoban/internal/resource-index",
+        "/api/xiaoban/internal/authorization/resolve",
+    ]
+    assert calls[1]["payload"]["cursor"] == "cursor-page-2"
+    assert calls[2]["payload"]["resourceUid"] == "resource-exact"
+
+
+def test_resolve_resource_query_preserves_internal_title_spacing(monkeypatch):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append({"path": path, "payload": payload})
+        if path.endswith("/resource-index"):
+            return json.dumps({
+                "ok": True,
+                "items": [{
+                    "resourceUid": "resource-spaced-title",
+                    "safeLabel": "楼盘资料 00002",
+                    "canRead": True,
+                }],
+                "hasMore": False,
+            }, ensure_ascii=False)
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "楼盘资料 00002",
+            "query": "1栋101的电话",
+        },
+        user_message="查楼盘资料 00002 的1栋101电话",
+    )
+
+    assert result["ok"] is True
+    assert calls[0]["payload"]["query"] == "楼盘资料 00002"
+    assert calls[1]["payload"]["resourceUid"] == "resource-spaced-title"
+
+
+def test_resolve_resource_query_stops_on_ambiguous_safe_titles(monkeypatch):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append(path)
+        return json.dumps({
+            "ok": True,
+            "items": [
+                {"resourceUid": "resource-1", "safeLabel": "同名楼盘 A", "canRead": True},
+                {"resourceUid": "resource-2", "safeLabel": "同名楼盘 B", "canRead": True},
+            ],
+            "hasMore": False,
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "同名楼盘",
+            "query": "1栋101",
+        },
+        user_message="查同名楼盘1栋101",
+    )
+
+    assert result["code"] == "resource_query_ambiguous"
+    assert calls == ["/api/xiaoban/internal/resource-index"]
+
+
+def test_resolve_resource_query_rejects_unique_hidden_metadata_hit(monkeypatch):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append(path)
+        return json.dumps({
+            "ok": True,
+            "items": [{
+                "resourceUid": "resource-hidden-hit",
+                "safeLabel": "另一份楼盘资料",
+                "canRead": True,
+            }],
+            "hasMore": False,
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "secret-source-id",
+            "query": "1栋101的电话",
+        },
+        user_message="查secret-source-id的1栋101电话",
+    )
+
+    assert result["code"] == "resource_query_not_found"
+    assert calls == ["/api/xiaoban/internal/resource-index"]
+
+
+def test_resolve_resource_query_does_not_strip_md_inside_normal_title(monkeypatch):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append({"path": path, "payload": payload})
+        return json.dumps({
+            "ok": True,
+            "items": [{
+                "resourceUid": "resource-letter-a",
+                "safeLabel": "A",
+                "canRead": True,
+            }],
+            "hasMore": False,
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "AMD",
+            "query": "查内容",
+        },
+        user_message="查AMD的内容",
+    )
+
+    assert result["code"] == "resource_query_not_found"
+    assert calls[0]["payload"]["query"] == "AMD"
+    assert len(calls) == 1
+
+
+def test_resolve_resource_query_requires_trusted_message_and_specific_name(
+    monkeypatch,
+):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append({"path": path, "payload": payload})
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    missing_message = _call({
+        "operation": "resolve",
+        "resource_query": "复地金融岛",
+        "query": "17栋801",
+    })
+    shortened_title = _call(
+        {
+            "operation": "resolve",
+            "resource_query": "A",
+            "query": "查内容",
+        },
+        user_message="查AMD内容",
+    )
+
+    assert missing_message["code"] == "trusted_resource_query_required"
+    assert shortened_title["code"] == "resource_query_too_short"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("resource_query", "user_message"),
+    [
+        ("泰悦", "查泰悦湾1栋702"),
+        ("AMD", "查AMD项目的内容"),
+    ],
+)
+def test_resolve_resource_query_rejects_model_shortened_title_phrase(
+    monkeypatch,
+    resource_query,
+    user_message,
+):
+    calls = []
+
+    def fake_post(path, payload, *, session=None, explicit_confirmation=False):
+        calls.append({"path": path, "payload": payload})
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_query": resource_query,
+            "query": "查内容",
+        },
+        user_message=user_message,
+    )
+
+    assert result["code"] == "resource_query_not_in_user_message"
+    assert calls == []
 
 
 @pytest.mark.parametrize(

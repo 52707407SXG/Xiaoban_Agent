@@ -3,7 +3,7 @@
   "contract": "mystand.resource-index-tool.v1",
   "tool": {
     "name": "mystand_resource_index",
-    "description": "Read the current My Stand user's server-filtered resource index. Use it only for real My Stand resource discovery. It never returns business content or raw AUTH values. Paginate with next_cursor. Real content reads and all writes still require mystand_authorization; never bypass the index, authorization wall, or database boundary.",
+    "description": "Read the current My Stand user's server-filtered resource index. Use it only to browse or disambiguate real My Stand resources; for a named resource content question, prefer one mystand_authorization resolve call with resource_query and query. This index never returns business content or raw AUTH values. Paginate with next_cursor. Resource discovery, index-map traversal, AUTH IDs, retries, and tool output are private backend details: never narrate them to the user. Real content reads and all writes still require mystand_authorization; never bypass the index, authorization wall, or database boundary.",
     "parameters": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -14,6 +14,11 @@
         },
         "module_id": {
           "maxLength": 80,
+          "type": "string"
+        },
+        "query": {
+          "description": "Optional safe-title search text for locating one resource before authorization resolve.",
+          "maxLength": 240,
           "type": "string"
         },
         "status": {

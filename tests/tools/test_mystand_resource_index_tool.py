@@ -19,6 +19,7 @@ def test_schema_is_read_only_and_cannot_accept_owner():
     assert parameters["properties"]["operation"]["const"] == "list_resources"
     assert "owner_user" not in parameters["properties"]
     assert parameters["additionalProperties"] is False
+    assert "never narrate" in bridge.MYSTAND_RESOURCE_INDEX_SCHEMA["description"]
 
 
 def test_current_session_identity_is_the_only_owner_source(monkeypatch):
@@ -32,6 +33,7 @@ def test_current_session_identity_is_the_only_owner_source(monkeypatch):
     result = _call({
         "operation": "list_resources",
         "module_id": "property-notes",
+        "query": "城南一号",
         "status": "all",
         "cursor": "cursor-1",
         "limit": 20,
@@ -42,6 +44,7 @@ def test_current_session_identity_is_the_only_owner_source(monkeypatch):
     assert calls == [({
         "operation": "list_resources",
         "moduleId": "property-notes",
+        "query": "城南一号",
         "status": "all",
         "cursor": "cursor-1",
         "limit": 20,

@@ -140,6 +140,7 @@ def mystand_resource_index_tool_handler(args, **_kwargs):
     return _post_internal({
         "operation": "list_resources",
         "moduleId": str(args.get("module_id") or "").strip()[:80],
+        "query": str(args.get("query") or "").strip()[:240],
         "status": status,
         "cursor": str(args.get("cursor") or "").strip()[:800],
         "limit": limit,
