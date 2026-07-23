@@ -157,6 +157,20 @@ def test_resolve_passes_auth_id_and_defaults_to_media_summary(internal_calls):
         }
     ]
 
+def test_resolve_passes_resource_uid_from_index_without_guessing_auth(internal_calls):
+    result = _call(
+        {
+            "operation": "resolve",
+            "resource_uid": "resource-uid-from-index",
+        }
+    )
+
+    assert result["ok"] is True
+    assert internal_calls[0]["payload"] == {
+        "resourceUid": "resource-uid-from-index",
+        "mediaMode": "summary",
+    }
+
 
 @pytest.mark.parametrize(
     ("message_id", "session_id"),

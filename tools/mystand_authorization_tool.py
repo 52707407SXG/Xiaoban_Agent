@@ -60,9 +60,12 @@ MYSTAND_AUTHORIZATION_SCHEMA = {
         "commit supported My Stand writes. Never read a database or local file "
         "instead.\n\n"
         "READS: list returns only the current user's authorization index. "
-        "resolve re-checks the supplied AUTH/OUT permission before returning "
-        "content. A feature explanation does not need this tool; real user data "
-        "does.\n\n"
+        "After mystand_resource_index finds a resource, resolve it with the exact "
+        "resource_uid; the server exchanges that opaque node for the current "
+        "user's Xiaoban-bound default AUTH. Never pass resource_uid, source_id, "
+        "KGREF, OUT, or module IDs as authorization_id. Direct AUTH/OUT resolve "
+        "remains supported and is re-checked before content is returned. A feature "
+        "explanation does not need this tool; real user data does.\n\n"
         "WRITES: OUT can never write. Only the fixed allowlisted actions are supported. "
         "First call preview_write with an internal AUTH whose canWrite is true, "
         "the target's current expected_version, and a fresh idempotency_key. "
@@ -85,6 +88,10 @@ MYSTAND_AUTHORIZATION_SCHEMA = {
             "authorization_id": {
                 "type": "string",
                 "description": "AUTH-... for internal read/write, or OUT-... for read-only resolve. OUT is rejected for every write.",
+            },
+            "resource_uid": {
+                "type": "string",
+                "description": "Exact opaque resourceUid returned by mystand_resource_index. Preferred for resolve after an index lookup; never reinterpret it as authorization_id.",
             },
             "query": {
                 "type": "string",
@@ -303,10 +310,24 @@ def mystand_authorization_tool_handler(args, **_kwargs):
                 "idType": str(args.get("id_type") or "").strip()[:40],
             })
         elif operation == "resolve":
-            body.update({
-                "authorizationId": _require_text(args, "authorization_id"),
-                "mediaMode": "include" if args.get("media_mode") == "include" else "summary",
-            })
+            resource_uid = str(args.get("resource_uid") or "").strip()
+            authorization_id = str(args.get("authorization_id") or "").strip()
+            if not resource_uid and not authorization_id:
+                raise ValueError("缺少 resource_uid 或 authorization_id")
+            body.update(
+                {
+                    **(
+                        {"resourceUid": resource_uid}
+                        if resource_uid
+                        else {"authorizationId": authorization_id}
+                    ),
+                    "mediaMode": (
+                        "include"
+                        if args.get("media_mode") == "include"
+                        else "summary"
+                    ),
+                }
+            )
         elif operation == "preview_write":
             if not session["message_id"] or not session["session_id"]:
                 return _error("当前请求缺少可信 messageId 或 sessionId，不能发起写入预览。", code="trusted_write_context_required", status=409)
