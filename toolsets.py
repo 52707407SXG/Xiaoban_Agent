@@ -214,6 +214,18 @@ TOOLSETS = {
         "includes": []
     },
 
+    "mystand_authorization_write": {
+        "description": "Write-only My Stand preview-confirm-verify authorization bridge",
+        "tools": ["mystand_authorization_write"],
+        "includes": []
+    },
+
+    "mystand_query": {
+        "description": "High-level semantic query for current-user authorized My Stand data",
+        "tools": ["mystand_query"],
+        "includes": []
+    },
+
     "mystand_resource_index": {
         "description": "Read-only current-user My Stand resource index",
         "tools": ["mystand_resource_index"],

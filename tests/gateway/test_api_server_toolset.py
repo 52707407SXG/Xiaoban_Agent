@@ -102,12 +102,14 @@ class TestApiServerAdapterToolset:
         owner = APIServerAdapter._toolsets_for_request_policy("mystand-owner")
         owner_research = APIServerAdapter._toolsets_for_request_policy("mystand-owner-research")
 
-        assert basic == ["web", "mystand_parser", "mystand_resource_index", "mystand_authorization"]
+        assert basic == [
+            "mystand_parser",
+            "mystand_query",
+            "mystand_authorization_write",
+        ]
         assert research == [
             "web",
             "mystand_parser",
-            "mystand_resource_index",
-            "mystand_authorization",
         ]
         assert owner == basic
         assert owner_research == research
@@ -118,6 +120,12 @@ class TestApiServerAdapterToolset:
             assert "skills" not in toolsets
             assert "memory" not in toolsets
             assert "session_search" not in toolsets
+            assert "mystand_resource_index" not in toolsets
+            assert "mystand_authorization" not in toolsets
+        assert "web" not in basic
+        assert "web" not in owner
+        assert "mystand_query" not in research
+        assert "mystand_authorization_write" not in research
 
     @pytest.mark.parametrize("policy", ["", "mystand-owner-typo", "unknown", "  "])
     def test_present_unknown_or_blank_mystand_policy_is_rejected(self, policy):
@@ -271,18 +279,16 @@ class TestApiServerAdapterToolset:
 
             adapter._create_agent(
                 enabled_toolsets_override=[
-                    "web",
                     "mystand_parser",
-                    "mystand_resource_index",
-                    "mystand_authorization",
+                    "mystand_query",
+                    "mystand_authorization_write",
                 ]
             )
 
             mock_agent_cls.assert_called_once()
             call_kwargs = mock_agent_cls.call_args
             assert call_kwargs.kwargs.get("enabled_toolsets") == [
-                "mystand_authorization",
+                "mystand_authorization_write",
                 "mystand_parser",
-                "mystand_resource_index",
-                "web",
+                "mystand_query",
             ]

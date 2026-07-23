@@ -145,49 +145,45 @@ class InvalidToolsetPolicy(ValueError):
 
 
 _MYSTAND_REQUEST_TOOLSETS = {
-    "mystand-broker-basic": ["web", "mystand_parser", "mystand_resource_index", "mystand_authorization"],
+    "mystand-broker-basic": [
+        "mystand_parser",
+        "mystand_query",
+        "mystand_authorization_write",
+    ],
     "mystand-broker-research": [
         "web",
         "mystand_parser",
-        "mystand_resource_index",
-        "mystand_authorization",
     ],
-    "mystand-owner": ["web", "mystand_parser", "mystand_resource_index", "mystand_authorization"],
+    "mystand-owner": [
+        "mystand_parser",
+        "mystand_query",
+        "mystand_authorization_write",
+    ],
     "mystand-owner-research": [
         "web",
         "mystand_parser",
-        "mystand_resource_index",
-        "mystand_authorization",
     ],
 }
 _MYSTAND_REQUEST_TOOL_NAMES = {
     "mystand-broker-basic": {
-        "web_search",
-        "web_extract",
         "mystand_parse",
-        "mystand_resource_index",
-        "mystand_authorization",
+        "mystand_query",
+        "mystand_authorization_write",
     },
     "mystand-broker-research": {
         "web_search",
         "web_extract",
         "mystand_parse",
-        "mystand_resource_index",
-        "mystand_authorization",
     },
     "mystand-owner": {
-        "web_search",
-        "web_extract",
         "mystand_parse",
-        "mystand_resource_index",
-        "mystand_authorization",
+        "mystand_query",
+        "mystand_authorization_write",
     },
     "mystand-owner-research": {
         "web_search",
         "web_extract",
         "mystand_parse",
-        "mystand_resource_index",
-        "mystand_authorization",
     },
 }
 
@@ -4852,6 +4848,7 @@ class APIServerAdapter(BasePlatformAdapter):
         user_id: str = "",
         message_id: str = "",
         user_message: str = "",
+        conversation_history: Any = None,
         async_delivery: bool = False,
     ) -> list:
         """Bind session contextvars for an API-server agent run.
@@ -4864,13 +4861,16 @@ class APIServerAdapter(BasePlatformAdapter):
         tool completions can re-enter the agent and be queued for that session.
 
         Returns reset tokens; pass them to ``clear_session_vars`` in a
-        ``finally`` block (the binding is request-scoped and must not outlive
-        the turn — a session resumed later on a delivering interface, e.g. the
-        CLI or a gateway platform, re-binds fresh and is NOT blocked).
+        ``finally`` block. Delivery capability is request-scoped; the separate
+        private-query taint is deliberately durable for the stable session and
+        is restored from structured tool history when supplied.
         """
-        from gateway.session_context import set_session_vars
+        from gateway.session_context import (
+            mark_mystand_private_query_from_history,
+            set_session_vars,
+        )
 
-        return set_session_vars(
+        tokens = set_session_vars(
             platform="api_server",
             source=source,
             chat_id=chat_id,
@@ -4881,6 +4881,8 @@ class APIServerAdapter(BasePlatformAdapter):
             session_id=session_id,
             async_delivery=bool(async_delivery),
         )
+        mark_mystand_private_query_from_history(conversation_history)
+        return tokens
 
     @staticmethod
     def _header_value(headers: Any, name: str) -> str:
@@ -5323,6 +5325,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 user_id=request_user_id,
                 message_id=request_message_id,
                 user_message=user_message if isinstance(user_message, str) else "",
+                conversation_history=conversation_history,
                 async_delivery=async_delivery,
             )
             try:
@@ -5702,6 +5705,7 @@ class APIServerAdapter(BasePlatformAdapter):
                             user_id=request_user_id,
                             message_id=request_message_id,
                             user_message=user_message if isinstance(user_message, str) else "",
+                            conversation_history=conversation_history,
                             async_delivery=async_delivery,
                         )
                         register_gateway_notify(approval_session_key, _approval_notify)

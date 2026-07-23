@@ -906,6 +906,18 @@ def web_search_tool(query: str, limit: int = 5) -> str:
     Raises:
         Exception: If search fails or API key is not set
     """
+    if not isinstance(query, str) or not query.strip() or len(query) > 4_000:
+        return tool_error(
+            "Invalid web search query.",
+            success=False,
+            code="invalid_web_search_query",
+        )
+    from tools.web_egress_safety import web_egress_block_result
+
+    egress_block = web_egress_block_result([query])
+    if egress_block is not None:
+        return egress_block
+
     try:
         limit = int(limit)
     except (TypeError, ValueError):
@@ -1008,6 +1020,27 @@ async def web_extract_tool(
     Raises:
         Exception: If extraction fails or API key is not set
     """
+    if (
+        not isinstance(urls, list)
+        or not urls
+        or any(
+            not isinstance(url, str) or not url.strip() or len(url) > 4_096
+            for url in urls
+        )
+    ):
+        return tool_error(
+            "Invalid web extract URL list.",
+            success=False,
+            code="invalid_web_extract_urls",
+        )
+    from tools.web_egress_safety import web_egress_block_result
+
+    egress_block = web_egress_block_result(
+        urls if isinstance(urls, list) else [],
+    )
+    if egress_block is not None:
+        return egress_block
+
     # Block URLs containing embedded secrets (exfiltration prevention).
     # URL-decode first so percent-encoded secrets (%73k- = sk-) are caught.
     from agent.redact import _PREFIX_RE

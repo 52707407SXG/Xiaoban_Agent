@@ -36,7 +36,13 @@ needs to replace the import + call site:
     platform = get_session_env("XIAOBAN_SESSION_PLATFORM", "")
 """
 
+import hashlib
+import json
+import os
+import secrets
+import threading
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Any
 
 # Sentinel to distinguish "never set in this context" from "explicitly set to empty".
@@ -65,6 +71,30 @@ _SESSION_MESSAGE_ID: ContextVar = ContextVar("XIAOBAN_SESSION_MESSAGE_ID", defau
 # _VAR_MAP or subprocess environments; only trusted in-process gates (such as
 # the My Stand write-confirmation tool) may inspect it.
 _SESSION_USER_MESSAGE: ContextVar = ContextVar("XIAOBAN_SESSION_USER_MESSAGE", default=_UNSET)
+# Set for the remainder of the active user turn once a high-level My Stand
+# private-data query is planned or invoked. Web tools consult this task-local
+# flag as a hard egress boundary. It is deliberately not exported through
+# _VAR_MAP or process environments.
+_SESSION_MYSTAND_PRIVATE_QUERY: ContextVar = ContextVar(
+    "XIAOBAN_SESSION_MYSTAND_PRIVATE_QUERY",
+    default=False,
+)
+_MYSTAND_PRIVATE_TAINT_SCHEMA = "xiaoban.mystand-private-session-taints.v1"
+_MYSTAND_PRIVATE_TAINT_FILE_ENV = "XIAOBAN_MYSTAND_PRIVATE_TAINT_FILE"
+_MYSTAND_PRIVATE_SESSION_TAINTS: set[str] = set()
+_MYSTAND_PRIVATE_SESSION_TAINT_LOCK = threading.Lock()
+_MYSTAND_PRIVATE_SESSION_TAINT_LOADED_PATH: Path | None = None
+_MYSTAND_PRIVATE_SESSION_TAINT_PERSISTENCE_FAILED = False
+_MYSTAND_PRIVATE_HISTORY_TOOL_NAMES = frozenset(
+    {
+        "mystand_query",
+        "mystand_authorization_write",
+        # Legacy model-visible tools are no longer exposed, but their trusted
+        # structured history can still be replayed after a gateway restart.
+        "mystand_authorization",
+        "mystand_resource_index",
+    }
+)
 
 # Whether the current session's delivery channel can route an ASYNC completion
 # back to the agent AFTER the current turn ends (i.e. wake a fresh turn).
@@ -167,6 +197,7 @@ def set_session_vars(
         _SESSION_ID.set(session_id),
         _SESSION_MESSAGE_ID.set(message_id),
         _SESSION_USER_MESSAGE.set(user_message),
+        _SESSION_MYSTAND_PRIVATE_QUERY.set(False),
         _SESSION_ASYNC_DELIVERY.set(bool(async_delivery)),
     ]
     try:
@@ -203,6 +234,7 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_USER_MESSAGE,
     ):
         var.set("")
+    _SESSION_MYSTAND_PRIVATE_QUERY.set(False)
     # Reset async-delivery capability to the "never set" sentinel rather than a
     # falsy value: a cleared context should fall back to the default-supported
     # behavior (CLI / unaware paths), not be mistaken for an opted-out
@@ -222,6 +254,243 @@ def get_session_user_message() -> str:
     if value is _UNSET:
         return ""
     return str(value or "")
+
+
+def mark_mystand_private_query_turn() -> None:
+    """Block web egress for this turn and later turns in the same session."""
+    _SESSION_MYSTAND_PRIVATE_QUERY.set(True)
+    taint_keys = _mystand_private_session_taint_keys()
+    if not taint_keys:
+        return
+    with _MYSTAND_PRIVATE_SESSION_TAINT_LOCK:
+        path = _mystand_private_session_taint_path()
+        _load_mystand_private_session_taints_locked(path)
+        new_keys = set(taint_keys) - _MYSTAND_PRIVATE_SESSION_TAINTS
+        if not new_keys:
+            return
+        _MYSTAND_PRIVATE_SESSION_TAINTS.update(new_keys)
+        if not _MYSTAND_PRIVATE_SESSION_TAINT_PERSISTENCE_FAILED:
+            _persist_mystand_private_session_taints_locked(path)
+
+
+def mystand_private_query_turn_active() -> bool:
+    """Return whether this turn or its stable session has touched private data."""
+    if _SESSION_MYSTAND_PRIVATE_QUERY.get() is True:
+        return True
+    taint_keys = _mystand_private_session_taint_keys()
+    if not taint_keys:
+        return False
+    with _MYSTAND_PRIVATE_SESSION_TAINT_LOCK:
+        _load_mystand_private_session_taints_locked(
+            _mystand_private_session_taint_path(),
+        )
+        return any(
+            key in _MYSTAND_PRIVATE_SESSION_TAINTS
+            for key in taint_keys
+        )
+
+
+def mystand_private_taint_persistence_failed() -> bool:
+    """Return whether the durable private-session boundary is unavailable."""
+    with _MYSTAND_PRIVATE_SESSION_TAINT_LOCK:
+        _load_mystand_private_session_taints_locked(
+            _mystand_private_session_taint_path(),
+        )
+        return _MYSTAND_PRIVATE_SESSION_TAINT_PERSISTENCE_FAILED
+
+
+def mark_mystand_private_query_from_history(conversation_history: Any) -> bool:
+    """Restore the private-session boundary from structured tool history.
+
+    Only trusted tool metadata is inspected. User or assistant prose that
+    merely contains a My Stand tool name never taints a session.
+    """
+    if not isinstance(conversation_history, (list, tuple)):
+        return False
+    for message in conversation_history:
+        if _history_message_has_mystand_private_tool(message):
+            mark_mystand_private_query_turn()
+            return True
+    return False
+
+
+def _mystand_private_session_taint_keys() -> tuple[str, ...]:
+    keys = []
+    for namespace, var in (
+        ("session_id", _SESSION_ID),
+        ("session_key", _SESSION_KEY),
+    ):
+        value = var.get()
+        if value is _UNSET:
+            continue
+        text = str(value or "").strip()
+        if not text:
+            continue
+        digest = hashlib.sha256(
+            f"{namespace}\0{text}".encode("utf-8"),
+        ).hexdigest()
+        keys.append(f"{namespace}:{digest}")
+    return tuple(keys)
+
+
+def _history_message_has_mystand_private_tool(message: Any) -> bool:
+    if not isinstance(message, dict):
+        return False
+
+    message_type = str(message.get("type") or "").strip().lower()
+    if (
+        message_type == "function_call"
+        and str(message.get("name") or "").strip()
+        in _MYSTAND_PRIVATE_HISTORY_TOOL_NAMES
+    ):
+        return True
+
+    role = str(message.get("role") or "").strip().lower()
+    if role == "assistant":
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, (list, tuple)):
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function")
+                if isinstance(function, dict):
+                    name = function.get("name")
+                else:
+                    name = tool_call.get("name")
+                if (
+                    str(name or "").strip()
+                    in _MYSTAND_PRIVATE_HISTORY_TOOL_NAMES
+                ):
+                    return True
+
+    if role == "tool":
+        return any(
+            str(message.get(field) or "").strip()
+            in _MYSTAND_PRIVATE_HISTORY_TOOL_NAMES
+            for field in ("name", "tool_name")
+        )
+    return False
+
+
+def _mystand_private_session_taint_path() -> Path:
+    configured = os.environ.get(_MYSTAND_PRIVATE_TAINT_FILE_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    xiaoban_home = os.environ.get("XIAOBAN_HOME", "").strip()
+    base = (
+        Path(xiaoban_home).expanduser()
+        if xiaoban_home
+        else Path.home() / ".xiaoban"
+    )
+    return base / "mystand-private-session-taints.json"
+
+
+def _load_mystand_private_session_taints_locked(path: Path) -> None:
+    global _MYSTAND_PRIVATE_SESSION_TAINT_LOADED_PATH
+    global _MYSTAND_PRIVATE_SESSION_TAINT_PERSISTENCE_FAILED
+
+    if _MYSTAND_PRIVATE_SESSION_TAINT_LOADED_PATH == path:
+        return
+    _MYSTAND_PRIVATE_SESSION_TAINT_LOADED_PATH = path
+    _MYSTAND_PRIVATE_SESSION_TAINT_PERSISTENCE_FAILED = False
+    _MYSTAND_PRIVATE_SESSION_TAINTS.clear()
+
+    try:
+        try:
+            path.stat()
+        except FileNotFoundError:
+            return
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("taint sidecar must be an object")
+        if payload.get("schema") != _MYSTAND_PRIVATE_TAINT_SCHEMA:
+            raise ValueError("unsupported taint sidecar schema")
+        raw_taints = payload.get("taints")
+        if not isinstance(raw_taints, list):
+            raise ValueError("taint sidecar entries must be an array")
+        taints = set()
+        for value in raw_taints:
+            text = str(value or "")
+            namespace, separator, digest = text.partition(":")
+            if (
+                separator != ":"
+                or namespace not in {"session_id", "session_key"}
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise ValueError("invalid taint sidecar entry")
+            taints.add(text)
+        path.chmod(0o600)
+        _MYSTAND_PRIVATE_SESSION_TAINTS.update(taints)
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        _MYSTAND_PRIVATE_SESSION_TAINT_PERSISTENCE_FAILED = True
+
+
+def _persist_mystand_private_session_taints_locked(path: Path) -> None:
+    global _MYSTAND_PRIVATE_SESSION_TAINT_PERSISTENCE_FAILED
+
+    parent = path.parent
+    temp_path: Path | None = None
+    file_descriptor: int | None = None
+    try:
+        parent_existed = parent.exists()
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not parent_existed:
+            parent.chmod(0o700)
+
+        for _attempt in range(10):
+            candidate = parent / (
+                f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+            )
+            try:
+                file_descriptor = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                temp_path = candidate
+                break
+            except FileExistsError:
+                continue
+        if file_descriptor is None or temp_path is None:
+            raise OSError("unable to allocate private-session taint temp file")
+
+        payload = {
+            "schema": _MYSTAND_PRIVATE_TAINT_SCHEMA,
+            "taints": sorted(_MYSTAND_PRIVATE_SESSION_TAINTS),
+        }
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            file_descriptor = None
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
+        path.chmod(0o600)
+
+        directory_descriptor = os.open(
+            parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except OSError:
+        _MYSTAND_PRIVATE_SESSION_TAINT_PERSISTENCE_FAILED = True
+    finally:
+        if file_descriptor is not None:
+            os.close(file_descriptor)
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 
 def get_session_env(name: str, default: str = "") -> str:
