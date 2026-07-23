@@ -238,6 +238,7 @@ _LEGACY_TOOLSET_MAP = {
     "file_tools": ["read_file", "write_file", "patch", "search_files"],
     "mystand_parser_tools": ["mystand_parse"],
     "mystand_authorization_tools": ["mystand_authorization"],
+    "mystand_resource_index_tools": ["mystand_resource_index"],
     "tts_tools": ["text_to_speech"],
 }
 

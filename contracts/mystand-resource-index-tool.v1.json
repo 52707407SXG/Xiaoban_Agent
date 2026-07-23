@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "contract": "mystand.resource-index-tool.v1",
+  "tool": {
+    "name": "mystand_resource_index",
+    "description": "Read the current My Stand user's server-filtered resource index. Use it only for real My Stand resource discovery. It never returns business content or raw AUTH values. Paginate with next_cursor. Real content reads and all writes still require mystand_authorization; never bypass the index, authorization wall, or database boundary.",
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "operation": {
+          "const": "list_resources",
+          "type": "string"
+        },
+        "module_id": {
+          "maxLength": 80,
+          "type": "string"
+        },
+        "status": {
+          "enum": ["all", "active", "archived", "locked"],
+          "type": "string"
+        },
+        "cursor": {
+          "maxLength": 800,
+          "type": "string"
+        },
+        "limit": {
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": ["operation"],
+      "additionalProperties": false
+    }
+  },
+  "result": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "schema": {
+        "const": "mystand.resource-index.page.v1",
+        "type": "string"
+      },
+      "ok": {
+        "type": "boolean"
+      },
+      "error": {
+        "maxLength": 120,
+        "type": "string"
+      },
+      "items": {
+        "type": "array",
+        "maxItems": 100,
+        "items": {
+          "type": "object",
+          "properties": {
+            "resourceUid": { "maxLength": 120, "type": "string" },
+            "moduleId": { "maxLength": 80, "type": "string" },
+            "resourceType": { "maxLength": 80, "type": "string" },
+            "parentResourceUid": { "maxLength": 120, "type": "string" },
+            "safeLabel": { "maxLength": 240, "type": "string" },
+            "encrypted": { "type": "boolean" },
+            "status": { "enum": ["active", "archived", "locked"], "type": "string" },
+            "locked": { "type": "boolean" },
+            "canRead": { "type": "boolean" },
+            "canWrite": { "type": "boolean" },
+            "sourceId": { "maxLength": 240, "type": "string" }
+          },
+          "required": ["resourceUid", "moduleId", "resourceType", "parentResourceUid", "safeLabel", "encrypted", "status", "locked", "canRead", "canWrite"],
+          "additionalProperties": false
+        }
+      },
+      "nextCursor": {
+        "maxLength": 800,
+        "type": "string"
+      },
+      "hasMore": {
+        "type": "boolean"
+      }
+    },
+    "required": ["schema", "ok", "items", "nextCursor", "hasMore"],
+    "additionalProperties": false
+  }
+}

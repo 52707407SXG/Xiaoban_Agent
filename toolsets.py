@@ -213,6 +213,12 @@ TOOLSETS = {
         "tools": ["mystand_authorization"],
         "includes": []
     },
+
+    "mystand_resource_index": {
+        "description": "Read-only current-user My Stand resource index",
+        "tools": ["mystand_resource_index"],
+        "includes": []
+    },
     
     "tts": {
         "description": "Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, OpenAI, or xAI",

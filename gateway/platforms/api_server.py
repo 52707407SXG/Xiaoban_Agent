@@ -145,16 +145,18 @@ class InvalidToolsetPolicy(ValueError):
 
 
 _MYSTAND_REQUEST_TOOLSETS = {
-    "mystand-broker-basic": ["web", "mystand_parser", "mystand_authorization"],
+    "mystand-broker-basic": ["web", "mystand_parser", "mystand_resource_index", "mystand_authorization"],
     "mystand-broker-research": [
         "web",
         "mystand_parser",
+        "mystand_resource_index",
         "mystand_authorization",
     ],
-    "mystand-owner": ["web", "mystand_parser", "mystand_authorization"],
+    "mystand-owner": ["web", "mystand_parser", "mystand_resource_index", "mystand_authorization"],
     "mystand-owner-research": [
         "web",
         "mystand_parser",
+        "mystand_resource_index",
         "mystand_authorization",
     ],
 }
@@ -163,24 +165,28 @@ _MYSTAND_REQUEST_TOOL_NAMES = {
         "web_search",
         "web_extract",
         "mystand_parse",
+        "mystand_resource_index",
         "mystand_authorization",
     },
     "mystand-broker-research": {
         "web_search",
         "web_extract",
         "mystand_parse",
+        "mystand_resource_index",
         "mystand_authorization",
     },
     "mystand-owner": {
         "web_search",
         "web_extract",
         "mystand_parse",
+        "mystand_resource_index",
         "mystand_authorization",
     },
     "mystand-owner-research": {
         "web_search",
         "web_extract",
         "mystand_parse",
+        "mystand_resource_index",
         "mystand_authorization",
     },
 }

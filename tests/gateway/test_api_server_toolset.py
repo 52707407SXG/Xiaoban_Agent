@@ -102,10 +102,11 @@ class TestApiServerAdapterToolset:
         owner = APIServerAdapter._toolsets_for_request_policy("mystand-owner")
         owner_research = APIServerAdapter._toolsets_for_request_policy("mystand-owner-research")
 
-        assert basic == ["web", "mystand_parser", "mystand_authorization"]
+        assert basic == ["web", "mystand_parser", "mystand_resource_index", "mystand_authorization"]
         assert research == [
             "web",
             "mystand_parser",
+            "mystand_resource_index",
             "mystand_authorization",
         ]
         assert owner == basic
@@ -272,6 +273,7 @@ class TestApiServerAdapterToolset:
                 enabled_toolsets_override=[
                     "web",
                     "mystand_parser",
+                    "mystand_resource_index",
                     "mystand_authorization",
                 ]
             )
@@ -281,5 +283,6 @@ class TestApiServerAdapterToolset:
             assert call_kwargs.kwargs.get("enabled_toolsets") == [
                 "mystand_authorization",
                 "mystand_parser",
+                "mystand_resource_index",
                 "web",
             ]
