@@ -42,6 +42,7 @@ _WRITE_ACTIONS = {
     "knowledge-graph.add-node",
     "knowledge-graph.update-node",
     "knowledge-graph.add-edge",
+    "finance-archive.update-row-fields",
 }
 _EXPLICIT_CONFIRMATION = "确认写入"
 _EXPLICIT_CONFIRMATION_REPLY_RE = re.compile(

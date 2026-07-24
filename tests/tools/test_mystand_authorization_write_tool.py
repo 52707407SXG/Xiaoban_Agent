@@ -24,7 +24,54 @@ def test_schema_exposes_only_write_operations():
     assert "expected_version" not in parameters["properties"]
     assert "query" not in parameters["properties"]
     assert "resource_uid" not in parameters["properties"]
+    assert "finance-archive" in parameters["properties"]["resource"]["properties"]["type_hint"]["enum"]
+    assert "finance-archive.update-row-fields" in parameters["properties"]["action"]["enum"]
     assert parameters["additionalProperties"] is False
+
+
+def test_finance_archive_write_preview_uses_semantic_resource(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bridge, "mark_mystand_private_query_turn", lambda: None)
+    monkeypatch.setattr(
+        bridge,
+        "_current_session",
+        lambda: {
+            "platform": "api_server",
+            "user_id": "52707407",
+            "message_id": "msg-finance-write",
+            "session_id": "session-finance-write",
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda path, payload, **kwargs: calls.append((path, payload, kwargs)) or '{"ok":true}',
+    )
+
+    result = json.loads(
+        bridge.mystand_authorization_write_tool_handler(
+            {
+                "operation": "preview_write",
+                "resource": {
+                    "name": "游雪梅2026年个人业务档案",
+                    "type_hint": "finance-archive",
+                },
+                "action": "finance-archive.update-row-fields",
+                "payload": {
+                    "brokerUser": "ZYJ001",
+                    "year": 2026,
+                    "recordId": "row-1",
+                    "changes": {"notes": "待确认备注"},
+                },
+                "idempotency_key": "finance-write-preview-0001",
+            }
+        )
+    )
+
+    assert result["ok"] is True
+    assert calls[0][0] == "/api/xiaoban/internal/authorization/write/preview"
+    assert calls[0][1]["resource"]["typeHint"] == "finance-archive"
+    assert calls[0][1]["action"] == "finance-archive.update-row-fields"
 
 
 def test_handler_hard_rejects_read_operations_and_extra_fields(monkeypatch):

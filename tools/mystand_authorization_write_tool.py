@@ -52,6 +52,7 @@ MYSTAND_AUTHORIZATION_WRITE_SCHEMA = {
                             "property-note",
                             "profile-card",
                             "knowledge-graph",
+                            "finance-archive",
                         ],
                     },
                 },
@@ -101,6 +102,7 @@ _ACTION_RESOURCE_TYPES = {
     "knowledge-graph.add-node": "knowledge-graph",
     "knowledge-graph.update-node": "knowledge-graph",
     "knowledge-graph.add-edge": "knowledge-graph",
+    "finance-archive.update-row-fields": "finance-archive",
 }
 _FAILED_WRITE_INTEGRITY_NOTICE = (
     "本次写入没有成功；禁止向用户声称已经写入或已落库，"

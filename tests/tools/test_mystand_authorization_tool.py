@@ -64,6 +64,7 @@ def test_schema_exposes_only_fixed_operations_and_write_actions():
         "knowledge-graph.add-node",
         "knowledge-graph.update-node",
         "knowledge-graph.add-edge",
+        "finance-archive.update-row-fields",
     }
     assert bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["additionalProperties"] is False
     assert "resource_query" in bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]
