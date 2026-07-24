@@ -420,3 +420,59 @@ def test_preview_rejects_auth_id_and_type_mismatch(monkeypatch):
         )
     )
     assert mismatch["code"] == "invalid_write_resource"
+
+
+def test_schema_tells_model_idempotency_key_is_required_for_preview():
+    parameters = bridge.MYSTAND_AUTHORIZATION_WRITE_SCHEMA["parameters"]
+
+    key_description = parameters["properties"]["idempotency_key"].get("description", "")
+    assert "REQUIRED for preview_write" in key_description
+    assert "unique" in key_description
+    assert "retrying the same preview" in key_description
+    assert "Never reuse" in key_description
+    tool_description = bridge.MYSTAND_AUTHORIZATION_WRITE_SCHEMA["description"]
+    assert "preview_write REQUIRES idempotency_key" in tool_description
+
+
+def test_preview_still_hard_fails_closed_without_idempotency_key(monkeypatch):
+    monkeypatch.setattr(
+        bridge,
+        "mark_mystand_private_query_turn",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_current_session",
+        lambda: {
+            "platform": "api_server",
+            "user_id": "ZYJ005",
+            "message_id": "msg-001",
+            "session_id": "session-001",
+        },
+    )
+    calls = []
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or "{}",
+    )
+
+    result = json.loads(
+        bridge.mystand_authorization_write_tool_handler(
+            {
+                "operation": "preview_write",
+                "resource": {
+                    "name": "城南一号2栋10楼特征卡",
+                    "type_hint": "profile-card",
+                },
+                "action": "profile-card.update-field",
+                "payload": {"fields": {"思维特征": "测试"}},
+            }
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "authorization_argument_missing"
+    assert "idempotency_key" in result["error"]
+    assert result["integrity_notice"]
+    assert calls == [], "缺少 idempotency_key 时不得触达 My Stand 写入预览接口"

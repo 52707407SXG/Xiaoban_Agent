@@ -20,7 +20,10 @@ MYSTAND_AUTHORIZATION_WRITE_SCHEMA = {
         "Preview or commit a supported My Stand write through the server-enforced "
         "authorization wall. This tool cannot list, resolve, discover, or read "
         "resources. Always preview first, show the exact preview, stop, and commit "
-        "only after a later standalone user confirmation."
+        "only after a later standalone user confirmation. preview_write REQUIRES "
+        "idempotency_key: generate one fresh unique key (e.g. a random UUID) for "
+        "each new write attempt, reuse the same key only when retrying that same "
+        "preview, and never reuse keys across different writes."
     ),
     "parameters": {
         "type": "object",
@@ -64,9 +67,17 @@ MYSTAND_AUTHORIZATION_WRITE_SCHEMA = {
             },
             "idempotency_key": {
                 "type": "string",
+                "description": (
+                    "REQUIRED for preview_write. Generate one fresh unique key "
+                    "(e.g. a random UUID) for each new write attempt; reuse the "
+                    "same key only when retrying the same preview so the server "
+                    "can deduplicate safely. Never reuse keys across different "
+                    "writes. Not used for commit_write (pass preview_token instead)."
+                ),
             },
             "preview_token": {
                 "type": "string",
+                "description": "REQUIRED for commit_write: the previewToken returned by the matching preview_write.",
             },
         },
         "required": ["operation"],
