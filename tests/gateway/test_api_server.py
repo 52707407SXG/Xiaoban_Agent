@@ -698,6 +698,85 @@ class TestAgentExecution:
         )
 
     @pytest.mark.asyncio
+    async def test_mystand_multimodal_text_binds_as_trusted_user_message(
+        self,
+        auth_adapter,
+    ):
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {
+            "final_response": "ok",
+            "messages": [],
+        }
+        mock_agent.session_prompt_tokens = 1
+        mock_agent.session_completion_tokens = 2
+        mock_agent.session_total_tokens = 3
+        user_message = [
+            {"type": "text", "text": "把城南一号2栋10楼的特征卡改一下"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,AAAA"},
+            },
+        ]
+
+        with (
+            patch.object(auth_adapter, "_create_agent", return_value=mock_agent),
+            patch.object(
+                auth_adapter,
+                "_bind_api_server_session",
+                return_value=[],
+            ) as bind_session,
+        ):
+            await auth_adapter._run_agent(
+                user_message=user_message,
+                conversation_history=[],
+                session_id="session-multimodal-trusted-text",
+                request_headers=_mystand_idempotent_headers(
+                    "multimodal-trusted-text"
+                ),
+            )
+
+        assert bind_session.call_args.kwargs["user_message"] == (
+            "把城南一号2栋10楼的特征卡改一下"
+        )
+
+    @pytest.mark.asyncio
+    async def test_mystand_confirmation_turn_receives_dynamic_system_reminder(
+        self,
+        auth_adapter,
+    ):
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {
+            "final_response": "没有写入。",
+            "messages": [],
+        }
+        mock_agent.session_prompt_tokens = 1
+        mock_agent.session_completion_tokens = 2
+        mock_agent.session_total_tokens = 3
+
+        with patch.object(
+            auth_adapter,
+            "_create_agent",
+            return_value=mock_agent,
+        ) as create_agent:
+            await auth_adapter._run_agent(
+                user_message="确认",
+                conversation_history=[
+                    {
+                        "role": "assistant",
+                        "content": "写入预览如下，确认后再提交。",
+                    }
+                ],
+                session_id="session-integrity-reminder",
+                request_headers=_mystand_idempotent_headers(
+                    "integrity-reminder"
+                ),
+            )
+
+        prompt = create_agent.call_args.kwargs["ephemeral_system_prompt"]
+        assert "本轮诚信强制提醒" in prompt
+        assert "当前回合" in prompt
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("agent_result", "expected_error_code"),
         [
@@ -1202,6 +1281,60 @@ class TestChatCompletionsEndpoint:
         assert resp.status == 409
         assert response_data["error"]["code"] == "idempotency_stream_unsupported"
         mock_run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mystand_stream_never_leaks_unverified_write_success_delta(
+        self,
+        auth_adapter,
+    ):
+        app = _create_app(auth_adapter)
+        headers = _mystand_idempotent_headers("stream-integrity")
+        headers.pop("Idempotency-Key")
+
+        async def _mock_run_agent(**kwargs):
+            callback = kwargs.get("stream_delta_callback")
+            if callback:
+                callback("四项全部写入成功。")
+            return (
+                {
+                    "_mystand_request": True,
+                    "final_response": "四项全部写入成功。",
+                    "messages": [
+                        {"role": "user", "content": "确认"},
+                        {"role": "assistant", "content": "四项全部写入成功。"},
+                    ],
+                },
+                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                auth_adapter,
+                "_run_agent",
+                side_effect=_mock_run_agent,
+            ):
+                response = await cli.post(
+                    "/v1/chat/completions",
+                    headers=headers,
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "确认"}],
+                        "stream": True,
+                    },
+                )
+                body = await response.text()
+
+        assert response.status == 200
+        visible_parts = []
+        for line in body.splitlines():
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            payload = json.loads(line[len("data: ") :])
+            for choice in payload.get("choices", []):
+                visible_parts.append(choice.get("delta", {}).get("content", ""))
+        visible_text = "".join(visible_parts)
+        assert "四项全部写入成功" not in visible_text
+        assert "没有实际执行可验证的写入" in visible_text
 
     @pytest.mark.asyncio
     async def test_concurrent_mystand_delivery_uses_stable_ledger_fingerprint(self, auth_adapter):

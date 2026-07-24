@@ -63,6 +63,10 @@ from gateway.platforms.base import (
     SendResult,
     is_network_accessible,
 )
+from gateway.mystand_integrity_guard import (
+    build_runtime_integrity_reminder as _build_mystand_runtime_integrity_reminder,
+    guard_mutation_success_claim,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +338,19 @@ def _latest_turn_requires_image_evidence(user_message: Any) -> bool:
     return bool(_IMAGE_READ_KEYWORD_RE.search(text))
 
 
+def _should_buffer_stream_deltas(
+    user_message: Any,
+    *,
+    mystand_request: bool = False,
+) -> bool:
+    """Buffer guarded streams so unverified prose cannot leak before egress."""
+    return bool(
+        mystand_request
+        or _latest_turn_requires_url_evidence(user_message)
+        or _latest_turn_requires_image_evidence(user_message)
+    )
+
+
 def _conversation_has_image_input(
     user_message: Any,
     conversation_history: Optional[List[Dict[str, Any]]] = None,
@@ -483,6 +500,16 @@ def _guard_evidence_backed_response(
     final_text = _sanitize_user_visible_text(text)
     if not final_text:
         return final_text
+
+    integrity_decision = guard_mutation_success_claim(final_text, result)
+    if integrity_decision.blocked:
+        logger.warning(
+            "My Stand integrity guard blocked unsupported mutation success claim: "
+            "evidence_status=%s",
+            integrity_decision.evidence_status,
+        )
+        return integrity_decision.text
+    final_text = integrity_decision.text
 
     url_required = _latest_turn_requires_url_evidence(user_message)
     image_required = _latest_turn_requires_image_evidence(user_message)
@@ -2592,9 +2619,12 @@ class APIServerAdapter(BasePlatformAdapter):
         message_id = f"msg_{uuid.uuid4().hex}"
         run_id = f"run_{uuid.uuid4().hex}"
         seq = 0
-        guard_stream_deltas = (
-            _latest_turn_requires_url_evidence(user_message)
-            or _latest_turn_requires_image_evidence(user_message)
+        guard_stream_deltas = _should_buffer_stream_deltas(
+            user_message,
+            mystand_request=self._header_present(
+                request.headers,
+                "X-Xiaoban-Toolset-Policy",
+            ),
         )
 
         def _event_payload(name: str, payload: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
@@ -2863,9 +2893,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 return limited
             import queue as _q
             _stream_q: _q.Queue = _q.Queue()
-            guard_stream_deltas = (
-                _latest_turn_requires_url_evidence(user_message)
-                or _latest_turn_requires_image_evidence(user_message)
+            guard_stream_deltas = _should_buffer_stream_deltas(
+                user_message,
+                mystand_request=mystand_request,
             )
 
             def _on_delta(delta):
@@ -4008,7 +4038,11 @@ class APIServerAdapter(BasePlatformAdapter):
         policy_err = self._request_toolset_policy_error(request.headers)
         if policy_err is not None:
             return policy_err
-        if self._header_present(request.headers, "X-Xiaoban-Toolset-Policy") and not self._api_key:
+        mystand_request = self._header_present(
+            request.headers,
+            "X-Xiaoban-Toolset-Policy",
+        )
+        if mystand_request and not self._api_key:
             return web.json_response(
                 _openai_error(
                     "My Stand requests require configured API authentication",
@@ -4017,8 +4051,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=503,
             )
         if (
-            self._header_present(request.headers, "X-Xiaoban-Toolset-Policy")
-            and request.headers.get("Idempotency-Key")
+            mystand_request and request.headers.get("Idempotency-Key")
         ):
             return web.json_response(
                 _openai_error(
@@ -4152,9 +4185,9 @@ class APIServerAdapter(BasePlatformAdapter):
             # calls in real time.  See _write_sse_responses for details.
             import queue as _q
             _stream_q: _q.Queue = _q.Queue()
-            guard_stream_deltas = (
-                _latest_turn_requires_url_evidence(user_message)
-                or _latest_turn_requires_image_evidence(user_message)
+            guard_stream_deltas = _should_buffer_stream_deltas(
+                user_message,
+                mystand_request=mystand_request,
             )
 
             def _on_delta(delta):
@@ -5304,6 +5337,17 @@ class APIServerAdapter(BasePlatformAdapter):
                         )
                 except Exception:
                     logger.warning("My Stand scoped memory recall unavailable", exc_info=False)
+            if mystand_request:
+                integrity_reminder = _build_mystand_runtime_integrity_reminder(
+                    user_message,
+                    conversation_history,
+                )
+                if integrity_reminder:
+                    run_system_prompt = "\n\n".join(
+                        part
+                        for part in (run_system_prompt, integrity_reminder)
+                        if part
+                    )
             if metadata_trace is not None:
                 attempt_value = self._header_value(request_headers, "X-Xiaoban-Attempt")
                 try:
@@ -5324,7 +5368,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 session_id=session_id or "",
                 user_id=request_user_id,
                 message_id=request_message_id,
-                user_message=user_message if isinstance(user_message, str) else "",
+                user_message=_content_to_visible_text(user_message),
                 conversation_history=conversation_history,
                 async_delivery=async_delivery,
             )
@@ -5354,6 +5398,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     conversation_history=conversation_history,
                     task_id=effective_task_id,
                 )
+                result = dict(result) if isinstance(result, dict) else {}
+                result["_mystand_request"] = mystand_request
                 usage = {
                     "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                     "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
@@ -5704,7 +5750,7 @@ class APIServerAdapter(BasePlatformAdapter):
                             session_id=session_id or "",
                             user_id=request_user_id,
                             message_id=request_message_id,
-                            user_message=user_message if isinstance(user_message, str) else "",
+                            user_message=_content_to_visible_text(user_message),
                             conversation_history=conversation_history,
                             async_delivery=async_delivery,
                         )

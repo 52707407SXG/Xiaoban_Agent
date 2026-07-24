@@ -112,6 +112,135 @@ def test_handler_delegates_valid_write_operations(monkeypatch):
     assert calls == [(args, {"task_id": "task-1"})]
 
 
+def test_failed_commit_result_injects_immediate_integrity_notice(monkeypatch):
+    monkeypatch.setattr(
+        bridge,
+        "mark_mystand_private_query_turn",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_current_session",
+        lambda: {
+            "platform": "api_server",
+            "user_id": "ZYJ005",
+            "message_id": "msg-001",
+            "session_id": "session-001",
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "mystand_authorization_tool_handler",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "ok": False,
+                "status": 409,
+                "code": "authorization_write_conflict",
+                "error": "版本冲突",
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    result = json.loads(
+        bridge.mystand_authorization_write_tool_handler(
+            {
+                "operation": "commit_write",
+                "preview_token": "preview-token",
+                "idempotency_key": "idem-failed-commit",
+            }
+        )
+    )
+
+    assert result["ok"] is False
+    assert "本次写入没有成功" in result["integrity_notice"]
+    assert "禁止向用户声称已经写入" in result["integrity_notice"]
+
+
+def test_argument_failure_also_injects_immediate_integrity_notice(monkeypatch):
+    monkeypatch.setattr(
+        bridge,
+        "mark_mystand_private_query_turn",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_current_session",
+        lambda: {
+            "platform": "api_server",
+            "user_id": "ZYJ005",
+            "message_id": "msg-001",
+            "session_id": "session-001",
+        },
+    )
+
+    result = json.loads(
+        bridge.mystand_authorization_write_tool_handler(
+            {
+                "operation": "preview_write",
+                "resource": {
+                    "name": "城南一号业主特征卡",
+                    "type_hint": "profile-card",
+                },
+                "action": "profile-card.update-field",
+                "payload": {"fields": {"思维特征": "测试"}},
+            }
+        )
+    )
+
+    assert result["code"] == "authorization_argument_missing"
+    assert "本次写入没有成功" in result["integrity_notice"]
+    assert "禁止向用户声称已经写入" in result["integrity_notice"]
+
+
+def test_preview_success_reminds_model_that_nothing_was_committed(monkeypatch):
+    monkeypatch.setattr(
+        bridge,
+        "mark_mystand_private_query_turn",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_current_session",
+        lambda: {
+            "platform": "api_server",
+            "user_id": "ZYJ005",
+            "message_id": "msg-001",
+            "session_id": "session-001",
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "ok": True,
+                "status": 200,
+                "previewToken": "preview-token",
+            }
+        ),
+    )
+
+    result = json.loads(
+        bridge.mystand_authorization_write_tool_handler(
+            {
+                "operation": "preview_write",
+                "resource": {
+                    "name": "城南一号业主特征卡",
+                    "type_hint": "profile-card",
+                },
+                "action": "profile-card.update-field",
+                "payload": {"fields": {"思维特征": "测试"}},
+                "idempotency_key": "idem-preview-only",
+            }
+        )
+    )
+
+    assert result["ok"] is True
+    assert "只是预览" in result["integrity_notice"]
+    assert "没有写入" in result["integrity_notice"]
+
+
 @pytest.mark.parametrize("operation", ["preview_write", "commit_write"])
 def test_handler_taints_before_preview_or_commit_processing(
     operation,

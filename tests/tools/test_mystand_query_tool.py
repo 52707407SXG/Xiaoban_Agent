@@ -404,6 +404,48 @@ def test_http_409_synthesizes_safe_clarification_and_candidates(monkeypatch):
         assert secret not in serialized
 
 
+def test_http_409_without_candidates_does_not_invent_multiple_matches(
+    monkeypatch,
+):
+    upstream = {
+        "ok": False,
+        "code": "resource_needs_clarification",
+        "clarification": "没有找到唯一且可供小伴读取的资料，请补充资料名称。",
+        "candidates": [],
+    }
+
+    def raise_conflict(request, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            409,
+            "Conflict",
+            {},
+            io.BytesIO(json.dumps(upstream).encode("utf-8")),
+        )
+
+    monkeypatch.setattr(
+        bridge,
+        "_api_base_url",
+        lambda: "http://127.0.0.1:18081",
+    )
+    monkeypatch.setattr(bridge, "_internal_token", lambda: "internal-token")
+    monkeypatch.setattr(bridge.urllib.request, "urlopen", raise_conflict)
+
+    result = json.loads(
+        bridge._post_internal(
+            {"operation": "read"},
+            {"user_id": "ZYJ005"},
+        )
+    )
+
+    assert result["status"] == 409
+    assert result.get("candidates", []) == []
+    assert result["error"] == (
+        "没有找到唯一且可供小伴读取的资料，请补充资料名称。"
+    )
+    assert "多项" not in result["error"]
+
+
 def test_http_404_limits_clarification_and_drops_internal_identifiers(monkeypatch):
     upstream = {
         "code": "resource_query_not_found",

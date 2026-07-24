@@ -91,6 +91,10 @@ _ACTION_RESOURCE_TYPES = {
     "knowledge-graph.update-node": "knowledge-graph",
     "knowledge-graph.add-edge": "knowledge-graph",
 }
+_FAILED_WRITE_INTEGRITY_NOTICE = (
+    "本次写入没有成功；禁止向用户声称已经写入或已落库，"
+    "必须如实说明失败。"
+)
 
 
 def _error(message: str, *, code: str, status: int = 400) -> str:
@@ -100,10 +104,44 @@ def _error(message: str, *, code: str, status: int = 400) -> str:
             "status": status,
             "code": code,
             "error": message,
+            "integrity_notice": _FAILED_WRITE_INTEGRITY_NOTICE,
         },
         ensure_ascii=False,
         separators=(",", ":"),
     )
+
+
+def _with_integrity_notice(result, *, operation: str) -> str:
+    try:
+        parsed = json.loads(result) if isinstance(result, str) else result
+    except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = None
+    if not isinstance(parsed, dict):
+        parsed = {
+            "ok": False,
+            "status": 502,
+            "code": "invalid_authorization_write_result",
+            "error": "My Stand 返回了无效的写入结果。",
+        }
+    if operation == "preview_write" and parsed.get("ok") is True:
+        notice = (
+            "本次只是预览，没有写入；不得向用户声称已落库，"
+            "必须等待后续独立确认。"
+        )
+    elif (
+        operation == "commit_write"
+        and parsed.get("ok") is True
+        and parsed.get("verified") is True
+        and parsed.get("receiptVersion") == "authorization-write-receipt-v2"
+    ):
+        notice = (
+            "本次已取得 authorization-write-receipt-v2 且 verified=true "
+            "回执，可以准确说明写入成功。"
+        )
+    else:
+        notice = _FAILED_WRITE_INTEGRITY_NOTICE
+    parsed["integrity_notice"] = notice
+    return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
 
 
 def mystand_authorization_write_tool_handler(args, **kwargs):
@@ -131,7 +169,10 @@ def mystand_authorization_write_tool_handler(args, **kwargs):
             status=403,
         )
     if operation == "commit_write":
-        return mystand_authorization_tool_handler(args, **kwargs)
+        return _with_integrity_notice(
+            mystand_authorization_tool_handler(args, **kwargs),
+            operation=operation,
+        )
 
     if not session["message_id"] or not session["session_id"]:
         return _error(
@@ -161,18 +202,21 @@ def mystand_authorization_write_tool_handler(args, **kwargs):
     idempotency_key = str(args.get("idempotency_key") or "").strip()
     if not idempotency_key:
         return _error("缺少 idempotency_key", code="authorization_argument_missing")
-    return _post_internal(
-        "/api/xiaoban/internal/authorization/write/preview",
-        {
-            "resource": {
-                "name": name.strip(),
-                "typeHint": type_hint,
+    return _with_integrity_notice(
+        _post_internal(
+            "/api/xiaoban/internal/authorization/write/preview",
+            {
+                "resource": {
+                    "name": name.strip(),
+                    "typeHint": type_hint,
+                },
+                "action": action,
+                "payload": payload,
+                "idempotencyKey": idempotency_key,
             },
-            "action": action,
-            "payload": payload,
-            "idempotencyKey": idempotency_key,
-        },
-        session=session,
+            session=session,
+        ),
+        operation=operation,
     )
 
 

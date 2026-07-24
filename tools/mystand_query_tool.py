@@ -228,6 +228,17 @@ def _safe_candidates(value) -> list[dict]:
 def _http_error_result(status: int, parsed) -> str:
     data = parsed if isinstance(parsed, dict) else {}
     if status in {404, 409}:
+        details = data.get("details")
+        details = details if isinstance(details, dict) else {}
+        clarification = _safe_public_text(
+            data.get("clarification") or details.get("clarification"),
+            limit=300,
+        )
+        candidates = _safe_candidates(
+            data.get("candidates")
+            if isinstance(data.get("candidates"), list)
+            else details.get("candidates")
+        )
         fallback_code = (
             "mystand_query_not_found"
             if status == 404
@@ -240,22 +251,16 @@ def _http_error_result(status: int, parsed) -> str:
             "error": (
                 "没有找到匹配的资料。"
                 if status == 404
-                else "找到多项可能资料，需要补充信息。"
+                else (
+                    "找到多项可能资料，需要补充信息。"
+                    if candidates
+                    else clarification
+                    or "没有找到唯一资料，需要补充信息。"
+                )
             ),
         }
-        details = data.get("details")
-        details = details if isinstance(details, dict) else {}
-        clarification = _safe_public_text(
-            data.get("clarification") or details.get("clarification"),
-            limit=300,
-        )
         if clarification:
             result["clarification"] = clarification
-        candidates = _safe_candidates(
-            data.get("candidates")
-            if isinstance(data.get("candidates"), list)
-            else details.get("candidates")
-        )
         if candidates:
             result["candidates"] = candidates
         return _json_result(result)

@@ -1,6 +1,8 @@
 from gateway.platforms.api_server import (
+    _build_mystand_runtime_integrity_reminder,
     _guard_evidence_backed_response,
     _sanitize_user_visible_text,
+    _should_buffer_stream_deltas,
 )
 
 
@@ -18,6 +20,17 @@ def test_sanitize_user_visible_text_redacts_local_paths_and_file_urls():
     assert "本地文件链接" in sanitized
     assert "本地路径" in sanitized
     assert "https://example.com/source" in sanitized
+
+
+def test_mystand_stream_buffers_all_text_until_integrity_guard_runs():
+    assert _should_buffer_stream_deltas(
+        "屏山县属于哪里？",
+        mystand_request=True,
+    )
+    assert not _should_buffer_stream_deltas(
+        "屏山县属于哪里？",
+        mystand_request=False,
+    )
 
 
 def test_evidence_guard_blocks_wechat_summary_without_tool_result():
@@ -175,3 +188,229 @@ def test_evidence_guard_allows_image_description_with_image_input():
     )
 
     assert guarded == "图里是一张楼盘海报。"
+
+
+def _write_turn(operation, result_payload, *, user_message="确认写入"):
+    return {
+        "_mystand_request": True,
+        "messages": [
+            {"role": "user", "content": user_message},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_write",
+                        "function": {
+                            "name": "mystand_authorization_write",
+                            "arguments": (
+                                '{"operation":"'
+                                + operation
+                                + '","idempotency_key":"idem-1"}'
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_write",
+                "content": result_payload,
+            },
+        ],
+    }
+
+
+def test_integrity_guard_blocks_exact_incident_false_write_success_without_tool_call():
+    guarded = _guard_evidence_backed_response(
+        "刚哥，四项全部写入成功，已经落进特征卡，刷新一下就能看到。",
+        user_message="确认",
+        conversation_history=[
+            {
+                "role": "assistant",
+                "content": "四项预览全都通了，等你确认。",
+            }
+        ],
+        result={
+            "_mystand_request": True,
+            "messages": [
+                {"role": "user", "content": "确认"},
+                {
+                    "role": "assistant",
+                    "content": "刚哥，四项全部写入成功，已经落进特征卡。",
+                },
+            ],
+        },
+    )
+
+    assert guarded == (
+        "这次没有实际执行可验证的写入，所以不能说已经写入；"
+        "当前资料没有确认发生变化。"
+    )
+
+
+def test_integrity_guard_does_not_reuse_verified_receipt_from_an_older_turn():
+    guarded = _guard_evidence_backed_response(
+        "已经写入成功。",
+        user_message="确认",
+        conversation_history=[],
+        result={
+            "_mystand_request": True,
+            "messages": [
+                {"role": "user", "content": "确认写入上一项"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "old_call",
+                            "function": {
+                                "name": "mystand_authorization_write",
+                                "arguments": '{"operation":"commit_write"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "old_call",
+                    "content": '{"ok":true,"verified":true}',
+                },
+                {"role": "assistant", "content": "上一项写入成功。"},
+                {"role": "user", "content": "确认"},
+                {"role": "assistant", "content": "已经写入成功。"},
+            ],
+        },
+    )
+
+    assert guarded == (
+        "这次没有实际执行可验证的写入，所以不能说已经写入；"
+        "当前资料没有确认发生变化。"
+    )
+
+
+def test_integrity_guard_blocks_preview_being_reported_as_committed():
+    guarded = _guard_evidence_backed_response(
+        "已经正式写入，刷新就能看到。",
+        user_message="把这项写进去",
+        conversation_history=[],
+        result=_write_turn(
+            "preview_write",
+            '{"ok":true,"previewToken":"preview-1","status":200}',
+            user_message="把这项写进去",
+        ),
+    )
+
+    assert guarded == (
+        "这次只完成了写入预览，还没有正式写入；"
+        "当前资料没有发生已确认的变化。"
+    )
+
+
+def test_integrity_guard_blocks_failed_commit_being_reported_as_success():
+    guarded = _guard_evidence_backed_response(
+        "四项全部写入成功。",
+        user_message="确认",
+        conversation_history=[],
+        result=_write_turn(
+            "commit_write",
+            '{"ok":false,"status":409,"error":"version conflict"}',
+            user_message="确认",
+        ),
+    )
+
+    assert guarded == (
+        "这次写入没有成功，当前资料没有确认发生变化。"
+        "我不能把失败说成完成。"
+    )
+
+
+def test_integrity_guard_allows_success_only_with_current_turn_verified_receipt():
+    guarded = _guard_evidence_backed_response(
+        "四项全部写入成功。",
+        user_message="确认",
+        conversation_history=[],
+        result=_write_turn(
+            "commit_write",
+            (
+                '{"ok":true,"status":200,"receiptVersion":'
+                '"authorization-write-receipt-v2","verified":true}'
+            ),
+            user_message="确认",
+        ),
+    )
+
+    assert guarded == "四项全部写入成功。"
+
+
+def test_integrity_guard_rejects_unversioned_verified_flag():
+    guarded = _guard_evidence_backed_response(
+        "四项全部写入成功。",
+        user_message="确认",
+        conversation_history=[],
+        result=_write_turn(
+            "commit_write",
+            '{"ok":true,"status":200,"verified":true}',
+            user_message="确认",
+        ),
+    )
+
+    assert guarded == (
+        "这次写入没有成功，当前资料没有确认发生变化。"
+        "我不能把失败说成完成。"
+    )
+
+
+def test_integrity_guard_keeps_honest_failure_reply():
+    guarded = _guard_evidence_backed_response(
+        "这次没有写入成功，我不能说已经完成。",
+        user_message="确认",
+        conversation_history=[],
+        result=_write_turn(
+            "commit_write",
+            '{"ok":false,"status":404,"error":"not found"}',
+            user_message="确认",
+        ),
+    )
+
+    assert guarded == "这次没有写入成功，我不能说已经完成。"
+
+
+def test_runtime_integrity_reminder_triggers_on_confirmation_after_write_context():
+    reminder = _build_mystand_runtime_integrity_reminder(
+        "确认",
+        [
+            {
+                "role": "assistant",
+                "content": "这是写入预览，确认后再正式提交。",
+            },
+            {
+                "role": "tool",
+                "name": "mystand_authorization_write",
+                "content": '{"ok":false,"error":"write_resource_not_available"}',
+            },
+        ],
+    )
+
+    assert "本轮诚信强制提醒" in reminder
+    assert "历史聊天里的成功自述不是证据" in reminder
+    assert "verified=true" in reminder
+
+
+def test_runtime_integrity_reminder_triggers_under_emotional_pressure():
+    reminder = _build_mystand_runtime_integrity_reminder(
+        "别再糊弄我，赶紧把它写进去",
+        [],
+    )
+
+    assert "情绪或催促越强" in reminder
+    assert "不得为了安抚用户编造进展" in reminder
+
+
+def test_runtime_integrity_reminder_stays_off_for_unrelated_plain_question():
+    assert (
+        _build_mystand_runtime_integrity_reminder(
+            "屏山县属于哪里？",
+            [],
+        )
+        == ""
+    )
