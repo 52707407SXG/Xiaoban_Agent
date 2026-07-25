@@ -1,6 +1,7 @@
 from gateway.platforms.api_server import (
     _build_mystand_runtime_integrity_reminder,
     _guard_evidence_backed_response,
+    _mystand_index_has_candidates,
     _resolve_mystand_initial_tool_choice,
     _sanitize_user_visible_text,
     _should_buffer_stream_deltas,
@@ -466,6 +467,16 @@ def test_resource_intent_forces_index_before_content_read():
             "【本轮可信意图与索引证据】\n意图=resource-read；索引=resource；状态=available。",
         )
         == "mystand_resource_index"
+    )
+
+
+def test_resource_index_candidate_detection_requires_nonempty_ok_page():
+    assert _mystand_index_has_candidates(
+        '{"ok":true,"items":[{"resourceUid":"resource-1"}]}'
+    )
+    assert not _mystand_index_has_candidates('{"ok":true,"items":[]}')
+    assert not _mystand_index_has_candidates(
+        '{"ok":false,"items":[{"resourceUid":"resource-1"}]}'
     )
 
 

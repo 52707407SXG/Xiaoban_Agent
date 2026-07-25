@@ -456,6 +456,19 @@ def _tool_result_looks_successful(content: Any) -> bool:
     return len(text) >= 20
 
 
+def _mystand_index_has_candidates(content: Any) -> bool:
+    try:
+        payload = json.loads(_safe_tool_content(content))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("ok") is True
+        and isinstance(payload.get("items"), list)
+        and payload["items"]
+    )
+
+
 def _source_text_for_evidence_tools(result: Any, evidence_tools: set[str]) -> str:
     if not isinstance(result, dict):
         return ""
@@ -5391,6 +5404,10 @@ class APIServerAdapter(BasePlatformAdapter):
 
         tool_started_at: dict[str, float] = {}
         tool_count = 0
+        evidence_followup = {
+            "agent": None,
+            "resource_index_required": False,
+        }
         original_tool_start_callback = tool_start_callback
         original_tool_complete_callback = tool_complete_callback
 
@@ -5427,6 +5444,17 @@ class APIServerAdapter(BasePlatformAdapter):
                     function_args,
                     function_result,
                 )
+            if (
+                evidence_followup["resource_index_required"]
+                and function_name == "mystand_resource_index"
+                and _mystand_index_has_candidates(function_result)
+            ):
+                evidence_agent = evidence_followup["agent"]
+                if (
+                    evidence_agent is not None
+                    and "mystand_authorization" in evidence_agent.valid_tool_names
+                ):
+                    evidence_agent._ephemeral_tool_choice = "mystand_authorization"
 
         def _run():
             from gateway.session_context import clear_session_vars
@@ -5508,6 +5536,10 @@ class APIServerAdapter(BasePlatformAdapter):
                     agent._ephemeral_tool_choice = initial_tool_choice
                 else:
                     initial_tool_choice = ""
+                evidence_followup["agent"] = agent
+                evidence_followup["resource_index_required"] = (
+                    initial_tool_choice == "mystand_resource_index"
+                )
                 if agent_ref is not None:
                     agent_ref[0] = agent
                     if len(agent_ref) > 1 and agent_ref[1]:
