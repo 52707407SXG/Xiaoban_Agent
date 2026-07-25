@@ -485,3 +485,39 @@ def test_required_mystand_evidence_failure_blocks_model_story():
         "这轮没有取得可验证的 My Stand 站内资料结果，所以我不能判断资料内容、"
         "权限状态或是否完成。"
     )
+
+
+def test_structured_ok_tool_result_wins_over_incidental_failure_digits():
+    guarded = _guard_evidence_backed_response(
+        "已按本轮结果读取。",
+        user_message="读取 AUTH-ABC12345",
+        conversation_history=[],
+        result={
+            "_mystand_request": True,
+            "_mystand_required_evidence_tool": "mystand_authorization",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "read-1",
+                            "function": {
+                                "name": "mystand_authorization",
+                                "arguments": '{"operation":"resolve"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "read-1",
+                    "content": (
+                        '{"ok":true,"key":{"canWrite":false},'
+                        '"content":"地址3401号"}'
+                    ),
+                },
+            ],
+        },
+    )
+
+    assert guarded == "已按本轮结果读取。"

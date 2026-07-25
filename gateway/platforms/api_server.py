@@ -416,6 +416,21 @@ def _tool_result_looks_successful(content: Any) -> bool:
     text = _safe_tool_content(content).strip()
     if not text:
         return False
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = None
+    if isinstance(payload, dict):
+        if payload.get("ok") is True or payload.get("success") is True:
+            return True
+        status = payload.get("status")
+        if (
+            payload.get("ok") is False
+            or payload.get("success") is False
+            or payload.get("error")
+            or (isinstance(status, int) and status >= 400)
+        ):
+            return False
     lowered = text.lower()
     if '"success": true' in lowered or "'success': true" in lowered:
         return True
