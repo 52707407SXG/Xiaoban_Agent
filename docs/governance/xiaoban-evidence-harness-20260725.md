@@ -6,13 +6,13 @@
 - PROGRAM_MAP_ID：xiaoban-agent / My Stand API channel
 - MAIN_GOAL：真实站内资料回答必须先取得本轮工具证据；写入守卫不得误伤读取。
 - CURRENT_WAVE：证据执行闸门
-- WAVE_STATUS：进行中
-- CURRENT_STAGE：MODULE_GATE
-- CURRENT_ITEM（唯一进行中）：真实 K3 验收
-- NEXT_ACTION（只写一条）：用正式授权 ID 走网站网关真实读取。
+- WAVE_STATUS：通过
+- CURRENT_STAGE：CLOSE
+- CURRENT_ITEM（唯一进行中）：已关闭
+- NEXT_ACTION（只写一条）：观察正式站日常对话，不扩展本波范围。
 - PASS_TO_ADVANCE：工具被强制调用，回复与授权结果一致；失败时出口拒绝编造。
 - DO_NOT_TOUCH：My Stand API、数据库、权限模型、提示词主体、其他 Agent 通道。
-- BACKUP_ID：发布前生成
+- BACKUP_ID：`/opt/xiaoban-agent-backups/evidence-harness-pre-20260725-205941`；Git 分支 `backup/xiaoban-before-evidence-harness-20260725-205941`
 - START_HEAD：890e592
 - REPLAN_COUNT：0
 - 当前模块波次：1 / 1
@@ -42,5 +42,5 @@
 - [x] 模块测试通过一次。
 - [x] 当前范围无已知 P0/P1。
 - [x] diff 未超预算，无新抽象或目录扩张。
-- [ ] 生产备份、真实 K3 与正式站路径通过。
-- [ ] 当前项关闭并写回唯一 NEXT_ACTION。
+- [x] 生产备份、真实 K3 与正式站路径通过。
+- [x] 当前项关闭并写回唯一 NEXT_ACTION。
