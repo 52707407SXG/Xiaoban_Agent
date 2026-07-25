@@ -897,6 +897,25 @@ def _guard_evidence_backed_response(
         )
         return _MYSTAND_EVIDENCE_FAILURE
 
+    if isinstance(result, dict) and result.get("_mystand_request") is True:
+        from xiaoban.trusted_runtime.completion_guard import (
+            check_mystand_final_answer,
+        )
+
+        completion = check_mystand_final_answer(
+            final_text,
+            user_message=user_message,
+            conversation_history=conversation_history,
+            result=result,
+        )
+        if not completion.allowed:
+            logger.warning(
+                "unsupported_claim_blocked reason=%s channel=web",
+                completion.reason,
+            )
+            return completion.text
+        final_text = completion.text
+
     url_required = _latest_turn_requires_url_evidence(user_message)
     image_required = _latest_turn_requires_image_evidence(user_message)
     if not url_required and not image_required:
@@ -5855,6 +5874,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     preexecuted_evidence,
                 )
                 result["_mystand_request"] = mystand_request
+                if mystand_request:
+                    result["_mystand_user_id"] = str(request_user_id or "")
                 if initial_tool_choice:
                     result["_mystand_required_evidence_groups"] = [
                         sorted(group)
