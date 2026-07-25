@@ -566,9 +566,29 @@ def _apply_ephemeral_tool_choice(agent, api_kwargs: dict) -> dict:
     return api_kwargs
 
 
+def _tools_for_ephemeral_choice(agent) -> list:
+    """Expose only the required first tool so providers cannot choose another."""
+
+    tools = list(agent.tools or [])
+    tool_name = str(getattr(agent, "_ephemeral_tool_choice", "") or "").strip()
+    if not tool_name:
+        return tools
+
+    def definition_name(item: Any) -> str:
+        if not isinstance(item, dict):
+            return ""
+        function = item.get("function")
+        if isinstance(function, dict):
+            return str(function.get("name") or "")
+        return str(item.get("name") or "")
+
+    filtered = [item for item in tools if definition_name(item) == tool_name]
+    return filtered or tools
+
+
 def build_api_kwargs(agent, api_messages: list) -> dict:
     """Build the keyword arguments dict for the active API mode."""
-    tools_for_api = agent.tools
+    tools_for_api = _tools_for_ephemeral_choice(agent)
 
     if agent.api_mode == "anthropic_messages":
         _transport = agent._get_transport()

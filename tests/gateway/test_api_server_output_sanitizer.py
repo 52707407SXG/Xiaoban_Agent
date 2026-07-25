@@ -530,9 +530,9 @@ def test_resource_index_alone_cannot_prove_business_content():
         conversation_history=[],
         result={
             "_mystand_request": True,
-            "_mystand_required_evidence_tools": [
-                "mystand_authorization",
-                "mystand_query",
+            "_mystand_required_evidence_groups": [
+                ["mystand_resource_index"],
+                ["mystand_authorization", "mystand_query"],
             ],
             "messages": [
                 {
@@ -551,6 +551,45 @@ def test_resource_index_alone_cannot_prove_business_content():
                     "role": "tool",
                     "tool_call_id": "index-1",
                     "content": '{"ok":true,"items":[]}',
+                },
+            ],
+        },
+    )
+
+    assert guarded == (
+        "这轮没有取得可验证的 My Stand 站内资料结果，所以我不能判断资料内容、"
+        "权限状态或是否完成。"
+    )
+
+
+def test_named_resource_content_without_index_is_blocked():
+    guarded = _guard_evidence_backed_response(
+        "查到了，结算业绩是 32105.68 元。",
+        user_message="按名称查游雪梅2026年财务档案",
+        conversation_history=[],
+        result={
+            "_mystand_request": True,
+            "_mystand_required_evidence_groups": [
+                ["mystand_resource_index"],
+                ["mystand_authorization", "mystand_query"],
+            ],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "read-1",
+                            "function": {
+                                "name": "mystand_authorization",
+                                "arguments": '{"operation":"resolve"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "read-1",
+                    "content": '{"ok":true,"content":"32105.68"}',
                 },
             ],
         },

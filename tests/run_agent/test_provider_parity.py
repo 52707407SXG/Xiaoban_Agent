@@ -432,7 +432,15 @@ class TestBuildApiKwargsKimiNoTemperatureOverride:
             "type": "function",
             "function": {"name": "web_search"},
         }
+        assert [
+            item["function"]["name"]
+            for item in first["tools"]
+        ] == ["web_search"]
         assert "tool_choice" not in second
+        assert {
+            item["function"]["name"]
+            for item in second["tools"]
+        } == {"web_search", "terminal"}
 
 
 class TestBuildApiKwargsNousPortal:

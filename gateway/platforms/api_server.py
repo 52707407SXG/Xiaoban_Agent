@@ -234,12 +234,17 @@ def _resolve_mystand_initial_tool_choice(
     return ""
 
 
-def _required_mystand_evidence_tools(initial_tool_choice: str) -> set[str]:
+def _required_mystand_evidence_groups(
+    initial_tool_choice: str,
+) -> list[set[str]]:
     if initial_tool_choice == "mystand_authorization":
-        return {"mystand_authorization"}
+        return [{"mystand_authorization"}]
     if initial_tool_choice == "mystand_resource_index":
-        return {"mystand_authorization", "mystand_query"}
-    return set()
+        return [
+            {"mystand_resource_index"},
+            {"mystand_authorization", "mystand_query"},
+        ]
+    return []
 
 _LOCAL_PATH_RE = re.compile(
     r"(?<![:/\w])/(?:root|opt|srv|var|etc)(?:/[^\s`'\"<>()\[\]{}，。；;]*)*"
@@ -581,26 +586,36 @@ def _guard_evidence_backed_response(
             return integrity_decision.text
         final_text = integrity_decision.text
 
-    required_mystand_tools = (
-        {
+    required_evidence_groups: list[set[str]] = []
+    if isinstance(result, dict):
+        for raw_group in result.get("_mystand_required_evidence_groups") or []:
+            if isinstance(raw_group, (list, tuple, set)):
+                group = {str(item) for item in raw_group if str(item)}
+                if group:
+                    required_evidence_groups.append(group)
+        legacy_tools = {
             str(item)
             for item in result.get("_mystand_required_evidence_tools") or []
             if str(item)
         }
-        if isinstance(result, dict)
-        else set()
-    )
-    if isinstance(result, dict) and result.get("_mystand_required_evidence_tool"):
-        required_mystand_tools.add(
-            str(result.get("_mystand_required_evidence_tool"))
-        )
-    if (
-        required_mystand_tools
-        and not _has_successful_tool_evidence(result, required_mystand_tools)
-    ):
+        if legacy_tools:
+            required_evidence_groups.append(legacy_tools)
+        if result.get("_mystand_required_evidence_tool"):
+            required_evidence_groups.append(
+                {str(result.get("_mystand_required_evidence_tool"))}
+            )
+    missing_evidence_groups = [
+        group
+        for group in required_evidence_groups
+        if not _has_successful_tool_evidence(result, group)
+    ]
+    if missing_evidence_groups:
         logger.warning(
-            "My Stand evidence gate blocked unverified response: required_tools=%s",
-            ",".join(sorted(required_mystand_tools)),
+            "My Stand evidence gate blocked unverified response: missing_groups=%s",
+            ";".join(
+                ",".join(sorted(group))
+                for group in missing_evidence_groups
+            ),
         )
         return _MYSTAND_EVIDENCE_FAILURE
 
@@ -5509,9 +5524,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 result = dict(result) if isinstance(result, dict) else {}
                 result["_mystand_request"] = mystand_request
                 if initial_tool_choice:
-                    result["_mystand_required_evidence_tools"] = sorted(
-                        _required_mystand_evidence_tools(initial_tool_choice)
-                    )
+                    result["_mystand_required_evidence_groups"] = [
+                        sorted(group)
+                        for group in _required_mystand_evidence_groups(
+                            initial_tool_choice
+                        )
+                    ]
                 usage = {
                     "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                     "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
