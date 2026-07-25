@@ -416,6 +416,24 @@ class TestBuildApiKwargsKimiNoTemperatureOverride:
         kwargs = agent._build_api_kwargs(messages)
         assert "temperature" not in kwargs
 
+    def test_kimi_profile_receives_one_shot_required_tool_choice(self, monkeypatch):
+        agent = _make_agent(
+            monkeypatch,
+            "kimi-coding",
+            base_url="https://api.kimi.com/coding/v1",
+            model="kimi-for-coding",
+        )
+        agent._ephemeral_tool_choice = "web_search"
+
+        first = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+        second = agent._build_api_kwargs([{"role": "user", "content": "again"}])
+
+        assert first["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "web_search"},
+        }
+        assert "tool_choice" not in second
+
 
 class TestBuildApiKwargsNousPortal:
     def test_includes_nous_product_tags(self, monkeypatch):
