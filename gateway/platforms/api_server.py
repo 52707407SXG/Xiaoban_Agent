@@ -246,6 +246,217 @@ def _required_mystand_evidence_groups(
         ]
     return []
 
+
+def _trusted_mystand_module_id(system_prompt: Any) -> str:
+    """Read only the module id inside My Stand's trusted intent block."""
+    prompt = str(system_prompt or "")
+    marker = "【本轮可信意图与索引证据】"
+    if marker not in prompt:
+        return ""
+    trusted_block = prompt.rsplit(marker, 1)[-1]
+    match = re.search(r'"moduleId"\s*:\s*"([A-Za-z0-9._:@-]{1,80})"', trusted_block)
+    return match.group(1) if match else ""
+
+
+def _longest_common_contiguous_length(left: str, right: str) -> int:
+    """Return a conservative label/message overlap score."""
+    a = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", str(left or "")).lower()
+    b = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", str(right or "")).lower()
+    if not a or not b:
+        return 0
+    previous = [0] * (len(b) + 1)
+    best = 0
+    for char_a in a:
+        current = [0]
+        for index, char_b in enumerate(b, start=1):
+            value = previous[index - 1] + 1 if char_a == char_b else 0
+            current.append(value)
+            best = max(best, value)
+        previous = current
+    return best
+
+
+def _select_mystand_index_candidate(
+    tool_result: Any,
+    user_message: Any,
+) -> Optional[Dict[str, Any]]:
+    """Select only one clearly identified readable resource."""
+    try:
+        payload = json.loads(_safe_tool_content(tool_result))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return None
+    readable = [
+        item
+        for item in items
+        if isinstance(item, dict)
+        and item.get("canRead") is True
+        and str(item.get("resourceUid") or "").strip()
+    ]
+    if len(readable) == 1:
+        return readable[0]
+    user_text = _content_to_visible_text(user_message)
+    scored = sorted(
+        (
+            (_longest_common_contiguous_length(item.get("safeLabel"), user_text), item)
+            for item in readable
+        ),
+        key=lambda pair: pair[0],
+        reverse=True,
+    )
+    if not scored or scored[0][0] < 2:
+        return None
+    if len(scored) > 1 and scored[0][0] == scored[1][0]:
+        return None
+    return scored[0][1]
+
+
+def _build_mystand_preexecuted_prompt(evidence: List[Dict[str, Any]]) -> str:
+    successful = [
+        item for item in evidence
+        if _tool_result_looks_successful(item.get("content"))
+    ]
+    if not successful:
+        return ""
+    lines = [
+        "【本轮程序已执行的 My Stand 站内证据】",
+        "以下结果由服务器在当前登录身份和授权边界内直接执行，优先级高于旧对话。"
+        "只根据结果回答当前问题；不得沿用旧对话里的权限、存在性或数值判断。",
+    ]
+    for item in successful:
+        content = _safe_tool_content(item.get("content"))
+        lines.append(
+            f"{item.get('name')}={content[:300_000]}"
+        )
+    return "\n".join(lines)
+
+
+def _run_mystand_preexecuted_evidence(
+    initial_tool_choice: str,
+    *,
+    user_message: Any,
+    system_prompt: Any,
+    tool_start_callback: Any,
+    tool_complete_callback: Any,
+) -> List[Dict[str, Any]]:
+    """Execute required read evidence in the harness, not by model choice."""
+    evidence: List[Dict[str, Any]] = []
+
+    def execute(name: str, args: Dict[str, Any], handler: Any) -> str:
+        call_id = f"mystand_pre_{uuid.uuid4().hex}"
+        tool_start_callback(call_id, name, args)
+        try:
+            content = handler(args)
+        except Exception:
+            logger.warning("My Stand deterministic evidence tool failed: %s", name, exc_info=False)
+            content = json.dumps(
+                {
+                    "ok": False,
+                    "status": 502,
+                    "code": "mystand_evidence_execution_failed",
+                    "error": "My Stand 站内资料读取暂时没有接稳。",
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        tool_complete_callback(call_id, name, args, content)
+        evidence.append(
+            {
+                "call_id": call_id,
+                "name": name,
+                "args": args,
+                "content": content,
+            }
+        )
+        return content
+
+    if initial_tool_choice == "mystand_authorization":
+        match = _MYSTAND_REFERENCE_ID_RE.search(
+            _content_to_visible_text(user_message)
+        )
+        if not match:
+            return evidence
+        from tools.mystand_authorization_tool import mystand_authorization_tool_handler
+
+        execute(
+            "mystand_authorization",
+            {
+                "operation": "resolve",
+                "authorization_id": match.group(0).upper(),
+            },
+            mystand_authorization_tool_handler,
+        )
+        return evidence
+
+    if initial_tool_choice != "mystand_resource_index":
+        return evidence
+
+    from tools.mystand_authorization_tool import mystand_authorization_tool_handler
+    from tools.mystand_resource_index_tool import mystand_resource_index_tool_handler
+
+    index_result = execute(
+        "mystand_resource_index",
+        {
+            "operation": "list_resources",
+            "module_id": _trusted_mystand_module_id(system_prompt),
+            "status": "all",
+            "limit": 100,
+        },
+        mystand_resource_index_tool_handler,
+    )
+    selected = _select_mystand_index_candidate(index_result, user_message)
+    if selected is not None:
+        execute(
+            "mystand_authorization",
+            {
+                "operation": "resolve",
+                "resource_uid": str(selected.get("resourceUid") or ""),
+            },
+            mystand_authorization_tool_handler,
+        )
+    return evidence
+
+
+def _append_mystand_preexecuted_evidence(
+    result: Dict[str, Any],
+    evidence: List[Dict[str, Any]],
+) -> None:
+    """Attach auditable tool-shaped receipts for the existing egress gate."""
+    messages = result.setdefault("messages", [])
+    if not isinstance(messages, list):
+        messages = []
+        result["messages"] = messages
+    for item in evidence:
+        call_id = str(item.get("call_id") or "")
+        name = str(item.get("name") or "")
+        args = item.get("args") if isinstance(item.get("args"), dict) else {}
+        messages.extend([
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(
+                            args,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                    },
+                }],
+            },
+            {
+                "role": "tool",
+                "name": name,
+                "tool_call_id": call_id,
+                "content": item.get("content"),
+            },
+        ])
+
 _LOCAL_PATH_RE = re.compile(
     r"(?<![:/\w])/(?:root|opt|srv|var|etc)(?:/[^\s`'\"<>()\[\]{}，。；;]*)*"
 )
@@ -567,6 +778,54 @@ def _has_successful_tool_evidence(result: Any, evidence_tools: set[str]) -> bool
     return False
 
 
+def _verified_mystand_failure_response(
+    result: Any,
+    evidence_tools: set[str],
+) -> str:
+    """Turn an executed negative receipt into one precise, non-model answer."""
+    if not isinstance(result, dict) or not isinstance(result.get("messages"), list):
+        return ""
+    call_names: Dict[str, str] = {}
+    for msg in result["messages"]:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for call in msg.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") or {}
+            call_id = str(call.get("id") or "")
+            name = str(function.get("name") or call.get("name") or "")
+            if call_id and name:
+                call_names[call_id] = name
+    for msg in reversed(result["messages"]):
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            continue
+        name = str(msg.get("name") or "")
+        if not name:
+            name = call_names.get(str(msg.get("tool_call_id") or ""), "")
+        if name not in evidence_tools:
+            continue
+        try:
+            payload = json.loads(_safe_tool_content(msg.get("content")))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("ok") is not False:
+            continue
+        try:
+            status = int(payload.get("status") or 0)
+        except (TypeError, ValueError):
+            status = 0
+        if status == 403:
+            return "这份资料已找到，但当前没有授权给小伴读取。"
+        if status == 404:
+            return "没有找到这份资料，或者这个站内 ID 已失效。"
+        if status == 409:
+            return "这份资料目前无法唯一定位，请补充更完整的资料名称。"
+        if status >= 500:
+            return "站内资料读取暂时没有接稳，请稍后再试。"
+    return ""
+
+
 def _guard_evidence_backed_response(
     text: Any,
     *,
@@ -623,6 +882,12 @@ def _guard_evidence_backed_response(
         if not _has_successful_tool_evidence(result, group)
     ]
     if missing_evidence_groups:
+        verified_failure = _verified_mystand_failure_response(
+            result,
+            set().union(*missing_evidence_groups),
+        )
+        if verified_failure:
+            return verified_failure
         logger.warning(
             "My Stand evidence gate blocked unverified response: missing_groups=%s",
             ";".join(
@@ -5530,16 +5795,38 @@ class APIServerAdapter(BasePlatformAdapter):
                     else ""
                 )
                 if (
-                    initial_tool_choice
-                    and initial_tool_choice in agent.valid_tool_names
+                    not initial_tool_choice
+                    or initial_tool_choice not in agent.valid_tool_names
                 ):
-                    agent._ephemeral_tool_choice = initial_tool_choice
-                else:
                     initial_tool_choice = ""
                 evidence_followup["agent"] = agent
                 evidence_followup["resource_index_required"] = (
                     initial_tool_choice == "mystand_resource_index"
                 )
+                preexecuted_evidence: List[Dict[str, Any]] = []
+                if initial_tool_choice:
+                    preexecuted_evidence = _run_mystand_preexecuted_evidence(
+                        initial_tool_choice,
+                        user_message=user_message,
+                        system_prompt=run_system_prompt,
+                        tool_start_callback=_traced_tool_start,
+                        tool_complete_callback=_traced_tool_complete,
+                    )
+                    evidence_prompt = _build_mystand_preexecuted_prompt(
+                        preexecuted_evidence
+                    )
+                    if evidence_prompt:
+                        agent.ephemeral_system_prompt = "\n\n".join(
+                            part
+                            for part in (
+                                agent.ephemeral_system_prompt,
+                                evidence_prompt,
+                            )
+                            if isinstance(part, str) and part.strip()
+                        )
+                    # The harness already executed the authoritative read.
+                    # Never ask the provider to repeat it through a hint.
+                    agent._ephemeral_tool_choice = ""
                 if agent_ref is not None:
                     agent_ref[0] = agent
                     if len(agent_ref) > 1 and agent_ref[1]:
@@ -5548,12 +5835,25 @@ class APIServerAdapter(BasePlatformAdapter):
                         finally:
                             raise CompletionStoppedError("request stopped before execution")
                 effective_task_id = session_id or str(uuid.uuid4())
+                execution_history = (
+                    []
+                    if initial_tool_choice
+                    and any(
+                        _tool_result_looks_successful(item.get("content"))
+                        for item in preexecuted_evidence
+                    )
+                    else conversation_history
+                )
                 result = agent.run_conversation(
                     user_message=user_message,
-                    conversation_history=conversation_history,
+                    conversation_history=execution_history,
                     task_id=effective_task_id,
                 )
                 result = dict(result) if isinstance(result, dict) else {}
+                _append_mystand_preexecuted_evidence(
+                    result,
+                    preexecuted_evidence,
+                )
                 result["_mystand_request"] = mystand_request
                 if initial_tool_choice:
                     result["_mystand_required_evidence_groups"] = [

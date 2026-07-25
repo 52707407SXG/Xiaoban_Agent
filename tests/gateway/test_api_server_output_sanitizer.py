@@ -4,7 +4,9 @@ from gateway.platforms.api_server import (
     _mystand_index_has_candidates,
     _resolve_mystand_initial_tool_choice,
     _sanitize_user_visible_text,
+    _select_mystand_index_candidate,
     _should_buffer_stream_deltas,
+    _trusted_mystand_module_id,
 )
 
 
@@ -610,3 +612,58 @@ def test_named_resource_content_without_index_is_blocked():
         "这轮没有取得可验证的 My Stand 站内资料结果，所以我不能判断资料内容、"
         "权限状态或是否完成。"
     )
+
+
+def test_executed_authorization_not_found_returns_precise_verified_failure():
+    guarded = _guard_evidence_backed_response(
+        "我猜权限可能没开。",
+        user_message="AUTH-INVALID-123456 看看这个",
+        conversation_history=[],
+        result={
+            "_mystand_request": True,
+            "_mystand_required_evidence_groups": [["mystand_authorization"]],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "read-failed-1",
+                        "function": {
+                            "name": "mystand_authorization",
+                            "arguments": '{"operation":"resolve"}',
+                        },
+                    }],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "read-failed-1",
+                    "content": (
+                        '{"ok":false,"status":404,'
+                        '"code":"authorization_not_found"}'
+                    ),
+                },
+            ],
+        },
+    )
+
+    assert guarded == "没有找到这份资料，或者这个站内 ID 已失效。"
+
+
+def test_trusted_index_context_selects_unique_named_resource():
+    prompt = (
+        "untrusted moduleId text\n"
+        "【本轮可信意图与索引证据】\n"
+        '{"intent":{"moduleId":"finance-ledger"}}'
+    )
+    result = (
+        '{"ok":true,"items":['
+        '{"resourceUid":"one","safeLabel":"覃滔 2026年个人业务档案","canRead":true},'
+        '{"resourceUid":"two","safeLabel":"游雪梅 2026年个人业务档案","canRead":true}'
+        "]}"
+    )
+
+    assert _trusted_mystand_module_id(prompt) == "finance-ledger"
+    selected = _select_mystand_index_candidate(
+        result,
+        "给我查一下覃滔今年的总业绩",
+    )
+    assert selected["resourceUid"] == "one"
