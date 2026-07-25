@@ -66,6 +66,7 @@ from gateway.platforms.base import (
 from gateway.mystand_integrity_guard import (
     build_runtime_integrity_reminder as _build_mystand_runtime_integrity_reminder,
     guard_mutation_success_claim,
+    requires_write_evidence as _requires_mystand_write_evidence,
 )
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,7 @@ _MYSTAND_REQUEST_TOOLSETS = {
     "mystand-broker-basic": [
         "mystand_parser",
         "mystand_query",
+        "mystand_authorization",
         "mystand_authorization_write",
     ],
     "mystand-broker-research": [
@@ -161,6 +163,7 @@ _MYSTAND_REQUEST_TOOLSETS = {
     "mystand-owner": [
         "mystand_parser",
         "mystand_query",
+        "mystand_authorization",
         "mystand_authorization_write",
     ],
     "mystand-owner-research": [
@@ -172,6 +175,7 @@ _MYSTAND_REQUEST_TOOL_NAMES = {
     "mystand-broker-basic": {
         "mystand_parse",
         "mystand_query",
+        "mystand_authorization",
         "mystand_authorization_write",
     },
     "mystand-broker-research": {
@@ -182,6 +186,7 @@ _MYSTAND_REQUEST_TOOL_NAMES = {
     "mystand-owner": {
         "mystand_parse",
         "mystand_query",
+        "mystand_authorization",
         "mystand_authorization_write",
     },
     "mystand-owner-research": {
@@ -190,6 +195,39 @@ _MYSTAND_REQUEST_TOOL_NAMES = {
         "mystand_parse",
     },
 }
+
+_MYSTAND_REFERENCE_ID_RE = re.compile(
+    r"(?<![A-Z0-9])(?:AUTH|OUT)-[A-Z0-9][A-Z0-9-]{5,}[A-Z0-9](?![A-Z0-9])",
+    re.IGNORECASE,
+)
+_MYSTAND_EVIDENCE_FAILURE = (
+    "这轮没有取得可验证的 My Stand 站内资料结果，所以我不能判断资料内容、"
+    "权限状态或是否完成。"
+)
+
+
+def _resolve_mystand_initial_tool_choice(
+    user_message: Any,
+    system_prompt: Any,
+) -> str:
+    """Select the first evidence tool from trusted My Stand request context.
+
+    This is an execution gate, not another behavioral prompt. Exact AUTH/OUT
+    references must be resolved through the authorization wall. Resource-data
+    intents already classified by My Stand's deterministic index preflight
+    must perform a semantic query before the model may answer.
+    """
+
+    user_text = _content_to_visible_text(user_message)
+    if _MYSTAND_REFERENCE_ID_RE.search(user_text):
+        return "mystand_authorization"
+    prompt_text = str(system_prompt or "")
+    if (
+        "【本轮可信意图与索引证据】" in prompt_text
+        and "索引=resource" in prompt_text
+    ):
+        return "mystand_query"
+    return ""
 
 _LOCAL_PATH_RE = re.compile(
     r"(?<![:/\w])/(?:root|opt|srv|var|etc)(?:/[^\s`'\"<>()\[\]{}，。；;]*)*"
@@ -501,15 +539,35 @@ def _guard_evidence_backed_response(
     if not final_text:
         return final_text
 
-    integrity_decision = guard_mutation_success_claim(final_text, result)
-    if integrity_decision.blocked:
+    if _requires_mystand_write_evidence(
+        user_message,
+        conversation_history,
+        result,
+    ):
+        integrity_decision = guard_mutation_success_claim(final_text, result)
+        if integrity_decision.blocked:
+            logger.warning(
+                "My Stand integrity guard blocked unsupported mutation success claim: "
+                "evidence_status=%s",
+                integrity_decision.evidence_status,
+            )
+            return integrity_decision.text
+        final_text = integrity_decision.text
+
+    required_mystand_tool = (
+        str(result.get("_mystand_required_evidence_tool") or "")
+        if isinstance(result, dict)
+        else ""
+    )
+    if (
+        required_mystand_tool
+        and not _has_successful_tool_evidence(result, {required_mystand_tool})
+    ):
         logger.warning(
-            "My Stand integrity guard blocked unsupported mutation success claim: "
-            "evidence_status=%s",
-            integrity_decision.evidence_status,
+            "My Stand evidence gate blocked unverified response: required_tool=%s",
+            required_mystand_tool,
         )
-        return integrity_decision.text
-    final_text = integrity_decision.text
+        return _MYSTAND_EVIDENCE_FAILURE
 
     url_required = _latest_turn_requires_url_evidence(user_message)
     image_required = _latest_turn_requires_image_evidence(user_message)
@@ -5385,6 +5443,21 @@ class APIServerAdapter(BasePlatformAdapter):
                     request_user_id=request_user_id or None,
                     skip_memory=mystand_request,
                 )
+                initial_tool_choice = (
+                    _resolve_mystand_initial_tool_choice(
+                        user_message,
+                        run_system_prompt,
+                    )
+                    if mystand_request
+                    else ""
+                )
+                if (
+                    initial_tool_choice
+                    and initial_tool_choice in agent.valid_tool_names
+                ):
+                    agent._ephemeral_tool_choice = initial_tool_choice
+                else:
+                    initial_tool_choice = ""
                 if agent_ref is not None:
                     agent_ref[0] = agent
                     if len(agent_ref) > 1 and agent_ref[1]:
@@ -5400,6 +5473,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
                 result = dict(result) if isinstance(result, dict) else {}
                 result["_mystand_request"] = mystand_request
+                if initial_tool_choice:
+                    result["_mystand_required_evidence_tool"] = initial_tool_choice
                 usage = {
                     "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                     "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,

@@ -552,6 +552,20 @@ def interruptible_api_call(agent, api_kwargs: dict):
 
 
 
+def _apply_ephemeral_tool_choice(agent, api_kwargs: dict) -> dict:
+    """Force one named evidence tool on the next model call, then return to auto."""
+
+    tool_name = str(getattr(agent, "_ephemeral_tool_choice", "") or "").strip()
+    if not tool_name or not api_kwargs.get("tools"):
+        return api_kwargs
+    agent._ephemeral_tool_choice = ""
+    api_kwargs["tool_choice"] = {
+        "type": "function",
+        "function": {"name": tool_name},
+    }
+    return api_kwargs
+
+
 def build_api_kwargs(agent, api_messages: list) -> dict:
     """Build the keyword arguments dict for the active API mode."""
     tools_for_api = agent.tools
@@ -641,7 +655,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
                     getattr(agent, "log_prefix", ""), exc,
                 )
 
-        return _ct.build_kwargs(
+        api_kwargs = _ct.build_kwargs(
             model=agent.model,
             messages=_msgs_for_codex,
             tools=tools_for_api,
@@ -762,6 +776,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             supports_reasoning=agent._supports_reasoning_extra_body(),
             qwen_session_metadata=_qwen_meta,
         )
+        return _apply_ephemeral_tool_choice(agent, api_kwargs)
 
     # ── Legacy flag path ────────────────────────────────────────────
     # Reached only when get_provider_profile() returns None — i.e. a
@@ -773,7 +788,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
     # Strip image parts for non-vision models (no-op when vision-capable).
     _msgs_for_chat = agent._prepare_messages_for_non_vision_model(api_messages)
 
-    return _ct.build_kwargs(
+    api_kwargs = _ct.build_kwargs(
         model=agent.model,
         messages=_msgs_for_chat,
         tools=tools_for_api,
@@ -809,6 +824,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         anthropic_max_output=_ant_max,
         provider_name=agent.provider,
     )
+    return _apply_ephemeral_tool_choice(agent, api_kwargs)
 
 
 

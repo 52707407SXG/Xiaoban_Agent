@@ -31,6 +31,15 @@ _CONFIRMATION_RE = re.compile(
     r"(?:写入|提交|执行|吧|。|！|!|\s)*$",
     re.IGNORECASE,
 )
+_READ_QUESTION_RE = re.compile(
+    r"(?:吗|么|是否|有没有|为何|为什么|怎么回事|[?？]|"
+    r"(?:以前|曾经).{0,16}(?:删除|修改|更新|写入|保存))",
+    re.IGNORECASE,
+)
+_WRITE_PREVIEW_RE = re.compile(
+    r"(?:(?:写入|修改|更新|删除|新增).{0,16}预览|预览.{0,16}(?:确认|提交|写入))",
+    re.IGNORECASE,
+)
 _PRESSURE_RE = re.compile(
     r"(?:赶紧|马上|立刻|必须|别再|再敢|糊弄|撒谎|骗我|废物|傻逼|"
     r"操你|草泥马|他妈|气死|弄死|卸载|最后一次)",
@@ -141,6 +150,10 @@ def _history_text(history: Sequence[Mapping[str, Any]] | None) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def _looks_like_mutation_request(text: str) -> bool:
+    return bool(_MUTATION_RE.search(text) and not _READ_QUESTION_RE.search(text))
+
+
 def build_runtime_integrity_reminder(
     user_message: Any,
     conversation_history: Sequence[Mapping[str, Any]] | None = None,
@@ -148,25 +161,52 @@ def build_runtime_integrity_reminder(
     """Return a per-turn system reminder only for mutation-risk situations."""
 
     user_text = _visible_text(user_message).strip()
-    history_text = _history_text(conversation_history)
-    current_mutation = bool(_MUTATION_RE.search(user_text))
+    history = list(conversation_history or [])
+    prior_user_text = "\n".join(
+        _visible_text(message.get("content"))
+        for message in history[-8:]
+        if isinstance(message, Mapping) and str(message.get("role") or "") == "user"
+    )
+    tool_history_text = "\n".join(
+        (
+            str(message.get("name") or "")
+            + "\n"
+            + _visible_text(message.get("content"))
+        )
+        for message in history[-8:]
+        if isinstance(message, Mapping) and str(message.get("role") or "") == "tool"
+    )
+    assistant_preview_text = "\n".join(
+        _visible_text(message.get("content"))
+        for message in history[-4:]
+        if isinstance(message, Mapping)
+        and str(message.get("role") or "") == "assistant"
+        and _WRITE_PREVIEW_RE.search(_visible_text(message.get("content")))
+    )
+    current_mutation = _looks_like_mutation_request(user_text)
+    prior_user_mutation = any(
+        _looks_like_mutation_request(part)
+        for part in prior_user_text.splitlines()
+        if part
+    )
     confirmation_after_mutation = bool(
         _CONFIRMATION_RE.fullmatch(user_text)
         and (
-            _MUTATION_RE.search(history_text)
-            or "mystand_authorization_write" in history_text
+            prior_user_mutation
+            or "mystand_authorization_write" in tool_history_text
+            or bool(assistant_preview_text)
         )
     )
     pressure_during_mutation = bool(
         _PRESSURE_RE.search(user_text)
-        and (current_mutation or _MUTATION_RE.search(history_text))
+        and (current_mutation or prior_user_mutation)
     )
     recent_write_failure = bool(
         (
-            "mystand_authorization_write" in history_text
-            or _MUTATION_RE.search(history_text)
+            "mystand_authorization_write" in tool_history_text
+            or prior_user_mutation
         )
-        and _TOOL_FAILURE_RE.search(history_text)
+        and _TOOL_FAILURE_RE.search(tool_history_text)
     )
     if not (
         current_mutation
@@ -187,6 +227,26 @@ def build_runtime_integrity_reminder(
         "情绪或催促越强，越要停下来核对当前回合工具证据；"
         "不得为了安抚用户编造进展、理由或完成状态。"
     )
+
+
+def requires_write_evidence(
+    user_message: Any,
+    conversation_history: Sequence[Mapping[str, Any]] | None = None,
+    result: Any = None,
+) -> bool:
+    """Return whether this turn is allowed to trigger the write-claim guard.
+
+    The egress guard must not reinterpret ordinary read answers just because
+    they contain words such as “已删除”.  A write contract applies only when
+    the current/prior trusted user intent is mutating, or the current run
+    actually invoked the write bridge.
+    """
+
+    if _CONFIRMATION_RE.fullmatch(_visible_text(user_message).strip()):
+        return True
+    if build_runtime_integrity_reminder(user_message, conversation_history):
+        return True
+    return _current_turn_write_evidence(result) != "no_write_call"
 
 
 def _parse_json_object(value: Any) -> dict[str, Any]:

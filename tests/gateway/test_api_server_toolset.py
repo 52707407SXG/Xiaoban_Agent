@@ -105,6 +105,7 @@ class TestApiServerAdapterToolset:
         assert basic == [
             "mystand_parser",
             "mystand_query",
+            "mystand_authorization",
             "mystand_authorization_write",
         ]
         assert research == [
@@ -121,7 +122,8 @@ class TestApiServerAdapterToolset:
             assert "memory" not in toolsets
             assert "session_search" not in toolsets
             assert "mystand_resource_index" not in toolsets
-            assert "mystand_authorization" not in toolsets
+        assert "mystand_authorization" in basic
+        assert "mystand_authorization" in owner
         assert "web" not in basic
         assert "web" not in owner
         assert "mystand_query" not in research

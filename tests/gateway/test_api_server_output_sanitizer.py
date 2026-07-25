@@ -1,6 +1,7 @@
 from gateway.platforms.api_server import (
     _build_mystand_runtime_integrity_reminder,
     _guard_evidence_backed_response,
+    _resolve_mystand_initial_tool_choice,
     _sanitize_user_visible_text,
     _should_buffer_stream_deltas,
 )
@@ -413,4 +414,74 @@ def test_runtime_integrity_reminder_stays_off_for_unrelated_plain_question():
             [],
         )
         == ""
+    )
+
+
+def test_read_reply_is_not_replaced_by_write_guard_words():
+    guarded = _guard_evidence_backed_response(
+        "这条是已删除的历史记录，不代表本轮执行了删除。",
+        user_message="这个档案以前删除了吗？",
+        conversation_history=[
+            {
+                "role": "assistant",
+                "content": "之前讨论过写入，但这不是当前任务。",
+            },
+        ],
+        result={"_mystand_request": True, "messages": []},
+    )
+
+    assert guarded == "这条是已删除的历史记录，不代表本轮执行了删除。"
+
+
+def test_delete_history_record_remains_a_write_request():
+    reminder = _build_mystand_runtime_integrity_reminder(
+        "删除这条历史记录",
+        [],
+    )
+
+    assert "本轮诚信强制提醒" in reminder
+
+
+def test_exact_auth_forces_authorization_evidence_tool():
+    assert (
+        _resolve_mystand_initial_tool_choice(
+            "读取 AUTH-74D760C1-3EA2F5BA-23ACBEF4-BC1819E6",
+            "",
+        )
+        == "mystand_authorization"
+    )
+    assert (
+        _resolve_mystand_initial_tool_choice(
+            "读取 AUTH-ABC12345",
+            "",
+        )
+        == "mystand_authorization"
+    )
+
+
+def test_resource_index_intent_forces_semantic_query_tool():
+    assert (
+        _resolve_mystand_initial_tool_choice(
+            "看看游雪梅今年的结算情况",
+            "【本轮可信意图与索引证据】\n意图=resource-read；索引=resource；状态=available。",
+        )
+        == "mystand_query"
+    )
+
+
+def test_required_mystand_evidence_failure_blocks_model_story():
+    guarded = _guard_evidence_backed_response(
+        "档案存在，但小伴可读开关没有打开。",
+        user_message="读取 AUTH-74D760C1-3EA2F5BA-23ACBEF4-BC1819E6",
+        conversation_history=[],
+        result={
+            "_mystand_request": True,
+            "_mystand_required_evidence_tool": "mystand_authorization",
+            "messages": [],
+        },
+    )
+
+    assert guarded == (
+        "这轮没有取得可验证的 My Stand 站内资料结果，所以我不能判断资料内容、"
+        "权限状态或是否完成。"
     )
