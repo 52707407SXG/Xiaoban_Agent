@@ -1,0 +1,255 @@
+{
+  "base_commit": "213398b7abe4a42b453f92c1a0f1398b4c1a5371",
+  "normalization": "crlf->lf; rstrip each line; strip leading/trailing blank lines; sha256 utf-8",
+  "blocks": [
+    {
+      "id": "identity.default-agent-identity",
+      "kind": "角色感",
+      "file": "agent/prompt_builder.py",
+      "symbol": "DEFAULT_AGENT_IDENTITY",
+      "sha256": "a87784b44ed04dd1f38168d5ec5f637ea65408daf45e8667cf01bf18071d55ec",
+      "consumers": [
+        "agent/system_prompt.py::build_system_prompt_parts"
+      ],
+      "related_tests": [
+        "tests/agent/test_system_prompt.py"
+      ]
+    },
+    {
+      "id": "identity.soul-md-loader",
+      "kind": "角色感",
+      "file": "agent/prompt_builder.py",
+      "symbol": "load_soul_md",
+      "sha256": "7bb70d9e80a1a380ceafd1c8e95b3fcb591a853b05754431cc1e453b0ffd408f",
+      "consumers": [
+        "agent/system_prompt.py::build_system_prompt_parts"
+      ],
+      "related_tests": [
+        "tests/agent/test_system_prompt.py"
+      ]
+    },
+    {
+      "id": "identity.native-identity",
+      "kind": "角色感",
+      "file": "xiaoban/prompt.py",
+      "symbol": "XIAOBAN_NATIVE_IDENTITY",
+      "sha256": "243ad49ce9cb2794f9b0f0f1f6dc8b90fe0767977cdd1297e5f5456a271f1a75",
+      "consumers": [
+        "xiaoban/prompt.py::build_xiaoban_identity_block",
+        "scripts/xiaoban_smoke.py"
+      ],
+      "related_tests": [
+        "tests/gateway/trusted_action_runtime/test_three_senses_fingerprints.py"
+      ]
+    },
+    {
+      "id": "identity.reply-style",
+      "kind": "角色感",
+      "file": "xiaoban/prompt.py",
+      "symbol": "XIAOBAN_REPLY_STYLE",
+      "sha256": "75e69056bc09f7c6d42d96cbfb1286347f5503969932332dce810e9645bf589a",
+      "consumers": [
+        "xiaoban/prompt.py::build_xiaoban_identity_block"
+      ],
+      "related_tests": [
+        "tests/gateway/trusted_action_runtime/test_three_senses_fingerprints.py"
+      ]
+    },
+    {
+      "id": "identity.security-boundary",
+      "kind": "角色感",
+      "file": "xiaoban/prompt.py",
+      "symbol": "XIAOBAN_SECURITY_BOUNDARY",
+      "sha256": "efdba0f7d7acfc2df3ea51b37fe8bdffa7616438d5790808b9eb6fee1301955a",
+      "consumers": [
+        "xiaoban/prompt.py::build_xiaoban_identity_block"
+      ],
+      "related_tests": [
+        "tests/gateway/trusted_action_runtime/test_three_senses_fingerprints.py"
+      ]
+    },
+    {
+      "id": "identity.identity-block-builder",
+      "kind": "角色感",
+      "file": "xiaoban/prompt.py",
+      "symbol": "build_xiaoban_identity_block",
+      "sha256": "f73bf82382487a0e238aeaa7df86681162012166a86ef244f5acfba0dd0b76a7",
+      "consumers": [
+        "scripts/xiaoban_smoke.py"
+      ],
+      "related_tests": [
+        "tests/gateway/trusted_action_runtime/test_three_senses_fingerprints.py"
+      ]
+    },
+    {
+      "id": "policy.operating-policy",
+      "kind": "角色感",
+      "file": "agent/xiaoban_operating_policy.py",
+      "symbol": "XIAOBAN_OPERATING_POLICY",
+      "sha256": "55e1ab0b076ec424cd766f6c20bc2b508702cb3c74d4e0592e8e5c0264dd77af",
+      "consumers": [
+        "agent/system_prompt.py::build_system_prompt_parts"
+      ],
+      "related_tests": [
+        "tests/agent/test_system_prompt.py"
+      ]
+    },
+    {
+      "id": "policy.mystand-feature-reasoning",
+      "kind": "角色感",
+      "file": "agent/xiaoban_operating_policy.py",
+      "symbol": "XIAOBAN_MYSTAND_FEATURE_REASONING_POLICY",
+      "sha256": "a986b8cf27f0486cb4b3d639ae71fc4093e951edc0335a7eaa6653a4ccfc4fd2",
+      "consumers": [
+        "agent/system_prompt.py::build_system_prompt_parts"
+      ],
+      "related_tests": [
+        "tests/agent/test_system_prompt.py"
+      ]
+    },
+    {
+      "id": "policy.mystand-security-boundary",
+      "kind": "角色感",
+      "file": "agent/xiaoban_operating_policy.py",
+      "symbol": "XIAOBAN_MYSTAND_SECURITY_BOUNDARY_POLICY",
+      "sha256": "f1d52b212dba8c5e158cdddeb729fdb3277771f2e861eb47c965c583d808b4c7",
+      "consumers": [
+        "agent/system_prompt.py::build_system_prompt_parts"
+      ],
+      "related_tests": [
+        "tests/agent/test_system_prompt.py"
+      ]
+    },
+    {
+      "id": "policy.agentic-workflow",
+      "kind": "角色感",
+      "file": "agent/xiaoban_operating_policy.py",
+      "symbol": "XIAOBAN_AGENTIC_WORKFLOW_POLICY",
+      "sha256": "6fa095a2a951ed7f79c5908759ca499fb3a3125775807712db2b014dc8b9b1a7",
+      "consumers": [
+        "agent/system_prompt.py::build_system_prompt_parts"
+      ],
+      "related_tests": [
+        "tests/agent/test_system_prompt.py"
+      ]
+    },
+    {
+      "id": "policy.verification-backfill",
+      "kind": "角色感",
+      "file": "agent/xiaoban_operating_policy.py",
+      "symbol": "XIAOBAN_VERIFICATION_BACKFILL_POLICY",
+      "sha256": "e9851325db81ec90b152009c09124950d089dbf0a75d4419202584971a44a29e",
+      "consumers": [
+        "agent/system_prompt.py::build_system_prompt_parts"
+      ],
+      "related_tests": [
+        "tests/agent/test_system_prompt.py"
+      ]
+    },
+    {
+      "id": "policy.explicit-learn",
+      "kind": "角色感",
+      "file": "agent/xiaoban_operating_policy.py",
+      "symbol": "XIAOBAN_EXPLICIT_LEARN_POLICY",
+      "sha256": "22cc5f76568af37ff340da1df469a535f0db146a6c03371f3764f2240e18a3f5",
+      "consumers": [
+        "agent/system_prompt.py::build_system_prompt_parts"
+      ],
+      "related_tests": [
+        "tests/agent/test_system_prompt.py"
+      ]
+    },
+    {
+      "id": "policy.advanced-moa",
+      "kind": "角色感",
+      "file": "agent/xiaoban_operating_policy.py",
+      "symbol": "XIAOBAN_ADVANCED_MOA_POLICY",
+      "sha256": "787e84585b841140f3ecff4b90a78e28df8ce20bbe0b1a6802da417120843f20",
+      "consumers": [
+        "agent/system_prompt.py::build_system_prompt_parts"
+      ],
+      "related_tests": [
+        "tests/agent/test_system_prompt.py"
+      ]
+    },
+    {
+      "id": "policy.deepseek-execution-guidance",
+      "kind": "角色感",
+      "file": "agent/xiaoban_operating_policy.py",
+      "symbol": "XIAOBAN_DEEPSEEK_EXECUTION_GUIDANCE",
+      "sha256": "74414b5b4d7c5b98a447df278a21c4505480bd4939261e55bdd8a95d8d5f6334",
+      "consumers": [
+        "agent/system_prompt.py::build_system_prompt_parts"
+      ],
+      "related_tests": [
+        "tests/agent/test_system_prompt.py"
+      ]
+    },
+    {
+      "id": "time.api-temporal-context",
+      "kind": "时间感",
+      "file": "gateway/platforms/api_server.py",
+      "symbol": "_build_api_temporal_context",
+      "sha256": "b291998cead74694dff52f8426bc6182f6bfcf91d3c5366b55de6b29b7c85535",
+      "consumers": [
+        "gateway/platforms/api_server.py::_merge_temporal_context"
+      ],
+      "related_tests": [
+        "tests/gateway/test_api_server.py"
+      ]
+    },
+    {
+      "id": "time.merge-temporal-context",
+      "kind": "时间感",
+      "file": "gateway/platforms/api_server.py",
+      "symbol": "_merge_temporal_context",
+      "sha256": "398dee75cfdb55b8f25e502bcccbdb54dfe015b35a215b187967cb0f0b364bcb",
+      "consumers": [
+        "gateway/platforms/api_server.py::_run_agent",
+        "gateway/platforms/api_server.py::_handle_runs"
+      ],
+      "related_tests": [
+        "tests/gateway/test_api_server.py"
+      ]
+    },
+    {
+      "id": "time.format-message-timestamp",
+      "kind": "时间感",
+      "file": "gateway/message_timestamps.py",
+      "symbol": "format_message_timestamp",
+      "sha256": "8d4a077c36335f1062866d965b84441c244a5094b1053399e709e198871a53b7",
+      "consumers": [
+        "gateway/message_timestamps.py::render_user_content_with_timestamp"
+      ],
+      "related_tests": [
+        "tests/gateway/test_message_timestamps.py"
+      ]
+    },
+    {
+      "id": "time.render-user-content-with-timestamp",
+      "kind": "时间感",
+      "file": "gateway/message_timestamps.py",
+      "symbol": "render_user_content_with_timestamp",
+      "sha256": "e3090a1b726259db9804a8ee62f89b2676a53a37983b746e366230f13d8a8d03",
+      "consumers": [
+        "gateway/run.py::GatewayRunner._handle_message"
+      ],
+      "related_tests": [
+        "tests/gateway/test_message_timestamps.py"
+      ]
+    },
+    {
+      "id": "space.environment-hints",
+      "kind": "空间感",
+      "file": "agent/prompt_builder.py",
+      "symbol": "build_environment_hints",
+      "sha256": "af8eaca9870c51b7848157cc2d8a203194cf9fa6ad15737d6c0cabad9487efc1",
+      "consumers": [
+        "agent/system_prompt.py::build_system_prompt_parts"
+      ],
+      "related_tests": [
+        "tests/agent/test_system_prompt.py"
+      ]
+    }
+  ]
+}
