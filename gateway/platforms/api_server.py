@@ -152,6 +152,7 @@ class InvalidToolsetPolicy(ValueError):
 _MYSTAND_REQUEST_TOOLSETS = {
     "mystand-broker-basic": [
         "mystand_parser",
+        "mystand_resource_index",
         "mystand_query",
         "mystand_authorization",
         "mystand_authorization_write",
@@ -162,6 +163,7 @@ _MYSTAND_REQUEST_TOOLSETS = {
     ],
     "mystand-owner": [
         "mystand_parser",
+        "mystand_resource_index",
         "mystand_query",
         "mystand_authorization",
         "mystand_authorization_write",
@@ -174,6 +176,7 @@ _MYSTAND_REQUEST_TOOLSETS = {
 _MYSTAND_REQUEST_TOOL_NAMES = {
     "mystand-broker-basic": {
         "mystand_parse",
+        "mystand_resource_index",
         "mystand_query",
         "mystand_authorization",
         "mystand_authorization_write",
@@ -185,6 +188,7 @@ _MYSTAND_REQUEST_TOOL_NAMES = {
     },
     "mystand-owner": {
         "mystand_parse",
+        "mystand_resource_index",
         "mystand_query",
         "mystand_authorization",
         "mystand_authorization_write",
@@ -226,8 +230,16 @@ def _resolve_mystand_initial_tool_choice(
         "【本轮可信意图与索引证据】" in prompt_text
         and "索引=resource" in prompt_text
     ):
-        return "mystand_query"
+        return "mystand_resource_index"
     return ""
+
+
+def _required_mystand_evidence_tools(initial_tool_choice: str) -> set[str]:
+    if initial_tool_choice == "mystand_authorization":
+        return {"mystand_authorization"}
+    if initial_tool_choice == "mystand_resource_index":
+        return {"mystand_authorization", "mystand_query"}
+    return set()
 
 _LOCAL_PATH_RE = re.compile(
     r"(?<![:/\w])/(?:root|opt|srv|var|etc)(?:/[^\s`'\"<>()\[\]{}，。；;]*)*"
@@ -569,18 +581,26 @@ def _guard_evidence_backed_response(
             return integrity_decision.text
         final_text = integrity_decision.text
 
-    required_mystand_tool = (
-        str(result.get("_mystand_required_evidence_tool") or "")
+    required_mystand_tools = (
+        {
+            str(item)
+            for item in result.get("_mystand_required_evidence_tools") or []
+            if str(item)
+        }
         if isinstance(result, dict)
-        else ""
+        else set()
     )
+    if isinstance(result, dict) and result.get("_mystand_required_evidence_tool"):
+        required_mystand_tools.add(
+            str(result.get("_mystand_required_evidence_tool"))
+        )
     if (
-        required_mystand_tool
-        and not _has_successful_tool_evidence(result, {required_mystand_tool})
+        required_mystand_tools
+        and not _has_successful_tool_evidence(result, required_mystand_tools)
     ):
         logger.warning(
-            "My Stand evidence gate blocked unverified response: required_tool=%s",
-            required_mystand_tool,
+            "My Stand evidence gate blocked unverified response: required_tools=%s",
+            ",".join(sorted(required_mystand_tools)),
         )
         return _MYSTAND_EVIDENCE_FAILURE
 
@@ -5489,7 +5509,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 result = dict(result) if isinstance(result, dict) else {}
                 result["_mystand_request"] = mystand_request
                 if initial_tool_choice:
-                    result["_mystand_required_evidence_tool"] = initial_tool_choice
+                    result["_mystand_required_evidence_tools"] = sorted(
+                        _required_mystand_evidence_tools(initial_tool_choice)
+                    )
                 usage = {
                     "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                     "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,

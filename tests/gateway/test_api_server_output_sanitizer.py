@@ -459,13 +459,13 @@ def test_exact_auth_forces_authorization_evidence_tool():
     )
 
 
-def test_resource_index_intent_forces_semantic_query_tool():
+def test_resource_intent_forces_index_before_content_read():
     assert (
         _resolve_mystand_initial_tool_choice(
             "看看游雪梅今年的结算情况",
             "【本轮可信意图与索引证据】\n意图=resource-read；索引=resource；状态=available。",
         )
-        == "mystand_query"
+        == "mystand_resource_index"
     )
 
 
@@ -521,3 +521,42 @@ def test_structured_ok_tool_result_wins_over_incidental_failure_digits():
     )
 
     assert guarded == "已按本轮结果读取。"
+
+
+def test_resource_index_alone_cannot_prove_business_content():
+    guarded = _guard_evidence_backed_response(
+        "查到了，结算业绩是 32105.68 元。",
+        user_message="按名称查游雪梅2026年财务档案",
+        conversation_history=[],
+        result={
+            "_mystand_request": True,
+            "_mystand_required_evidence_tools": [
+                "mystand_authorization",
+                "mystand_query",
+            ],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "index-1",
+                            "function": {
+                                "name": "mystand_resource_index",
+                                "arguments": '{"operation":"list_resources"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "index-1",
+                    "content": '{"ok":true,"items":[]}',
+                },
+            ],
+        },
+    )
+
+    assert guarded == (
+        "这轮没有取得可验证的 My Stand 站内资料结果，所以我不能判断资料内容、"
+        "权限状态或是否完成。"
+    )
