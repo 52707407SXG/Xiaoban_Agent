@@ -172,8 +172,8 @@ ACTION_OUTPUT_CONTRACTS: Dict[str, ActionOutputContract] = {
         "mystand_query",
         "v1",
         "read",
-        ("content",),
-        ("resourceUid",),
+        ("content", "facts", "collection"),
+        ("resourceUid", "resource.resourceUid", "recordRefs[]"),
     ),
 }
 
@@ -199,6 +199,10 @@ class IndexReceipt:
     scope_summary: str
     matched_resource_refs: List[str]
     status: str
+    source_call_id: str = ""
+    has_more: Optional[bool] = None
+    resource_count: int = 0
+    resource_refs_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -221,6 +225,8 @@ class EvidenceEnvelope:
     output_digest: str
     verified_at: str
     verification_status: str
+    requirement_digest: str = ""
+    coverage_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -228,6 +234,7 @@ class CompletionDecision:
     allowed: bool
     text: str
     reason: str
+    verification: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -239,6 +246,9 @@ class WorkTurn:
     identity: Optional[TrustedIdentity]
     interaction_kind: str
     index_receipt: Optional[IndexReceipt]
+    fact_requirement: Optional[Dict[str, Any]] = None
+    fact_requirement_digest: str = ""
+    collection_evidence: Optional[Dict[str, Any]] = None
     action_calls: List[ActionCall] = field(default_factory=list)
     action_results: List[ActionResult] = field(default_factory=list)
     evidence: List[EvidenceEnvelope] = field(default_factory=list)

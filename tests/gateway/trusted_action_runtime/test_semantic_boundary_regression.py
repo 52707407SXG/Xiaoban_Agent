@@ -118,14 +118,20 @@ def test_mystand_chat_streams_without_waiting_for_completion_guard() -> None:
     )
 
 
-def test_trusted_resource_intent_still_buffers_until_evidence_is_verified() -> None:
+def test_only_structured_resource_requirement_buffers_until_verified() -> None:
     prompt = (
         "【本轮可信意图与索引证据】\n"
         "意图=resource-read；索引=resource；写闸=不需要；状态=available。"
     )
 
+    assert not _should_buffer_stream_deltas(
+        "查一下这份资料",
+        mystand_request=True,
+        system_prompt=prompt,
+    )
     assert _should_buffer_stream_deltas(
         "查一下这份资料",
         mystand_request=True,
         system_prompt=prompt,
+        fact_requirement={"schema": "mystand.fact-requirement.v1"},
     )

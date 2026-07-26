@@ -477,6 +477,14 @@ def test_resource_intent_forces_index_before_content_read():
             "看看游雪梅今年的结算情况",
             "【本轮可信意图与索引证据】\n意图=resource-read；索引=resource；状态=available。",
         )
+        == ""
+    )
+    assert (
+        _resolve_mystand_initial_tool_choice(
+            "看看游雪梅今年的结算情况",
+            "",
+            fact_requirement={"schema": "mystand.fact-requirement.v1"},
+        )
         == "mystand_resource_index"
     )
 

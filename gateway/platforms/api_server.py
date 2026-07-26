@@ -34,6 +34,7 @@ Requires:
 """
 
 import asyncio
+import base64
 from collections import deque
 from datetime import datetime, time as dt_time, timedelta, timezone
 import hashlib
@@ -68,6 +69,10 @@ from gateway.mystand_integrity_guard import (
     build_runtime_integrity_reminder as _build_mystand_runtime_integrity_reminder,
     guard_mutation_success_claim,
     requires_write_evidence as _requires_mystand_write_evidence,
+)
+from xiaoban.trusted_runtime.fact_contract import (
+    build_fact_query_plan as _mystand_fact_query_plan,
+    normalized_fact_query_text as _normalized_mystand_fact_query_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -282,6 +287,46 @@ _MYSTAND_REFERENCE_ID_RE = re.compile(
 _MYSTAND_STREAM_DELIVERY_ID_RE = re.compile(r"xbd_[0-9a-f]{40}")
 _MYSTAND_STREAM_ATTEMPT_RE = re.compile(r"[0-9]{1,9}")
 _MYSTAND_STREAM_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
+_MYSTAND_FACT_REQUIREMENT_HEADER = "X-Xiaoban-Fact-Requirement"
+_MYSTAND_FACT_SIGNATURE_HEADER = "X-Xiaoban-Fact-Signature"
+_MYSTAND_FACT_SIGNATURE_DOMAIN = b"mystand-fact-requirement-v1\0"
+_MYSTAND_FACT_BINDING_FIELDS = frozenset(
+    {
+        "user_id",
+        "message_id",
+        "delivery_id",
+        "attempt",
+        "request_fingerprint",
+        "session_id",
+        "datascope_fingerprint",
+    }
+)
+_MYSTAND_FACT_QUERY_PLAN_FIELDS = frozenset(
+    {
+        "operation",
+        "query_kind",
+        "module_id",
+        "fact_paths",
+        "query_args",
+        "coverage_required",
+    }
+)
+_MYSTAND_FACT_FORBIDDEN_PLAN_FIELDS = frozenset(
+    {
+        "owner",
+        "owner_user",
+        "user",
+        "user_id",
+        "authorization_id",
+        "auth_id",
+        "resource_uid",
+        "source_id",
+        "scope_fingerprint",
+        "requirement_digest",
+        "plan_id",
+        "queryText",
+    }
+)
 
 _MYSTAND_EVIDENCE_FAILURE = (
     "这轮没有取得可验证的 My Stand 站内资料结果，所以我不能判断资料内容、"
@@ -289,27 +334,528 @@ _MYSTAND_EVIDENCE_FAILURE = (
 )
 
 
+def _fact_header_value(headers: Any, name: str) -> str:
+    """Read one header without assuming a concrete multidict implementation."""
+    if headers is None:
+        return ""
+    try:
+        value = headers.get(name, "")
+    except (AttributeError, TypeError):
+        value = ""
+    if value not in (None, ""):
+        return str(value).strip()
+    lowered = name.lower()
+    try:
+        for key, candidate in headers.items():
+            if str(key).lower() == lowered:
+                return str(candidate or "").strip()
+    except (AttributeError, TypeError):
+        return ""
+    return ""
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _fact_plan_has_forbidden_field(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if str(key) in _MYSTAND_FACT_FORBIDDEN_PLAN_FIELDS:
+                return True
+            if _fact_plan_has_forbidden_field(nested):
+                return True
+    elif isinstance(value, list):
+        return any(_fact_plan_has_forbidden_field(item) for item in value)
+    return False
+
+
+def _validate_mystand_fact_query_plan(
+    plan: Any,
+    *,
+    fact_kind: str,
+    operation: str,
+    module_id: str,
+) -> None:
+    if (
+        not isinstance(plan, dict)
+        or set(plan) - _MYSTAND_FACT_QUERY_PLAN_FIELDS
+        or _fact_plan_has_forbidden_field(plan)
+        or len(_canonical_json_bytes(plan)) > 8_192
+        or plan.get("operation") != "read"
+    ):
+        raise ValueError("fact requirement query plan is invalid")
+    query_kind = plan.get("query_kind")
+    if query_kind not in {
+        "resource-read",
+        "rank",
+        "list",
+        "aggregate",
+        "predicate",
+        "count",
+    }:
+        raise ValueError("fact requirement query plan is invalid")
+    if plan.get("module_id") != module_id:
+        raise ValueError("fact requirement query plan is invalid")
+    coverage_required = plan.get("coverage_required")
+    if fact_kind == "collection":
+        if query_kind != operation or coverage_required is not True:
+            raise ValueError("fact requirement query plan is invalid")
+    elif query_kind != "resource-read" or coverage_required is not False:
+        raise ValueError("fact requirement query plan is invalid")
+    fact_paths = plan.get("fact_paths")
+    if (
+        not isinstance(fact_paths, list)
+        or not fact_paths
+        or len(fact_paths) > 12
+        or len(set(fact_paths)) != len(fact_paths)
+        or any(
+            not isinstance(path, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_.-]{1,119}", path)
+            for path in fact_paths
+        )
+    ):
+        raise ValueError("fact requirement query plan is invalid")
+    query_args = plan.get("query_args")
+    if not isinstance(query_args, dict):
+        raise ValueError("fact requirement query plan is invalid")
+
+
+def _validate_mystand_fact_requirement_seed(
+    payload: Dict[str, Any],
+) -> None:
+    """Recompute the API-authored canonical seed and bind its transport view."""
+    seed = payload.get("requirement_seed")
+    signed_plan = payload.get("query_plan")
+    binding = payload.get("binding")
+    if (
+        not isinstance(seed, dict)
+        or not isinstance(signed_plan, dict)
+        or not isinstance(binding, dict)
+    ):
+        raise ValueError("fact requirement seed is missing")
+    collection = payload.get("fact_kind") == "collection"
+    expected_seed_keys = {
+        "schema",
+        "required",
+        "planId",
+        "queryKind",
+        "factKind",
+        "scopeFingerprint",
+        "coverageRequired",
+        "queryPlan",
+        "indexCount",
+        "indexResourceRefsDigest",
+        "indexHasMore",
+    }
+    if collection:
+        expected_seed_keys.add("year")
+    seed_plan = seed.get("queryPlan")
+    expected_seed_plan_keys = {
+        "schema",
+        "queryKind",
+        "moduleId",
+        "factPaths",
+        "queryArgs",
+        "coverageRequired",
+        "contextSource",
+    }
+    if not collection:
+        expected_seed_plan_keys.add("factKind")
+    if (
+        set(seed) != expected_seed_keys
+        or not isinstance(seed_plan, dict)
+        or set(seed_plan) != expected_seed_plan_keys
+        or seed_plan.get("contextSource")
+        not in {"current-message", "adjacent-user-turn"}
+    ):
+        raise ValueError("fact requirement seed schema is invalid")
+    expected_seed_plan = {
+        "schema": "mystand.xiaoban-fact-query-plan.v1",
+        "queryKind": signed_plan.get("query_kind"),
+        "moduleId": signed_plan.get("module_id"),
+        **({"factKind": "single-resource"} if not collection else {}),
+        "factPaths": signed_plan.get("fact_paths"),
+        "queryArgs": signed_plan.get("query_args"),
+        "coverageRequired": signed_plan.get("coverage_required"),
+        "contextSource": seed_plan.get("contextSource"),
+    }
+    expected_seed = {
+        "schema": "mystand.xiaoban-trusted-fact-requirement-binding.v1",
+        "required": True,
+        "planId": payload.get("plan_id"),
+        "queryKind": payload.get("query_kind"),
+        "factKind": "collection" if collection else "single-resource",
+        **(
+            {"year": signed_plan.get("query_args", {}).get("year")}
+            if collection
+            else {}
+        ),
+        "scopeFingerprint": binding.get("datascope_fingerprint"),
+        "coverageRequired": payload.get("coverage_required"),
+        "queryPlan": expected_seed_plan,
+        "indexCount": payload.get("index_count"),
+        "indexResourceRefsDigest": payload.get(
+            "index_resource_refs_digest"
+        ),
+        "indexHasMore": payload.get("index_has_more"),
+    }
+    requirement_digest = payload.get("requirement_digest")
+    recomputed_digest = hashlib.sha256(
+        _canonical_json_bytes(seed)
+    ).hexdigest()
+    if (
+        seed_plan != expected_seed_plan
+        or seed != expected_seed
+        or requirement_digest != recomputed_digest
+    ):
+        raise ValueError("fact requirement seed projection is invalid")
+
+
+def _parse_mystand_fact_requirement_header(
+    headers: Any,
+    *,
+    signing_key: str,
+    expected_binding: Dict[str, Any],
+    expected_user_message: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """Verify and parse My Stand's server-signed fact requirement.
+
+    The signature authenticates the canonical payload.  The binding check then
+    ties that payload to this exact account, message, delivery attempt, request,
+    session and DataScope before any agent/model work can start.
+    """
+    encoded = _fact_header_value(headers, _MYSTAND_FACT_REQUIREMENT_HEADER)
+    signature = _fact_header_value(headers, _MYSTAND_FACT_SIGNATURE_HEADER)
+    if not encoded and not signature:
+        return None
+    if not signature:
+        raise ValueError("fact requirement signature is missing")
+    if not encoded:
+        raise ValueError("fact requirement signature has no payload")
+    if not signing_key:
+        raise ValueError("fact requirement signature key is unavailable")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,8192}", encoded):
+        raise ValueError("fact requirement signature payload is invalid")
+    if not re.fullmatch(r"[0-9a-f]{64}", signature):
+        raise ValueError("fact requirement signature is invalid")
+
+    expected_signature = hmac.new(
+        signing_key.encode("utf-8"),
+        _MYSTAND_FACT_SIGNATURE_DOMAIN + encoded.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        raise ValueError("fact requirement signature mismatch")
+
+    try:
+        padded = encoded + ("=" * (-len(encoded) % 4))
+        raw = base64.b64decode(
+            padded.encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("fact requirement payload is invalid") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("fact requirement payload is invalid")
+    canonical_encoded = (
+        base64.urlsafe_b64encode(_canonical_json_bytes(payload))
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    if not hmac.compare_digest(encoded, canonical_encoded):
+        raise ValueError("fact requirement payload is not canonical")
+
+    allowed_fields = {
+        "schema",
+        "source",
+        "fact_kind",
+        "operation",
+        "module_id",
+        "time_scope",
+        "metric",
+        "ordinal",
+        "plan_id",
+        "query_plan",
+        "requirement_seed",
+        "requirement_digest",
+        "query_kind",
+        "fact_paths",
+        "query_args",
+        "coverage_required",
+        "index_evidence_digest",
+        "index_count",
+        "index_resource_refs_digest",
+        "index_has_more",
+        "binding",
+    }
+    required_fields = {
+        "schema",
+        "source",
+        "fact_kind",
+        "operation",
+        "module_id",
+        "binding",
+    }
+    if set(payload) - allowed_fields or not required_fields.issubset(payload):
+        raise ValueError("fact requirement payload schema is invalid")
+    if payload.get("schema") != "mystand.fact-requirement.v1":
+        raise ValueError("fact requirement payload schema is invalid")
+    if payload.get("source") != "mystand-server":
+        raise ValueError("fact requirement source is invalid")
+    if payload.get("fact_kind") not in {"single", "collection"}:
+        raise ValueError("fact requirement kind is invalid")
+    operation = payload.get("operation")
+    if operation not in {
+        "read",
+        "query",
+        "rank",
+        "list",
+        "aggregate",
+        "predicate",
+        "count",
+    }:
+        raise ValueError("fact requirement operation is invalid")
+    module_id = payload.get("module_id")
+    if (
+        not isinstance(module_id, str)
+        or len(module_id) > 80
+        or (
+            module_id
+            and not re.fullmatch(r"[A-Za-z0-9._:@-]{1,80}", module_id)
+        )
+        or (not module_id and payload.get("fact_kind") != "single")
+    ):
+        raise ValueError("fact requirement module is invalid")
+    plan_id = payload.get("plan_id")
+    if plan_id is not None and (
+        not isinstance(plan_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9._:@-]{1,160}", plan_id)
+    ):
+        raise ValueError("fact requirement plan is invalid")
+    for name, limit in (("time_scope", 160), ("metric", 120)):
+        value = payload.get(name)
+        if value is not None and (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value) > limit
+            or re.search(r"[\x00-\x1f\x7f]", value)
+        ):
+            raise ValueError(f"fact requirement {name} is invalid")
+    ordinal = payload.get("ordinal")
+    if ordinal is not None and (
+        isinstance(ordinal, bool)
+        or not isinstance(ordinal, int)
+        or ordinal < 1
+        or ordinal > 10_000
+    ):
+        raise ValueError("fact requirement ordinal is invalid")
+    if operation == "rank" and (
+        payload.get("fact_kind") != "collection"
+        or ordinal is None
+        or not payload.get("metric")
+        or not payload.get("time_scope")
+    ):
+        raise ValueError("fact requirement rank schema is invalid")
+    if payload.get("fact_kind") == "single" and operation not in {
+        "read",
+        "query",
+    }:
+        raise ValueError("fact requirement single schema is invalid")
+    if payload.get("fact_kind") == "collection" and operation in {
+        "read",
+        "query",
+    }:
+        raise ValueError("fact requirement collection schema is invalid")
+    query_plan = payload.get("query_plan")
+    if query_plan is not None:
+        _validate_mystand_fact_query_plan(
+            query_plan,
+            fact_kind=str(payload.get("fact_kind") or ""),
+            operation=str(operation or ""),
+            module_id=module_id,
+        )
+        for top_name, plan_name in (
+            ("query_kind", "query_kind"),
+            ("fact_paths", "fact_paths"),
+            ("query_args", "query_args"),
+            ("coverage_required", "coverage_required"),
+        ):
+            if (
+                top_name not in payload
+                or payload.get(top_name) != query_plan.get(plan_name)
+            ):
+                raise ValueError("fact requirement query plan binding is invalid")
+        query_args = query_plan.get("query_args")
+        if payload.get("fact_kind") == "collection":
+            plan_year = query_args.get("year")
+            if (
+                isinstance(plan_year, bool)
+                or not isinstance(plan_year, int)
+                or payload.get("time_scope") != str(plan_year)
+            ):
+                raise ValueError(
+                    "fact requirement query plan binding is invalid"
+                )
+        if operation == "rank" and (
+            not isinstance(query_args, dict)
+            or payload.get("ordinal") != query_args.get("rank")
+        ):
+            raise ValueError("fact requirement query plan binding is invalid")
+        if query_plan.get("query_kind") == "resource-read":
+            normalized_query = _normalized_mystand_fact_query_text(
+                expected_user_message
+            )
+            semantic_digest = query_args.get("semanticQueryDigest")
+            if (
+                not normalized_query
+                or semantic_digest
+                != hashlib.sha256(
+                    normalized_query.encode("utf-8")
+                ).hexdigest()
+            ):
+                raise ValueError(
+                    "fact requirement query text binding is invalid"
+                )
+    declared_requirement_digest = payload.get("requirement_digest")
+    if declared_requirement_digest is not None and (
+        not isinstance(declared_requirement_digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", declared_requirement_digest)
+    ):
+        raise ValueError("fact requirement digest is invalid")
+    index_evidence_digest = payload.get("index_evidence_digest")
+    if index_evidence_digest is not None and (
+        not isinstance(index_evidence_digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", index_evidence_digest)
+    ):
+        raise ValueError("fact requirement index evidence digest is invalid")
+    index_count = payload.get("index_count")
+    index_resource_refs_digest = payload.get("index_resource_refs_digest")
+    index_has_more = payload.get("index_has_more")
+    if any(
+        name in payload
+        for name in (
+            "index_count",
+            "index_resource_refs_digest",
+            "index_has_more",
+        )
+    ) and (
+        isinstance(index_count, bool)
+        or not isinstance(index_count, int)
+        or index_count < 0
+        or not isinstance(index_resource_refs_digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", index_resource_refs_digest)
+        or index_has_more is not False
+    ):
+        raise ValueError("fact requirement index coverage is invalid")
+    if query_plan is not None and not all(
+        name in payload
+        for name in (
+            "plan_id",
+            "requirement_seed",
+            "requirement_digest",
+            "index_count",
+            "index_resource_refs_digest",
+            "index_has_more",
+        )
+    ):
+        raise ValueError("fact requirement index coverage is missing")
+
+    binding = payload.get("binding")
+    if (
+        not isinstance(binding, dict)
+        or set(binding) != _MYSTAND_FACT_BINDING_FIELDS
+        or set(expected_binding) != _MYSTAND_FACT_BINDING_FIELDS
+    ):
+        raise ValueError("fact requirement binding is invalid")
+    for field in _MYSTAND_FACT_BINDING_FIELDS:
+        actual = binding.get(field)
+        expected = expected_binding.get(field)
+        if field == "attempt":
+            if (
+                isinstance(actual, bool)
+                or not isinstance(actual, int)
+                or isinstance(expected, bool)
+                or not isinstance(expected, int)
+            ):
+                raise ValueError("fact requirement binding is invalid")
+        elif not isinstance(actual, str) or not isinstance(expected, str):
+            raise ValueError("fact requirement binding is invalid")
+        if actual != expected:
+            raise ValueError("fact requirement binding mismatch")
+    if query_plan is not None:
+        _validate_mystand_fact_requirement_seed(payload)
+    return payload
+
+
+def _mystand_fact_expected_binding(
+    headers: Any,
+    *,
+    session_id: str,
+) -> Dict[str, Any]:
+    """Build the server-observed side of a signed requirement binding."""
+    from xiaoban.trusted_runtime.types import TrustedIdentity
+
+    attempt_text = _fact_header_value(headers, "X-Xiaoban-Attempt")
+    if not _MYSTAND_STREAM_ATTEMPT_RE.fullmatch(attempt_text):
+        raise ValueError("fact requirement binding attempt is invalid")
+    user_id = _fact_header_value(headers, "X-Xiaoban-User-Id")
+    binding = {
+        "user_id": user_id,
+        "message_id": _fact_header_value(headers, "X-Xiaoban-Message-Id"),
+        "delivery_id": _fact_header_value(headers, "X-Xiaoban-Delivery-Id"),
+        "attempt": int(attempt_text),
+        "request_fingerprint": _fact_header_value(
+            headers,
+            "X-Xiaoban-Request-Fingerprint",
+        ).lower(),
+        "session_id": str(session_id or ""),
+        "datascope_fingerprint": TrustedIdentity(
+            account_id=user_id,
+            data_scope="mystand",
+            source="server_session",
+        ).datascope_fingerprint,
+    }
+    if (
+        not user_id
+        or not binding["message_id"]
+        or not _MYSTAND_STREAM_DELIVERY_ID_RE.fullmatch(binding["delivery_id"])
+        or not _MYSTAND_STREAM_FINGERPRINT_RE.fullmatch(
+            binding["request_fingerprint"]
+        )
+        or not binding["session_id"]
+    ):
+        raise ValueError("fact requirement binding is invalid")
+    return binding
+
+
 def _resolve_mystand_initial_tool_choice(
     user_message: Any,
-    system_prompt: Any,
+    system_prompt: Any = None,
+    *,
+    fact_requirement: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Select the first evidence tool from trusted My Stand request context.
 
     This is an execution gate, not another behavioral prompt. Exact AUTH/OUT
-    references must be resolved through the authorization wall. Resource-data
-    intents already classified by My Stand's deterministic index preflight
-    must perform a semantic query before the model may answer.
+    references must be resolved through the authorization wall. Natural
+    business-fact work is trusted only when My Stand supplied a verified,
+    request-bound structured requirement; prompt text is never an authority.
     """
 
+    del system_prompt
+    if fact_requirement is not None:
+        return "mystand_resource_index"
     user_text = _content_to_visible_text(user_message)
     if _MYSTAND_REFERENCE_ID_RE.search(user_text):
         return "mystand_authorization"
-    prompt_text = str(system_prompt or "")
-    if (
-        "【本轮可信意图与索引证据】" in prompt_text
-        and "索引=resource" in prompt_text
-    ):
-        return "mystand_resource_index"
     return ""
 
 
@@ -420,6 +966,7 @@ def _run_mystand_preexecuted_evidence(
     tool_start_callback: Any,
     tool_complete_callback: Any,
     trusted_turn: Any = None,
+    fact_requirement: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Execute required read evidence in the harness, not by model choice.
 
@@ -520,19 +1067,66 @@ def _run_mystand_preexecuted_evidence(
     if initial_tool_choice != "mystand_resource_index":
         return evidence
 
-    from tools.mystand_authorization_tool import mystand_authorization_tool_handler
     from tools.mystand_resource_index_tool import mystand_resource_index_tool_handler
 
     index_result = execute(
         "mystand_resource_index",
         {
             "operation": "list_resources",
-            "module_id": _trusted_mystand_module_id(system_prompt),
+            "module_id": (
+                str(fact_requirement.get("module_id") or "")
+                if isinstance(fact_requirement, dict)
+                else _trusted_mystand_module_id(system_prompt)
+            ),
             "status": "all",
             "limit": 100,
         },
         mystand_resource_index_tool_handler,
     )
+    if isinstance(fact_requirement, dict):
+        try:
+            index_payload = json.loads(_safe_tool_content(index_result))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return evidence
+        if (
+            not isinstance(index_payload, dict)
+            or index_payload.get("ok") is not True
+            or not isinstance(index_payload.get("items"), list)
+            or not index_payload["items"]
+            or index_payload.get("hasMore") is not False
+            or index_payload.get("nextCursor") not in (None, "")
+        ):
+            return evidence
+        if trusted_turn is not None and any(
+            name in fact_requirement
+            for name in (
+                "index_count",
+                "index_resource_refs_digest",
+                "index_has_more",
+            )
+        ):
+            receipt = getattr(trusted_turn, "index_receipt", None)
+            if (
+                receipt is None
+                or receipt.resource_count != fact_requirement.get("index_count")
+                or receipt.resource_refs_digest
+                != fact_requirement.get("index_resource_refs_digest")
+                or receipt.has_more is not fact_requirement.get("index_has_more")
+            ):
+                return evidence
+        query_plan = _mystand_fact_query_plan(fact_requirement)
+        if query_plan is not None:
+            from tools.mystand_query_tool import mystand_query_tool_handler
+
+            execute(
+                "mystand_query",
+                query_plan,
+                mystand_query_tool_handler,
+            )
+        return evidence
+
+    from tools.mystand_authorization_tool import mystand_authorization_tool_handler
+
     selected = _select_mystand_index_candidate(index_result, user_message)
     if selected is not None:
         execute(
@@ -737,6 +1331,7 @@ def _should_buffer_stream_deltas(
     mystand_request: bool = False,
     system_prompt: Any = None,
     conversation_history: Optional[List[Dict[str, Any]]] = None,
+    fact_requirement: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """只缓冲当前回合确实要求外部证据的流。
 
@@ -746,7 +1341,11 @@ def _should_buffer_stream_deltas(
     """
     mystand_evidence_required = bool(
         mystand_request
-        and _resolve_mystand_initial_tool_choice(user_message, system_prompt)
+        and _resolve_mystand_initial_tool_choice(
+            user_message,
+            system_prompt,
+            fact_requirement=fact_requirement,
+        )
     )
     mystand_write_required = bool(
         mystand_request
@@ -973,6 +1572,20 @@ def _verified_mystand_failure_response(
     return ""
 
 
+def _bind_verification_to_visible_text(text: str, result: Any) -> str:
+    """Keep a terminal receipt only when it hashes the actual egress text."""
+    if not isinstance(result, dict):
+        return text
+    verification = result.get("_mystand_trusted_verification")
+    if not isinstance(verification, dict):
+        return text
+    actual_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if verification.get("output_digest") != actual_digest:
+        result.pop("_mystand_trusted_verification", None)
+        result["_mystand_completion_allowed"] = False
+    return text
+
+
 def _guard_evidence_backed_response(
     text: Any,
     *,
@@ -987,8 +1600,15 @@ def _guard_evidence_backed_response(
     plainly instead of describing unobserved content.
     """
     final_text = _sanitize_user_visible_text(text)
-    if not final_text:
+    has_fact_requirement = bool(
+        isinstance(result, dict)
+        and isinstance(result.get("_mystand_fact_requirement"), dict)
+    )
+    if not final_text and not has_fact_requirement:
         return final_text
+    if isinstance(result, dict):
+        result.pop("_mystand_trusted_verification", None)
+        result["_mystand_completion_allowed"] = False
 
     if _requires_mystand_write_evidence(
         user_message,
@@ -1006,7 +1626,7 @@ def _guard_evidence_backed_response(
         final_text = integrity_decision.text
 
     required_evidence_groups: list[set[str]] = []
-    if isinstance(result, dict):
+    if isinstance(result, dict) and not has_fact_requirement:
         for raw_group in result.get("_mystand_required_evidence_groups") or []:
             if isinstance(raw_group, (list, tuple, set)):
                 group = {str(item) for item in raw_group if str(item)}
@@ -1065,26 +1685,96 @@ def _guard_evidence_backed_response(
                 completion.reason,
             )
             return completion.text
+        result["_mystand_completion_allowed"] = True
+        if completion.verification is not None:
+            result["_mystand_trusted_verification"] = dict(
+                completion.verification
+            )
         final_text = completion.text
 
     url_required = _latest_turn_requires_url_evidence(user_message)
     image_required = _latest_turn_requires_image_evidence(user_message)
     if not url_required and not image_required:
-        return final_text
+        return _bind_verification_to_visible_text(final_text, result)
 
     if url_required:
         if not _has_successful_tool_evidence(result, _URL_EVIDENCE_TOOLS):
-            return _URL_EVIDENCE_FAILURE
+            return _bind_verification_to_visible_text(
+                _URL_EVIDENCE_FAILURE,
+                result,
+            )
         source_text = _source_text_for_evidence_tools(result, _URL_EVIDENCE_TOOLS)
         if _needs_source_absence_guard(user_message, final_text, source_text):
-            return _URL_UNSUPPORTED_MENTION_FAILURE
+            return _bind_verification_to_visible_text(
+                _URL_UNSUPPORTED_MENTION_FAILURE,
+                result,
+            )
 
     image_has_input = _conversation_has_image_input(user_message, conversation_history)
     image_has_tool = _has_successful_tool_evidence(result, _IMAGE_EVIDENCE_TOOLS)
     if image_required and not (image_has_input or image_has_tool):
-        return _IMAGE_EVIDENCE_FAILURE
+        return _bind_verification_to_visible_text(
+            _IMAGE_EVIDENCE_FAILURE,
+            result,
+        )
 
-    return final_text
+    return _bind_verification_to_visible_text(final_text, result)
+
+
+def _install_signed_fact_persistence_guard(
+    agent: Any,
+    trusted_turn: Any,
+) -> None:
+    """Persist only the terminal CompletionGuard projection for a fact turn."""
+    original_persist = getattr(agent, "_persist_session", None)
+    if not callable(original_persist):
+        return
+    safe_assistant: Dict[str, Any] = {
+        "role": "assistant",
+        "content": "",
+    }
+
+    def _guarded_persist(
+        messages: Any,
+        conversation_history: Any = None,
+    ) -> None:
+        if not isinstance(messages, list):
+            return
+        last_user_index = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if isinstance(messages[index], dict)
+                and messages[index].get("role") == "user"
+            ),
+            -1,
+        )
+        if last_user_index < 0:
+            return
+        safe_messages = list(messages[: last_user_index + 1])
+        terminal_text = ""
+        for message in reversed(messages[last_user_index + 1 :]):
+            if (
+                isinstance(message, dict)
+                and message.get("role") == "assistant"
+                and not message.get("tool_calls")
+            ):
+                terminal_text = _content_to_visible_text(
+                    message.get("content")
+                )
+                if terminal_text:
+                    break
+        if terminal_text:
+            from xiaoban.trusted_runtime.completion_guard import (
+                check_completion,
+            )
+
+            decision = check_completion(terminal_text, trusted_turn)
+            safe_assistant["content"] = decision.text
+            safe_messages.append(safe_assistant)
+        original_persist(safe_messages, conversation_history)
+
+    agent._persist_session = _guarded_persist
 
 
 def _normalize_timezone_name(value: Any, default: str = DEFAULT_USER_TIMEZONE) -> str:
@@ -3450,6 +4140,54 @@ class APIServerAdapter(BasePlatformAdapter):
 
         history = _trim_chat_history_for_context(history)
 
+        fact_requirement: Optional[Dict[str, Any]] = None
+        fact_header_present = bool(
+            _fact_header_value(request.headers, _MYSTAND_FACT_REQUIREMENT_HEADER)
+            or _fact_header_value(request.headers, _MYSTAND_FACT_SIGNATURE_HEADER)
+        )
+        if fact_header_present:
+            if not mystand_request:
+                return web.json_response(
+                    _openai_error(
+                        "Fact requirements are only accepted from My Stand",
+                        code="invalid_fact_requirement",
+                    ),
+                    status=400,
+                )
+            try:
+                fact_requirement = _parse_mystand_fact_requirement_header(
+                    request.headers,
+                    signing_key=self._api_key,
+                    expected_binding=_mystand_fact_expected_binding(
+                        request.headers,
+                        session_id=session_id,
+                    ),
+                    expected_user_message=_content_to_visible_text(
+                        user_message
+                    ),
+                )
+            except ValueError:
+                # Do not reflect signed payload/binding details to the client or
+                # logs.  The stable code is sufficient for deterministic retry.
+                return web.json_response(
+                    _openai_error(
+                        "Invalid My Stand fact requirement",
+                        code="invalid_fact_requirement",
+                    ),
+                    status=400,
+                )
+        if (
+            fact_requirement is not None
+            and self._session_events_requested(request)
+        ):
+            return web.json_response(
+                _openai_error(
+                    "Signed fact turns cannot use asynchronous session delivery",
+                    code="fact_async_delivery_unsupported",
+                ),
+                status=409,
+            )
+
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())
@@ -3526,6 +4264,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 mystand_request=mystand_request,
                 system_prompt=system_prompt,
                 conversation_history=history,
+                fact_requirement=fact_requirement,
             )
 
             def _on_delta(delta):
@@ -3649,7 +4388,12 @@ class APIServerAdapter(BasePlatformAdapter):
                         agent_ref=agent_ref,
                         gateway_session_key=gateway_session_key,
                         request_headers=request.headers,
-                        async_delivery=self._session_events_requested(request),
+                        async_delivery=(
+                            False
+                            if fact_requirement is not None
+                            else self._session_events_requested(request)
+                        ),
+                        fact_requirement=fact_requirement,
                     )
                 finally:
                     # Runs for success, provider/tool exceptions, explicit
@@ -3704,8 +4448,13 @@ class APIServerAdapter(BasePlatformAdapter):
                     session_id=session_id,
                     gateway_session_key=gateway_session_key,
                     request_headers=request.headers,
-                    async_delivery=self._session_events_requested(request),
+                    async_delivery=(
+                        False
+                        if fact_requirement is not None
+                        else self._session_events_requested(request)
+                    ),
                     agent_ref=agent_ref,
+                    fact_requirement=fact_requirement,
                 )
                 if agent_ref[1]:
                     result = dict(result or {})
@@ -3876,6 +4625,19 @@ class APIServerAdapter(BasePlatformAdapter):
             response_headers["X-Xiaoban-Partial"] = "true" if is_partial else "false"
             if err_msg:
                 response_headers["X-Xiaoban-Error"] = err_msg[:200]
+        trusted_verification = result.get("_mystand_trusted_verification")
+        if isinstance(trusted_verification, dict):
+            xiaoban_state = response_data.setdefault(
+                "xiaoban",
+                {
+                    "completed": completed,
+                    "partial": is_partial,
+                    "failed": is_failed,
+                },
+            )
+            xiaoban_state["trusted_verification"] = dict(
+                trusted_verification
+            )
 
         return web.json_response(response_data, headers=response_headers)
 
@@ -4072,11 +4834,22 @@ class APIServerAdapter(BasePlatformAdapter):
 
             # Trusted work turns surface their verification receipt as a
             # dedicated SSE event after the content chunk, before finish.
+            # Signed fact turns may emit only the full receipt produced by the
+            # successful terminal CompletionGuard decision.
             if (
                 isinstance(result, dict)
                 and result.get("_mystand_request")
                 and not run_stopped
             ):
+                fact_verification = result.get("_mystand_trusted_verification")
+                if isinstance(fact_verification, dict):
+                    await response.write(
+                        (
+                            "event: xiaoban.trusted.verification\n"
+                            f"data: {json.dumps(fact_verification, ensure_ascii=False)}\n\n"
+                        ).encode()
+                    )
+                    fact_verification = None
                 trusted_turn = result.get("_trusted_turn")
                 verified_evidence = [
                     item
@@ -4086,7 +4859,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 ]
                 request_id = str(getattr(trusted_turn, "request_id", "") or "")
                 if (
-                    trusted_turn is not None
+                    not isinstance(result.get("_mystand_fact_requirement"), dict)
+                    and result.get("_mystand_completion_allowed") is True
+                    and trusted_turn is not None
                     and verified_evidence
                     and request_id == str(result.get("_mystand_request_id") or "")
                 ):
@@ -5790,6 +6565,8 @@ class APIServerAdapter(BasePlatformAdapter):
             "X-User-Timezone",
             "X-Xiaoban-User-Locale",
             "X-User-Locale",
+            _MYSTAND_FACT_REQUIREMENT_HEADER,
+            _MYSTAND_FACT_SIGNATURE_HEADER,
         )
         mystand_request = cls._header_present(headers, "X-Xiaoban-Toolset-Policy")
         if mystand_request:
@@ -6041,6 +6818,7 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key: Optional[str] = None,
         request_headers: Any = None,
         async_delivery: bool = False,
+        fact_requirement: Optional[Dict[str, Any]] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -6165,6 +6943,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 _resolve_mystand_initial_tool_choice(
                     user_message,
                     run_system_prompt,
+                    fact_requirement=fact_requirement,
                 )
                 if mystand_request
                 else ""
@@ -6220,7 +6999,10 @@ class APIServerAdapter(BasePlatformAdapter):
                         else f"mystand-req-{uuid.uuid4().hex}"
                     ),
                     message_id=str(request_message_id or ""),
-                    evidence_required=bool(trusted_initial_tool_choice),
+                    evidence_required=bool(
+                        trusted_initial_tool_choice or fact_requirement
+                    ),
+                    fact_requirement=fact_requirement,
                 )
                 trusted_turn_token = activate_turn(trusted_turn)
             try:
@@ -6255,6 +7037,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         tool_start_callback=_traced_tool_start,
                         tool_complete_callback=_traced_tool_complete,
                         trusted_turn=trusted_turn,
+                        fact_requirement=fact_requirement,
                     )
                     evidence_prompt = _build_mystand_preexecuted_prompt(
                         preexecuted_evidence
@@ -6271,6 +7054,16 @@ class APIServerAdapter(BasePlatformAdapter):
                     # The harness already executed the authoritative read.
                     # Never ask the provider to repeat it through a hint.
                     agent._ephemeral_tool_choice = ""
+                if fact_requirement is not None:
+                    # The signed plan has already executed deterministically.
+                    # The provider only writes prose; it cannot repeat or
+                    # branch into another business tool call.
+                    agent.tools = []
+                    agent.valid_tool_names = set()
+                    _install_signed_fact_persistence_guard(
+                        agent,
+                        trusted_turn,
+                    )
                 if agent_ref is not None:
                     agent_ref[0] = agent
                     if len(agent_ref) > 1 and agent_ref[1]:
@@ -6298,6 +7091,19 @@ class APIServerAdapter(BasePlatformAdapter):
                     result,
                     preexecuted_evidence,
                 )
+                if fact_requirement is not None:
+                    from xiaoban.trusted_runtime.completion_guard import (
+                        check_completion,
+                    )
+
+                    guarded_fact = check_completion(
+                        result.get("final_response", ""),
+                        trusted_turn,
+                    )
+                    result["final_response"] = guarded_fact.text
+                    # Raw provider prose/tool attempts are diagnostic-only and
+                    # must not become an alternate transcript delivery path.
+                    result["messages"] = []
                 result["_mystand_request"] = mystand_request
                 if mystand_request:
                     result["_mystand_user_id"] = str(request_user_id or "")
@@ -6305,8 +7111,10 @@ class APIServerAdapter(BasePlatformAdapter):
                     result["_mystand_message_id"] = str(request_message_id or "")
                     result["_trusted_turn"] = trusted_turn
                     result["_mystand_evidence_required"] = bool(
-                        trusted_initial_tool_choice
+                        trusted_initial_tool_choice or fact_requirement
                     )
+                    if fact_requirement is not None:
+                        result["_mystand_fact_requirement"] = fact_requirement
                 if initial_tool_choice:
                     result["_mystand_required_evidence_groups"] = [
                         sorted(group)

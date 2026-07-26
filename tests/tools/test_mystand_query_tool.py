@@ -81,6 +81,11 @@ def test_contract_is_semantic_and_contains_no_identity_or_internal_id_inputs():
 
     assert set(properties) == {
         "operation",
+        "query_kind",
+        "module_id",
+        "fact_paths",
+        "query_args",
+        "coverage_required",
         "resource",
         "entities",
         "fact_needs",
@@ -113,6 +118,9 @@ def test_contract_is_semantic_and_contains_no_identity_or_internal_id_inputs():
         "auth_id",
         "resource_uid",
         "source_id",
+        "plan_id",
+        "requirement_digest",
+        "scope_fingerprint",
     }.isdisjoint(properties)
 
 

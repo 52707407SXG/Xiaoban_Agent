@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import contextvars
+import copy
 import hashlib
 import json
 import uuid
@@ -34,6 +35,11 @@ from xiaoban.trusted_runtime.types import (
     INTERACTION_CHAT,
     INTERACTION_WORK,
     is_write_action,
+)
+from xiaoban.trusted_runtime.fact_contract import (
+    build_fact_query_plan,
+    canonical_digest,
+    evidence_requirement_digest,
 )
 
 _ACCOUNT_KEYS = frozenset(
@@ -101,6 +107,166 @@ def _parse_json_object(value: Any) -> Dict[str, Any]:
     return dict(parsed) if isinstance(parsed, Mapping) else {}
 
 
+def _canonical_digest(value: Any) -> str:
+    return canonical_digest(value)
+
+
+def _fact_query_result_binding_valid(
+    turn: WorkTurn,
+    payload: Mapping[str, Any],
+) -> bool:
+    """Bind one internal query result to this signed plan and DataScope."""
+    requirement = turn.fact_requirement
+    if (
+        not isinstance(requirement, Mapping)
+        or not isinstance(requirement.get("query_plan"), Mapping)
+    ):
+        return True
+    binding = requirement.get("binding")
+    if not isinstance(binding, Mapping):
+        return False
+    expected_scope = binding.get("datascope_fingerprint")
+    actual_scope = payload.get("scopeFingerprint")
+    if requirement.get("fact_kind") == "collection":
+        coverage = payload.get("coverage")
+        actual_scope = (
+            coverage.get("scopeFingerprint")
+            if isinstance(coverage, Mapping)
+            else None
+        )
+    return bool(
+        payload.get("schema") == "mystand.query-result.v1"
+        and payload.get("queryKind") == requirement.get("query_kind")
+        and payload.get("planId") == requirement.get("plan_id")
+        and payload.get("requirementDigest")
+        == evidence_requirement_digest(
+            requirement,
+            canonical_fallback=turn.fact_requirement_digest,
+        )
+        and actual_scope == expected_scope
+    )
+
+
+def _collection_evidence_from_payload(
+    turn: WorkTurn,
+    call_id: str,
+    payload: Mapping[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Bind a typed My Stand collection response to this exact fact turn."""
+    requirement = turn.fact_requirement
+    if not isinstance(requirement, Mapping):
+        return None
+    server_coverage = payload.get("coverage")
+    if not isinstance(server_coverage, Mapping):
+        return None
+    requirement_digest = evidence_requirement_digest(
+        requirement,
+        canonical_fallback=turn.fact_requirement_digest,
+    )
+    echoed_digest = payload.get("requirementDigest") or payload.get(
+        "requirement_digest"
+    )
+    if echoed_digest != requirement_digest:
+        return None
+    binding = requirement.get("binding")
+    if not isinstance(binding, Mapping):
+        return None
+    scope_fingerprint = (
+        server_coverage.get("scopeFingerprint")
+        or server_coverage.get("scope_fingerprint")
+    )
+    if scope_fingerprint != binding.get("datascope_fingerprint"):
+        return None
+
+    expected_count = server_coverage.get(
+        "expectedCount",
+        server_coverage.get("expected_count"),
+    )
+    actual_count = server_coverage.get(
+        "returnedCount",
+        server_coverage.get("actual_count"),
+    )
+    has_more = server_coverage.get(
+        "hasMore",
+        server_coverage.get("has_more"),
+    )
+    expected_digest = server_coverage.get(
+        "expectedResourceRefsDigest",
+        server_coverage.get("expected_digest"),
+    )
+    actual_digest = server_coverage.get(
+        "returnedResourceRefsDigest",
+        server_coverage.get("actual_digest"),
+    )
+    complete = server_coverage.get("complete")
+    coverage_year = server_coverage.get("year")
+    tie_rule = server_coverage.get("tieRule")
+    raw_record_refs = payload.get("recordRefs")
+    if (
+        not isinstance(raw_record_refs, list)
+        or any(not isinstance(ref, str) or not ref for ref in raw_record_refs)
+    ):
+        return None
+    record_refs = sorted(set(raw_record_refs))
+    if len(record_refs) != len(raw_record_refs):
+        return None
+    recomputed_digest = _canonical_digest(record_refs)
+    if (
+        isinstance(expected_count, bool)
+        or not isinstance(expected_count, int)
+        or isinstance(actual_count, bool)
+        or not isinstance(actual_count, int)
+        or expected_count != actual_count
+        or actual_count != len(record_refs)
+        or has_more is not False
+        or complete is not True
+        or expected_digest != recomputed_digest
+        or actual_digest != recomputed_digest
+        or (
+            str(requirement.get("time_scope") or "").isdigit()
+            and coverage_year
+            != int(str(requirement.get("time_scope")))
+        )
+        or (
+            requirement.get("operation") == "rank"
+            and tie_rule != "dense"
+        )
+    ):
+        return None
+    plan_id = str(requirement.get("plan_id") or "")
+    echoed_plan_id = str(payload.get("planId") or payload.get("plan_id") or "")
+    if plan_id and echoed_plan_id != plan_id:
+        return None
+    projected_facts: Dict[str, Any] = {
+        "operation": requirement.get("operation"),
+        "metric": requirement.get("metric"),
+        "time_scope": requirement.get("time_scope"),
+    }
+    if requirement.get("ordinal") is not None:
+        projected_facts["ordinal"] = requirement.get("ordinal")
+    if isinstance(payload.get("facts"), (list, dict)):
+        projected_facts["facts"] = payload.get("facts")
+    if requirement.get("plan_id"):
+        projected_facts["plan_id"] = requirement.get("plan_id")
+    return {
+        "schema": "mystand.collection-evidence.v1",
+        "requirement_digest": requirement_digest,
+        "binding": dict(binding),
+        "status": "complete" if complete is True else "incomplete",
+        "expected_count": expected_count,
+        "actual_count": actual_count,
+        "has_more": has_more,
+        "expected_digest": expected_digest,
+        "actual_digest": actual_digest,
+        "source_call_ids": [call_id],
+        "projected_facts": projected_facts,
+        "projected_text": str(payload.get("content") or ""),
+        # Kept only for the server-to-server terminal receipt projection.
+        "server_coverage": dict(server_coverage),
+        "record_refs": record_refs,
+    }
+
+
 def classify_interaction(
     user_message: Any,
     conversation_history: Optional[Sequence[Mapping[str, Any]]] = None,
@@ -159,6 +325,7 @@ def begin_turn(
     request_id: str = "",
     message_id: str = "",
     evidence_required: bool = False,
+    fact_requirement: Optional[Mapping[str, Any]] = None,
 ) -> WorkTurn:
     """服务端开回合：稳定 request/message ID + 服务端解析身份。"""
     turn_id = hashlib.sha256(
@@ -166,6 +333,11 @@ def begin_turn(
             "utf-8"
         )
     ).hexdigest()[:16]
+    bound_requirement = (
+        copy.deepcopy(dict(fact_requirement))
+        if isinstance(fact_requirement, Mapping)
+        else None
+    )
     turn = WorkTurn(
         turn_id=turn_id,
         request_id=request_id,
@@ -175,9 +347,15 @@ def begin_turn(
         interaction_kind=classify_interaction(
             user_message,
             conversation_history,
-            evidence_required=evidence_required,
+            evidence_required=bool(evidence_required or fact_requirement),
         ),
         index_receipt=None,
+        fact_requirement=bound_requirement,
+        fact_requirement_digest=(
+            _canonical_digest(bound_requirement)
+            if bound_requirement is not None
+            else ""
+        ),
     )
     turn.enter("accepted")
     if identity is not None and identity.account_id:
@@ -236,6 +414,21 @@ def begin_action(
             return _record_denial(turn, call_id, action_id, "unknown_action", status="error")
         if catalog_lookup is not None and not catalog_lookup(action_id):
             return _record_denial(turn, call_id, action_id, "not_in_catalog")
+        if action_id == "mystand_query" and (
+            args.get("query_kind") is not None
+            or (
+                isinstance(turn.fact_requirement, Mapping)
+                and turn.fact_requirement.get("fact_kind") == "collection"
+            )
+        ):
+            signed_plan = build_fact_query_plan(turn.fact_requirement)
+            if signed_plan != args:
+                return _record_denial(
+                    turn,
+                    call_id,
+                    action_id,
+                    "unbound_fact_query_plan",
+                )
         if any(call.call_id == call_id for call in turn.action_calls):
             # 重复 callId 不得静默覆盖：同名调用已产生的证据一并作废。
             turn.evidence = [e for e in turn.evidence if e.call_id != call_id]
@@ -343,12 +536,20 @@ def _classify_contract_status(
             return "error"
         status = payload.get("status")
         if status is not None:
-            try:
-                status_code = int(status)
-            except (TypeError, ValueError):
-                return "error"
-            if status_code >= 400:
-                return "error"
+            if isinstance(status, str) and status in {
+                "matched",
+                "success",
+                "complete",
+                "completed",
+            }:
+                pass
+            else:
+                try:
+                    status_code = int(status)
+                except (TypeError, ValueError):
+                    return "error"
+                if status_code >= 400:
+                    return "error"
         if contract.kind == "index":
             items = payload.get("items")
             if not isinstance(items, list):
@@ -358,11 +559,17 @@ def _classify_contract_status(
             if not all(isinstance(item, Mapping) for item in items):
                 return "error"
             return "success"
-        if "content" not in payload:
-            return "error"
-        if not str(payload.get("content") or "").strip():
+        if str(payload.get("content") or "").strip():
+            return "success"
+        if "content" in payload:
             return "empty"
-        return "success"
+        if (
+            contract.action_id == "mystand_query"
+            and payload.get("schema") == "mystand.query-result.v1"
+            and isinstance(payload.get("facts"), list)
+        ):
+            return "success" if payload["facts"] else "empty"
+        return "error"
     return "error"
 
 
@@ -372,7 +579,36 @@ def _project_allowed_facts(
     facts: Dict[str, Any] = {}
     for path in contract.allowed_fact_paths:
         if path == "content":
-            facts[path] = str(payload.get("content") or "")
+            content = str(payload.get("content") or "")
+            if content:
+                facts[path] = content
+        elif path == "facts":
+            safe_facts: List[Dict[str, Any]] = []
+            for item in payload.get("facts") or []:
+                if not isinstance(item, Mapping):
+                    continue
+                safe_item = {
+                    key: item[key]
+                    for key in (
+                        "kind",
+                        "predicate",
+                        "label",
+                        "value",
+                        "unit",
+                        "confidence",
+                    )
+                    if key in item
+                }
+                if safe_item:
+                    safe_facts.append(safe_item)
+            if safe_facts:
+                facts[path] = safe_facts
+        elif path == "collection":
+            coverage = payload.get("collection_evidence")
+            if isinstance(coverage, Mapping):
+                projected = coverage.get("projected_facts")
+                if isinstance(projected, Mapping):
+                    facts[path] = dict(projected)
         elif path == "items[].safeLabel":
             facts[path] = [
                 str(item.get("safeLabel") or "")
@@ -391,12 +627,22 @@ def _record_refs(contract: ActionOutputContract, payload: Dict[str, Any], args: 
                 for item in payload.get("items") or []
                 if isinstance(item, Mapping) and item.get("resourceUid")
             )
+        elif path == "recordRefs[]":
+            refs.extend(
+                str(item)
+                for item in payload.get("recordRefs") or []
+                if isinstance(item, str) and item
+            )
+        elif path == "resource.resourceUid":
+            resource = payload.get("resource")
+            if isinstance(resource, Mapping) and resource.get("resourceUid"):
+                refs.append(str(resource["resourceUid"]))
         elif payload.get(path):
             refs.append(str(payload[path]))
     for key in ("resource_uid", "authorization_id"):
         if args.get(key):
             refs.append(str(args[key]))
-    return refs
+    return sorted(set(refs))
 
 
 def _update_index_receipt(
@@ -407,7 +653,15 @@ def _update_index_receipt(
         return
     if turn.index_receipt is not None and turn.index_receipt.status == "found":
         return  # 已建立的有效回执不被后续失败冲掉
-    if result.status == "success":
+    raw_has_more = result.normalized_payload.get("hasMore")
+    has_more = raw_has_more if isinstance(raw_has_more, bool) else None
+    next_cursor = result.normalized_payload.get("nextCursor")
+    terminal_page_is_consistent = (
+        has_more is not False
+        or next_cursor is None
+        or next_cursor == ""
+    )
+    if result.status == "success" and terminal_page_is_consistent:
         status = "found"
     elif result.status == "empty":
         status = "none"
@@ -415,6 +669,22 @@ def _update_index_receipt(
         status = "denied"
     else:
         status = "unavailable"
+    record_refs = sorted(
+        set(
+            _record_refs(
+                contract,
+                result.normalized_payload,
+                next(
+                    (
+                        c.arguments
+                        for c in turn.action_calls
+                        if c.call_id == result.call_id
+                    ),
+                    {},
+                ),
+            )
+        )
+    )
     turn.enter("indexing")
     turn.index_receipt = IndexReceipt(
         request_id=turn.request_id,
@@ -423,15 +693,14 @@ def _update_index_receipt(
         ),
         loaded_at=result.finished_at,
         scope_summary=result.action_id,
-        matched_resource_refs=_record_refs(
-            contract,
-            result.normalized_payload,
-            next(
-                (c.arguments for c in turn.action_calls if c.call_id == result.call_id),
-                {},
-            ),
-        ),
+        matched_resource_refs=record_refs,
         status=status,
+        source_call_id=result.call_id,
+        has_more=has_more,
+        resource_count=len(record_refs),
+        resource_refs_digest=(
+            _canonical_digest(record_refs) if record_refs else ""
+        ),
     )
 
 
@@ -465,9 +734,30 @@ def finish_action(
     )
     contract = ACTION_OUTPUT_CONTRACTS[action_id]
     payload = _parse_json_object(raw_text)
+    fact_binding_invalid = bool(
+        action_id == "mystand_query"
+        and payload
+        and not _fact_query_result_binding_valid(turn, payload)
+    )
+    collection_evidence = (
+        _collection_evidence_from_payload(turn, call_id, payload)
+        if action_id == "mystand_query"
+        and payload
+        and not fact_binding_invalid
+        else None
+    )
+    collection_binding_invalid = bool(
+        action_id == "mystand_query"
+        and isinstance(turn.fact_requirement, Mapping)
+        and turn.fact_requirement.get("fact_kind") == "collection"
+        and collection_evidence is None
+    )
+    if collection_evidence is not None:
+        payload = dict(payload)
+        payload["collection_evidence"] = collection_evidence
     if cancelled:
         status = "cancelled"
-    elif not payload:
+    elif not payload or fact_binding_invalid or collection_binding_invalid:
         status = "error"  # 长文本/半截回执不再洗白成 success
     else:
         status = _classify_contract_status(contract, payload)
@@ -494,6 +784,8 @@ def finish_action(
         # 索引只负责资源发现与工作前置（记入 IndexReceipt），
         # 不代替业务 Evidence（计划 §4.3）。
         return result
+    if collection_evidence is not None:
+        turn.collection_evidence = collection_evidence
     facts = _project_allowed_facts(contract, payload)
     turn.evidence.append(
         EvidenceEnvelope(
@@ -510,13 +802,33 @@ def finish_action(
             allowed_facts=json.dumps(facts, ensure_ascii=False, sort_keys=True),
             record_refs=_record_refs(contract, payload, call.arguments),
             input_digest=hashlib.sha256(
-                json.dumps(call.arguments, ensure_ascii=False, sort_keys=True).encode(
-                    "utf-8"
-                )
+                json.dumps(
+                    call.arguments,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode("utf-8")
             ).hexdigest(),
             output_digest=hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
             verified_at=result.finished_at,
             verification_status="verified",
+            requirement_digest=(
+                collection_evidence["requirement_digest"]
+                if collection_evidence is not None
+                else (
+                    evidence_requirement_digest(
+                        turn.fact_requirement,
+                        canonical_fallback=turn.fact_requirement_digest,
+                    )
+                    if action_id == "mystand_query"
+                    and isinstance(turn.fact_requirement, Mapping)
+                    else ""
+                )
+            ),
+            coverage_digest=(
+                _canonical_digest(collection_evidence)
+                if collection_evidence is not None
+                else ""
+            ),
         )
     )
     return result
@@ -642,6 +954,12 @@ def build_work_turn(
         request_id=request_id,
         message_id=message_id,
         evidence_required=result_requires_evidence(result),
+        fact_requirement=(
+            result.get("_mystand_fact_requirement")
+            if isinstance(result, Mapping)
+            and isinstance(result.get("_mystand_fact_requirement"), Mapping)
+            else None
+        ),
     )
     for message in _current_turn_messages(result):
         role = str(message.get("role") or "")

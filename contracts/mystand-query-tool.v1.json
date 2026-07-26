@@ -12,6 +12,32 @@
           "const": "read",
           "type": "string"
         },
+        "query_kind": {
+          "enum": ["resource-read", "rank", "predicate", "count", "list", "aggregate"],
+          "type": "string"
+        },
+        "module_id": {
+          "maxLength": 80,
+          "type": "string"
+        },
+        "fact_paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "pattern": "^[a-z][a-z0-9_.-]{1,119}$",
+            "type": "string"
+          }
+        },
+        "query_args": {
+          "type": "object",
+          "maxProperties": 12,
+          "additionalProperties": true
+        },
+        "coverage_required": {
+          "type": "boolean"
+        },
         "resource": {
           "type": "object",
           "properties": {
@@ -111,18 +137,27 @@
           "default": "facts"
         }
       },
-      "required": ["operation", "fact_needs"],
+      "required": ["operation"],
       "anyOf": [
         {
-          "required": ["resource"]
+          "required": ["resource", "fact_needs"]
         },
         {
-          "required": ["entities"],
+          "required": ["entities", "fact_needs"],
           "properties": {
             "entities": {
               "minItems": 1
             }
           }
+        },
+        {
+          "required": [
+            "query_kind",
+            "module_id",
+            "fact_paths",
+            "query_args",
+            "coverage_required"
+          ]
         }
       ],
       "additionalProperties": false
@@ -134,6 +169,23 @@
     "properties": {
       "ok": {
         "type": "boolean"
+      },
+      "content": {
+        "type": "string"
+      },
+      "facts": {
+        "type": "array"
+      },
+      "coverage": {
+        "type": "object"
+      },
+      "recordRefs": {
+        "type": "array",
+        "items": { "type": "string" }
+      },
+      "requirementDigest": {
+        "pattern": "^[a-f0-9]{64}$",
+        "type": "string"
       }
     },
     "required": ["ok"],
