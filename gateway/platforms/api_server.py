@@ -1796,6 +1796,18 @@ class _IdempotencyCache:
                 return "reusable" if existing_fingerprint == fingerprint else "conflict"
         return "missing"
 
+    def claim(self, key: str, fingerprint: str) -> str:
+        """Bind a stable identity before work starts, returning its prior state."""
+        state = self.lookup_state(key, fingerprint)
+        if state == "missing":
+            self._store[key] = {
+                "resp": None,
+                "fp": fingerprint,
+                "ts": time.time(),
+            }
+            self._purge()
+        return state
+
     async def get_or_set(self, key: str, fingerprint: str, compute_coro, agent_ref=None):
         state = self.lookup_state(key, fingerprint)
         if state == "conflict":
@@ -3369,10 +3381,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 if identity_err is not None:
                     return identity_err
             stream_scoped_key = ""
+            stream_binding_key = ""
             stream_idem_fp = ""
             if stream_delivery_id:
                 try:
                     stream_scoped_key = self._scoped_idempotency_key(
+                        request.headers, stream_delivery_id
+                    )
+                    stream_binding_key = self._stream_delivery_binding_key(
                         request.headers, stream_delivery_id
                     )
                     stream_idem_fp = self._chat_idempotency_fingerprint(body, request.headers)
@@ -3385,6 +3401,14 @@ class APIServerAdapter(BasePlatformAdapter):
                     return web.json_response(
                         _openai_error(
                             "idempotency key was reused with a different request",
+                            code="idempotency_conflict",
+                        ),
+                        status=409,
+                    )
+                if _idem_cache.claim(stream_binding_key, stream_idem_fp) == "conflict":
+                    return web.json_response(
+                        _openai_error(
+                            "delivery identity was reused with a different request",
                             code="idempotency_conflict",
                         ),
                         status=409,
@@ -3917,14 +3941,28 @@ class APIServerAdapter(BasePlatformAdapter):
 
             # Trusted work turns surface their verification receipt as a
             # dedicated SSE event after the content chunk, before finish.
-            if isinstance(result, dict) and result.get("_mystand_request"):
+            if (
+                isinstance(result, dict)
+                and result.get("_mystand_request")
+                and not run_stopped
+            ):
                 trusted_turn = result.get("_trusted_turn")
-                action_results = getattr(trusted_turn, "action_results", None) or []
-                if trusted_turn is not None and action_results:
+                verified_evidence = [
+                    item
+                    for item in (getattr(trusted_turn, "evidence", None) or [])
+                    if getattr(item, "status", "") == "success"
+                    and getattr(item, "verification_status", "") == "verified"
+                ]
+                request_id = str(getattr(trusted_turn, "request_id", "") or "")
+                if (
+                    trusted_turn is not None
+                    and verified_evidence
+                    and request_id == str(result.get("_mystand_request_id") or "")
+                ):
                     verification = {
                         "verified": True,
-                        "action_count": len(action_results),
-                        "request_id": str(getattr(trusted_turn, "request_id", "") or ""),
+                        "action_count": len(verified_evidence),
+                        "request_id": request_id,
                     }
                     await response.write(
                         f"event: xiaoban.trusted.verification\ndata: {json.dumps(verification, ensure_ascii=False)}\n\n".encode()
@@ -5590,6 +5628,15 @@ class APIServerAdapter(BasePlatformAdapter):
         payload = f"mystand-idempotency-v1\0{site_id}\0{user_id}\0{key}\0{attempt}".encode("utf-8")
         return f"mystand:{hmac.new(secret, payload, hashlib.sha256).hexdigest()}"
 
+    def _stream_delivery_binding_key(self, headers: Any, delivery_id: str) -> str:
+        """Bind one delivery+attempt globally while keeping the raw ID private."""
+        if not self._api_key:
+            raise InvalidToolsetPolicy("My Stand idempotency requires API authentication")
+        attempt = self._header_value(headers, "X-Xiaoban-Attempt")
+        payload = f"mystand-stream-delivery-v1\0{delivery_id}\0{attempt}".encode("utf-8")
+        digest = hmac.new(self._api_key.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+        return f"mystand-stream:{digest}"
+
     @classmethod
     def _chat_idempotency_fingerprint(cls, body: Dict[str, Any], headers: Any) -> str:
         """Bind cached output to every trusted header that can affect a run."""
@@ -5679,7 +5726,16 @@ class APIServerAdapter(BasePlatformAdapter):
             raise InvalidToolsetPolicy(
                 "My Stand streaming requires a valid X-Xiaoban-Delivery-Id"
             )
-        attempt = cls._header_value(headers, "X-Xiaoban-Attempt") or delivery_attempt
+        attempt_header = cls._header_value(headers, "X-Xiaoban-Attempt")
+        if (
+            attempt_header
+            and delivery_attempt
+            and attempt_header != delivery_attempt
+        ):
+            raise InvalidToolsetPolicy(
+                "My Stand streaming attempt headers must match"
+            )
+        attempt = attempt_header
         if not _MYSTAND_STREAM_ATTEMPT_RE.fullmatch(attempt):
             raise InvalidToolsetPolicy(
                 "My Stand streaming requires a valid X-Xiaoban-Attempt"
