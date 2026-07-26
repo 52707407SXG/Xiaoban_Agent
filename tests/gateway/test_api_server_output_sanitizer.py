@@ -519,6 +519,27 @@ def test_structured_ok_tool_result_wins_over_incidental_failure_digits():
                     "role": "assistant",
                     "tool_calls": [
                         {
+                            "id": "idx-1",
+                            "function": {
+                                "name": "mystand_resource_index",
+                                "arguments": '{"operation":"list_resources","module_id":"finance-ledger"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "name": "mystand_resource_index",
+                    "tool_call_id": "idx-1",
+                    "content": (
+                        '{"ok":true,"items":[{"resourceUid":"res-demo-1",'
+                        '"safeLabel":"档案"}]}'
+                    ),
+                },
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
                             "id": "read-1",
                             "function": {
                                 "name": "mystand_authorization",

@@ -18,6 +18,23 @@ ERROR_MESSAGE = "站内资料读取暂时没有接稳，请稍后再试。"
 FABRICATED_ANSWER = "查到了，滨江一号3栋802的业主是周某，月供 5600 元，目前状态正常。"
 FABRICATED_TOKENS = ("周某", "5600")
 
+# WORK 强制最小索引前置：业务读取前必须先有服务端 IndexReceipt。
+INDEX_CALL = (
+    "call_idx",
+    "mystand_resource_index",
+    {"operation": "list_resources", "module_id": "finance-ledger"},
+    {
+        "ok": True,
+        "items": [
+            {
+                "resourceUid": "res-demo-1",
+                "safeLabel": "游某 2026年个人业务档案",
+                "canRead": True,
+            }
+        ],
+    },
+)
+
 
 def tool_turn(
     user_message: str,
@@ -82,6 +99,7 @@ SCENARIO_ALL_TOOLS_FAILED = {
     "result": tool_turn(
         "帮我看看滨江一号3栋802的业主和月供",
         [
+            INDEX_CALL,
             (
                 "call_q1",
                 "mystand_authorization",
@@ -225,6 +243,7 @@ def result_status_turn(receipt: Any) -> Dict[str, Any]:
     return tool_turn(
         SCENARIO_RESULT_STATUSES["user_message"],
         [
+            INDEX_CALL,
             (
                 "call_s1",
                 "mystand_authorization",
@@ -295,6 +314,7 @@ SCENARIO_CROSS_ACCOUNT_EVIDENCE = {
     "result": tool_turn(
         "帮我看看滨江一号3栋802的业主和月供",
         [
+            INDEX_CALL,
             (
                 "call_x1",
                 "mystand_authorization",
@@ -324,6 +344,7 @@ SCENARIO_EVIDENCE_BACKED_ANSWER = {
     "result": tool_turn(
         "查一下游某今年的结算业绩",
         [
+            INDEX_CALL,
             (
                 "call_ok",
                 "mystand_authorization",
@@ -342,6 +363,7 @@ SCENARIO_FACT_MISMATCH = {
     "result": tool_turn(
         "查一下游某今年的结算业绩",
         [
+            INDEX_CALL,
             (
                 "call_ok",
                 "mystand_authorization",

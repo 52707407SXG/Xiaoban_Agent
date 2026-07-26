@@ -34,6 +34,7 @@ from xiaoban.trusted_runtime.types import (
     WorkTurn,
     INTERACTION_CHAT,
     INTERACTION_WORK,
+    is_write_action,
 )
 
 _BUSINESS_INTENT_RE = re.compile(
@@ -44,8 +45,34 @@ _BUSINESS_INTENT_RE = re.compile(
 )
 
 _ACCOUNT_KEYS = frozenset(
-    {"accountid", "account_id", "userid", "user_id", "ownerid", "owner_id"}
+    {
+        "accountid",
+        "account_id",
+        "userid",
+        "user_id",
+        "ownerid",
+        "owner_id",
+        "owneruser",
+        "owner_user",
+    }
 )
+
+# team/company 等 DataScope 维度：只信 identity.scope_values（服务端可核实值），
+# 无法核实的一律 fail closed。
+_TEAM_COMPANY_KEYS = frozenset(
+    {
+        "teamid",
+        "team_id",
+        "companyid",
+        "company_id",
+        "orgid",
+        "org_id",
+        "tenantid",
+        "tenant_id",
+    }
+)
+
+_MODULE_KEYS = frozenset({"moduleid", "module_id"})
 
 # 活动可信回合：ContextVar 与 gateway.session_context 同机制，
 # 每个请求执行线程各自隔离，并发同账号请求不会互相污染。
@@ -95,8 +122,10 @@ def classify_interaction(
     if used_business_tools:
         return INTERACTION_WORK
     texts = [_visible_text(user_message)]
+    # 连续业务追问的语境可能在 assistant 回复里（"您是想查…业主吗？"→"他是谁？"），
+    # 历史扫描不限角色，漏判成 CHAT 会放行纯人名事实。
     for message in list(conversation_history or [])[-4:]:
-        if isinstance(message, Mapping) and str(message.get("role") or "") == "user":
+        if isinstance(message, Mapping):
             texts.append(_visible_text(message.get("content")))
     if any(_BUSINESS_INTENT_RE.search(text) for text in texts if text):
         return INTERACTION_WORK
@@ -186,6 +215,9 @@ def begin_action(
     call_id = call_id or f"mystand_pre_{uuid.uuid4().hex}"
     args = dict(arguments or {})
     try:
+        if is_write_action(action_id, args):
+            # 写动作不属于只读合同，绝不经由只读链执行或采证。
+            return _record_denial(turn, call_id, action_id, "write_isolated")
         contract = ACTION_OUTPUT_CONTRACTS.get(action_id)
         if contract is None or contract.version != version:
             # 未知动作或缺少动作级 output 合同：不执行。
@@ -237,25 +269,44 @@ def begin_action(
         return _record_denial(turn, call_id, action_id, "preaction_error")
 
 
-def _iter_account_values(node: Any) -> List[str]:
-    """递归提取 payload 中所有自报账号字段（嵌套越权不得漏检）。"""
-    values: List[str] = []
+def _scope_violations(
+    node: Any,
+    identity: Optional[TrustedIdentity],
+    call_args: Dict[str, Any],
+) -> List[str]:
+    """递归复核 payload 自报的 owner/team/company/module 字段。
+
+    owner 级字段必须等于当前服务端身份；team/company 级字段必须命中
+    identity.scope_values（无服务端可核实值时一律拒绝）；module 必须
+    与执行上下文调用参数一致。嵌套越权不得漏检。
+    """
+    violations: List[str] = []
     if isinstance(node, Mapping):
         for key, value in node.items():
-            if str(key).lower() in _ACCOUNT_KEYS and value not in (None, ""):
-                values.append(str(value))
+            lowered = str(key).lower()
+            if lowered in _ACCOUNT_KEYS and value not in (None, ""):
+                if identity is None or str(value) != identity.account_id:
+                    violations.append(str(key))
+            elif lowered in _TEAM_COMPANY_KEYS and value not in (None, ""):
+                allowed = set(identity.scope_values) if identity else set()
+                if str(value) not in allowed:
+                    violations.append(str(key))
+            elif lowered in _MODULE_KEYS and value not in (None, ""):
+                expected = call_args.get("module_id") or call_args.get("moduleId")
+                if expected and str(value) != str(expected):
+                    violations.append(str(key))
             else:
-                values.extend(_iter_account_values(value))
+                violations.extend(_scope_violations(value, identity, call_args))
     elif isinstance(node, list):
         for item in node:
-            values.extend(_iter_account_values(item))
-    return values
+            violations.extend(_scope_violations(item, identity, call_args))
+    return violations
 
 
 def _classify_contract_status(
     contract: ActionOutputContract, payload: Dict[str, Any]
 ) -> str:
-    """按动作级 output 合同分类；不认识的 payload 一律失败关闭。"""
+    """按动作级 output 合同分类；矛盾/未知回执一律失败关闭。"""
     ok = payload.get("ok")
     success = payload.get("success")
     if ok is False or success is False:
@@ -271,9 +322,21 @@ def _classify_contract_status(
             return "ambiguous"
         return "error"
     if ok is True or success is True:
-        status = payload.get("status")
-        if isinstance(status, int) and status >= 400:
+        # 矛盾回执：ok=true 同时带 error / 失败 code / 4xx-5xx（含字符串
+        # 形式）/ 无法解析的 status，一律不得生成 success。
+        if payload.get("error"):
             return "error"
+        code_value = payload.get("code")
+        if code_value not in (None, "", 0, "0", "OK", "ok"):
+            return "error"
+        status = payload.get("status")
+        if status is not None:
+            try:
+                status_code = int(status)
+            except (TypeError, ValueError):
+                return "error"
+            if status_code >= 400:
+                return "error"
         if contract.kind == "index":
             items = payload.get("items")
             if not isinstance(items, list):
@@ -327,8 +390,8 @@ def _record_refs(contract: ActionOutputContract, payload: Dict[str, Any], args: 
 def _update_index_receipt(
     turn: WorkTurn, contract: ActionOutputContract, result: ActionResult
 ) -> None:
-    """IndexReceipt 只来自本轮真实执行的索引/定向读取结果。"""
-    if contract.kind not in ("index", "scoped_read"):
+    """IndexReceipt 只来自本轮真实执行的最小索引读取，禁止反向补索引。"""
+    if contract.kind != "index":
         return
     if turn.index_receipt is not None and turn.index_receipt.status == "found":
         return  # 已建立的有效回执不被后续失败冲掉
@@ -411,14 +474,14 @@ def finish_action(
 
     # PostAction Verify：只对真实返回的 ActionResult 执行。
     turn.enter("verifying")
-    if status != "success":
+    if status != "success" or contract.kind == "index":
+        # 索引只负责资源发现与工作前置（记入 IndexReceipt），
+        # 不代替业务 Evidence（计划 §4.3）。
         return result
     identity = turn.identity
-    declared = _iter_account_values(payload)
-    if declared and (
-        identity is None or any(value != identity.account_id for value in declared)
-    ):
-        # 跨账号/嵌套越权 payload：拒绝成为本轮证据。
+    violations = _scope_violations(payload, identity, call.arguments)
+    if violations:
+        # 跨账号/嵌套越权/不可核实 DataScope 的 payload：拒绝成为本轮证据。
         turn.rejected_cross_account += 1
         return result
     facts = _project_allowed_facts(contract, payload)
@@ -457,7 +520,9 @@ def gate_registry_action(
     返回 None 表示非可信目录动作或非 My Stand 服务端会话，保持原路径；
     返回 (turn, decision) 时调用方必须按 decision 执行或拒绝。
     """
-    if name not in ACTION_OUTPUT_CONTRACTS:
+    if name not in ACTION_OUTPUT_CONTRACTS or is_write_action(
+        name, args if isinstance(args, dict) else None
+    ):
         return None
     try:
         from gateway.session_context import get_session_env
@@ -492,6 +557,27 @@ def _current_turn_messages(result: Any) -> List[Mapping[str, Any]]:
     if last_user < 0:
         return []
     return messages[last_user + 1 :]
+
+
+def result_has_write_actions(result: Any) -> bool:
+    """本轮执行记录中是否含写动作（写流程由既有写回执硬闸接管）。"""
+    for message in _current_turn_messages(result):
+        if str(message.get("role") or "") != "assistant":
+            continue
+        for call in message.get("tool_calls") or []:
+            if not isinstance(call, Mapping):
+                continue
+            function = call.get("function")
+            function = function if isinstance(function, Mapping) else {}
+            name = str(function.get("name") or call.get("name") or "")
+            args = _parse_json_object(
+                function.get("arguments")
+                if "arguments" in function
+                else call.get("arguments")
+            )
+            if name and is_write_action(name, args):
+                return True
+    return False
 
 
 def build_work_turn(
@@ -529,18 +615,24 @@ def build_work_turn(
                 name = str(function.get("name") or call.get("name") or "")
                 if not call_id or not name:
                     continue
+                call_args = _parse_json_object(
+                    function.get("arguments")
+                    if "arguments" in function
+                    else call.get("arguments")
+                )
+                if is_write_action(name, call_args):
+                    # 写动作由既有写回执硬闸接管，只读链不登记不采证。
+                    continue
                 begin_action(
                     turn,
                     name,
                     "v1",
-                    _parse_json_object(
-                        function.get("arguments")
-                        if "arguments" in function
-                        else call.get("arguments")
-                    ),
+                    call_args,
                     call_id=call_id,
                 )
         elif role == "tool":
+            if is_write_action(str(message.get("name") or ""), None):
+                continue
             finish_action(
                 turn,
                 str(message.get("tool_call_id") or ""),

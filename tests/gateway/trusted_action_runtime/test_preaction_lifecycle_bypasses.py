@@ -31,6 +31,11 @@ def _result(calls, user_message=BUSINESS_MSG, user_id="user-a"):
     return fx.tool_turn(user_message, calls, user_id=user_id)
 
 
+def _indexed_result(calls, user_message=BUSINESS_MSG, user_id="user-a"):
+    # 最小索引前置后再送入业务读取，使断言真正打到 payload 分类/复核层。
+    return fx.tool_turn(user_message, [fx.INDEX_CALL] + list(calls), user_id=user_id)
+
+
 # --- R0-1：My Stand WORK 没有 IndexReceipt，业务动作结果被错误采信 ---
 def test_red_work_without_index_receipt_must_not_allow():
     # 当前行为：无索引前置，query 成功即 allowed_evidence_backed。
@@ -66,8 +71,8 @@ def test_red_pure_person_name_without_evidence_must_block():
 # --- R0-3：嵌套 payload 中的 owner/actor 与当前身份冲突仍被采信 ---
 def test_red_nested_owner_mismatch_must_reject_evidence():
     # 当前行为：只查顶层 accountId/userId/ownerId，嵌套 items[].ownerId 漏检。
-    result = _result(
-        [("call_n", "mystand_query", {"operation": "read"}, {
+    result = _indexed_result(
+        [("call_n", "mystand_authorization", {"operation": "resolve", "resource_uid": "res-demo-1"}, {
             "ok": True,
             "content": "游某 2026 结算业绩 32105.68 元",
             "items": [{"ownerId": "user-b", "resourceUid": "res-demo-9"}],
@@ -86,7 +91,7 @@ def test_red_nested_owner_mismatch_must_reject_evidence():
 # --- R0-4：ok=true 叠加错误状态 / 长文本被当成 success ---
 def test_red_ok_true_with_error_status_is_not_success():
     # 当前行为：ok is True 直接 success，不看 status。
-    result = _result(
+    result = _indexed_result(
         [("call_e", "mystand_authorization", {"operation": "resolve", "resource_uid": "res-demo-1"}, {
             "ok": True, "status": 500,
             "content": "upstream bridge timeout while reading ledger",
@@ -95,19 +100,19 @@ def test_red_ok_true_with_error_status_is_not_success():
     turn = build_work_turn(
         channel="web", user_message=BUSINESS_MSG, result=result, identity=IDENTITY,
     )
-    assert turn.action_results[0].status == "error"
+    assert turn.action_results[-1].status == "error"
     assert turn.evidence == []
 
 
 def test_red_long_unstructured_text_is_not_success():
     # 当前行为：无法解析的长文本（>=20 字符）直接 success。
-    result = _result(
+    result = _indexed_result(
         [("call_t", "mystand_authorization", {"operation": "resolve", "resource_uid": "res-demo-1"}, "业主是周某，月供 5600 元，状态正常")]
     )
     turn = build_work_turn(
         channel="web", user_message=BUSINESS_MSG, result=result, identity=IDENTITY,
     )
-    assert turn.action_results[0].status == "error"
+    assert turn.action_results[-1].status == "error"
     assert turn.evidence == []
 
 
@@ -224,6 +229,9 @@ def test_red_previous_turn_evidence_cannot_be_reused():
         request_id="req-a",
         message_id="msg-a",
     )
+    index_a = begin_action(turn_a, "mystand_resource_index", "v1", {"operation": "list_resources", "module_id": "finance-ledger"})
+    assert index_a.decision == "allow"
+    finish_action(turn_a, index_a.call.call_id, "mystand_resource_index", "v1", '{"ok":true,"items":[{"resourceUid":"res-demo-1","safeLabel":"游某 2026年个人业务档案"}]}')
     decision_a = begin_action(turn_a, "mystand_authorization", "v1", {"operation": "resolve", "resource_uid": "res-demo-1"})
     assert decision_a.decision == "allow"
     finish_action(turn_a, decision_a.call.call_id, "mystand_authorization", "v1", '{"ok":true,"content":"游某 2026 结算业绩 32105.68 元"}')
@@ -236,6 +244,8 @@ def test_red_previous_turn_evidence_cannot_be_reused():
         request_id="req-b",
         message_id="msg-b",
     )
+    index_b = begin_action(turn_b, "mystand_resource_index", "v1", {"operation": "list_resources", "module_id": "finance-ledger"})
+    finish_action(turn_b, index_b.call.call_id, "mystand_resource_index", "v1", '{"ok":true,"items":[{"resourceUid":"res-demo-2","safeLabel":"周某 2026年个人业务档案"}]}')
     decision_b = begin_action(turn_b, "mystand_authorization", "v1", {"operation": "resolve", "resource_uid": "res-demo-2"})
     finish_action(turn_b, decision_b.call.call_id, "mystand_authorization", "v1", '{"ok":false,"status":500,"error":"internal"}')
     assert turn_b.evidence == [], "上一回合 evidence 污染了本轮"
@@ -244,22 +254,22 @@ def test_red_previous_turn_evidence_cannot_be_reused():
 # --- R0-10：执行异常/超时回执被当成 success ---
 def test_red_exception_receipt_is_not_success():
     # 当前行为：'{"error": "Tool execution failed: ..."}' 超 20 字符即 success。
-    result = _result(
+    result = _indexed_result(
         [("call_x", "mystand_authorization", {"operation": "resolve", "resource_uid": "res-demo-1"},
           '{"error": "Tool execution failed: TimeoutError: read timed out"}')]
     )
     turn = build_work_turn(
         channel="web", user_message=BUSINESS_MSG, result=result, identity=IDENTITY,
     )
-    assert turn.action_results[0].status == "error"
+    assert turn.action_results[-1].status == "error"
     assert turn.evidence == []
 
 
 # --- R0-13：没有真实 PostAction Verify 却产出 verified Evidence ---
 def test_red_unverified_payload_must_not_be_marked_verified():
     # 当前行为：长文本归 success 后无条件 verification_status="verified"。
-    result = _result(
-        [("call_v", "mystand_query", {"operation": "read"}, "调试输出：读取过程中部分字段缺失，但文本足够长")]
+    result = _indexed_result(
+        [("call_v", "mystand_authorization", {"operation": "resolve", "resource_uid": "res-demo-1"}, "调试输出：读取过程中部分字段缺失，但文本足够长")]
     )
     turn = build_work_turn(
         channel="web", user_message=BUSINESS_MSG, result=result, identity=IDENTITY,
@@ -297,7 +307,7 @@ def test_red_unknown_action_payload_must_fail_closed():
     turn = build_work_turn(
         channel="web", user_message=BUSINESS_MSG, result=result, identity=IDENTITY,
     )
-    assert turn.action_results[0].status == "error"
+    assert turn.action_results[-1].status == "error"
     assert turn.evidence == []
     decision = check_mystand_final_answer(
         "客户电话是 13800001111。",

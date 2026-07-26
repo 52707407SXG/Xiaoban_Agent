@@ -29,6 +29,21 @@
       ]
     },
     {
+      "id": "identity.runtime-soul-md",
+      "kind": "角色感",
+      "file": "/var/lib/xiaoban/SOUL.md",
+      "symbol": "(runtime-file)",
+      "sha256": "91380eaf31b9da4a08771baa4e3e79e9f59fe78fd4262aca6091cfa5f48ce95f",
+      "consumers": [
+        "agent/prompt_builder.py::load_soul_md",
+        "agent/system_prompt.py::build_system_prompt_parts",
+        "systemd:xiaoban-agent.service Environment=XIAOBAN_HOME"
+      ],
+      "related_tests": [
+        "tests/gateway/trusted_action_runtime/test_three_senses_fingerprints.py"
+      ]
+    },
+    {
       "id": "identity.native-identity",
       "kind": "角色感",
       "file": "xiaoban/prompt.py",

@@ -53,6 +53,22 @@ def _function_loader(module_name: str, symbol: str) -> Callable[[], str]:
     return load
 
 
+# 生产 SOUL.md 运行源（systemd xiaoban-agent.service: XIAOBAN_HOME=/var/lib/xiaoban，
+# 经 agent/prompt_builder.py::load_soul_md 注入系统提示）。只记录规范化指纹，
+# 不记录、不输出正文。
+RUNTIME_SOUL_MD_PATH = "/var/lib/xiaoban/SOUL.md"
+
+
+def _runtime_file_loader(path: str) -> Callable[[], str]:
+    def load() -> str:
+        try:
+            return fingerprint_text(Path(path).read_text(encoding="utf-8"))
+        except OSError:
+            return f"MISSING:{path}"
+
+    return load
+
+
 # (id, 类别, 文件, 符号, loader, 调用链消费者, 相关现有测试)
 _BLOCK_SPECS = [
     (
@@ -72,6 +88,19 @@ _BLOCK_SPECS = [
         _function_loader("agent.prompt_builder", "load_soul_md"),
         ["agent/system_prompt.py::build_system_prompt_parts"],
         ["tests/agent/test_system_prompt.py"],
+    ),
+    (
+        "identity.runtime-soul-md",
+        "角色感",
+        RUNTIME_SOUL_MD_PATH,
+        "(runtime-file)",
+        _runtime_file_loader(RUNTIME_SOUL_MD_PATH),
+        [
+            "agent/prompt_builder.py::load_soul_md",
+            "agent/system_prompt.py::build_system_prompt_parts",
+            "systemd:xiaoban-agent.service Environment=XIAOBAN_HOME",
+        ],
+        ["tests/gateway/trusted_action_runtime/test_three_senses_fingerprints.py"],
     ),
     (
         "identity.native-identity",

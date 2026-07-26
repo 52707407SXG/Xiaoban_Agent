@@ -415,7 +415,19 @@ def _run_mystand_preexecuted_evidence(
         if not match:
             return evidence
         from tools.mystand_authorization_tool import mystand_authorization_tool_handler
+        from tools.mystand_resource_index_tool import mystand_resource_index_tool_handler
 
+        # WORK 强制最小索引前置：任何业务读取前必须先取得服务端 IndexReceipt。
+        execute(
+            "mystand_resource_index",
+            {
+                "operation": "list_resources",
+                "module_id": _trusted_mystand_module_id(system_prompt),
+                "status": "all",
+                "limit": 100,
+            },
+            mystand_resource_index_tool_handler,
+        )
         execute(
             "mystand_authorization",
             {
@@ -945,6 +957,7 @@ def _guard_evidence_backed_response(
             result=result,
             channel="web",
             account_id=str(result.get("_mystand_user_id") or ""),
+            message_id=str(result.get("_mystand_message_id") or ""),
         )
         if not completion.allowed:
             logger.warning(
@@ -5938,6 +5951,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 result["_mystand_request"] = mystand_request
                 if mystand_request:
                     result["_mystand_user_id"] = str(request_user_id or "")
+                    result["_mystand_message_id"] = str(request_message_id or "")
                     result["_trusted_turn"] = trusted_turn
                 if initial_tool_choice:
                     result["_mystand_required_evidence_groups"] = [

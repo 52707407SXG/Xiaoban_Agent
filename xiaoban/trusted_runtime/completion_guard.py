@@ -14,7 +14,7 @@ import json
 import re
 from typing import Any, List, Mapping, Optional, Sequence
 
-from xiaoban.trusted_runtime.turns import build_work_turn
+from xiaoban.trusted_runtime.turns import build_work_turn, result_has_write_actions
 from xiaoban.trusted_runtime.types import (
     CompletionDecision,
     TrustedIdentity,
@@ -91,7 +91,11 @@ def _answer_fact_tokens(text: str) -> List[str]:
 
 
 def project_answer(turn: WorkTurn) -> str:
-    """ChannelProjection：公开业务内容只来自 Evidence 允许字段路径。"""
+    """ChannelProjection：公开业务内容只来自 Evidence 允许字段路径。
+
+    索引只负责资源发现（记录在 IndexReceipt），公开业务事实只从
+    业务读取动作的 content 字段投影。
+    """
     parts: List[str] = []
     for item in turn.evidence:
         try:
@@ -101,9 +105,6 @@ def project_answer(turn: WorkTurn) -> str:
         content = str(facts.get("content") or "").strip()
         if content:
             parts.append(content)
-        labels = [label for label in facts.get("items[].safeLabel") or [] if label]
-        if labels:
-            parts.append("找到的相关资料：" + "、".join(labels) + "。")
     return "\n".join(parts)
 
 
@@ -155,6 +156,28 @@ def check_completion(final_text: str, turn: WorkTurn) -> CompletionDecision:
         return CompletionDecision(False, NO_EVIDENCE_MESSAGE, "blocked_guard_error")
 
 
+def _trusted_turn_binding_valid(
+    turn: WorkTurn,
+    *,
+    channel: str,
+    account_id: str,
+    message_id: str,
+) -> bool:
+    """_trusted_turn 必须与本次服务端身份、渠道、messageId、DataScope 再绑定。"""
+    identity = turn.identity
+    if identity is None or not account_id or identity.account_id != account_id:
+        return False
+    if identity.data_scope != "mystand":
+        return False
+    if turn.channel != channel:
+        return False
+    if message_id and turn.message_id != message_id:
+        return False
+    if not turn.request_id:
+        return False
+    return True
+
+
 def check_mystand_final_answer(
     final_text: str,
     *,
@@ -169,10 +192,15 @@ def check_mystand_final_answer(
     """构建/取用 WorkTurn 并执行 CompletionGuard（模型无关确定性路径）。
 
     身份只信调用方显式传入的服务端解析结果（Web 登录会话或渠道绑定），
-    绝不回退读取 result 自报字段。
+    绝不回退读取 result 自报字段；附着的 _trusted_turn 必须与本次
+    服务端身份/messageId/渠道/DataScope 再绑定，不一致立即拒绝。
     """
     if not isinstance(result, Mapping) or result.get("_mystand_request") is not True:
         return CompletionDecision(True, str(final_text or ""), "not_mystand")
+    if result_has_write_actions(result):
+        # 写流程由既有写确认 + 写回执硬闸（上游已先行执行）接管，
+        # 只读 CompletionGuard 不拦截、不改写合法 verified 写回执。
+        return CompletionDecision(True, str(final_text or ""), "write_turn_deferred")
     identity = (
         TrustedIdentity(
             account_id=account_id,
@@ -183,7 +211,14 @@ def check_mystand_final_answer(
         else None
     )
     turn = result.get("_trusted_turn")
-    if not isinstance(turn, WorkTurn):
+    if isinstance(turn, WorkTurn):
+        if not _trusted_turn_binding_valid(
+            turn, channel=channel, account_id=account_id, message_id=message_id
+        ):
+            return CompletionDecision(
+                False, NO_EVIDENCE_MESSAGE, "blocked_identity_rebind"
+            )
+    else:
         # 没有生命周期回合时，执行记录仍要逐项过同一套生命周期门禁，
         # 伪造/越权/无索引的动作在这一步被拒绝，不能洗白成证据。
         turn = build_work_turn(

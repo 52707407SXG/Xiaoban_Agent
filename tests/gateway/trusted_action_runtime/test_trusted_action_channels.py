@@ -206,7 +206,8 @@ def test_channels_share_full_runtime_products_for_success():
     product = products[0]
     assert product["kind"] == INTERACTION_WORK
     assert product["bound"] is True
-    assert product["statuses"] == ["success"]
+    assert product["statuses"] == ["success", "success"]  # 索引前置 + 业务读取
+    assert product["receipt"] == "found"
     assert product["facts"], "三渠道必须共享相同 Evidence 字段路径"
     assert product["decision"][0] is True
 
@@ -215,6 +216,6 @@ def test_channels_share_full_runtime_products_for_failure():
     products = _channel_products(fx.SCENARIO_ALL_TOOLS_FAILED)
     assert products[0] == products[1] == products[2]
     product = products[0]
-    assert product["statuses"] == ["error"]
+    assert product["statuses"] == ["success", "error"]  # 索引成功、业务读取失败
     assert product["facts"] == []
     assert product["decision"] == (False, fx.ERROR_MESSAGE, "blocked_no_evidence")

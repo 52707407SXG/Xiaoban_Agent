@@ -44,10 +44,15 @@ def _turn(user_message="读取 AUTH-ABC12345", identity=IDENTITY):
 
 
 def test_preexecuted_allow_path_binds_real_call_id(monkeypatch):
-    calls = []
+    auth_calls, index_calls = [], []
     monkeypatch.setattr(
         "tools.mystand_authorization_tool.mystand_authorization_tool_handler",
-        lambda args: calls.append(args) or '{"ok":true,"content":"地址3401号"}',
+        lambda args: auth_calls.append(args) or '{"ok":true,"content":"地址3401号"}',
+    )
+    monkeypatch.setattr(
+        "tools.mystand_resource_index_tool.mystand_resource_index_tool_handler",
+        lambda args: index_calls.append(args)
+        or '{"ok":true,"items":[{"resourceUid":"res-demo-1","safeLabel":"档案"}]}',
     )
     starts, completes = [], []
     turn = _turn()
@@ -59,10 +64,13 @@ def test_preexecuted_allow_path_binds_real_call_id(monkeypatch):
         tool_complete_callback=lambda cid, name, args, content: completes.append(cid),
         trusted_turn=turn,
     )
-    assert len(calls) == 1
-    assert starts == completes == [turn.action_calls[0].call_id]
-    assert evidence[0]["call_id"] == turn.action_calls[0].call_id
-    assert turn.action_results[0].status == "success"
+    # WORK 强制最小索引前置：先索引、后业务读取，handler 各调用一次。
+    assert len(index_calls) == 1
+    assert len(auth_calls) == 1
+    call_ids = [call.call_id for call in turn.action_calls]
+    assert starts == completes == call_ids
+    assert [item["call_id"] for item in evidence] == call_ids
+    assert turn.action_results[-1].status == "success"
     assert turn.index_receipt is not None and turn.index_receipt.status == "found"
     assert turn.evidence and "verifying" in turn.states
 
@@ -72,6 +80,10 @@ def test_preexecuted_deny_means_zero_handler_calls(monkeypatch):
     monkeypatch.setattr(
         "tools.mystand_authorization_tool.mystand_authorization_tool_handler",
         lambda args: calls.append(args) or '{"ok":true}',
+    )
+    monkeypatch.setattr(
+        "tools.mystand_resource_index_tool.mystand_resource_index_tool_handler",
+        lambda args: calls.append(args) or '{"ok":true,"items":[]}',
     )
     turn = _turn(identity=None)  # 关键身份字段缺失：fail closed
     evidence = _run_mystand_preexecuted_evidence(
@@ -84,7 +96,7 @@ def test_preexecuted_deny_means_zero_handler_calls(monkeypatch):
     )
     assert calls == [], "PreAction deny 时 handler 必须零调用"
     assert json.loads(evidence[0]["content"])["code"] == "missing_identity"
-    assert turn.pre_action_denials == 1
+    assert turn.pre_action_denials == 2  # 索引与业务读取均被拒
     assert turn.evidence == []
 
 
@@ -135,14 +147,14 @@ def test_registry_dispatch_gate_allows_after_real_index_receipt():
         raw = json.loads(registry.dispatch("mystand_query", {"operation": "read"}))
         assert raw["code"] == "missing_index_receipt"
         assert hits == []
-        # 真实定向读取建立回执后：允许执行并严格绑定。
+        # 真实最小索引建立回执后：允许执行并严格绑定。
         allow = begin_action(
-            turn, "mystand_authorization", "v1",
-            {"operation": "resolve", "resource_uid": "res-demo-1"},
+            turn, "mystand_resource_index", "v1",
+            {"operation": "list_resources", "module_id": "finance-ledger"},
         )
         finish_action(
-            turn, allow.call.call_id, "mystand_authorization", "v1",
-            '{"ok":true,"content":"档案存在"}',
+            turn, allow.call.call_id, "mystand_resource_index", "v1",
+            '{"ok":true,"items":[{"resourceUid":"res-demo-1","safeLabel":"档案"}]}',
         )
         raw = json.loads(registry.dispatch("mystand_query", {"operation": "read"}))
         assert raw["ok"] is True
@@ -155,8 +167,21 @@ def test_registry_dispatch_gate_allows_after_real_index_receipt():
         clear_session_vars(tokens)
 
 
+def _establish_index(turn):
+    allow = begin_action(
+        turn, "mystand_resource_index", "v1",
+        {"operation": "list_resources", "module_id": "finance-ledger"},
+    )
+    assert allow.decision == "allow"
+    finish_action(
+        turn, allow.call.call_id, "mystand_resource_index", "v1",
+        '{"ok":true,"items":[{"resourceUid":"res-demo-1","safeLabel":"档案"}]}',
+    )
+
+
 def test_evidence_contains_only_contract_field_paths():
     turn = _turn()
+    _establish_index(turn)
     allow = begin_action(
         turn, "mystand_authorization", "v1",
         {"operation": "resolve", "resource_uid": "res-demo-1"},
@@ -175,14 +200,16 @@ def test_evidence_contains_only_contract_field_paths():
 
 def test_tool_start_without_complete_cannot_end_as_success():
     turn = _turn()
+    _establish_index(turn)
     allow = begin_action(
         turn, "mystand_authorization", "v1",
         {"operation": "resolve", "resource_uid": "res-demo-1"},
     )
     assert allow.decision == "allow"
+    # 索引已完成但业务读取只有 start 没有 complete/failed：不得结束为成功。
     decision = check_completion("查到了，地址是3401号。", turn)
     assert not decision.allowed
-    assert decision.reason == "blocked_no_action_result"
+    assert decision.reason == "blocked_no_evidence"
     assert "3401" not in decision.text
 
 

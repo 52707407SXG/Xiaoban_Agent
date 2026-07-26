@@ -68,7 +68,11 @@ def test_result_statuses_are_classified_distinctly():
     }
     for name, case in cases.items():
         turn = _turn(fx.result_status_turn(case["receipt"]))
-        assert [item.status for item in turn.action_results] == [expected[name]]
+        # 索引前置成功 + 业务读取按合同分类
+        assert [item.status for item in turn.action_results] == [
+            "success",
+            expected[name],
+        ]
 
 
 def test_verifying_state_only_after_real_post_action_verify():

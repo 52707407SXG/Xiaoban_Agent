@@ -80,17 +80,25 @@ class CommandEnvelope:
 
 @dataclass(frozen=True)
 class TrustedIdentity:
-    """服务端解析的身份；消息正文、自报账号不能成为权限依据。"""
+    """服务端解析的身份；消息正文、自报账号不能成为权限依据。
+
+    scope_values 是服务端可核实的 team/company 等 DataScope 维度值；
+    为空时，payload 自报的任何 team/company 字段一律 fail closed。
+    """
 
     account_id: str
     data_scope: str
     source: str  # server_session | platform_binding | none
+    scope_values: Tuple[str, ...] = ()
 
     @property
     def datascope_fingerprint(self) -> str:
         import hashlib
 
-        raw = f"{self.account_id}|{self.data_scope}|{self.source}"
+        raw = (
+            f"{self.account_id}|{self.data_scope}|{self.source}"
+            f"|{','.join(sorted(self.scope_values))}"
+        )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -142,6 +150,9 @@ class ActionOutputContract:
 
 
 # 第一波只适配现有只读动作，不扩大动作目录。
+# kind=index：最小资源索引读取，是 IndexReceipt 的唯一来源；
+# kind=read：业务读取，执行前必须已有 found 的 IndexReceipt，
+# 禁止用业务 ActionResult 反向补索引。
 ACTION_OUTPUT_CONTRACTS: Dict[str, ActionOutputContract] = {
     "mystand_resource_index": ActionOutputContract(
         "mystand_resource_index",
@@ -153,7 +164,7 @@ ACTION_OUTPUT_CONTRACTS: Dict[str, ActionOutputContract] = {
     "mystand_authorization": ActionOutputContract(
         "mystand_authorization",
         "v1",
-        "scoped_read",
+        "read",
         ("content",),
         ("resourceUid", "authorizationId"),
     ),
@@ -165,6 +176,19 @@ ACTION_OUTPUT_CONTRACTS: Dict[str, ActionOutputContract] = {
         ("resourceUid",),
     ),
 }
+
+# 写操作不属于第一阶段只读合同：由既有写确认 + 写回执硬闸接管，
+# 可信只读链对其完全旁路，不登记、不采证、不拦截。
+WRITE_TOOL_NAMES = frozenset({"mystand_authorization_write"})
+WRITE_OPERATIONS = frozenset({"preview_write", "commit_write"})
+
+
+def is_write_action(name: str, arguments: Optional[Dict[str, Any]] = None) -> bool:
+    if name in WRITE_TOOL_NAMES:
+        return True
+    if name == "mystand_authorization":
+        return str((arguments or {}).get("operation") or "") in WRITE_OPERATIONS
+    return False
 
 
 @dataclass(frozen=True)

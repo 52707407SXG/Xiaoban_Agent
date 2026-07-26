@@ -30,7 +30,7 @@ def test_ledger_records_file_symbol_consumers_and_tests():
     assert ledger["blocks"], "保护账本不能为空"
     kinds = set()
     for block in ledger["blocks"]:
-        assert block["file"].endswith(".py")
+        assert block["file"].endswith((".py", ".md"))
         assert block["symbol"]
         assert block["sha256"] and len(block["sha256"]) == 64
         assert block["consumers"], f"{block['id']} 缺少调用链消费者记录"
