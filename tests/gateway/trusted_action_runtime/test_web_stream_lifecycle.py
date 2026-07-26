@@ -315,6 +315,7 @@ async def test_r4_guarded_stream_replaces_unverified_business_claim():
         return (
             {
                 "_mystand_request": True,
+                "_mystand_evidence_required": True,
                 "final_response": claim,
                 "messages": [
                     {"role": "user", "content": "确认"},
@@ -362,6 +363,40 @@ async def test_r5a_plain_chat_stream_has_no_trusted_verification_event():
             body = await resp.text()
 
     assert resp.status == 200
+    assert "xiaoban.trusted.verification" not in body
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_forwards_real_deltas_without_guard_rewrite_or_duplicate():
+    adapter = _make_adapter()
+    answer_parts = ["你好，", "我是站小伴。"]
+
+    async def _mock_run_agent(**kwargs):
+        callback = kwargs.get("stream_delta_callback")
+        for part in answer_parts:
+            callback(part)
+        return (
+            {
+                "_mystand_request": True,
+                "final_response": "".join(answer_parts),
+                "messages": [],
+            },
+            dict(_USAGE),
+        )
+
+    app = _create_app(adapter)
+    with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/chat/completions",
+                headers=_mystand_stream_headers("xbd_" + "0d" * 20),
+                json=_stream_body("你好，介绍一下你自己"),
+            )
+            body = await resp.text()
+
+    assert resp.status == 200
+    assert _visible_sse_text(body) == "".join(answer_parts)
+    assert "没有真正查到站内资料" not in body
     assert "xiaoban.trusted.verification" not in body
 
 

@@ -152,7 +152,7 @@ def test_regression_evidence_backed_answer_passes():
     assert _egress(scenario) == scenario["answer"]
 
 
-# --- 回归：诚实承认无权限的回答必须原样放行 ---
-def test_regression_honest_denial_admission_passes():
+# --- 回归：无权限语义只来自 ActionResult，不沿用模型补充建议 ---
+def test_regression_denied_result_uses_runtime_message():
     scenario = fx.SCENARIO_HONEST_DENIAL_ADMISSION
-    assert _egress(scenario) == scenario["answer"]
+    assert _egress(scenario) == fx.DENIED_MESSAGE

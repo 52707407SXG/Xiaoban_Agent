@@ -26,8 +26,8 @@ def test_sanitize_user_visible_text_redacts_local_paths_and_file_urls():
     assert "https://example.com/source" in sanitized
 
 
-def test_mystand_stream_buffers_all_text_until_integrity_guard_runs():
-    assert _should_buffer_stream_deltas(
+def test_plain_mystand_stream_does_not_wait_for_business_guard():
+    assert not _should_buffer_stream_deltas(
         "屏山县属于哪里？",
         mystand_request=True,
     )
@@ -430,7 +430,12 @@ def test_read_reply_is_not_replaced_by_write_guard_words():
                 "content": "之前讨论过写入，但这不是当前任务。",
             },
         ],
-        result={"_mystand_request": True, "_mystand_user_id": "user-a", "messages": []},
+        result={
+            "_mystand_request": True,
+            "_mystand_user_id": "user-a",
+            "_mystand_evidence_required": True,
+            "messages": [],
+        },
     )
 
     # 写闸文案不得误伤读回复；但本轮零 ActionCall 的读侧自述同样不能出站，

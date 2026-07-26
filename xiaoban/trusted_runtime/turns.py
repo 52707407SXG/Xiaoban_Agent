@@ -18,7 +18,6 @@ from __future__ import annotations
 import contextvars
 import hashlib
 import json
-import re
 import uuid
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
@@ -35,13 +34,6 @@ from xiaoban.trusted_runtime.types import (
     INTERACTION_CHAT,
     INTERACTION_WORK,
     is_write_action,
-)
-
-_BUSINESS_INTENT_RE = re.compile(
-    r"(?:业主|房源|楼盘|客户|档案|账本|账目|欠费|提成|结算|佣金|业绩|笔记|"
-    r"授权|资料|租户|租客|房东|售价|租金|月供|财务|流水|合同|钥匙|跟进|"
-    r"AUTH-|OUT-|栋|单元|号楼)",
-    re.IGNORECASE,
 )
 
 _ACCOUNT_KEYS = frozenset(
@@ -114,22 +106,35 @@ def classify_interaction(
     conversation_history: Optional[Sequence[Mapping[str, Any]]] = None,
     *,
     used_business_tools: bool = False,
+    evidence_required: bool = False,
 ) -> str:
-    """CHAT/WORK 分类；无法可靠区分时默认 WORK。
+    """只按服务器执行事实分类 CHAT/WORK。
 
-    分类只决定是否进入工作链，不是唯一反撒谎边界。
+    自然语言、数字、日期和历史消息都不是可信执行信号。My Stand 后端
+    签发的本轮 ``evidence_required``，或当前回合真实出现的业务工具，
+    才能把回合推进到 WORK。参数保留 ``user_message`` /
+    ``conversation_history`` 是为了兼容各渠道统一入口，不读取其内容。
     """
-    if used_business_tools:
-        return INTERACTION_WORK
-    texts = [_visible_text(user_message)]
-    # 连续业务追问的语境可能在 assistant 回复里（"您是想查…业主吗？"→"他是谁？"），
-    # 历史扫描不限角色，漏判成 CHAT 会放行纯人名事实。
-    for message in list(conversation_history or [])[-8:]:
-        if isinstance(message, Mapping):
-            texts.append(_visible_text(message.get("content")))
-    if any(_BUSINESS_INTENT_RE.search(text) for text in texts if text):
+    del user_message, conversation_history
+    if used_business_tools or evidence_required:
         return INTERACTION_WORK
     return INTERACTION_CHAT
+
+
+def result_requires_evidence(result: Any) -> bool:
+    """读取 API 运行时写入的结构化证据要求，不检查回答文本。"""
+    if not isinstance(result, Mapping):
+        return False
+    if result.get("_mystand_evidence_required") is True:
+        return True
+    return any(
+        result.get(key)
+        for key in (
+            "_mystand_required_evidence_groups",
+            "_mystand_required_evidence_tools",
+            "_mystand_required_evidence_tool",
+        )
+    )
 
 
 def activate_turn(turn: WorkTurn) -> "contextvars.Token":
@@ -153,6 +158,7 @@ def begin_turn(
     identity: Optional[TrustedIdentity] = None,
     request_id: str = "",
     message_id: str = "",
+    evidence_required: bool = False,
 ) -> WorkTurn:
     """服务端开回合：稳定 request/message ID + 服务端解析身份。"""
     turn_id = hashlib.sha256(
@@ -166,7 +172,11 @@ def begin_turn(
         message_id=message_id,
         channel=channel,
         identity=identity,
-        interaction_kind=classify_interaction(user_message, conversation_history),
+        interaction_kind=classify_interaction(
+            user_message,
+            conversation_history,
+            evidence_required=evidence_required,
+        ),
         index_receipt=None,
     )
     turn.enter("accepted")
@@ -631,6 +641,7 @@ def build_work_turn(
         identity=identity,
         request_id=request_id,
         message_id=message_id,
+        evidence_required=result_requires_evidence(result),
     )
     for message in _current_turn_messages(result):
         role = str(message.get("role") or "")

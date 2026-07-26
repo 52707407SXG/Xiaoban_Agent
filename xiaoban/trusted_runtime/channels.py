@@ -16,12 +16,10 @@ from xiaoban.trusted_runtime.completion_guard import (
     NO_EVIDENCE_MESSAGE,
     check_mystand_final_answer,
 )
-from xiaoban.trusted_runtime.turns import classify_interaction
 from xiaoban.trusted_runtime.types import (
     CommandEnvelope,
     CompletionDecision,
     TrustedIdentity,
-    INTERACTION_WORK,
 )
 
 PLATFORM_WEB = "web"
@@ -87,11 +85,9 @@ def evaluate_channel_answer(
     读取 result 自报身份补 envelope；未绑定一律 deny。
     """
     if envelope.platform == PLATFORM_CLI:
-        # CLI 只是可选入口：业务请求只能得到非业务拒绝，零业务事实。
-        if (
-            classify_interaction(user_message or envelope.text, conversation_history)
-            == INTERACTION_WORK
-        ):
+        # CLI 没有 My Stand 服务端身份。是否触及 My Stand 只认运行时
+        # 结构标记，不从用户自然语言猜测。
+        if isinstance(result, Mapping) and result.get("_mystand_request") is True:
             return CompletionDecision(
                 False, NO_EVIDENCE_MESSAGE, "blocked_cli_no_server_identity"
             )

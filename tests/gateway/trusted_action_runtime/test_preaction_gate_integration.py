@@ -214,5 +214,12 @@ def test_tool_start_without_complete_cannot_end_as_success():
 
 
 def test_mystand_stream_deltas_are_buffered_until_guard_passes():
-    # 既有安全行为锁定：My Stand 请求的业务 delta 在 Guard 前不得外发。
-    assert _should_buffer_stream_deltas("查一下业主", mystand_request=True) is True
+    # 后端可信资源意图要求证据时，业务 delta 在 Guard 前不得外发。
+    assert _should_buffer_stream_deltas(
+        "查一下业主",
+        mystand_request=True,
+        system_prompt=(
+            "【本轮可信意图与索引证据】\n"
+            "意图=resource-read；索引=resource；状态=available。"
+        ),
+    ) is True

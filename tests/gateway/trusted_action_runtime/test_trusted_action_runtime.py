@@ -14,7 +14,6 @@ from xiaoban.trusted_runtime import (
 from xiaoban.trusted_runtime.completion_guard import (
     ERROR_MESSAGE,
     NO_EVIDENCE_MESSAGE,
-    VERIFICATION_BLOCK_MESSAGE,
 )
 
 from tests.gateway.trusted_action_runtime import incident_fixtures as fx
@@ -109,10 +108,17 @@ def test_index_receipt_reflects_real_index_outcome():
     assert chat_turn.index_receipt is None
 
 
-def test_chat_and_work_classification_fail_closed_to_work():
+def test_chat_and_work_classification_uses_runtime_signals_only():
     assert classify_interaction("今天有点累，陪我聊两句", []) == "CHAT"
-    assert classify_interaction("小张这个月提成多少", []) == "WORK"
-    # 无法可靠区分时默认 WORK（本回合调用了业务工具）
+    assert classify_interaction("小张这个月提成多少", []) == "CHAT"
+    assert (
+        classify_interaction(
+            "小张这个月提成多少",
+            [],
+            evidence_required=True,
+        )
+        == "WORK"
+    )
     assert (
         classify_interaction("嗯", [], used_business_tools=True) == "WORK"
     )
@@ -140,8 +146,8 @@ def test_verification_claim_requires_real_verified_evidence():
     )
     decision = check_completion(fx.SCENARIO_FAKE_REVERIFICATION["answer"], turn)
     assert not decision.allowed
-    assert decision.text == VERIFICATION_BLOCK_MESSAGE
-    assert decision.reason == "blocked_verification_claim"
+    assert decision.text == NO_EVIDENCE_MESSAGE
+    assert decision.reason == "blocked_no_action_call"
 
 
 def test_no_action_call_means_no_query_claim():

@@ -663,10 +663,30 @@ def _should_buffer_stream_deltas(
     user_message: Any,
     *,
     mystand_request: bool = False,
+    system_prompt: Any = None,
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
-    """Buffer guarded streams so unverified prose cannot leak before egress."""
-    return bool(
+    """只缓冲当前回合确实要求外部证据的流。
+
+    My Stand 渠道本身不等于业务执行。普通聊天直接流式输出；只有后端
+    可信意图要求资源证据，或 URL/图片读取要求证据时，才在最终核验前
+    缓冲模型文本。
+    """
+    mystand_evidence_required = bool(
         mystand_request
+        and _resolve_mystand_initial_tool_choice(user_message, system_prompt)
+    )
+    mystand_write_required = bool(
+        mystand_request
+        and _requires_mystand_write_evidence(
+            user_message,
+            conversation_history,
+            None,
+        )
+    )
+    return bool(
+        mystand_evidence_required
+        or mystand_write_required
         or _latest_turn_requires_url_evidence(user_message)
         or _latest_turn_requires_image_evidence(user_message)
     )
@@ -3100,12 +3120,15 @@ class APIServerAdapter(BasePlatformAdapter):
         message_id = f"msg_{uuid.uuid4().hex}"
         run_id = f"run_{uuid.uuid4().hex}"
         seq = 0
+        history = self._conversation_history_for_session(session_id)
         guard_stream_deltas = _should_buffer_stream_deltas(
             user_message,
             mystand_request=self._header_present(
                 request.headers,
                 "X-Xiaoban-Toolset-Policy",
             ),
+            system_prompt=system_prompt,
+            conversation_history=history,
         )
 
         def _event_payload(name: str, payload: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
@@ -3146,7 +3169,6 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 await queue.put(_event_payload("run.started", {"user_message": {"role": "user", "content": user_message}}))
                 await queue.put(_event_payload("message.started", {"message": {"id": message_id, "role": "assistant"}}))
-                history = self._conversation_history_for_session(session_id)
                 result, usage = await self._run_agent(
                     user_message=user_message,
                     conversation_history=history,
@@ -3430,6 +3452,8 @@ class APIServerAdapter(BasePlatformAdapter):
             guard_stream_deltas = _should_buffer_stream_deltas(
                 user_message,
                 mystand_request=mystand_request,
+                system_prompt=system_prompt,
+                conversation_history=history,
             )
 
             def _on_delta(delta):
@@ -4777,6 +4801,8 @@ class APIServerAdapter(BasePlatformAdapter):
             guard_stream_deltas = _should_buffer_stream_deltas(
                 user_message,
                 mystand_request=mystand_request,
+                system_prompt=instructions,
+                conversation_history=conversation_history,
             )
 
             def _on_delta(delta):
@@ -6028,6 +6054,14 @@ class APIServerAdapter(BasePlatformAdapter):
                         for part in (run_system_prompt, integrity_reminder)
                         if part
                     )
+            trusted_initial_tool_choice = (
+                _resolve_mystand_initial_tool_choice(
+                    user_message,
+                    run_system_prompt,
+                )
+                if mystand_request
+                else ""
+            )
             if metadata_trace is not None:
                 attempt_value = self._header_value(request_headers, "X-Xiaoban-Attempt")
                 try:
@@ -6079,6 +6113,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         else f"mystand-req-{uuid.uuid4().hex}"
                     ),
                     message_id=str(request_message_id or ""),
+                    evidence_required=bool(trusted_initial_tool_choice),
                 )
                 trusted_turn_token = activate_turn(trusted_turn)
             try:
@@ -6094,14 +6129,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     request_user_id=request_user_id or None,
                     skip_memory=mystand_request,
                 )
-                initial_tool_choice = (
-                    _resolve_mystand_initial_tool_choice(
-                        user_message,
-                        run_system_prompt,
-                    )
-                    if mystand_request
-                    else ""
-                )
+                initial_tool_choice = trusted_initial_tool_choice
                 if (
                     not initial_tool_choice
                     or initial_tool_choice not in agent.valid_tool_names
@@ -6169,6 +6197,9 @@ class APIServerAdapter(BasePlatformAdapter):
                     result["_mystand_request_id"] = str(trusted_turn.request_id)
                     result["_mystand_message_id"] = str(request_message_id or "")
                     result["_trusted_turn"] = trusted_turn
+                    result["_mystand_evidence_required"] = bool(
+                        trusted_initial_tool_choice
+                    )
                 if initial_tool_choice:
                     result["_mystand_required_evidence_groups"] = [
                         sorted(group)

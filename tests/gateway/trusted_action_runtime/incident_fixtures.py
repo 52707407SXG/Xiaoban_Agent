@@ -42,6 +42,7 @@ def tool_turn(
     *,
     user_id: str = "user-a",
     prior_messages: Optional[List[Dict[str, Any]]] = None,
+    evidence_required: bool = True,
 ) -> Dict[str, Any]:
     """Build an OpenAI-style result dict for one My Stand turn.
 
@@ -81,6 +82,7 @@ def tool_turn(
     return {
         "_mystand_request": True,
         "_mystand_user_id": user_id,
+        "_mystand_evidence_required": evidence_required,
         "messages": messages,
     }
 
@@ -261,6 +263,7 @@ SCENARIO_FORGED_CALL_ID = {
     "result": {
         "_mystand_request": True,
         "_mystand_user_id": "user-a",
+        "_mystand_evidence_required": True,
         "messages": [
             {"role": "user", "content": "帮我看看滨江一号3栋802的业主和月供"},
             {
@@ -334,7 +337,10 @@ SCENARIO_CROSS_ACCOUNT_EVIDENCE = {
 SCENARIO_PLAIN_CHAT = {
     "user_message": "今天有点累，陪我聊两句",
     "answer": "辛苦了，先喝口水歇一下，我陪你聊会儿。",
-    "result": tool_turn("今天有点累，陪我聊两句"),
+    "result": tool_turn(
+        "今天有点累，陪我聊两句",
+        evidence_required=False,
+    ),
 }
 
 # --- 正向控制：本轮真实证据支持的业务回答必须放行 ---
