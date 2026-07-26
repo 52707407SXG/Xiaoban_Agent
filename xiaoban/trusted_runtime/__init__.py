@@ -13,20 +13,34 @@ from xiaoban.trusted_runtime.channels import (
 from xiaoban.trusted_runtime.completion_guard import (
     check_completion,
     check_mystand_final_answer,
+    project_answer,
 )
-from xiaoban.trusted_runtime.turns import build_work_turn, classify_interaction
+from xiaoban.trusted_runtime.turns import (
+    activate_turn,
+    begin_action,
+    begin_turn,
+    build_work_turn,
+    classify_interaction,
+    current_turn,
+    deactivate_turn,
+    finish_action,
+    gate_registry_action,
+)
 from xiaoban.trusted_runtime.types import (
+    ACTION_OUTPUT_CONTRACTS,
     ActionCall,
     ActionResult,
     CommandEnvelope,
     CompletionDecision,
     EvidenceEnvelope,
     IndexReceipt,
+    PreActionDecision,
     TrustedIdentity,
     WorkTurn,
 )
 
 __all__ = [
+    "ACTION_OUTPUT_CONTRACTS",
     "ActionCall",
     "ActionResult",
     "CommandEnvelope",
@@ -37,14 +51,23 @@ __all__ = [
     "PLATFORM_FEISHU",
     "PLATFORM_WEB",
     "PLATFORM_WECHAT",
+    "PreActionDecision",
     "TrustedIdentity",
     "WorkTurn",
+    "activate_turn",
+    "begin_action",
+    "begin_turn",
     "build_work_turn",
     "check_completion",
     "check_mystand_final_answer",
     "classify_interaction",
+    "current_turn",
+    "deactivate_turn",
     "envelope_from_feishu_event",
     "envelope_from_wechat_event",
     "evaluate_channel_answer",
+    "finish_action",
+    "gate_registry_action",
     "identity_from_envelope",
+    "project_answer",
 ]

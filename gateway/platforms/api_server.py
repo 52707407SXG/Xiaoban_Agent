@@ -340,12 +340,46 @@ def _run_mystand_preexecuted_evidence(
     system_prompt: Any,
     tool_start_callback: Any,
     tool_complete_callback: Any,
+    trusted_turn: Any = None,
 ) -> List[Dict[str, Any]]:
-    """Execute required read evidence in the harness, not by model choice."""
+    """Execute required read evidence in the harness, not by model choice.
+
+    When *trusted_turn* is given, every action passes the trusted runtime
+    PreAction gate first; a non-allow decision means zero handler calls,
+    and the result is bound to the gate-issued callId via PostAction.
+    """
     evidence: List[Dict[str, Any]] = []
 
+    def _catalog_contains(name: str) -> bool:
+        try:
+            from tools.registry import registry as _tool_registry
+
+            return _tool_registry.get_entry(name) is not None
+        except Exception:
+            return False
+
     def execute(name: str, args: Dict[str, Any], handler: Any) -> str:
-        call_id = f"mystand_pre_{uuid.uuid4().hex}"
+        decision = None
+        if trusted_turn is not None:
+            from xiaoban.trusted_runtime.turns import begin_action, finish_action
+
+            decision = begin_action(
+                trusted_turn, name, "v1", args, catalog_lookup=_catalog_contains
+            )
+            if decision.decision != "allow":
+                # PreAction 拒绝：handler 调用数为 0，回执为确定性拒绝。
+                content = json.dumps(
+                    {"ok": False, "status": 403, "code": decision.reason},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                evidence.append(
+                    {"call_id": "", "name": name, "args": args, "content": content}
+                )
+                return content
+            call_id = decision.call.call_id
+        else:
+            call_id = f"mystand_pre_{uuid.uuid4().hex}"
         tool_start_callback(call_id, name, args)
         try:
             content = handler(args)
@@ -361,6 +395,8 @@ def _run_mystand_preexecuted_evidence(
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
+        if decision is not None:
+            finish_action(trusted_turn, call_id, name, "v1", content)
         tool_complete_callback(call_id, name, args, content)
         evidence.append(
             {
@@ -907,6 +943,8 @@ def _guard_evidence_backed_response(
             user_message=user_message,
             conversation_history=conversation_history,
             result=result,
+            channel="web",
+            account_id=str(result.get("_mystand_user_id") or ""),
         )
         if not completion.allowed:
             logger.warning(
@@ -5792,6 +5830,29 @@ class APIServerAdapter(BasePlatformAdapter):
                 conversation_history=conversation_history,
                 async_delivery=async_delivery,
             )
+            trusted_turn = None
+            trusted_turn_token = None
+            if mystand_request:
+                from xiaoban.trusted_runtime.turns import activate_turn, begin_turn, deactivate_turn
+                from xiaoban.trusted_runtime.types import TrustedIdentity
+
+                trusted_turn = begin_turn(
+                    channel="web",
+                    user_message=user_message,
+                    conversation_history=conversation_history,
+                    identity=(
+                        TrustedIdentity(
+                            account_id=str(request_user_id or ""),
+                            data_scope="mystand",
+                            source="server_session",
+                        )
+                        if request_user_id
+                        else None
+                    ),
+                    request_id=f"mystand-req-{uuid.uuid4().hex}",
+                    message_id=str(request_message_id or ""),
+                )
+                trusted_turn_token = activate_turn(trusted_turn)
             try:
                 agent = self._create_agent(
                     ephemeral_system_prompt=run_system_prompt,
@@ -5830,6 +5891,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         system_prompt=run_system_prompt,
                         tool_start_callback=_traced_tool_start,
                         tool_complete_callback=_traced_tool_complete,
+                        trusted_turn=trusted_turn,
                     )
                     evidence_prompt = _build_mystand_preexecuted_prompt(
                         preexecuted_evidence
@@ -5876,6 +5938,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 result["_mystand_request"] = mystand_request
                 if mystand_request:
                     result["_mystand_user_id"] = str(request_user_id or "")
+                    result["_trusted_turn"] = trusted_turn
                 if initial_tool_choice:
                     result["_mystand_required_evidence_groups"] = [
                         sorted(group)
@@ -5960,6 +6023,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     )
                 raise
             finally:
+                if trusted_turn_token is not None:
+                    deactivate_turn(trusted_turn_token)
                 clear_session_vars(tokens)
 
         self._inflight_agent_runs += 1

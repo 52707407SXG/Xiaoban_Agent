@@ -430,10 +430,14 @@ def test_read_reply_is_not_replaced_by_write_guard_words():
                 "content": "之前讨论过写入，但这不是当前任务。",
             },
         ],
-        result={"_mystand_request": True, "messages": []},
+        result={"_mystand_request": True, "_mystand_user_id": "user-a", "messages": []},
     )
 
-    assert guarded == "这条是已删除的历史记录，不代表本轮执行了删除。"
+    # 写闸文案不得误伤读回复；但本轮零 ActionCall 的读侧自述同样不能出站，
+    # 只能落成可信 Runtime 的无证据安全文案。
+    assert guarded == (
+        "这轮我没有真正查到站内资料，所以不能给出具体的资料内容、数值或状态。"
+    )
 
 
 def test_delete_history_record_remains_a_write_request():
@@ -507,8 +511,10 @@ def test_structured_ok_tool_result_wins_over_incidental_failure_digits():
         conversation_history=[],
         result={
             "_mystand_request": True,
+            "_mystand_user_id": "user-a",
             "_mystand_required_evidence_tool": "mystand_authorization",
             "messages": [
+                {"role": "user", "content": "读取 AUTH-ABC12345"},
                 {
                     "role": "assistant",
                     "tool_calls": [
@@ -523,6 +529,7 @@ def test_structured_ok_tool_result_wins_over_incidental_failure_digits():
                 },
                 {
                     "role": "tool",
+                    "name": "mystand_authorization",
                     "tool_call_id": "read-1",
                     "content": (
                         '{"ok":true,"key":{"canWrite":false},'
@@ -533,7 +540,9 @@ def test_structured_ok_tool_result_wins_over_incidental_failure_digits():
         },
     )
 
-    assert guarded == "已按本轮结果读取。"
+    # ok=true 的结构化结果不会被附带数字误判成失败；公开回答以本轮
+    # Evidence 允许字段的投影为准。
+    assert guarded == "地址3401号"
 
 
 def test_resource_index_alone_cannot_prove_business_content():

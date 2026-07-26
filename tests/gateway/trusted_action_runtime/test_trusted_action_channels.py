@@ -5,12 +5,16 @@ CompletionDecision；CLI 不得拥有独立业务成功路径。
 """
 
 from xiaoban.trusted_runtime import (
+    TrustedIdentity,
+    build_work_turn,
+    check_completion,
     envelope_from_feishu_event,
     envelope_from_wechat_event,
     evaluate_channel_answer,
     identity_from_envelope,
 )
 from xiaoban.trusted_runtime.completion_guard import check_mystand_final_answer
+from xiaoban.trusted_runtime.types import INTERACTION_WORK
 
 from tests.gateway.trusted_action_runtime import incident_fixtures as fx
 
@@ -128,3 +132,89 @@ def test_unbound_channel_identity_fails_closed():
         {"messageId": "msg-9", "fromUser": "wx-stranger", "text": "查业主"}
     )
     assert identity_from_envelope(envelope) is None
+
+
+# --- B7：三渠道共享同一个 Runtime 的完整核心产物，不只是合成 decision ---
+def _channel_products(scenario):
+    products = []
+    identities = {
+        "web": TrustedIdentity(
+            account_id=ACCOUNT, data_scope="mystand", source="server_session"
+        ),
+        "weixin": identity_from_envelope(
+            envelope_from_wechat_event(
+                {
+                    "requestId": "req-1",
+                    "messageId": "msg-1",
+                    "conversationId": "conv-1",
+                    "fromUser": "wx-open-id-demo",
+                    "text": scenario["user_message"],
+                    "boundAccountId": ACCOUNT,
+                }
+            )
+        ),
+        "feishu": identity_from_envelope(
+            envelope_from_feishu_event(
+                {
+                    "requestId": "req-1",
+                    "messageId": "msg-1",
+                    "chatId": "chat-1",
+                    "openId": "ou-demo",
+                    "text": scenario["user_message"],
+                    "boundAccountId": ACCOUNT,
+                }
+            )
+        ),
+    }
+    for channel in ("web", "weixin", "feishu"):
+        identity = identities[channel]
+        turn = build_work_turn(
+            channel=channel,
+            user_message=scenario["user_message"],
+            conversation_history=scenario.get("conversation_history") or [],
+            result=scenario["result"],
+            identity=identity,
+            request_id="req-1",
+            message_id="msg-1",
+        )
+        decision = check_completion(scenario["answer"], turn)
+        receipt = turn.index_receipt
+        products.append(
+            {
+                "account": (identity.account_id, identity.data_scope),
+                "kind": turn.interaction_kind,
+                "receipt": (receipt.status if receipt else None),
+                "actions": [call.action_id for call in turn.action_calls],
+                "bound": sorted(
+                    result.call_id for result in turn.action_results
+                )
+                == sorted(call.call_id for call in turn.action_calls),
+                "statuses": [item.status for item in turn.action_results],
+                "facts": sorted(item.allowed_facts for item in turn.evidence),
+                "refs": sorted(
+                    ref for item in turn.evidence for ref in item.record_refs
+                ),
+                "decision": (decision.allowed, decision.text, decision.reason),
+            }
+        )
+    return products
+
+
+def test_channels_share_full_runtime_products_for_success():
+    products = _channel_products(fx.SCENARIO_EVIDENCE_BACKED_ANSWER)
+    assert products[0] == products[1] == products[2]
+    product = products[0]
+    assert product["kind"] == INTERACTION_WORK
+    assert product["bound"] is True
+    assert product["statuses"] == ["success"]
+    assert product["facts"], "三渠道必须共享相同 Evidence 字段路径"
+    assert product["decision"][0] is True
+
+
+def test_channels_share_full_runtime_products_for_failure():
+    products = _channel_products(fx.SCENARIO_ALL_TOOLS_FAILED)
+    assert products[0] == products[1] == products[2]
+    product = products[0]
+    assert product["statuses"] == ["error"]
+    assert product["facts"] == []
+    assert product["decision"] == (False, fx.ERROR_MESSAGE, "blocked_no_evidence")

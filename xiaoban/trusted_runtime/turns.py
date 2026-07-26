@@ -1,23 +1,35 @@
-"""从真实执行记录构建 WorkTurn。
+"""Trusted Action Runtime 真实生命周期：PreAction → Execute → PostAction。
 
-只消费程序产生的 transcript（assistant tool_calls 与 tool 回执）：
-- 每个 ActionResult 严格绑定本回合匹配的 callId；
-- 旧回合、伪造 callId、跨账号回执一律排除出本轮证据；
-- `verifying` 状态只在 PostAction Verify 真实运行时产生。
+机制映射（固定上游 commit，详见交接单）：
+- Codex 322d5b96 tools/orchestrator.rs：调度前保留唯一 call ID，
+  complete/failed 与同一调用绑定，无结果的调用不得视为成功；
+- Claude SDK f8b9ec9 types.py：PreToolUse 在 handler 前 allow/deny，
+  tool_use_id 贯穿 pre/execute/post，失败是第一等状态；
+- Gemini CLI 3818efbb policy-engine.ts：确定性 allow/deny，无匹配规则、
+  安全字段缺失、策略异常一律默认拒绝。
+
+本模块不从 transcript 倒推可信结论；``build_work_turn`` 只是把既有
+执行记录逐项送入同一生命周期门禁的兼容驱动（测试/夹具用），准入门禁
+与生产路径完全一致。
 """
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import re
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+import uuid
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from xiaoban.trusted_runtime.types import (
+    ACTION_OUTPUT_CONTRACTS,
     ActionCall,
     ActionResult,
+    ActionOutputContract,
     EvidenceEnvelope,
     IndexReceipt,
+    PreActionDecision,
     TrustedIdentity,
     WorkTurn,
     INTERACTION_CHAT,
@@ -31,19 +43,15 @@ _BUSINESS_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
-_BUSINESS_TOOL_NAMES = {
-    "mystand_parse",
-    "mystand_resource_index",
-    "mystand_query",
-    "mystand_authorization",
-    "mystand_authorization_write",
-}
+_ACCOUNT_KEYS = frozenset(
+    {"accountid", "account_id", "userid", "user_id", "ownerid", "owner_id"}
+)
 
-_INDEX_TOOL_NAMES = {"mystand_resource_index"}
-
-_ACCOUNT_KEYS = ("accountId", "account_id", "userId", "user_id", "ownerId", "owner_id")
-
-_RECORD_REF_KEYS = ("resourceUid", "resourceId", "authorizationId", "sourceId")
+# 活动可信回合：ContextVar 与 gateway.session_context 同机制，
+# 每个请求执行线程各自隔离，并发同账号请求不会互相污染。
+_CURRENT_TURN: "contextvars.ContextVar[Optional[WorkTurn]]" = contextvars.ContextVar(
+    "xiaoban_trusted_runtime_turn", default=None
+)
 
 
 def _visible_text(content: Any) -> str:
@@ -74,72 +82,6 @@ def _parse_json_object(value: Any) -> Dict[str, Any]:
     return dict(parsed) if isinstance(parsed, Mapping) else {}
 
 
-def _current_turn_messages(result: Any) -> List[Mapping[str, Any]]:
-    """只取最后一个 user 消息之后的回合；没有边界时视为无证据。"""
-    if not isinstance(result, Mapping):
-        return []
-    raw = result.get("messages")
-    if not isinstance(raw, list):
-        return []
-    messages = [m for m in raw if isinstance(m, Mapping)]
-    last_user = -1
-    for index, message in enumerate(messages):
-        if str(message.get("role") or "") == "user":
-            last_user = index
-    if last_user < 0:
-        return []
-    return messages[last_user + 1 :]
-
-
-def _classify_result_status(payload: Dict[str, Any], raw_text: str) -> str:
-    ok = payload.get("ok")
-    success = payload.get("success")
-    if ok is False or success is False:
-        try:
-            code = int(payload.get("status") or 0)
-        except (TypeError, ValueError):
-            code = 0
-        if code == 403:
-            return "denied"
-        if code == 404:
-            return "not_found"
-        if code == 409:
-            return "ambiguous"
-        return "error"
-    if ok is True or success is True:
-        items = payload.get("items")
-        if isinstance(items, list) and not items:
-            return "empty"
-        if "content" in payload and not str(payload.get("content") or "").strip():
-            return "empty"
-        return "success"
-    if '"success": true' in raw_text.lower():
-        return "success"
-    return "error" if len(raw_text.strip()) < 20 else "success"
-
-
-def _declared_accounts(payload: Dict[str, Any]) -> List[str]:
-    return [
-        str(payload[key])
-        for key in _ACCOUNT_KEYS
-        if payload.get(key) not in (None, "")
-    ]
-
-
-def _record_refs(payload: Dict[str, Any]) -> List[str]:
-    refs = []
-    for key in _RECORD_REF_KEYS:
-        value = payload.get(key)
-        if value:
-            refs.append(str(value))
-    items = payload.get("items")
-    if isinstance(items, list):
-        for item in items:
-            if isinstance(item, Mapping) and item.get("resourceUid"):
-                refs.append(str(item["resourceUid"]))
-    return refs
-
-
 def classify_interaction(
     user_message: Any,
     conversation_history: Optional[Sequence[Mapping[str, Any]]] = None,
@@ -161,17 +103,29 @@ def classify_interaction(
     return INTERACTION_CHAT
 
 
-def build_work_turn(
+def activate_turn(turn: WorkTurn) -> "contextvars.Token":
+    """在当前执行上下文中激活可信回合（registry 扼点据此找回回合）。"""
+    return _CURRENT_TURN.set(turn)
+
+
+def deactivate_turn(token: "contextvars.Token") -> None:
+    _CURRENT_TURN.reset(token)
+
+
+def current_turn() -> Optional[WorkTurn]:
+    return _CURRENT_TURN.get()
+
+
+def begin_turn(
     *,
     channel: str,
     user_message: Any,
     conversation_history: Optional[Sequence[Mapping[str, Any]]] = None,
-    result: Any = None,
     identity: Optional[TrustedIdentity] = None,
     request_id: str = "",
     message_id: str = "",
 ) -> WorkTurn:
-    """从真实 transcript 重建本轮可信回合。"""
+    """服务端开回合：稳定 request/message ID + 服务端解析身份。"""
     turn_id = hashlib.sha256(
         f"{channel}|{request_id}|{message_id}|{_visible_text(user_message)[:200]}".encode(
             "utf-8"
@@ -183,164 +137,415 @@ def build_work_turn(
         message_id=message_id,
         channel=channel,
         identity=identity,
-        interaction_kind=INTERACTION_CHAT,
+        interaction_kind=classify_interaction(user_message, conversation_history),
         index_receipt=None,
     )
     turn.enter("accepted")
     if identity is not None and identity.account_id:
         turn.enter("identity_resolved")
-
-    messages = _current_turn_messages(result)
-
-    calls: Dict[str, ActionCall] = {}
-    order = 0
-    for message in messages:
-        if str(message.get("role") or "") != "assistant":
-            continue
-        for call in message.get("tool_calls") or []:
-            if not isinstance(call, Mapping):
-                continue
-            function = call.get("function")
-            function = function if isinstance(function, Mapping) else {}
-            call_id = str(call.get("id") or "")
-            name = str(function.get("name") or call.get("name") or "")
-            if not call_id or not name:
-                continue
-            order += 1
-            calls[call_id] = ActionCall(
-                call_id=call_id,
-                action_id=name,
-                version="v1",
-                arguments=_parse_json_object(
-                    function.get("arguments")
-                    if "arguments" in function
-                    else call.get("arguments")
-                ),
-                requested_at=f"seq:{order}",
-            )
-    turn.action_calls = list(calls.values())
-
-    used_business_tools = any(
-        call.action_id in _BUSINESS_TOOL_NAMES for call in turn.action_calls
-    )
-    turn.interaction_kind = classify_interaction(
-        user_message,
-        conversation_history,
-        used_business_tools=used_business_tools,
-    )
-
-    results: List[ActionResult] = []
-    for message in messages:
-        if str(message.get("role") or "") != "tool":
-            continue
-        call_id = str(message.get("tool_call_id") or "")
-        bound = calls.get(call_id)
-        if bound is None:
-            # 伪造或跨回合 callId：不得成为本轮证据。
-            turn.orphaned_receipts += 1
-            continue
-        raw_text = message.get("content")
-        if not isinstance(raw_text, str):
-            raw_text = json.dumps(raw_text, ensure_ascii=False, default=str)
-        payload = _parse_json_object(raw_text)
-        results.append(
-            ActionResult(
-                call_id=call_id,
-                action_id=bound.action_id,
-                status=_classify_result_status(payload, raw_text),
-                normalized_payload=payload,
-                error_code=str(payload.get("code") or payload.get("error") or ""),
-                started_at=bound.requested_at,
-                finished_at=f"seq:{order + 1 + len(results)}",
-                raw_text=raw_text,
-            )
-        )
-    turn.action_results = results
-    if turn.action_calls:
-        turn.enter("executing")
-
-    # PostAction Verify：只在真实 ActionResult 返回后执行。
-    if results:
-        turn.enter("verifying")
-        account_id = identity.account_id if identity else ""
-        for item in results:
-            if item.status != "success":
-                continue
-            declared = _declared_accounts(item.normalized_payload)
-            if declared and (
-                not account_id or any(value != account_id for value in declared)
-            ):
-                # 跨账号 evidence 不得进入本轮。
-                turn.rejected_cross_account += 1
-                continue
-            turn.evidence.append(
-                EvidenceEnvelope(
-                    evidence_id=hashlib.sha256(
-                        f"{turn_id}|{item.call_id}".encode("utf-8")
-                    ).hexdigest()[:16],
-                    turn_id=turn_id,
-                    call_id=item.call_id,
-                    action_id=item.action_id,
-                    datascope_fingerprint=(
-                        identity.datascope_fingerprint if identity else ""
-                    ),
-                    status=item.status,
-                    allowed_facts=item.raw_text,
-                    record_refs=_record_refs(item.normalized_payload),
-                    input_digest=hashlib.sha256(
-                        json.dumps(
-                            calls[item.call_id].arguments,
-                            ensure_ascii=False,
-                            sort_keys=True,
-                        ).encode("utf-8")
-                    ).hexdigest(),
-                    output_digest=hashlib.sha256(
-                        item.raw_text.encode("utf-8")
-                    ).hexdigest(),
-                    verified_at=item.finished_at,
-                    verification_status="verified",
-                )
-            )
-
-    # PreAction 最小索引回执由程序生成，模型不得伪造或补写。
-    turn.enter("indexing")
-    turn.index_receipt = _build_index_receipt(turn, request_id=request_id)
     return turn
 
 
-def _build_index_receipt(turn: WorkTurn, *, request_id: str) -> IndexReceipt:
-    fingerprint = turn.identity.datascope_fingerprint if turn.identity else ""
-    index_results = [
-        item for item in turn.action_results if item.action_id in _INDEX_TOOL_NAMES
-    ]
-    if not index_results:
-        status = (
-            "no_internal_resource_needed"
-            if turn.interaction_kind == INTERACTION_CHAT or turn.evidence
-            else "none"
-        )
-        return IndexReceipt(
-            request_id=request_id,
-            actor_fingerprint=fingerprint,
-            loaded_at="",
-            scope_summary="",
-            matched_resource_refs=[],
+def _seq(turn: WorkTurn) -> str:
+    return f"seq:{len(turn.action_calls) + len(turn.action_results) + 1}"
+
+
+def _record_denial(
+    turn: WorkTurn, call_id: str, action_id: str, reason: str, *, status: str = "denied"
+) -> PreActionDecision:
+    turn.pre_action_denials += 1
+    stamp = _seq(turn)
+    turn.action_results.append(
+        ActionResult(
+            call_id=call_id,
+            action_id=action_id,
             status=status,
+            normalized_payload={},
+            error_code=reason,
+            started_at=stamp,
+            finished_at=stamp,
         )
-    latest = index_results[-1]
-    if latest.status == "success":
+    )
+    return PreActionDecision("deny", reason)
+
+
+def begin_action(
+    turn: WorkTurn,
+    action_id: str,
+    version: str,
+    arguments: Optional[Dict[str, Any]] = None,
+    *,
+    call_id: str = "",
+    catalog_lookup: Optional[Callable[[str], bool]] = None,
+) -> PreActionDecision:
+    """PreAction：真实 handler 执行前的确定性门禁（默认拒绝）。
+
+    allow 时一次性生成/登记 callId 并贯穿后续 finish_action；
+    任何安全关键异常都拒绝，调用方必须保证 deny 时 handler 调用数为 0。
+    """
+    call_id = call_id or f"mystand_pre_{uuid.uuid4().hex}"
+    args = dict(arguments or {})
+    try:
+        contract = ACTION_OUTPUT_CONTRACTS.get(action_id)
+        if contract is None or contract.version != version:
+            # 未知动作或缺少动作级 output 合同：不执行。
+            return _record_denial(turn, call_id, action_id, "unknown_action", status="error")
+        if catalog_lookup is not None and not catalog_lookup(action_id):
+            return _record_denial(turn, call_id, action_id, "not_in_catalog")
+        if any(call.call_id == call_id for call in turn.action_calls):
+            # 重复 callId 不得静默覆盖：同名调用已产生的证据一并作废。
+            turn.evidence = [e for e in turn.evidence if e.call_id != call_id]
+            turn.action_results = [
+                ActionResult(
+                    call_id=r.call_id,
+                    action_id=r.action_id,
+                    status="error",
+                    normalized_payload={},
+                    error_code="duplicate_call_id",
+                    started_at=r.started_at,
+                    finished_at=r.finished_at,
+                )
+                if r.call_id == call_id
+                else r
+                for r in turn.action_results
+            ]
+            return _record_denial(turn, call_id, action_id, "duplicate_call_id")
+        # 业务动作出现即进入 WORK 链，CHAT 误分不能成为绕过口。
+        turn.interaction_kind = INTERACTION_WORK
+        identity = turn.identity
+        if identity is None or not identity.account_id:
+            return _record_denial(turn, call_id, action_id, "missing_identity")
+        if not identity.datascope_fingerprint:
+            return _record_denial(turn, call_id, action_id, "missing_datascope")
+        if contract.kind == "read" and not (
+            turn.index_receipt is not None and turn.index_receipt.status == "found"
+        ):
+            # My Stand WORK：开放查询前必须有本轮服务端 IndexReceipt。
+            return _record_denial(turn, call_id, action_id, "missing_index_receipt")
+        turn.enter("validating")
+        call = ActionCall(
+            call_id=call_id,
+            action_id=action_id,
+            version=version,
+            arguments=args,
+            requested_at=_seq(turn),
+        )
+        turn.action_calls.append(call)
+        turn.enter("executing")
+        return PreActionDecision("allow", "allowed", call)
+    except Exception:
+        return _record_denial(turn, call_id, action_id, "preaction_error")
+
+
+def _iter_account_values(node: Any) -> List[str]:
+    """递归提取 payload 中所有自报账号字段（嵌套越权不得漏检）。"""
+    values: List[str] = []
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            if str(key).lower() in _ACCOUNT_KEYS and value not in (None, ""):
+                values.append(str(value))
+            else:
+                values.extend(_iter_account_values(value))
+    elif isinstance(node, list):
+        for item in node:
+            values.extend(_iter_account_values(item))
+    return values
+
+
+def _classify_contract_status(
+    contract: ActionOutputContract, payload: Dict[str, Any]
+) -> str:
+    """按动作级 output 合同分类；不认识的 payload 一律失败关闭。"""
+    ok = payload.get("ok")
+    success = payload.get("success")
+    if ok is False or success is False:
+        try:
+            code = int(payload.get("status") or 0)
+        except (TypeError, ValueError):
+            code = 0
+        if code == 403:
+            return "denied"
+        if code == 404:
+            return "not_found"
+        if code == 409:
+            return "ambiguous"
+        return "error"
+    if ok is True or success is True:
+        status = payload.get("status")
+        if isinstance(status, int) and status >= 400:
+            return "error"
+        if contract.kind == "index":
+            items = payload.get("items")
+            if not isinstance(items, list):
+                return "error"
+            if not items:
+                return "empty"
+            if not all(isinstance(item, Mapping) for item in items):
+                return "error"
+            return "success"
+        if "content" not in payload:
+            return "error"
+        if not str(payload.get("content") or "").strip():
+            return "empty"
+        return "success"
+    return "error"
+
+
+def _project_allowed_facts(
+    contract: ActionOutputContract, payload: Dict[str, Any]
+) -> Dict[str, Any]:
+    facts: Dict[str, Any] = {}
+    for path in contract.allowed_fact_paths:
+        if path == "content":
+            facts[path] = str(payload.get("content") or "")
+        elif path == "items[].safeLabel":
+            facts[path] = [
+                str(item.get("safeLabel") or "")
+                for item in payload.get("items") or []
+                if isinstance(item, Mapping) and item.get("safeLabel")
+            ]
+    return facts
+
+
+def _record_refs(contract: ActionOutputContract, payload: Dict[str, Any], args: Dict[str, Any]) -> List[str]:
+    refs: List[str] = []
+    for path in contract.record_ref_paths:
+        if path == "items[].resourceUid":
+            refs.extend(
+                str(item["resourceUid"])
+                for item in payload.get("items") or []
+                if isinstance(item, Mapping) and item.get("resourceUid")
+            )
+        elif payload.get(path):
+            refs.append(str(payload[path]))
+    for key in ("resource_uid", "authorization_id"):
+        if args.get(key):
+            refs.append(str(args[key]))
+    return refs
+
+
+def _update_index_receipt(
+    turn: WorkTurn, contract: ActionOutputContract, result: ActionResult
+) -> None:
+    """IndexReceipt 只来自本轮真实执行的索引/定向读取结果。"""
+    if contract.kind not in ("index", "scoped_read"):
+        return
+    if turn.index_receipt is not None and turn.index_receipt.status == "found":
+        return  # 已建立的有效回执不被后续失败冲掉
+    if result.status == "success":
         status = "found"
-    elif latest.status == "empty":
+    elif result.status == "empty":
         status = "none"
-    elif latest.status == "denied":
+    elif result.status == "denied":
         status = "denied"
     else:
         status = "unavailable"
-    return IndexReceipt(
-        request_id=request_id,
-        actor_fingerprint=fingerprint,
-        loaded_at=latest.finished_at,
-        scope_summary=latest.action_id,
-        matched_resource_refs=_record_refs(latest.normalized_payload),
+    turn.enter("indexing")
+    turn.index_receipt = IndexReceipt(
+        request_id=turn.request_id,
+        actor_fingerprint=(
+            turn.identity.datascope_fingerprint if turn.identity else ""
+        ),
+        loaded_at=result.finished_at,
+        scope_summary=result.action_id,
+        matched_resource_refs=_record_refs(
+            contract,
+            result.normalized_payload,
+            next(
+                (c.arguments for c in turn.action_calls if c.call_id == result.call_id),
+                {},
+            ),
+        ),
         status=status,
     )
+
+
+def finish_action(
+    turn: WorkTurn,
+    call_id: str,
+    action_id: str,
+    version: str,
+    raw_content: Any,
+    *,
+    cancelled: bool = False,
+) -> Optional[ActionResult]:
+    """PostAction：严格绑定 + 合同校验 + DataScope 复核 + Evidence 构建。
+
+    ``verifying`` 状态只在本函数真实执行时产生。重复、未知、跨回合或
+    actionId/version 不一致的 callId 一律拒绝绑定。
+    """
+    call = next((c for c in turn.action_calls if c.call_id == call_id), None)
+    if (
+        call is None
+        or call.action_id != action_id
+        or call.version != version
+        or any(r.call_id == call_id for r in turn.action_results)
+    ):
+        turn.orphaned_receipts += 1
+        return None
+    raw_text = (
+        raw_content
+        if isinstance(raw_content, str)
+        else json.dumps(raw_content, ensure_ascii=False, default=str)
+    )
+    contract = ACTION_OUTPUT_CONTRACTS[action_id]
+    payload = _parse_json_object(raw_text)
+    if cancelled:
+        status = "cancelled"
+    elif not payload:
+        status = "error"  # 长文本/半截回执不再洗白成 success
+    else:
+        status = _classify_contract_status(contract, payload)
+    result = ActionResult(
+        call_id=call_id,
+        action_id=action_id,
+        status=status,
+        normalized_payload=payload if status != "error" or payload else {},
+        error_code=str(payload.get("code") or payload.get("error") or ""),
+        started_at=call.requested_at,
+        finished_at=_seq(turn),
+        raw_text=raw_text if status == "success" else "",
+    )
+    turn.action_results.append(result)
+    _update_index_receipt(turn, contract, result)
+
+    # PostAction Verify：只对真实返回的 ActionResult 执行。
+    turn.enter("verifying")
+    if status != "success":
+        return result
+    identity = turn.identity
+    declared = _iter_account_values(payload)
+    if declared and (
+        identity is None or any(value != identity.account_id for value in declared)
+    ):
+        # 跨账号/嵌套越权 payload：拒绝成为本轮证据。
+        turn.rejected_cross_account += 1
+        return result
+    facts = _project_allowed_facts(contract, payload)
+    turn.evidence.append(
+        EvidenceEnvelope(
+            evidence_id=hashlib.sha256(
+                f"{turn.turn_id}|{call_id}".encode("utf-8")
+            ).hexdigest()[:16],
+            turn_id=turn.turn_id,
+            call_id=call_id,
+            action_id=action_id,
+            datascope_fingerprint=(
+                identity.datascope_fingerprint if identity else ""
+            ),
+            status=status,
+            allowed_facts=json.dumps(facts, ensure_ascii=False, sort_keys=True),
+            record_refs=_record_refs(contract, payload, call.arguments),
+            input_digest=hashlib.sha256(
+                json.dumps(call.arguments, ensure_ascii=False, sort_keys=True).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+            output_digest=hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
+            verified_at=result.finished_at,
+            verification_status="verified",
+        )
+    )
+    return result
+
+
+def gate_registry_action(
+    name: str, args: Any
+) -> Optional["tuple[Optional[WorkTurn], PreActionDecision]"]:
+    """``ToolRegistry.dispatch`` 的 PreAction 钩子（Gemini 默认拒绝策略）。
+
+    返回 None 表示非可信目录动作或非 My Stand 服务端会话，保持原路径；
+    返回 (turn, decision) 时调用方必须按 decision 执行或拒绝。
+    """
+    if name not in ACTION_OUTPUT_CONTRACTS:
+        return None
+    try:
+        from gateway.session_context import get_session_env
+
+        platform = get_session_env("XIAOBAN_SESSION_PLATFORM")
+        user_id = get_session_env("XIAOBAN_SESSION_USER_ID")
+        if platform != "api_server" or not user_id:
+            # 非 My Stand 服务端会话：工具 handler 自身已有 fail-closed 门禁。
+            return None
+        turn = current_turn()
+        if turn is None:
+            return None, PreActionDecision("deny", "no_active_turn")
+        decision = begin_action(turn, name, "v1", args if isinstance(args, dict) else {})
+        return turn, decision
+    except Exception:
+        # 策略异常默认拒绝（只影响可信目录动作）。
+        return None, PreActionDecision("deny", "preaction_error")
+
+
+def _current_turn_messages(result: Any) -> List[Mapping[str, Any]]:
+    """只取最后一个 user 消息之后的回合；没有边界时视为无证据。"""
+    if not isinstance(result, Mapping):
+        return []
+    raw = result.get("messages")
+    if not isinstance(raw, list):
+        return []
+    messages = [m for m in raw if isinstance(m, Mapping)]
+    last_user = -1
+    for index, message in enumerate(messages):
+        if str(message.get("role") or "") == "user":
+            last_user = index
+    if last_user < 0:
+        return []
+    return messages[last_user + 1 :]
+
+
+def build_work_turn(
+    *,
+    channel: str,
+    user_message: Any,
+    conversation_history: Optional[Sequence[Mapping[str, Any]]] = None,
+    result: Any = None,
+    identity: Optional[TrustedIdentity] = None,
+    request_id: str = "",
+    message_id: str = "",
+) -> WorkTurn:
+    """兼容驱动：把既有执行记录逐项送入真实生命周期门禁。
+
+    模型/历史伪造的调用与回执会在 begin_action/finish_action 的同一
+    套 PreAction、绑定与合同校验中被拒绝，不能借此洗白成证据。
+    """
+    turn = begin_turn(
+        channel=channel,
+        user_message=user_message,
+        conversation_history=conversation_history,
+        identity=identity,
+        request_id=request_id,
+        message_id=message_id,
+    )
+    for message in _current_turn_messages(result):
+        role = str(message.get("role") or "")
+        if role == "assistant":
+            for call in message.get("tool_calls") or []:
+                if not isinstance(call, Mapping):
+                    continue
+                function = call.get("function")
+                function = function if isinstance(function, Mapping) else {}
+                call_id = str(call.get("id") or "")
+                name = str(function.get("name") or call.get("name") or "")
+                if not call_id or not name:
+                    continue
+                begin_action(
+                    turn,
+                    name,
+                    "v1",
+                    _parse_json_object(
+                        function.get("arguments")
+                        if "arguments" in function
+                        else call.get("arguments")
+                    ),
+                    call_id=call_id,
+                )
+        elif role == "tool":
+            finish_action(
+                turn,
+                str(message.get("tool_call_id") or ""),
+                str(message.get("name") or ""),
+                "v1",
+                message.get("content"),
+            )
+    return turn

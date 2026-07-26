@@ -393,17 +393,47 @@ class ToolRegistry:
         * Async handlers are bridged automatically via ``_run_async()``.
         * All exceptions are caught and returned as ``{"error": "..."}``
           for consistent error format.
+        * Trusted-catalog actions (My Stand read-only) pass the trusted
+          runtime PreAction gate first; a deny means zero handler calls.
         """
         entry = self.get_entry(name)
         if not entry:
             return json.dumps({"error": f"Unknown tool: {name}"})
+        gate = None
+        try:
+            from xiaoban.trusted_runtime.turns import gate_registry_action
+
+            gate = gate_registry_action(name, args)
+        except Exception:
+            if name.startswith("mystand_"):
+                # 可信目录动作的策略异常默认拒绝（Gemini policy 语义）。
+                return json.dumps(
+                    {"ok": False, "status": 403, "code": "preaction_error"}
+                )
+        if gate is not None:
+            turn, decision = gate
+            if turn is None or decision.decision != "allow":
+                return json.dumps(
+                    {"ok": False, "status": 403, "code": decision.reason}
+                )
+            raw = self._dispatch_entry(entry, args, **kwargs)
+            try:
+                from xiaoban.trusted_runtime.turns import finish_action
+
+                finish_action(turn, decision.call.call_id, name, "v1", raw)
+            except Exception:
+                logger.exception("Trusted post-action failed for %s", name)
+            return raw
+        return self._dispatch_entry(entry, args, **kwargs)
+
+    def _dispatch_entry(self, entry, args: dict, **kwargs) -> str:
         try:
             if entry.is_async:
                 from model_tools import _run_async
                 return _run_async(entry.handler(args, **kwargs))
             return entry.handler(args, **kwargs)
         except Exception as e:
-            logger.exception("Tool %s dispatch error: %s", name, e)
+            logger.exception("Tool %s dispatch error: %s", entry.name, e)
             # Route through the sanitizer so framing tokens / CDATA / fences
             # in exception strings don't reach the model as structural noise.
             # See model_tools._sanitize_tool_error for rationale.

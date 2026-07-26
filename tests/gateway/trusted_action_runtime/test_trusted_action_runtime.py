@@ -13,7 +13,6 @@ from xiaoban.trusted_runtime import (
 )
 from xiaoban.trusted_runtime.completion_guard import (
     ERROR_MESSAGE,
-    FACT_MISMATCH_MESSAGE,
     NO_EVIDENCE_MESSAGE,
     VERIFICATION_BLOCK_MESSAGE,
 )
@@ -102,7 +101,8 @@ def test_index_receipt_reflects_real_index_outcome():
         fx.SCENARIO_PLAIN_CHAT["result"],
         user_message=fx.SCENARIO_PLAIN_CHAT["user_message"],
     )
-    assert chat_turn.index_receipt.status == "no_internal_resource_needed"
+    # CHAT 不需要索引回执；回执只能来自本轮真实索引/定向读取。
+    assert chat_turn.index_receipt is None
 
 
 def test_chat_and_work_classification_fail_closed_to_work():
@@ -114,15 +114,19 @@ def test_chat_and_work_classification_fail_closed_to_work():
     )
 
 
-def test_business_facts_must_exist_in_current_evidence():
+def test_business_facts_come_from_evidence_projection():
     turn = _turn(fx.SCENARIO_EVIDENCE_BACKED_ANSWER["result"])
     decision = check_completion(fx.SCENARIO_EVIDENCE_BACKED_ANSWER["answer"], turn)
     assert decision.allowed
+    assert decision.reason == "projected_evidence"
 
+    # 模型口径与本轮证据不一致时，公开回答以证据投影为准，
+    # 模型新增/篡改的数值不会出站。
     mismatch_turn = _turn(fx.SCENARIO_FACT_MISMATCH["result"])
     mismatch = check_completion(fx.SCENARIO_FACT_MISMATCH["answer"], mismatch_turn)
-    assert not mismatch.allowed
-    assert mismatch.text == FACT_MISMATCH_MESSAGE
+    assert mismatch.allowed
+    assert "12345.00" in mismatch.text
+    assert "32105.68" not in mismatch.text
 
 
 def test_verification_claim_requires_real_verified_evidence():
@@ -169,4 +173,7 @@ def test_cli_platform_has_no_independent_business_path():
         user_message=envelope.text,
         result=fx.SCENARIO_ZERO_CALL_FABRICATION["result"],
     )
-    assert decision.reason == "not_mystand"
+    assert not decision.allowed
+    assert decision.reason == "blocked_cli_no_server_identity"
+    for token in fx.FABRICATED_TOKENS:
+        assert token not in decision.text

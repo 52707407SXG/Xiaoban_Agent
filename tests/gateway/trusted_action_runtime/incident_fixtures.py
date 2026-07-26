@@ -84,8 +84,8 @@ SCENARIO_ALL_TOOLS_FAILED = {
         [
             (
                 "call_q1",
-                "mystand_query",
-                {"operation": "read", "entities": ["滨江一号3栋802"]},
+                "mystand_authorization",
+                {"operation": "resolve", "resource_uid": "res-demo-1"},
                 {"ok": False, "status": 500, "error": "internal_bridge_error"},
             ),
         ],
@@ -297,8 +297,8 @@ SCENARIO_CROSS_ACCOUNT_EVIDENCE = {
         [
             (
                 "call_x1",
-                "mystand_query",
-                {"operation": "read", "entities": ["滨江一号3栋802"]},
+                "mystand_authorization",
+                {"operation": "resolve", "resource_uid": "res-demo-1"},
                 {
                     "ok": True,
                     "accountId": "user-b",
@@ -326,15 +326,15 @@ SCENARIO_EVIDENCE_BACKED_ANSWER = {
         [
             (
                 "call_ok",
-                "mystand_query",
-                {"operation": "read", "entities": ["游某"]},
-                {"ok": True, "content": "游某 2026 结算业绩 32105.68 元"},
+                "mystand_authorization",
+                {"operation": "resolve", "resource_uid": "res-demo-1"},
+                {"ok": True, "content": "游某今年结算业绩是 32105.68 元。"},
             ),
         ],
     ),
 }
 
-# --- 反向控制：回答数值与本轮证据不一致必须拦截 ---
+# --- 反向控制：公开回答以本轮证据投影为准，模型口径不一致不得出站 ---
 SCENARIO_FACT_MISMATCH = {
     "user_message": "查一下游某今年的结算业绩",
     "answer": "游某今年结算业绩是 32105.68 元。",
@@ -344,8 +344,8 @@ SCENARIO_FACT_MISMATCH = {
         [
             (
                 "call_ok",
-                "mystand_query",
-                {"operation": "read", "entities": ["游某"]},
+                "mystand_authorization",
+                {"operation": "resolve", "resource_uid": "res-demo-1"},
                 {"ok": True, "content": "游某 2026 结算业绩 12345.00 元"},
             ),
         ],

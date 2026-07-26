@@ -1,16 +1,16 @@
-"""CompletionGuard：最终公开回答发送前的确定性检查。
+"""CompletionGuard：最终公开回答发送前的确定性检查（Claude Stop 等价位置）。
 
-边界由程序构成，不靠提示词自律：
-- 没有 ActionCall，不能说"我查了、调用了、执行了"；
-- 没有匹配 callId 的本轮 ActionResult，不能引用结果；
-- 没有本轮 EvidenceEnvelope，不能陈述 My Stand 业务事实；
-- 金额、日期、数量等事实必须存在于本轮证据允许字段中；
-- empty/error/denied/ambiguous/not_found 只能各自如实表达；
-- 没有真实 PostAction Verify，不得说"已核验"。
+边界由程序构成，不靠提示词自律，也不靠扩充关键词/数字正则：
+- WORK 的公开业务回答由 ChannelProjection 从本轮 EvidenceEnvelope
+  允许的字段路径生成，模型自然语言不能新增实体、关系或状态；
+- 没有本轮 EvidenceEnvelope，WORK 只能输出固定安全失败/追问文案；
+- CHAT 可以自然回复，但不得伪装成 My Stand 查询结果；
+- 没有真实 PostAction Verify，不得说"已核验"；Guard 自身异常 fail closed。
 """
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, List, Mapping, Optional, Sequence
 
@@ -25,9 +25,6 @@ from xiaoban.trusted_runtime.types import (
 # 用户可见安全文案：自然、简短，不含内部 ID、规则名或技术栈。
 NO_EVIDENCE_MESSAGE = (
     "这轮我没有真正查到站内资料，所以不能给出具体的资料内容、数值或状态。"
-)
-FACT_MISMATCH_MESSAGE = (
-    "这次回答里有些内容超出了本轮实际查到的站内结果，我不能这样陈述。"
 )
 VERIFICATION_BLOCK_MESSAGE = (
     "这轮没有完成新的真实核验，我不能说已经核验或确认。"
@@ -61,6 +58,7 @@ _NEGATION_RE = re.compile(
     r"(?:没有|没能|未能|未|没|不能|无法|尚未|还没|并未|并没有|不代表|不是)"
 )
 
+# CHAT 伪装成业务结论的跳闸信号（不是事实绑定手段，只是 CHAT 边界）。
 _CLAIM_VERB_RE = re.compile(
     r"(?:查到了|查到|查询到|找到了|结果显示|业主是|租户是|租客是|房东是|"
     r"状态是|记录在|登记在|名下有)"
@@ -73,7 +71,6 @@ _REFERENCE_ID_RE = re.compile(
 _PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 _DATE_RE = re.compile(r"20\d{2}\s*[年\-/.]\s*\d{1,2}(?:\s*[月\-/.]\s*\d{1,2}\s*日?)?")
 _NUMBER_RE = re.compile(r"\d[\d,]{1,}(?:\.\d+)?")
-_NUMERIC_RUN_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 
 def _has_positive_claim(pattern: re.Pattern, text: str) -> bool:
@@ -84,55 +81,36 @@ def _has_positive_claim(pattern: re.Pattern, text: str) -> bool:
     return False
 
 
-def _number_keys(text: str) -> set:
-    """抽取可用于证据绑定的数值键（去分隔符的数字串与归一日期）。"""
-    keys = set()
-    for match in _NUMERIC_RUN_RE.finditer(text):
-        digits = re.sub(r"\D", "", match.group(0))
-        if len(digits) >= 2:
-            keys.add(digits)
-    for match in re.finditer(
-        r"20(\d{2})\D{0,3}(\d{1,2})\D{0,3}(\d{1,2})", text
-    ):
-        year = "20" + match.group(1)
-        keys.add(f"{year}{int(match.group(2)):02d}{int(match.group(3)):02d}")
-    for match in re.finditer(r"20(\d{2})\s*[年\-/.]\s*(\d{1,2})", text):
-        keys.add(f"20{match.group(1)}{int(match.group(2)):02d}")
-    return keys
-
-
 def _answer_fact_tokens(text: str) -> List[str]:
     tokens: List[str] = []
-    tokens.extend(match.group(0).upper() for match in _REFERENCE_ID_RE.finditer(text))
+    tokens.extend(match.group(0) for match in _REFERENCE_ID_RE.finditer(text))
     tokens.extend(match.group(0) for match in _PHONE_RE.finditer(text))
-    for match in _DATE_RE.finditer(text):
-        digits = re.findall(r"\d+", match.group(0))
-        if len(digits) >= 3:
-            tokens.append(f"{digits[0]}{int(digits[1]):02d}{int(digits[2]):02d}")
-        elif len(digits) == 2:
-            tokens.append(f"{digits[0]}{int(digits[1]):02d}")
-    for match in _NUMBER_RE.finditer(text):
-        digits = re.sub(r"\D", "", match.group(0))
-        if len(digits) >= 2:
-            tokens.append(digits)
+    tokens.extend(match.group(0) for match in _DATE_RE.finditer(text))
+    tokens.extend(match.group(0) for match in _NUMBER_RE.finditer(text))
     return tokens
 
 
-def _unsupported_facts(answer: str, evidence_text: str) -> List[str]:
-    evidence_keys = _number_keys(evidence_text)
-    evidence_upper = evidence_text.upper()
-    unsupported = []
-    for token in _answer_fact_tokens(answer):
-        if token.isdigit():
-            if token not in evidence_keys:
-                unsupported.append(token)
-        elif token not in evidence_upper:
-            unsupported.append(token)
-    return unsupported
+def project_answer(turn: WorkTurn) -> str:
+    """ChannelProjection：公开业务内容只来自 Evidence 允许字段路径。"""
+    parts: List[str] = []
+    for item in turn.evidence:
+        try:
+            facts = json.loads(item.allowed_facts or "{}")
+        except (TypeError, ValueError):
+            continue
+        content = str(facts.get("content") or "").strip()
+        if content:
+            parts.append(content)
+        labels = [label for label in facts.get("items[].safeLabel") or [] if label]
+        if labels:
+            parts.append("找到的相关资料：" + "、".join(labels) + "。")
+    return "\n".join(parts)
 
 
 def _failure_message(turn: WorkTurn) -> str:
     for item in reversed(turn.action_results):
+        if item.status == "denied" and item.error_code == "missing_index_receipt":
+            return NO_EVIDENCE_MESSAGE
         if item.status in _STATUS_MESSAGES:
             return _STATUS_MESSAGES[item.status]
     return NO_EVIDENCE_MESSAGE
@@ -140,43 +118,41 @@ def _failure_message(turn: WorkTurn) -> str:
 
 def check_completion(final_text: str, turn: WorkTurn) -> CompletionDecision:
     """对最终公开回答做确定性检查；阻断时给出安全文案与结构化原因。"""
-    text = str(final_text or "")
-    evidence_text = "\n".join(item.allowed_facts for item in turn.evidence)
-    has_claim_verb = _has_positive_claim(_CLAIM_VERB_RE, text)
-    has_verification_claim = _has_positive_claim(_VERIFICATION_CLAIM_RE, text)
-    fact_tokens = _answer_fact_tokens(text)
-    honest_admission = bool(_HONESTY_RE.search(text)) and not fact_tokens
+    try:
+        text = str(final_text or "")
+        has_claim_verb = _has_positive_claim(_CLAIM_VERB_RE, text)
+        has_verification_claim = _has_positive_claim(_VERIFICATION_CLAIM_RE, text)
+        fact_tokens = _answer_fact_tokens(text)
+        honest_admission = bool(_HONESTY_RE.search(text)) and not fact_tokens
 
-    if turn.interaction_kind == INTERACTION_CHAT and not (
-        has_claim_verb or has_verification_claim or fact_tokens
-    ):
-        return CompletionDecision(True, text, "allowed_chat")
+        if turn.interaction_kind == INTERACTION_CHAT and not (
+            has_claim_verb or has_verification_claim or fact_tokens
+        ):
+            return CompletionDecision(True, text, "allowed_chat")
 
-    if honest_admission:
-        return CompletionDecision(True, text, "allowed_honest_admission")
+        if honest_admission:
+            return CompletionDecision(True, text, "allowed_honest_admission")
 
-    if not turn.evidence:
+        if turn.evidence:
+            # WORK + 本轮可信证据：公开业务内容由结构化投影生成，
+            # 模型文本里的新增实体/关系/状态不会进入公开回答。
+            projected = project_answer(turn)
+            if projected:
+                return CompletionDecision(True, projected, "projected_evidence")
+            return CompletionDecision(False, NO_EVIDENCE_MESSAGE, "blocked_no_evidence")
+
         if has_verification_claim:
             return CompletionDecision(False, VERIFICATION_BLOCK_MESSAGE, "blocked_verification_claim")
-        if has_claim_verb or fact_tokens:
-            if not turn.action_calls:
-                reason = "blocked_no_action_call"
-            elif not turn.action_results:
-                reason = "blocked_no_action_result"
-            else:
-                reason = "blocked_no_evidence"
-            return CompletionDecision(False, _failure_message(turn), reason)
-        return CompletionDecision(True, text, "allowed_no_claims")
-
-    if has_verification_claim and not any(
-        item.verification_status == "verified" for item in turn.evidence
-    ):
-        return CompletionDecision(False, VERIFICATION_BLOCK_MESSAGE, "blocked_verification_claim")
-
-    unsupported = _unsupported_facts(text, evidence_text)
-    if unsupported:
-        return CompletionDecision(False, FACT_MISMATCH_MESSAGE, "blocked_fact_mismatch")
-    return CompletionDecision(True, text, "allowed_evidence_backed")
+        if not turn.action_calls:
+            reason = "blocked_no_action_call"
+        elif not turn.action_results:
+            reason = "blocked_no_action_result"
+        else:
+            reason = "blocked_no_evidence"
+        return CompletionDecision(False, _failure_message(turn), reason)
+    except Exception:
+        # Guard 自身异常 fail closed。
+        return CompletionDecision(False, NO_EVIDENCE_MESSAGE, "blocked_guard_error")
 
 
 def check_mystand_final_answer(
@@ -190,28 +166,35 @@ def check_mystand_final_answer(
     request_id: str = "",
     message_id: str = "",
 ) -> CompletionDecision:
-    """构建 WorkTurn 并执行 CompletionGuard（模型无关的确定性路径）。"""
+    """构建/取用 WorkTurn 并执行 CompletionGuard（模型无关确定性路径）。
+
+    身份只信调用方显式传入的服务端解析结果（Web 登录会话或渠道绑定），
+    绝不回退读取 result 自报字段。
+    """
     if not isinstance(result, Mapping) or result.get("_mystand_request") is not True:
         return CompletionDecision(True, str(final_text or ""), "not_mystand")
-    resolved_account = account_id or str(result.get("_mystand_user_id") or "")
     identity = (
         TrustedIdentity(
-            account_id=resolved_account,
+            account_id=account_id,
             data_scope="mystand",
             source="server_session",
         )
-        if resolved_account
+        if account_id
         else None
     )
-    turn = build_work_turn(
-        channel=channel,
-        user_message=user_message,
-        conversation_history=conversation_history,
-        result=result,
-        identity=identity,
-        request_id=request_id,
-        message_id=message_id,
-    )
+    turn = result.get("_trusted_turn")
+    if not isinstance(turn, WorkTurn):
+        # 没有生命周期回合时，执行记录仍要逐项过同一套生命周期门禁，
+        # 伪造/越权/无索引的动作在这一步被拒绝，不能洗白成证据。
+        turn = build_work_turn(
+            channel=channel,
+            user_message=user_message,
+            conversation_history=conversation_history,
+            result=result,
+            identity=identity,
+            request_id=request_id,
+            message_id=message_id,
+        )
     decision = check_completion(final_text, turn)
     turn.terminal_reason = decision.reason
     turn.enter("succeeded" if decision.allowed else "blocked")

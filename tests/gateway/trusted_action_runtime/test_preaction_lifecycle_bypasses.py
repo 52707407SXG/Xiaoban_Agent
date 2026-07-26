@@ -87,7 +87,7 @@ def test_red_nested_owner_mismatch_must_reject_evidence():
 def test_red_ok_true_with_error_status_is_not_success():
     # 当前行为：ok is True 直接 success，不看 status。
     result = _result(
-        [("call_e", "mystand_query", {"operation": "read"}, {
+        [("call_e", "mystand_authorization", {"operation": "resolve", "resource_uid": "res-demo-1"}, {
             "ok": True, "status": 500,
             "content": "upstream bridge timeout while reading ledger",
         })]
@@ -102,7 +102,7 @@ def test_red_ok_true_with_error_status_is_not_success():
 def test_red_long_unstructured_text_is_not_success():
     # 当前行为：无法解析的长文本（>=20 字符）直接 success。
     result = _result(
-        [("call_t", "mystand_query", {"operation": "read"}, "业主是周某，月供 5600 元，状态正常")]
+        [("call_t", "mystand_authorization", {"operation": "resolve", "resource_uid": "res-demo-1"}, "业主是周某，月供 5600 元，状态正常")]
     )
     turn = build_work_turn(
         channel="web", user_message=BUSINESS_MSG, result=result, identity=IDENTITY,
@@ -245,7 +245,7 @@ def test_red_previous_turn_evidence_cannot_be_reused():
 def test_red_exception_receipt_is_not_success():
     # 当前行为：'{"error": "Tool execution failed: ..."}' 超 20 字符即 success。
     result = _result(
-        [("call_x", "mystand_query", {"operation": "read"},
+        [("call_x", "mystand_authorization", {"operation": "resolve", "resource_uid": "res-demo-1"},
           '{"error": "Tool execution failed: TimeoutError: read timed out"}')]
     )
     turn = build_work_turn(
