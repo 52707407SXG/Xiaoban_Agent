@@ -37,6 +37,10 @@ DELIVERY_R5A = "xbd_" + "05" * 20
 DELIVERY_R5B = "xbd_" + "06" * 20
 DELIVERY_R6A = "xbd_" + "07" * 20
 DELIVERY_R6B = "xbd_" + "08" * 20
+DELIVERY_R3_USER = "xbd_" + "09" * 20
+DELIVERY_R3_SITE = "xbd_" + "0a" * 20
+DELIVERY_R2_ATTEMPT = "xbd_" + "0b" * 20
+DELIVERY_R5_DENIED = "xbd_" + "0c" * 20
 FINGERPRINT_A = hashlib.sha256(b"wave2-stream-fingerprint-a").hexdigest()
 FINGERPRINT_B = hashlib.sha256(b"wave2-stream-fingerprint-b").hexdigest()
 
@@ -59,13 +63,14 @@ def _mystand_stream_headers(
     delivery_id: str,
     *,
     user: str = "alice",
+    site: str = "mystand-test-site",
     attempt: str = "1",
     fingerprint: str = FINGERPRINT_A,
 ) -> dict[str, str]:
     """My Stand 流式全套可信 header（按 G1 合同全部合法），脱敏虚构。"""
     return {
         "Authorization": "Bearer sk-secret",
-        "X-Xiaoban-Site-Id": "mystand-test-site",
+        "X-Xiaoban-Site-Id": site,
         "X-Xiaoban-User-Id": user,
         "X-Xiaoban-Toolset-Policy": "mystand-broker-basic",
         "X-Xiaoban-Memory-Mode": "disabled",
@@ -228,6 +233,71 @@ async def test_r3_stream_replay_with_changed_fingerprint_conflicts():
     assert mock_run.call_count == 1, "同 key 换 fingerprint 的重放不得再次执行 Agent"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("delivery_id", "changed_headers"),
+    [
+        (DELIVERY_R3_USER, {"user": "bob"}),
+        (DELIVERY_R3_SITE, {"site": "mystand-other-site"}),
+    ],
+)
+async def test_r3_stream_replay_with_changed_server_identity_conflicts(
+    delivery_id,
+    changed_headers,
+):
+    """同 delivery+attempt 换 owner/site 必须在第二次 Agent 执行前 409。
+
+    scoped key 本身包含 owner/site，不能因此把相同 delivery 当成新请求。
+    """
+    adapter = _make_adapter()
+    mock_run = AsyncMock(
+        return_value=({"final_response": "你好。", "messages": []}, _USAGE)
+    )
+    app = _create_app(adapter)
+    with patch.object(adapter, "_run_agent", new=mock_run):
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post(
+                "/v1/chat/completions",
+                headers=_mystand_stream_headers(delivery_id),
+                json=_stream_body("你好"),
+            )
+            await first.read()
+            second = await cli.post(
+                "/v1/chat/completions",
+                headers=_mystand_stream_headers(delivery_id, **changed_headers),
+                json=_stream_body("你好"),
+            )
+            second_body = await second.text()
+
+    assert first.status == 200
+    assert second.status == 409, second_body
+    assert mock_run.call_count == 1, "跨身份重放不得触发第二次 Agent"
+
+
+@pytest.mark.asyncio
+async def test_r2_stream_rejects_conflicting_attempt_headers():
+    """两个服务端 attempt 头同时存在时必须完全一致，否则 Agent 零调用。"""
+    adapter = _make_adapter()
+    headers = _mystand_stream_headers(DELIVERY_R2_ATTEMPT, attempt="1")
+    headers["X-Xiaoban-Delivery-Attempt"] = "2"
+    mock_run = AsyncMock(
+        return_value=({"final_response": "你好。", "messages": []}, _USAGE)
+    )
+    app = _create_app(adapter)
+    with patch.object(adapter, "_run_agent", new=mock_run):
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/chat/completions",
+                headers=headers,
+                json=_stream_body("你好"),
+            )
+            body = await resp.text()
+
+    assert resp.status == 400, body
+    assert json.loads(body)["error"]["code"] == "invalid_delivery_identity"
+    mock_run.assert_not_called()
+
+
 # R4（§B R4，表征）：Guard 拒绝的业务回答在 SSE 里只有替换文案
 
 
@@ -338,13 +408,45 @@ async def test_r5b_work_turn_stream_emits_trusted_verification_event(monkeypatch
     )
     payload = json.loads(data_line[len("data: "):])
     assert payload["verified"] is True
-    assert payload["action_count"] == 2
+    assert payload["action_count"] == 1
     assert payload["request_id"] == DELIVERY_R5B
     # 位置合同：内容 chunk 之后、finish chunk 之前。
     event_at = body.index("event: xiaoban.trusted.verification")
     content_at = body.index('"delta": {"content"')
     finish_at = body.index('"finish_reason": "stop"')
     assert content_at < event_at < finish_at
+
+
+@pytest.mark.asyncio
+async def test_r5c_denied_action_does_not_emit_verified_event(monkeypatch):
+    """权限拒绝虽有 ActionResult，但没有 verified Evidence，不得标记 verified=true。"""
+    monkeypatch.setattr(
+        "tools.mystand_authorization_tool.mystand_authorization_tool_handler",
+        lambda args: '{"ok":false,"status":403,"code":"read_not_authorized"}',
+    )
+    monkeypatch.setattr(
+        "tools.mystand_resource_index_tool.mystand_resource_index_tool_handler",
+        lambda args: '{"ok":true,"items":[{"resourceUid":"res-demo-denied","safeLabel":"档案"}]}',
+    )
+    adapter = _make_adapter()
+    mock_agent = _mock_agent("当前没有权限读取这份资料。")
+    mock_agent.valid_tool_names = [
+        "mystand_authorization",
+        "mystand_resource_index",
+        "mystand_query",
+    ]
+    app = _create_app(adapter)
+    with patch.object(adapter, "_create_agent", return_value=mock_agent):
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/chat/completions",
+                headers=_mystand_stream_headers(DELIVERY_R5_DENIED),
+                json=_stream_body("读取 AUTH-ABC12345"),
+            )
+            body = await resp.text()
+
+    assert resp.status == 200
+    assert "xiaoban.trusted.verification" not in body
 
 
 # R6（§B R6 / G4）：stop 与流式执行的竞态收口
