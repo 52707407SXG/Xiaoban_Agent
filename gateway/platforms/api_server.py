@@ -44,6 +44,7 @@ import os
 import socket as _socket
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -75,22 +76,93 @@ logger = logging.getLogger(__name__)
 def _mystand_tool_result_failed(tool_name: Any, tool_result: Any) -> bool:
     """Classify a tool result without ever adding its contents to telemetry."""
     try:
-        from agent.display import _detect_tool_failure
+        structured_result = tool_result
+        decoded_json = not isinstance(tool_result, str)
+        if isinstance(tool_result, str):
+            try:
+                structured_result = json.loads(tool_result)
+            except (TypeError, ValueError):
+                structured_result = None
+                decoded_json = False
+            else:
+                decoded_json = True
 
-        normalized_result = tool_result
-        if tool_result is not None and not isinstance(tool_result, str):
-            normalized_result = json.dumps(
-                tool_result,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
+        if isinstance(structured_result, dict):
+            status_failed: Optional[bool] = None
+            status = structured_result.get("status")
+            if isinstance(status, int) and not isinstance(status, bool):
+                if 400 <= status <= 599:
+                    status_failed = True
+                elif 100 <= status <= 399:
+                    status_failed = False
+            elif isinstance(status, str):
+                normalized_status = status.strip().lower()
+                if re.fullmatch(r"[45]\d{2}", normalized_status):
+                    status_failed = True
+                elif re.fullmatch(r"[123]\d{2}", normalized_status):
+                    status_failed = False
+                elif normalized_status in {
+                    "error",
+                    "failed",
+                    "failure",
+                    "cancelled",
+                    "canceled",
+                    "timeout",
+                }:
+                    status_failed = True
+                elif normalized_status in {
+                    "ok",
+                    "success",
+                    "succeeded",
+                    "completed",
+                    "complete",
+                    "done",
+                }:
+                    status_failed = False
+
+            error = structured_result.get("error")
+            has_error = bool(error)
+            exit_code = structured_result.get("exit_code")
+            has_failed_exit = (
+                isinstance(exit_code, int)
+                and not isinstance(exit_code, bool)
+                and exit_code != 0
             )
-        failed, _suffix = _detect_tool_failure(
-            str(tool_name or "unknown"),
-            normalized_result,
-        )
-        return bool(failed)
+
+            # Failure signals win over contradictory success metadata.  This
+            # keeps explicit transport/tool failures from being displayed as
+            # completed while avoiding text scans of values such as
+            # ``{"ok": true, "failed": false}``.
+            if (
+                structured_result.get("ok") is False
+                or structured_result.get("success") is False
+                or structured_result.get("failed") is True
+                or status_failed is True
+                or has_error
+                or has_failed_exit
+            ):
+                return True
+            # A decoded object with no top-level failure contract is not
+            # searched as text.  Nested payloads commonly contain fields like
+            # ``{"failed": false}``, which are data rather than tool status.
+            return False
+
+        # Other valid JSON values are data, not prose error channels.
+        if decoded_json or not isinstance(tool_result, str):
+            return False
+
+        # Plain-text tool failures are limited to explicit executor/system
+        # markers.  Do not keyword-scan ordinary content returned by a tool.
+        return bool(re.match(
+            r"^\s*(?:"
+            r"\[?tool execution cancell?ed\b|"
+            r"error(?:\s+executing\s+tool\b|:)|"
+            r"exception:|"
+            r"traceback \(most recent call last\):"
+            r")",
+            tool_result,
+            re.IGNORECASE,
+        ))
     except Exception:
         # Optional metadata must never break the request, but it must also not
         # turn an unclassifiable result into a false success signal.
@@ -3467,11 +3539,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 if delta is not None and not guard_stream_deltas:
                     _stream_q.put(_sanitize_user_visible_text(delta))
 
-            # Track which tool_call_ids we've emitted a "running" lifecycle
-            # event for, so a "completed" event without a matching "running"
-            # (e.g. internal/filtered tools) is silently dropped instead of
-            # producing an orphaned event clients can't correlate.
-            _started_tool_call_ids: set[str] = set()
+            # Tool callbacks run in the agent executor thread while task
+            # cancellation and final cleanup run in the event-loop thread.
+            # Keep one locked lifecycle ledger so every visible call id gets
+            # exactly one terminal event, including interrupted tool batches.
+            _tool_lifecycle_lock = threading.Lock()
+            _open_tool_calls: dict[str, str] = {}
+            _seen_tool_call_ids: set[str] = set()
+            _tool_lifecycle_closed = False
 
             def _on_tool_start(tool_call_id, function_name, function_args):
                 """Emit ``xiaoban.tool.progress`` with ``status: running``.
@@ -3486,38 +3561,63 @@ class APIServerAdapter(BasePlatformAdapter):
                 events (``_thinking``, …) stay off the wire — matching
                 the prior ``_on_tool_progress`` filter exactly.
                 """
+                nonlocal _tool_lifecycle_closed
                 if not tool_call_id or function_name.startswith("_"):
                     return
-                _started_tool_call_ids.add(tool_call_id)
                 from agent.display import build_tool_preview, get_tool_emoji
                 label = (
                     function_name
                     if mystand_request
                     else (build_tool_preview(function_name, function_args) or function_name)
                 )
-                _stream_q.put(("__tool_progress__", {
-                    "tool": function_name,
-                    "emoji": get_tool_emoji(function_name),
-                    "label": label,
-                    "toolCallId": tool_call_id,
-                    "status": "running",
-                }))
+                with _tool_lifecycle_lock:
+                    if _tool_lifecycle_closed or tool_call_id in _seen_tool_call_ids:
+                        return
+                    _seen_tool_call_ids.add(tool_call_id)
+                    _open_tool_calls[tool_call_id] = function_name
+                    _stream_q.put(("__tool_progress__", {
+                        "tool": function_name,
+                        "emoji": get_tool_emoji(function_name),
+                        "label": label,
+                        "toolCallId": tool_call_id,
+                        "status": "running",
+                    }))
 
             def _on_tool_complete(tool_call_id, function_name, function_args, function_result):
-                """Emit the matching ``status: completed`` event.
+                """Emit the matching terminal tool event.
 
                 Dropped if the start was filtered (internal tool, missing
                 id, or never seen) so clients never get an orphaned
-                ``completed`` they can't correlate to a prior ``running``.
+                terminal update they can't correlate to a prior ``running``.
                 """
-                if not tool_call_id or tool_call_id not in _started_tool_call_ids:
+                if not tool_call_id:
                     return
-                _started_tool_call_ids.discard(tool_call_id)
-                _stream_q.put(("__tool_progress__", {
-                    "tool": function_name,
-                    "toolCallId": tool_call_id,
-                    "status": "completed",
-                }))
+                status = (
+                    "failed"
+                    if _mystand_tool_result_failed(function_name, function_result)
+                    else "completed"
+                )
+                with _tool_lifecycle_lock:
+                    if _open_tool_calls.pop(tool_call_id, None) is None:
+                        return
+                    _stream_q.put(("__tool_progress__", {
+                        "tool": function_name,
+                        "toolCallId": tool_call_id,
+                        "status": status,
+                    }))
+
+            def _close_open_tool_calls() -> None:
+                """Fail every visible call left open when the agent exits."""
+                nonlocal _tool_lifecycle_closed
+                with _tool_lifecycle_lock:
+                    _tool_lifecycle_closed = True
+                    for tool_call_id, function_name in _open_tool_calls.items():
+                        _stream_q.put(("__tool_progress__", {
+                            "tool": function_name,
+                            "toolCallId": tool_call_id,
+                            "status": "failed",
+                        }))
+                    _open_tool_calls.clear()
 
             # Start agent in background.  agent_ref is a mutable container
             # so the SSE writer can interrupt the agent on client disconnect.
@@ -3535,21 +3635,28 @@ class APIServerAdapter(BasePlatformAdapter):
             agent_ref = [None, False] if stream_scoped_key else [None]
 
             async def _stream_compute():
-                if stream_scoped_key and agent_ref[1]:
-                    raise CompletionStoppedError("request stopped before execution")
-                return await self._run_agent(
-                    user_message=user_message,
-                    conversation_history=history,
-                    ephemeral_system_prompt=system_prompt,
-                    session_id=session_id,
-                    stream_delta_callback=_on_delta,
-                    tool_start_callback=_on_tool_start,
-                    tool_complete_callback=_on_tool_complete,
-                    agent_ref=agent_ref,
-                    gateway_session_key=gateway_session_key,
-                    request_headers=request.headers,
-                    async_delivery=self._session_events_requested(request),
-                )
+                try:
+                    if stream_scoped_key and agent_ref[1]:
+                        raise CompletionStoppedError("request stopped before execution")
+                    return await self._run_agent(
+                        user_message=user_message,
+                        conversation_history=history,
+                        ephemeral_system_prompt=system_prompt,
+                        session_id=session_id,
+                        stream_delta_callback=_on_delta,
+                        tool_start_callback=_on_tool_start,
+                        tool_complete_callback=_on_tool_complete,
+                        agent_ref=agent_ref,
+                        gateway_session_key=gateway_session_key,
+                        request_headers=request.headers,
+                        async_delivery=self._session_events_requested(request),
+                    )
+                finally:
+                    # Runs for success, provider/tool exceptions, explicit
+                    # /stop cancellation, client disconnect cancellation and
+                    # BaseException paths such as sequential KeyboardInterrupt.
+                    # This enqueue happens before the task's EOS callback.
+                    _close_open_tool_calls()
 
             if stream_scoped_key:
                 agent_task = asyncio.ensure_future(_idem_cache.get_or_set(

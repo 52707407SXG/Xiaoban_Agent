@@ -35,6 +35,7 @@ from gateway.platforms.api_server import (
     _IdempotencyCache,
     _build_api_temporal_context,
     _derive_chat_session_id,
+    _mystand_tool_result_failed,
     _merge_temporal_context,
     _trim_chat_history_for_context,
     check_api_server_requirements,
@@ -55,6 +56,45 @@ class TestCheckRequirements:
     @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", False)
     def test_returns_false_without_aiohttp(self):
         assert check_api_server_requirements() is False
+
+
+class TestMystandToolResultFailure:
+    @pytest.mark.parametrize(
+        ("result", "expected"),
+        [
+            ({"ok": False}, True),
+            ({"status": 404}, True),
+            ({"status": "503"}, True),
+            ({"success": False}, True),
+            ({"failed": True}, True),
+            ({"error": "remote unavailable"}, True),
+            ({"ok": True, "failed": False}, False),
+            ('{"ok":true,"failed":false}', False),
+            ({"data": {"failed": False}}, False),
+            ('{"data":{"failed":false}}', False),
+            (
+                "[Tool execution cancelled — mystand_query was skipped due to user interrupt]",
+                True,
+            ),
+            ({"data": {"items": [1]}}, False),
+        ],
+        ids=[
+            "ok-false-without-error",
+            "http-4xx-status",
+            "http-5xx-string-status",
+            "success-false",
+            "failed-true",
+            "non-empty-error",
+            "ok-true-failed-false",
+            "json-ok-true-failed-false",
+            "nested-failed-false",
+            "json-nested-failed-false",
+            "explicit-tool-cancelled",
+            "normal-result",
+        ],
+    )
+    def test_structured_result_fields_take_priority(self, result, expected):
+        assert _mystand_tool_result_failed("mystand_query", result) is expected
 
 
 class TestChatHistoryContextBudget:
@@ -2126,6 +2166,172 @@ class TestChatCompletionsEndpoint:
             assert len(pairs) == 2, f"expected 2 events (running+completed), got {pairs}"
             assert pairs[0] == ("running", "call_terminal_1"), pairs
             assert pairs[1] == ("completed", "call_terminal_1"), pairs
+
+    @pytest.mark.asyncio
+    async def test_stream_tool_lifecycle_reports_failed_result(self, adapter):
+        """A real failed tool result must not be rendered as completed."""
+        import asyncio
+        import json as _json
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            async def _mock_run_agent(**kwargs):
+                cb = kwargs.get("stream_delta_callback")
+                ts_cb = kwargs.get("tool_start_callback")
+                tc_cb = kwargs.get("tool_complete_callback")
+                if ts_cb:
+                    ts_cb("call_query_failed", "mystand_query", {"query": "missing"})
+                if tc_cb:
+                    tc_cb(
+                        "call_query_failed",
+                        "mystand_query",
+                        {"query": "missing"},
+                        {"ok": False, "error": "not found"},
+                    )
+                if cb:
+                    await asyncio.sleep(0.05)
+                    cb("没有查到结果。")
+                return (
+                    {"final_response": "没有查到结果。", "messages": [], "api_calls": 1},
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+
+            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "查询不存在的资料"}],
+                        "stream": True,
+                    },
+                )
+                assert resp.status == 200
+                body = await resp.text()
+
+            pairs: list[tuple[str | None, str | None]] = []
+            lines = body.splitlines()
+            for i, line in enumerate(lines):
+                if line.strip() != "event: xiaoban.tool.progress":
+                    continue
+                for follow in lines[i + 1: i + 4]:
+                    if follow.startswith("data: "):
+                        payload = _json.loads(follow[len("data: "):])
+                        pairs.append((payload.get("status"), payload.get("toolCallId")))
+                        break
+
+            assert pairs == [
+                ("running", "call_query_failed"),
+                ("failed", "call_query_failed"),
+            ], pairs
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("exit_mode", ["normal", "exception"])
+    async def test_stream_tool_lifecycle_closes_orphan_when_agent_exits(
+        self,
+        adapter,
+        exit_mode,
+    ):
+        """Every started call gets one failed terminal event on agent exit."""
+        app = _create_app(adapter)
+        call_id = f"call_orphan_{exit_mode}"
+
+        async with TestClient(TestServer(app)) as cli:
+            async def _mock_run_agent(**kwargs):
+                start_cb = kwargs.get("tool_start_callback")
+                if start_cb:
+                    start_cb(call_id, "mystand_query", {"query": "unfinished"})
+                if exit_mode == "exception":
+                    raise RuntimeError("provider failed after tool start")
+                return (
+                    {"final_response": "done", "messages": [], "api_calls": 1},
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+
+            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "run unfinished tool"}],
+                        "stream": True,
+                    },
+                )
+                assert resp.status == 200
+                body = await resp.text()
+
+        statuses = []
+        for line in body.splitlines():
+            if not line.startswith("data: ") or line.strip() == "data: [DONE]":
+                continue
+            try:
+                payload = json.loads(line[len("data: "):])
+            except json.JSONDecodeError:
+                continue
+            if payload.get("toolCallId") == call_id:
+                statuses.append(payload.get("status"))
+
+        assert statuses == ["running", "failed"]
+
+    @pytest.mark.asyncio
+    async def test_stream_tool_lifecycle_closes_open_call_on_task_cancel(self, adapter):
+        """Cancelling the API task closes each open tool before queue EOS."""
+        app = _create_app(adapter)
+        started = asyncio.Event()
+        captured_items = []
+
+        async def _mock_run_agent(**kwargs):
+            start_cb = kwargs.get("tool_start_callback")
+            if start_cb:
+                start_cb("call_cancelled", "mystand_query", {"query": "slow"})
+            started.set()
+            await asyncio.Future()
+
+        async def _cancel_stream_writer(*args, **kwargs):
+            stream_q = args[4]
+            agent_task = args[5]
+            await asyncio.wait_for(started.wait(), timeout=1)
+            agent_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await agent_task
+            await asyncio.sleep(0)
+            while not stream_q.empty():
+                captured_items.append(stream_q.get_nowait())
+            return web.Response(status=200, text="cancelled")
+
+        async with TestClient(TestServer(app)) as cli:
+            with (
+                patch.object(adapter, "_run_agent", side_effect=_mock_run_agent),
+                patch.object(
+                    adapter,
+                    "_write_sse_chat_completion",
+                    side_effect=_cancel_stream_writer,
+                ),
+            ):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "cancel slow tool"}],
+                        "stream": True,
+                    },
+                )
+                assert resp.status == 200
+
+        progress = [
+            item[1]
+            for item in captured_items
+            if isinstance(item, tuple)
+            and len(item) == 2
+            and item[0] == "__tool_progress__"
+        ]
+        assert [
+            (item.get("toolCallId"), item.get("status"))
+            for item in progress
+        ] == [
+            ("call_cancelled", "running"),
+            ("call_cancelled", "failed"),
+        ]
+        assert captured_items[-1] is None
 
     @pytest.mark.asyncio
     async def test_stream_tool_lifecycle_skips_internal_and_orphan_completes(self, adapter):
