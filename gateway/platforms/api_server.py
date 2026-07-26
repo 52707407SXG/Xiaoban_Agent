@@ -204,6 +204,13 @@ _MYSTAND_REFERENCE_ID_RE = re.compile(
     r"(?<![A-Z0-9])(?:AUTH|OUT)-[A-Z0-9][A-Z0-9-]{5,}[A-Z0-9](?![A-Z0-9])",
     re.IGNORECASE,
 )
+
+# Trusted My Stand stream delivery identity (wave 2).  A stream that carries
+# any delivery signal must present the full quartet below.
+_MYSTAND_STREAM_DELIVERY_ID_RE = re.compile(r"xbd_[0-9a-f]{40}")
+_MYSTAND_STREAM_ATTEMPT_RE = re.compile(r"[0-9]{1,9}")
+_MYSTAND_STREAM_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
+
 _MYSTAND_EVIDENCE_FAILURE = (
     "这轮没有取得可验证的 My Stand 站内资料结果，所以我不能判断资料内容、"
     "权限状态或是否完成。"
@@ -1850,6 +1857,11 @@ class _IdempotencyCache:
                     logger.warning("Failed to interrupt idempotent API run", exc_info=False)
         return True
 
+    def is_stopped(self, key: str) -> bool:
+        """Return True while a stop tombstone is active for a scoped key."""
+        self._purge()
+        return key in self._stopped
+
 
 _idem_cache = _IdempotencyCache()
 
@@ -3345,6 +3357,47 @@ class APIServerAdapter(BasePlatformAdapter):
                     ),
                     status=409,
                 )
+            # Trusted My Stand streams bind their delivery identity through
+            # headers (never Idempotency-Key, rejected above).  Validate the
+            # quartet before any agent work and register the run in the
+            # idempotency cache so replays conflict and /stop can reach it.
+            stream_delivery_id = ""
+            if mystand_request:
+                identity_err, stream_delivery_id = self._stream_delivery_identity_error(
+                    request.headers
+                )
+                if identity_err is not None:
+                    return identity_err
+            stream_scoped_key = ""
+            stream_idem_fp = ""
+            if stream_delivery_id:
+                try:
+                    stream_scoped_key = self._scoped_idempotency_key(
+                        request.headers, stream_delivery_id
+                    )
+                    stream_idem_fp = self._chat_idempotency_fingerprint(body, request.headers)
+                except InvalidToolsetPolicy as e:
+                    return web.json_response(
+                        _openai_error(str(e), code="invalid_idempotency_scope"),
+                        status=400,
+                    )
+                if _idem_cache.lookup_state(stream_scoped_key, stream_idem_fp) == "conflict":
+                    return web.json_response(
+                        _openai_error(
+                            "idempotency key was reused with a different request",
+                            code="idempotency_conflict",
+                        ),
+                        status=409,
+                    )
+                if _idem_cache.is_stopped(stream_scoped_key):
+                    return web.json_response(
+                        _openai_error(
+                            "Completion stopped by request",
+                            err_type="request_stopped",
+                            code="completion_stopped",
+                        ),
+                        status=409,
+                    )
             limited = self._concurrency_limited_response()
             if limited is not None:
                 return limited
@@ -3426,20 +3479,39 @@ class APIServerAdapter(BasePlatformAdapter):
             # side-by-side with ``tool_start_callback``/``tool_complete_callback``.
             # The structured callbacks are strictly richer (they carry the
             # tool_call id), so they own the chat-completions SSE channel.
-            agent_ref = [None]
-            agent_task = asyncio.ensure_future(self._run_agent(
-                user_message=user_message,
-                conversation_history=history,
-                ephemeral_system_prompt=system_prompt,
-                session_id=session_id,
-                stream_delta_callback=_on_delta,
-                tool_start_callback=_on_tool_start,
-                tool_complete_callback=_on_tool_complete,
-                agent_ref=agent_ref,
-                gateway_session_key=gateway_session_key,
-                request_headers=request.headers,
-                async_delivery=self._session_events_requested(request),
-            ))
+            #
+            # Trusted My Stand streams additionally register in the
+            # idempotency cache (inflight task + agent_ref), so a /stop with
+            # the same delivery key interrupts this agent and a stop-before-
+            # register race fails closed instead of running.
+            agent_ref = [None, False] if stream_scoped_key else [None]
+
+            async def _stream_compute():
+                if stream_scoped_key and agent_ref[1]:
+                    raise CompletionStoppedError("request stopped before execution")
+                return await self._run_agent(
+                    user_message=user_message,
+                    conversation_history=history,
+                    ephemeral_system_prompt=system_prompt,
+                    session_id=session_id,
+                    stream_delta_callback=_on_delta,
+                    tool_start_callback=_on_tool_start,
+                    tool_complete_callback=_on_tool_complete,
+                    agent_ref=agent_ref,
+                    gateway_session_key=gateway_session_key,
+                    request_headers=request.headers,
+                    async_delivery=self._session_events_requested(request),
+                )
+
+            if stream_scoped_key:
+                agent_task = asyncio.ensure_future(_idem_cache.get_or_set(
+                    stream_scoped_key,
+                    stream_idem_fp,
+                    _stream_compute,
+                    agent_ref=agent_ref,
+                ))
+            else:
+                agent_task = asyncio.ensure_future(_stream_compute())
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
             agent_task.add_done_callback(lambda _fut: _stream_q.put(None))
@@ -3815,6 +3887,7 @@ class APIServerAdapter(BasePlatformAdapter):
             # Get usage from completed agent
             usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
             guarded_final = ""
+            result = None
             try:
                 result, agent_usage = await agent_task
                 usage = agent_usage or usage
@@ -3826,15 +3899,36 @@ class APIServerAdapter(BasePlatformAdapter):
                         result=result,
                     )
             except Exception as exc:
+                result = None
                 logger.warning("Agent task %s failed, usage data lost: %s", completion_id, exc)
 
-            if guarded_final:
+            # A stopped/interrupted run must never emit business text, even
+            # if the guard would otherwise pass the buffered final answer.
+            run_stopped = isinstance(result, dict) and bool(
+                result.get("interrupted") or result.get("stopped")
+            )
+            if guarded_final and not run_stopped:
                 content_chunk = {
                     "id": completion_id, "object": "chat.completion.chunk",
                     "created": created, "model": model,
                     "choices": [{"index": 0, "delta": {"content": guarded_final}, "finish_reason": None}],
                 }
                 await response.write(f"data: {json.dumps(content_chunk)}\n\n".encode())
+
+            # Trusted work turns surface their verification receipt as a
+            # dedicated SSE event after the content chunk, before finish.
+            if isinstance(result, dict) and result.get("_mystand_request"):
+                trusted_turn = result.get("_trusted_turn")
+                action_results = getattr(trusted_turn, "action_results", None) or []
+                if trusted_turn is not None and action_results:
+                    verification = {
+                        "verified": True,
+                        "action_count": len(action_results),
+                        "request_id": str(getattr(trusted_turn, "request_id", "") or ""),
+                    }
+                    await response.write(
+                        f"event: xiaoban.trusted.verification\ndata: {json.dumps(verification, ensure_ascii=False)}\n\n".encode()
+                    )
 
             # Finish chunk
             finish_chunk = {
@@ -5561,6 +5655,61 @@ class APIServerAdapter(BasePlatformAdapter):
             )
         return None
 
+    @classmethod
+    def _mystand_stream_delivery_id(cls, headers: Any) -> str:
+        """Return the validated delivery-id for a trusted My Stand stream.
+
+        Returns ``""`` for legacy My Stand streams that carry no wave-2
+        delivery signal at all; those keep their pre-existing behavior.  Any
+        delivery signal — the ``X-Xiaoban-Delivery-Id`` /
+        ``X-Xiaoban-Delivery-Attempt`` headers, or a message id bound to a
+        delivery (``xbd_…``) — requires the full trusted identity quartet,
+        failing closed with :class:`InvalidToolsetPolicy` otherwise.
+        """
+        delivery_id = cls._header_value(headers, "X-Xiaoban-Delivery-Id")
+        delivery_attempt = cls._header_value(headers, "X-Xiaoban-Delivery-Attempt")
+        message_id = cls._header_value(headers, "X-Xiaoban-Message-Id")
+        if not (
+            delivery_id
+            or delivery_attempt
+            or _MYSTAND_STREAM_DELIVERY_ID_RE.search(message_id)
+        ):
+            return ""
+        if not _MYSTAND_STREAM_DELIVERY_ID_RE.fullmatch(delivery_id):
+            raise InvalidToolsetPolicy(
+                "My Stand streaming requires a valid X-Xiaoban-Delivery-Id"
+            )
+        attempt = cls._header_value(headers, "X-Xiaoban-Attempt") or delivery_attempt
+        if not _MYSTAND_STREAM_ATTEMPT_RE.fullmatch(attempt):
+            raise InvalidToolsetPolicy(
+                "My Stand streaming requires a valid X-Xiaoban-Attempt"
+            )
+        fingerprint = cls._header_value(headers, "X-Xiaoban-Request-Fingerprint").lower()
+        if not _MYSTAND_STREAM_FINGERPRINT_RE.fullmatch(fingerprint):
+            raise InvalidToolsetPolicy(
+                "My Stand streaming requires a valid X-Xiaoban-Request-Fingerprint"
+            )
+        if not message_id.strip():
+            raise InvalidToolsetPolicy(
+                "My Stand streaming requires X-Xiaoban-Message-Id"
+            )
+        return delivery_id
+
+    @classmethod
+    def _stream_delivery_identity_error(cls, headers: Any) -> tuple:
+        """Map stream delivery identity failures to a 400 error envelope."""
+        try:
+            delivery_id = cls._mystand_stream_delivery_id(headers)
+        except InvalidToolsetPolicy as exc:
+            return (
+                web.json_response(
+                    _openai_error(str(exc), code="invalid_delivery_identity"),
+                    status=400,
+                ),
+                "",
+            )
+        return None, delivery_id
+
     @staticmethod
     def _memory_query_text(user_message: Any) -> str:
         if isinstance(user_message, str):
@@ -5722,6 +5871,9 @@ class APIServerAdapter(BasePlatformAdapter):
         )
         request_user_id = self._header_value(request_headers, "X-Xiaoban-User-Id")
         request_message_id = self._header_value(request_headers, "X-Xiaoban-Message-Id")
+        request_delivery_id = self._header_value(request_headers, "X-Xiaoban-Delivery-Id")
+        if not _MYSTAND_STREAM_DELIVERY_ID_RE.fullmatch(request_delivery_id):
+            request_delivery_id = ""
         enabled_toolsets_override = self._toolsets_for_request_headers(request_headers)
         mystand_request = enabled_toolsets_override is not None
         memory_identity = self._mystand_memory_identity(request_headers) if mystand_request else None
@@ -5863,7 +6015,13 @@ class APIServerAdapter(BasePlatformAdapter):
                         if request_user_id
                         else None
                     ),
-                    request_id=f"mystand-req-{uuid.uuid4().hex}",
+                    # Trusted deliveries bind the turn to the server-verified
+                    # delivery id; ad-hoc My Stand calls keep a random id.
+                    request_id=(
+                        request_delivery_id
+                        if request_delivery_id
+                        else f"mystand-req-{uuid.uuid4().hex}"
+                    ),
                     message_id=str(request_message_id or ""),
                 )
                 trusted_turn_token = activate_turn(trusted_turn)
