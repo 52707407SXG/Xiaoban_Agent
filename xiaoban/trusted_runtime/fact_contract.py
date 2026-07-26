@@ -5,7 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import unicodedata
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Sequence
+
+SIGNED_FACT_INDEX_PAGE_LIMIT = 100
+SIGNED_FACT_INDEX_MAX_PAGES = 200
+SIGNED_FACT_INDEX_MAX_ITEMS = (
+    SIGNED_FACT_INDEX_PAGE_LIMIT * SIGNED_FACT_INDEX_MAX_PAGES
+)
 
 
 def canonical_digest(value: Any) -> str:
@@ -37,6 +43,33 @@ def evidence_requirement_digest(
     if isinstance(declared, str) and len(declared) == 64:
         return declared
     return canonical_fallback or canonical_digest(requirement)
+
+
+def resource_read_record_refs_valid(
+    raw_record_refs: Any,
+    evidence_record_refs: Any,
+    matched_index_refs: Sequence[str],
+) -> bool:
+    """Bind every resource-read evidence source to this turn's index.
+
+    Collection queries intentionally do not use this shape: their record refs
+    describe the complete result set.  A generic resource-read may legitimately
+    join a root resource with linked profile/property material, but every
+    reported source must be unique and present in the signed IndexReceipt.
+    """
+    if (
+        not isinstance(raw_record_refs, list)
+        or not raw_record_refs
+        or any(
+            not isinstance(ref, str) or not ref
+            for ref in raw_record_refs
+        )
+        or len(set(raw_record_refs)) != len(raw_record_refs)
+        or not isinstance(evidence_record_refs, list)
+        or evidence_record_refs != sorted(raw_record_refs)
+    ):
+        return False
+    return set(raw_record_refs).issubset(set(matched_index_refs))
 
 
 def build_fact_query_plan(

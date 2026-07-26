@@ -108,6 +108,48 @@ def test_open_read_without_index_receipt_is_denied_before_execution():
     assert turn.action_calls == [], "deny 不得登记为已允许调用"
 
 
+def test_partial_index_page_cannot_unlock_business_read():
+    turn = _turn(user_message="查一下游某今年的结算业绩")
+    index = begin_action(
+        turn,
+        "mystand_resource_index",
+        "v1",
+        {
+            "operation": "list_resources",
+            "module_id": "finance-ledger",
+        },
+    )
+    assert index.decision == "allow"
+    finish_action(
+        turn,
+        index.call.call_id,
+        "mystand_resource_index",
+        "v1",
+        {
+            "ok": True,
+            "items": [
+                {
+                    "resourceUid": "res-demo-1",
+                    "safeLabel": "档案",
+                }
+            ],
+            "hasMore": True,
+            "nextCursor": "cursor-page-2",
+        },
+    )
+    assert turn.index_receipt is not None
+    assert turn.index_receipt.status == "unavailable"
+
+    read = begin_action(
+        turn,
+        "mystand_query",
+        "v1",
+        {"operation": "read"},
+    )
+    assert read.decision == "deny"
+    assert read.reason == "missing_index_receipt"
+
+
 def test_registry_dispatch_gate_denies_without_active_turn():
     tokens = set_session_vars(
         platform="api_server", user_id="user-a", message_id="msg-none"

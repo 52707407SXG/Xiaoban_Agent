@@ -12,9 +12,10 @@ import pytest
 
 from gateway.platforms.api_server import (
     _parse_mystand_fact_requirement_header,
+    _run_mystand_preexecuted_evidence,
 )
 from gateway.session_context import clear_session_vars, set_session_vars
-from tools import mystand_query_tool
+from tools import mystand_query_tool, mystand_resource_index_tool
 from xiaoban.trusted_runtime.completion_guard import (
     check_completion,
     check_mystand_final_answer,
@@ -60,7 +61,13 @@ def _binding() -> dict:
     }
 
 
-def _index_payload() -> dict:
+def _index_payload(
+    refs: list[str] | None = None,
+    *,
+    next_cursor: str = "",
+    has_more: bool = False,
+) -> dict:
+    refs = INDEX_REFS if refs is None else refs
     return {
         "schema": "mystand.resource-index.page.v1",
         "ok": True,
@@ -69,14 +76,22 @@ def _index_payload() -> dict:
                 "resourceUid": ref,
                 "safeLabel": f"合成索引{index}",
             }
-            for index, ref in enumerate(INDEX_REFS, start=1)
+            for index, ref in enumerate(refs, start=1)
         ],
-        "nextCursor": "",
-        "hasMore": False,
+        "nextCursor": next_cursor,
+        "hasMore": has_more,
     }
 
 
-def _base_requirement(query_plan: dict, *, fact_kind: str, operation: str) -> dict:
+def _base_requirement(
+    query_plan: dict,
+    *,
+    fact_kind: str,
+    operation: str,
+    index_refs: list[str] | None = None,
+) -> dict:
+    index_refs = INDEX_REFS if index_refs is None else index_refs
+    index_refs_digest = canonical_digest(index_refs)
     collection = fact_kind == "collection"
     plan_id = f"plan-{query_plan['query_kind']}-2026"
     seed_query_plan = {
@@ -103,8 +118,8 @@ def _base_requirement(query_plan: dict, *, fact_kind: str, operation: str) -> di
         "scopeFingerprint": IDENTITY.datascope_fingerprint,
         "coverageRequired": query_plan["coverage_required"],
         "queryPlan": seed_query_plan,
-        "indexCount": len(INDEX_REFS),
-        "indexResourceRefsDigest": INDEX_REFS_DIGEST,
+        "indexCount": len(index_refs),
+        "indexResourceRefsDigest": index_refs_digest,
         "indexHasMore": False,
     }
     return {
@@ -121,8 +136,8 @@ def _base_requirement(query_plan: dict, *, fact_kind: str, operation: str) -> di
         "query_args": query_plan["query_args"],
         "coverage_required": query_plan["coverage_required"],
         "query_plan": query_plan,
-        "index_count": len(INDEX_REFS),
-        "index_resource_refs_digest": INDEX_REFS_DIGEST,
+        "index_count": len(index_refs),
+        "index_resource_refs_digest": index_refs_digest,
         "index_has_more": False,
         "requirement_seed": requirement_seed,
         "binding": _binding(),
@@ -182,6 +197,73 @@ def _finish_index(turn) -> None:
         _index_payload(),
     )
     assert result is not None and result.status == "success"
+
+
+def _rank_requirement(index_refs: list[str]) -> tuple[dict, dict]:
+    plan = {
+        "operation": "read",
+        "query_kind": "rank",
+        "module_id": "finance-ledger",
+        "fact_paths": ["finance.performance.rank"],
+        "query_args": {"year": 2026, "rank": 4},
+        "coverage_required": True,
+    }
+    return plan, {
+        **_base_requirement(
+            plan,
+            fact_kind="collection",
+            operation="rank",
+            index_refs=index_refs,
+        ),
+        "metric": "settled_performance",
+        "ordinal": 4,
+    }
+
+
+def _collection_result(requirement: dict, refs: list[str]) -> str:
+    refs_digest = canonical_digest(refs)
+    return json.dumps(
+        {
+            "schema": "mystand.query-result.v1",
+            "ok": True,
+            "status": "matched",
+            "queryKind": "rank",
+            "planId": requirement["plan_id"],
+            "requirementDigest": requirement["requirement_digest"],
+            "content": (
+                "2026年没有可排名的业绩记录。"
+                if not refs
+                else "2026年合成排名结果。"
+            ),
+            "facts": [],
+            "missing_facts": [],
+            "recordRefs": refs,
+            "coverage": {
+                "expectedCount": len(refs),
+                "returnedCount": len(refs),
+                "hasMore": False,
+                "expectedResourceRefsDigest": refs_digest,
+                "returnedResourceRefsDigest": refs_digest,
+                "year": 2026,
+                "scopeFingerprint": IDENTITY.datascope_fingerprint,
+                "tieRule": "dense",
+                "complete": True,
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def _run_preexecuted_fact(turn, requirement: dict) -> list[dict]:
+    return _run_mystand_preexecuted_evidence(
+        "mystand_resource_index",
+        user_message="今年业绩第四名是谁？",
+        system_prompt="",
+        tool_start_callback=lambda *_args: None,
+        tool_complete_callback=lambda *_args: None,
+        trusted_turn=turn,
+        fact_requirement=requirement,
+    )
 
 
 def _assert_mutated_index_arguments_are_blocked(turn) -> None:
@@ -271,6 +353,276 @@ def test_index_receipt_rejects_false_has_more_with_nonempty_cursor() -> None:
     assert result is not None and result.status == "success"
     assert turn.index_receipt is not None
     assert turn.index_receipt.status == "unavailable"
+
+
+def test_empty_collection_still_queries_and_issues_zero_coverage_receipt(
+    monkeypatch,
+) -> None:
+    plan, requirement = _rank_requirement([])
+    parsed = _parse_mystand_fact_requirement_header(
+        _signed_headers(requirement),
+        signing_key=TEST_SIGNING_KEY,
+        expected_binding=_binding(),
+    )
+    assert parsed == requirement
+    turn = _begin(requirement)
+    index_calls: list[dict] = []
+    query_calls: list[dict] = []
+    monkeypatch.setattr(
+        mystand_resource_index_tool,
+        "_post_internal",
+        lambda payload, _user_id: index_calls.append(dict(payload))
+        or json.dumps(_index_payload([]), ensure_ascii=False),
+    )
+    monkeypatch.setattr(
+        mystand_query_tool,
+        "_post_internal",
+        lambda payload, _session: query_calls.append(dict(payload))
+        or _collection_result(requirement, []),
+    )
+
+    session_tokens = set_session_vars(
+        platform="api_server",
+        user_id=IDENTITY.account_id,
+        message_id=MESSAGE_ID,
+        session_id=SESSION_ID,
+        user_message="今年业绩第四名是谁？",
+    )
+    turn_token = activate_turn(turn)
+    try:
+        evidence = _run_preexecuted_fact(turn, requirement)
+    finally:
+        deactivate_turn(turn_token)
+        clear_session_vars(session_tokens)
+
+    assert len(index_calls) == 1
+    assert len(query_calls) == 1
+    assert {
+        key: query_calls[0][key]
+        for key in plan
+    } == plan
+    assert query_calls[0]["requirement_digest"] == requirement[
+        "requirement_digest"
+    ]
+    assert [item["name"] for item in evidence] == [
+        "mystand_resource_index",
+        "mystand_query",
+    ]
+    index_payload = json.loads(evidence[0]["content"])
+    assert index_payload["schema"] == "mystand.resource-index.complete.v1"
+    assert index_payload["pageCount"] == 1
+    assert index_payload["items"] == []
+    assert turn.index_receipt is not None
+    assert turn.index_receipt.status == "found"
+    assert turn.index_receipt.resource_count == 0
+    assert turn.index_receipt.resource_refs_digest == canonical_digest([])
+    completion = check_completion("模型伪造了一个名字。", turn)
+    assert completion.allowed is True
+    assert completion.text == "2026年没有可排名的业绩记录。"
+    assert completion.verification is not None
+    assert completion.verification["index_count"] == 0
+    assert completion.verification["coverage"]["returnedCount"] == 0
+
+
+def test_empty_resource_read_index_rejects_before_query(monkeypatch) -> None:
+    plan = {
+        "operation": "read",
+        "query_kind": "resource-read",
+        "module_id": "property-maintenance",
+        "fact_paths": ["content"],
+        "query_args": {
+            "semanticQueryDigest": hashlib.sha256(
+                b"generic question"
+            ).hexdigest(),
+        },
+        "coverage_required": False,
+    }
+    requirement = _base_requirement(
+        plan,
+        fact_kind="single",
+        operation="read",
+        index_refs=[],
+    )
+    turn = _begin(requirement)
+    query_calls: list[dict] = []
+    monkeypatch.setattr(
+        mystand_resource_index_tool,
+        "mystand_resource_index_tool_handler",
+        lambda _args: json.dumps(_index_payload([]), ensure_ascii=False),
+    )
+    monkeypatch.setattr(
+        mystand_query_tool,
+        "mystand_query_tool_handler",
+        lambda args: query_calls.append(dict(args)) or "{}",
+    )
+
+    evidence = _run_preexecuted_fact(turn, requirement)
+
+    assert [item["name"] for item in evidence] == [
+        "mystand_resource_index"
+    ]
+    assert query_calls == []
+    assert turn.index_receipt is not None
+    assert turn.index_receipt.status == "none"
+    completion = check_completion("模型声称查到了资料。", turn)
+    assert completion.allowed is False
+    assert completion.verification is None
+
+
+@pytest.mark.parametrize("item_count", (51, 101))
+def test_signed_fact_index_walks_every_page_without_truncation(
+    monkeypatch,
+    item_count: int,
+) -> None:
+    refs = [f"finance-index-{index:03d}" for index in range(item_count)]
+    plan, requirement = _rank_requirement(refs)
+    turn = _begin(requirement)
+    index_calls: list[dict] = []
+    query_calls: list[dict] = []
+
+    def _index_handler(args: dict) -> str:
+        index_calls.append(dict(args))
+        cursor = str(args.get("cursor") or "")
+        if not cursor:
+            page_refs = refs[:100]
+            has_more = item_count > 100
+            next_cursor = "cursor-page-2" if has_more else ""
+        elif cursor == "cursor-page-2":
+            page_refs = refs[100:]
+            has_more = False
+            next_cursor = ""
+        else:
+            raise AssertionError(f"unexpected cursor: {cursor}")
+        return json.dumps(
+            _index_payload(
+                page_refs,
+                next_cursor=next_cursor,
+                has_more=has_more,
+            ),
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(
+        mystand_resource_index_tool,
+        "mystand_resource_index_tool_handler",
+        _index_handler,
+    )
+    monkeypatch.setattr(
+        mystand_query_tool,
+        "mystand_query_tool_handler",
+        lambda args: query_calls.append(dict(args))
+        or _collection_result(requirement, refs),
+    )
+
+    evidence = _run_preexecuted_fact(turn, requirement)
+
+    assert [
+        str(call.get("cursor") or "") for call in index_calls
+    ] == ([""] if item_count == 51 else ["", "cursor-page-2"])
+    index_payload = json.loads(evidence[0]["content"])
+    assert index_payload["schema"] == "mystand.resource-index.complete.v1"
+    assert index_payload["pageCount"] == (1 if item_count == 51 else 2)
+    assert index_payload["hasMore"] is False
+    assert index_payload["nextCursor"] == ""
+    assert len(index_payload["items"]) == item_count
+    assert query_calls == [plan]
+    assert turn.index_receipt is not None
+    assert turn.index_receipt.status == "found"
+    assert turn.index_receipt.has_more is False
+    assert turn.index_receipt.resource_count == item_count
+    assert turn.index_receipt.matched_resource_refs == sorted(refs)
+    assert turn.index_receipt.resource_refs_digest == canonical_digest(
+        sorted(refs)
+    )
+    completion = check_completion("模型伪造排名结果。", turn)
+    assert completion.allowed is True
+    assert completion.verification is not None
+
+
+@pytest.mark.parametrize(
+    "failure_mode",
+    (
+        "tampered_middle_page",
+        "duplicate_ref",
+        "duplicate_ref_in_page",
+        "stalled_cursor",
+    ),
+)
+def test_signed_fact_index_pagination_anomaly_fails_closed(
+    monkeypatch,
+    failure_mode: str,
+) -> None:
+    refs = [f"finance-index-{index:03d}" for index in range(101)]
+    _plan, requirement = _rank_requirement(refs)
+    turn = _begin(requirement)
+    query_calls: list[dict] = []
+
+    def _index_handler(args: dict) -> str:
+        cursor = str(args.get("cursor") or "")
+        if not cursor:
+            page_refs = refs[:100]
+            if failure_mode == "duplicate_ref_in_page":
+                page_refs = [*refs[:99], refs[98]]
+            return json.dumps(
+                _index_payload(
+                    page_refs,
+                    next_cursor="cursor-page-2",
+                    has_more=True,
+                ),
+                ensure_ascii=False,
+            )
+        if failure_mode == "tampered_middle_page":
+            page_refs = ["finance-index-tampered"]
+            has_more = False
+            next_cursor = ""
+        elif failure_mode == "duplicate_ref":
+            page_refs = [refs[99]]
+            has_more = False
+            next_cursor = ""
+        else:
+            page_refs = [refs[100]]
+            has_more = True
+            next_cursor = "cursor-page-2"
+        return json.dumps(
+            _index_payload(
+                page_refs,
+                next_cursor=next_cursor,
+                has_more=has_more,
+            ),
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(
+        mystand_resource_index_tool,
+        "mystand_resource_index_tool_handler",
+        _index_handler,
+    )
+    monkeypatch.setattr(
+        mystand_query_tool,
+        "mystand_query_tool_handler",
+        lambda args: query_calls.append(dict(args)) or "{}",
+    )
+
+    evidence = _run_preexecuted_fact(turn, requirement)
+
+    assert query_calls == []
+    assert [item["name"] for item in evidence] == [
+        "mystand_resource_index"
+    ]
+    index_payload = json.loads(evidence[0]["content"])
+    if failure_mode == "tampered_middle_page":
+        assert index_payload["ok"] is True
+        assert turn.index_receipt is not None
+        assert (
+            turn.index_receipt.resource_refs_digest
+            != requirement["index_resource_refs_digest"]
+        )
+    else:
+        assert index_payload["ok"] is False
+        assert index_payload["code"] == "mystand_resource_index_incomplete"
+    completion = check_completion("模型声称已取得完整索引。", turn)
+    assert completion.allowed is False
+    assert completion.verification is None
 
 
 @pytest.mark.parametrize(
@@ -686,8 +1038,8 @@ def test_real_generic_chain_projects_facts_without_content() -> None:
             "planId": requirement["plan_id"],
             "requirementDigest": requirement["requirement_digest"],
             "scopeFingerprint": IDENTITY.datascope_fingerprint,
-            "resource": {"resourceUid": "resource-generic-01"},
-            "recordRefs": ["resource-generic-01"],
+            "resource": {"resourceUid": INDEX_REFS[0]},
+            "recordRefs": [INDEX_REFS[0]],
             "facts": [
                 {
                     "predicate": "owner.name",
@@ -718,6 +1070,60 @@ def test_real_generic_chain_projects_facts_without_content() -> None:
 
     _assert_mutated_index_arguments_are_blocked(turn)
     _assert_mutated_index_result_is_blocked(turn)
+    original_evidence = turn.evidence[0]
+    tampered_allowed_facts = json.loads(original_evidence.allowed_facts)
+    tampered_allowed_facts["facts"][0]["value"] = (
+        "串入的另一份资料正文"
+    )
+    turn.evidence[0] = replace(
+        original_evidence,
+        allowed_facts=json.dumps(
+            tampered_allowed_facts,
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+    )
+    tampered_projection = check_completion(
+        "模型试图使用被改写的证据摘要。",
+        turn,
+    )
+    assert tampered_projection.allowed is False
+    assert tampered_projection.verification is None
+    turn.evidence[0] = original_evidence
+
+    original_query_result = turn.action_results[1]
+    turn.action_results[1] = replace(
+        original_query_result,
+        normalized_payload={
+            **original_query_result.normalized_payload,
+            "facts": [
+                {
+                    "predicate": "owner.name",
+                    "label": "业主姓名",
+                    "value": "串入的另一份资料正文",
+                }
+            ],
+        },
+    )
+    mutated_normalized_result = check_completion(
+        "模型试图使用未绑定原始回执的投影。",
+        turn,
+    )
+    assert mutated_normalized_result.allowed is False
+    assert mutated_normalized_result.verification is None
+    turn.action_results[1] = original_query_result
+
+    turn.evidence[0] = replace(
+        original_evidence,
+        record_refs=["resource-from-another-index"],
+    )
+    crossed_evidence = check_completion(
+        "模型试图把另一轮查询证据接进来。",
+        turn,
+    )
+    assert crossed_evidence.allowed is False
+    assert crossed_evidence.verification is None
+    turn.evidence[0] = original_evidence
     turn.evidence.append(
         replace(
             turn.evidence[0],
@@ -728,6 +1134,91 @@ def test_real_generic_chain_projects_facts_without_content() -> None:
     extra_evidence = check_completion("模型继续伪造业主姓名。", turn)
     assert extra_evidence.allowed is False
     assert extra_evidence.verification is None
+
+
+@pytest.mark.parametrize(
+    ("record_refs", "resource_uid", "allowed"),
+    (
+        ([], None, False),
+        (["resource-from-another-index"], None, False),
+        ([INDEX_REFS[0], INDEX_REFS[1]], INDEX_REFS[0], True),
+        ([INDEX_REFS[0], INDEX_REFS[0]], None, False),
+        ([INDEX_REFS[0], "resource-from-another-index"], None, False),
+        ([INDEX_REFS[0]], "resource-from-another-index", False),
+    ),
+)
+def test_generic_fact_evidence_sources_must_be_current_index_subset(
+    record_refs: list[str],
+    resource_uid: str | None,
+    allowed: bool,
+) -> None:
+    plan = {
+        "operation": "read",
+        "query_kind": "resource-read",
+        "module_id": "",
+        "fact_paths": ["content"],
+        "query_args": {
+            "semanticQueryDigest": hashlib.sha256(
+                b"generic question"
+            ).hexdigest(),
+        },
+        "coverage_required": False,
+    }
+    requirement = _base_requirement(
+        plan,
+        fact_kind="single",
+        operation="read",
+    )
+    turn = _begin(requirement)
+    _finish_index(turn)
+    assert begin_action(
+        turn,
+        "mystand_query",
+        "v1",
+        plan,
+        call_id="call-query",
+    ).decision == "allow"
+    raw = {
+        "schema": "mystand.query-result.v1",
+        "ok": True,
+        "status": "matched",
+        "queryKind": "resource-read",
+        "planId": requirement["plan_id"],
+        "requirementDigest": requirement["requirement_digest"],
+        "scopeFingerprint": IDENTITY.datascope_fingerprint,
+        "recordRefs": record_refs,
+        "facts": [
+            {
+                "predicate": "owner.name",
+                "label": "业主姓名",
+                "value": "合成姓名乙",
+            }
+        ],
+        "missing_facts": [],
+    }
+    if resource_uid is not None:
+        raw["resource"] = {"resourceUid": resource_uid}
+
+    result = finish_action(
+        turn,
+        "call-query",
+        "mystand_query",
+        "v1",
+        raw,
+    )
+
+    assert result is not None
+    completion = check_completion("模型声称业主是合成姓名乙。", turn)
+    if allowed:
+        assert result.status == "success"
+        assert turn.evidence[0].record_refs == sorted(record_refs)
+        assert completion.allowed is True
+        assert completion.verification is not None
+    else:
+        assert result.status == "error"
+        assert turn.evidence == []
+        assert completion.allowed is False
+        assert completion.verification is None
 
 
 @pytest.mark.parametrize(

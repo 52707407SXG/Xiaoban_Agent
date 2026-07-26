@@ -586,7 +586,7 @@ async def test_signed_generic_full_http_chain_uses_only_trusted_query_text(
                 "requirementDigest": requirement["requirement_digest"],
                 "scopeFingerprint": IDENTITY.datascope_fingerprint,
                 "content": "面积：100平方米",
-                "recordRefs": ["resource-generic-01"],
+                    "recordRefs": [INDEX_REFS[0]],
                 "facts": [
                     {
                         "kind": "property.area",

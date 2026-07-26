@@ -19,10 +19,15 @@ from typing import Any, List, Mapping, Optional, Sequence
 from xiaoban.trusted_runtime.turns import (
     build_work_turn,
     result_has_write_actions,
+    serialize_allowed_facts,
 )
 from xiaoban.trusted_runtime.fact_contract import (
+    SIGNED_FACT_INDEX_MAX_ITEMS,
+    SIGNED_FACT_INDEX_MAX_PAGES,
+    SIGNED_FACT_INDEX_PAGE_LIMIT,
     canonical_digest,
     evidence_requirement_digest,
+    resource_read_record_refs_valid,
 )
 from xiaoban.trusted_runtime.types import (
     CompletionDecision,
@@ -202,7 +207,7 @@ def _verified_index_receipt_digest(
         "operation": "list_resources",
         "module_id": str(requirement.get("module_id") or ""),
         "status": "all",
-        "limit": 100,
+        "limit": SIGNED_FACT_INDEX_PAGE_LIMIT,
     }
     if (
         call.version != "v1"
@@ -222,28 +227,52 @@ def _verified_index_receipt_digest(
     ):
         return ""
     raw_items = raw_payload.get("items")
+    raw_schema = raw_payload.get("schema")
     if (
-        not isinstance(raw_items, list)
-        or not raw_items
+        raw_payload.get("ok") is not True
+        or raw_schema not in {
+            "mystand.resource-index.page.v1",
+            "mystand.resource-index.complete.v1",
+        }
+        or not isinstance(raw_items, list)
         or any(
             not isinstance(item, Mapping)
             or not isinstance(item.get("resourceUid"), str)
             or not item.get("resourceUid")
             for item in raw_items
         )
+        or (
+            not raw_items
+            and requirement.get("fact_kind") != "collection"
+        )
+        or (
+            raw_schema == "mystand.resource-index.complete.v1"
+            and (
+                isinstance(raw_payload.get("pageCount"), bool)
+                or not isinstance(raw_payload.get("pageCount"), int)
+                or raw_payload.get("pageCount") < 1
+                or raw_payload.get("pageCount")
+                > SIGNED_FACT_INDEX_MAX_PAGES
+                or len(raw_items) > SIGNED_FACT_INDEX_MAX_ITEMS
+            )
+        )
+        or (
+            raw_schema == "mystand.resource-index.page.v1"
+            and len(raw_items) > SIGNED_FACT_INDEX_PAGE_LIMIT
+        )
     ):
         return ""
-    raw_resource_refs = sorted(
-        {
-            str(item.get("resourceUid"))
-            for item in raw_items
-            if isinstance(item, Mapping) and item.get("resourceUid")
-        }
-    )
+    listed_resource_refs = [
+        str(item.get("resourceUid"))
+        for item in raw_items
+        if isinstance(item, Mapping) and item.get("resourceUid")
+    ]
+    raw_resource_refs = sorted(set(listed_resource_refs))
     if (
-        raw_resource_refs != sorted(set(receipt.matched_resource_refs))
+        len(raw_resource_refs) != len(listed_resource_refs)
+        or raw_resource_refs != sorted(set(receipt.matched_resource_refs))
         or raw_payload.get("hasMore") is not receipt.has_more
-        or raw_payload.get("nextCursor") not in (None, "")
+        or raw_payload.get("nextCursor") != ""
     ):
         return ""
     return _canonical_digest(
@@ -662,13 +691,29 @@ def _generic_fact_completion(turn: WorkTurn) -> CompletionDecision:
             "blocked_fact_evidence_binding",
         )
     normalized_result = _mapping(query_results[0].normalized_payload)
+    try:
+        raw_result = json.loads(query_results[0].raw_text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raw_result = None
     if (
-        normalized_result.get("queryKind") != requirement.get("query_kind")
+        not isinstance(raw_result, dict)
+        or _canonical_digest(raw_result)
+        != _canonical_digest(normalized_result)
+        or query_evidence.allowed_facts
+        != serialize_allowed_facts("mystand_query", raw_result)
+        or normalized_result.get("queryKind")
+        != requirement.get("query_kind")
         or normalized_result.get("planId") != requirement.get("plan_id")
         or normalized_result.get("requirementDigest")
         != requirement_digest
         or normalized_result.get("scopeFingerprint")
         != binding.get("datascope_fingerprint")
+        or turn.index_receipt is None
+        or not resource_read_record_refs_valid(
+            normalized_result.get("recordRefs"),
+            query_evidence.record_refs,
+            turn.index_receipt.matched_resource_refs,
+        )
     ):
         return CompletionDecision(
             False,

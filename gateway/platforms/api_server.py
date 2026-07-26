@@ -71,6 +71,9 @@ from gateway.mystand_integrity_guard import (
     requires_write_evidence as _requires_mystand_write_evidence,
 )
 from xiaoban.trusted_runtime.fact_contract import (
+    SIGNED_FACT_INDEX_MAX_ITEMS,
+    SIGNED_FACT_INDEX_MAX_PAGES,
+    SIGNED_FACT_INDEX_PAGE_LIMIT,
     build_fact_query_plan as _mystand_fact_query_plan,
     normalized_fact_query_text as _normalized_mystand_fact_query_text,
 )
@@ -290,6 +293,8 @@ _MYSTAND_STREAM_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 _MYSTAND_FACT_REQUIREMENT_HEADER = "X-Xiaoban-Fact-Requirement"
 _MYSTAND_FACT_SIGNATURE_HEADER = "X-Xiaoban-Fact-Signature"
 _MYSTAND_FACT_SIGNATURE_DOMAIN = b"mystand-fact-requirement-v1\0"
+_MYSTAND_FACT_INDEX_MAX_SCAN_BYTES = 60_000_000
+_MYSTAND_FACT_INDEX_MAX_RESULT_BYTES = 8_000_000
 _MYSTAND_FACT_BINDING_FIELDS = frozenset(
     {
         "user_id",
@@ -958,6 +963,126 @@ def _build_mystand_preexecuted_prompt(evidence: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _read_complete_mystand_resource_index(
+    arguments: Dict[str, Any],
+    page_handler: Any,
+) -> str:
+    """Walk one signed fact index to a terminal cursor, or fail as a whole.
+
+    The trusted runtime records this as one logical index action.  Individual
+    pages are transport details; no partial page set may establish an
+    IndexReceipt or be compared with My Stand's signed count/digest.
+    """
+
+    def _failure() -> str:
+        return json.dumps(
+            {
+                "ok": False,
+                "status": 502,
+                "code": "mystand_resource_index_incomplete",
+                "error": "My Stand 资源索引没有完整读取。",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    try:
+        page_limit = int(arguments.get("limit", 100))
+    except (TypeError, ValueError):
+        return _failure()
+    if page_limit < 1 or page_limit > SIGNED_FACT_INDEX_PAGE_LIMIT:
+        return _failure()
+
+    all_items: List[Dict[str, Any]] = []
+    resource_refs: set[str] = set()
+    seen_cursors = {""}
+    cursor = ""
+    total_bytes = 0
+    for page_count in range(1, SIGNED_FACT_INDEX_MAX_PAGES + 1):
+        page_arguments = dict(arguments)
+        if cursor:
+            page_arguments["cursor"] = cursor
+        else:
+            page_arguments.pop("cursor", None)
+        raw_page = _safe_tool_content(page_handler(page_arguments))
+        total_bytes += len(raw_page.encode("utf-8"))
+        if total_bytes > _MYSTAND_FACT_INDEX_MAX_SCAN_BYTES:
+            return _failure()
+        try:
+            page = json.loads(raw_page)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return _failure()
+        if (
+            not isinstance(page, dict)
+            or page.get("schema") != "mystand.resource-index.page.v1"
+            or page.get("ok") is not True
+            or not isinstance(page.get("items"), list)
+            or len(page["items"]) > page_limit
+            or not isinstance(page.get("hasMore"), bool)
+            or not isinstance(page.get("nextCursor"), str)
+            or len(page["nextCursor"]) > 800
+        ):
+            return _failure()
+
+        page_refs: List[str] = []
+        for item in page["items"]:
+            if not isinstance(item, dict):
+                return _failure()
+            resource_uid = item.get("resourceUid")
+            if (
+                not isinstance(resource_uid, str)
+                or not resource_uid
+                or len(resource_uid) > 120
+                or resource_uid in resource_refs
+                or resource_uid in page_refs
+            ):
+                return _failure()
+            page_refs.append(resource_uid)
+        if (
+            len(all_items) + len(page["items"])
+            > SIGNED_FACT_INDEX_MAX_ITEMS
+        ):
+            return _failure()
+        resource_refs.update(page_refs)
+        all_items.extend(
+            {"resourceUid": resource_uid}
+            for resource_uid in page_refs
+        )
+
+        has_more = page["hasMore"]
+        next_cursor = page["nextCursor"]
+        if not has_more:
+            if next_cursor:
+                return _failure()
+            complete_result = json.dumps(
+                {
+                    "schema": "mystand.resource-index.complete.v1",
+                    "ok": True,
+                    "items": all_items,
+                    "nextCursor": "",
+                    "hasMore": False,
+                    "pageCount": page_count,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if (
+                len(complete_result.encode("utf-8"))
+                > _MYSTAND_FACT_INDEX_MAX_RESULT_BYTES
+            ):
+                return _failure()
+            return complete_result
+        if (
+            not page["items"]
+            or not next_cursor
+            or next_cursor in seen_cursors
+        ):
+            return _failure()
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    return _failure()
+
+
 def _run_mystand_preexecuted_evidence(
     initial_tool_choice: str,
     *,
@@ -1069,6 +1194,12 @@ def _run_mystand_preexecuted_evidence(
 
     from tools.mystand_resource_index_tool import mystand_resource_index_tool_handler
 
+    index_handler = mystand_resource_index_tool_handler
+    if isinstance(fact_requirement, dict):
+        index_handler = lambda args: _read_complete_mystand_resource_index(
+            args,
+            mystand_resource_index_tool_handler,
+        )
     index_result = execute(
         "mystand_resource_index",
         {
@@ -1079,9 +1210,9 @@ def _run_mystand_preexecuted_evidence(
                 else _trusted_mystand_module_id(system_prompt)
             ),
             "status": "all",
-            "limit": 100,
+            "limit": SIGNED_FACT_INDEX_PAGE_LIMIT,
         },
-        mystand_resource_index_tool_handler,
+        index_handler,
     )
     if isinstance(fact_requirement, dict):
         try:
@@ -1090,9 +1221,14 @@ def _run_mystand_preexecuted_evidence(
             return evidence
         if (
             not isinstance(index_payload, dict)
+            or index_payload.get("schema")
+            != "mystand.resource-index.complete.v1"
             or index_payload.get("ok") is not True
             or not isinstance(index_payload.get("items"), list)
-            or not index_payload["items"]
+            or (
+                not index_payload["items"]
+                and fact_requirement.get("fact_kind") != "collection"
+            )
             or index_payload.get("hasMore") is not False
             or index_payload.get("nextCursor") not in (None, "")
         ):

@@ -40,6 +40,7 @@ from xiaoban.trusted_runtime.fact_contract import (
     build_fact_query_plan,
     canonical_digest,
     evidence_requirement_digest,
+    resource_read_record_refs_valid,
 )
 
 _ACCOUNT_KEYS = frozenset(
@@ -618,6 +619,21 @@ def _project_allowed_facts(
     return facts
 
 
+def serialize_allowed_facts(
+    action_id: str,
+    payload: Dict[str, Any],
+) -> str:
+    """Create the one canonical EvidenceEnvelope fact projection."""
+    contract = ACTION_OUTPUT_CONTRACTS.get(action_id)
+    if contract is None:
+        return ""
+    return json.dumps(
+        _project_allowed_facts(contract, payload),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
 def _record_refs(contract: ActionOutputContract, payload: Dict[str, Any], args: Dict[str, Any]) -> List[str]:
     refs: List[str] = []
     for path in contract.record_ref_paths:
@@ -656,11 +672,13 @@ def _update_index_receipt(
     raw_has_more = result.normalized_payload.get("hasMore")
     has_more = raw_has_more if isinstance(raw_has_more, bool) else None
     next_cursor = result.normalized_payload.get("nextCursor")
-    terminal_page_is_consistent = (
-        has_more is not False
-        or next_cursor is None
-        or next_cursor == ""
+    signed_fact = isinstance(turn.fact_requirement, Mapping)
+    legacy_pagination_undeclared = (
+        not signed_fact and raw_has_more is None and next_cursor is None
     )
+    terminal_page_is_consistent = (
+        has_more is False and next_cursor in (None, "")
+    ) or legacy_pagination_undeclared
     if result.status == "success" and terminal_page_is_consistent:
         status = "found"
     elif result.status == "empty":
@@ -698,9 +716,31 @@ def _update_index_receipt(
         source_call_id=result.call_id,
         has_more=has_more,
         resource_count=len(record_refs),
-        resource_refs_digest=(
-            _canonical_digest(record_refs) if record_refs else ""
-        ),
+        resource_refs_digest=_canonical_digest(record_refs),
+    )
+
+
+def _signed_resource_read_refs_valid(
+    turn: WorkTurn,
+    contract: ActionOutputContract,
+    payload: Mapping[str, Any],
+    arguments: Dict[str, Any],
+) -> bool:
+    """Bind all generic fact evidence sources to this turn's index."""
+    requirement = turn.fact_requirement
+    if (
+        not isinstance(requirement, Mapping)
+        or requirement.get("fact_kind") != "single"
+        or requirement.get("query_kind") != "resource-read"
+    ):
+        return True
+    receipt = turn.index_receipt
+    if receipt is None or receipt.status != "found":
+        return False
+    return resource_read_record_refs_valid(
+        payload.get("recordRefs"),
+        _record_refs(contract, dict(payload), arguments),
+        receipt.matched_resource_refs,
     )
 
 
@@ -752,15 +792,47 @@ def finish_action(
         and turn.fact_requirement.get("fact_kind") == "collection"
         and collection_evidence is None
     )
+    resource_read_binding_invalid = bool(
+        action_id == "mystand_query"
+        and payload
+        and not _signed_resource_read_refs_valid(
+            turn,
+            contract,
+            payload,
+            call.arguments,
+        )
+    )
     if collection_evidence is not None:
         payload = dict(payload)
         payload["collection_evidence"] = collection_evidence
     if cancelled:
         status = "cancelled"
-    elif not payload or fact_binding_invalid or collection_binding_invalid:
+    elif (
+        not payload
+        or fact_binding_invalid
+        or collection_binding_invalid
+        or resource_read_binding_invalid
+    ):
         status = "error"  # 长文本/半截回执不再洗白成 success
     else:
         status = _classify_contract_status(contract, payload)
+        if (
+            status == "empty"
+            and contract.kind == "index"
+            and isinstance(turn.fact_requirement, Mapping)
+            and turn.fact_requirement.get("fact_kind") == "collection"
+            and payload.get("schema")
+            in {
+                "mystand.resource-index.page.v1",
+                "mystand.resource-index.complete.v1",
+            }
+            and payload.get("hasMore") is False
+            and payload.get("nextCursor") == ""
+        ):
+            # A complete zero-item index is valid coverage for collection
+            # facts.  It still must be followed by mystand_query so the server
+            # can issue a signed zero-coverage business result.
+            status = "success"
     result = ActionResult(
         call_id=call_id,
         action_id=action_id,
@@ -786,7 +858,6 @@ def finish_action(
         return result
     if collection_evidence is not None:
         turn.collection_evidence = collection_evidence
-    facts = _project_allowed_facts(contract, payload)
     turn.evidence.append(
         EvidenceEnvelope(
             evidence_id=hashlib.sha256(
@@ -799,7 +870,7 @@ def finish_action(
                 identity.datascope_fingerprint if identity else ""
             ),
             status=status,
-            allowed_facts=json.dumps(facts, ensure_ascii=False, sort_keys=True),
+            allowed_facts=serialize_allowed_facts(action_id, payload),
             record_refs=_record_refs(contract, payload, call.arguments),
             input_digest=hashlib.sha256(
                 json.dumps(
