@@ -30,7 +30,7 @@ VERIFICATION_BLOCK_MESSAGE = (
     "这轮没有完成新的真实核验，我不能说已经核验或确认。"
 )
 EMPTY_RESULT_MESSAGE = "这轮没有找到对应的站内资料内容。"
-DENIED_MESSAGE = "这份资料已找到，但当前没有授权给小伴读取。"
+DENIED_MESSAGE = "当前没有权限让小伴读取这份资料。"
 NOT_FOUND_MESSAGE = "没有找到这份资料，或者这个站内 ID 已失效。"
 AMBIGUOUS_MESSAGE = "这份资料目前无法唯一定位，请补充更完整的资料名称。"
 ERROR_MESSAGE = "站内资料读取暂时没有接稳，请稍后再试。"
@@ -124,7 +124,12 @@ def check_completion(final_text: str, turn: WorkTurn) -> CompletionDecision:
         has_claim_verb = _has_positive_claim(_CLAIM_VERB_RE, text)
         has_verification_claim = _has_positive_claim(_VERIFICATION_CLAIM_RE, text)
         fact_tokens = _answer_fact_tokens(text)
-        honest_admission = bool(_HONESTY_RE.search(text)) and not fact_tokens
+        honest_admission = (
+            bool(_HONESTY_RE.search(text))
+            and not fact_tokens
+            and not _CLAIM_VERB_RE.search(text)
+            and not has_verification_claim
+        )
 
         if turn.interaction_kind == INTERACTION_CHAT and not (
             has_claim_verb or has_verification_claim or fact_tokens
@@ -161,6 +166,7 @@ def _trusted_turn_binding_valid(
     *,
     channel: str,
     account_id: str,
+    request_id: str,
     message_id: str,
 ) -> bool:
     """_trusted_turn 必须与本次服务端身份、渠道、messageId、DataScope 再绑定。"""
@@ -171,9 +177,9 @@ def _trusted_turn_binding_valid(
         return False
     if turn.channel != channel:
         return False
-    if message_id and turn.message_id != message_id:
+    if not request_id or turn.request_id != request_id:
         return False
-    if not turn.request_id:
+    if not message_id or turn.message_id != message_id:
         return False
     return True
 
@@ -199,7 +205,11 @@ def check_mystand_final_answer(
         return CompletionDecision(True, str(final_text or ""), "not_mystand")
     if result_has_write_actions(result):
         # 写流程由既有写确认 + 写回执硬闸（上游已先行执行）接管，
-        # 只读 CompletionGuard 不拦截、不改写合法 verified 写回执。
+        # 但失败写回合不能夹带无关的读取事实。
+        if _has_positive_claim(_CLAIM_VERB_RE, str(final_text or "")):
+            return CompletionDecision(
+                False, NO_EVIDENCE_MESSAGE, "blocked_write_fact_leak"
+            )
         return CompletionDecision(True, str(final_text or ""), "write_turn_deferred")
     identity = (
         TrustedIdentity(
@@ -213,7 +223,11 @@ def check_mystand_final_answer(
     turn = result.get("_trusted_turn")
     if isinstance(turn, WorkTurn):
         if not _trusted_turn_binding_valid(
-            turn, channel=channel, account_id=account_id, message_id=message_id
+            turn,
+            channel=channel,
+            account_id=account_id,
+            request_id=request_id,
+            message_id=message_id,
         ):
             return CompletionDecision(
                 False, NO_EVIDENCE_MESSAGE, "blocked_identity_rebind"

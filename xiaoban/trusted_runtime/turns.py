@@ -124,7 +124,7 @@ def classify_interaction(
     texts = [_visible_text(user_message)]
     # 连续业务追问的语境可能在 assistant 回复里（"您是想查…业主吗？"→"他是谁？"），
     # 历史扫描不限角色，漏判成 CHAT 会放行纯人名事实。
-    for message in list(conversation_history or [])[-4:]:
+    for message in list(conversation_history or [])[-8:]:
         if isinstance(message, Mapping):
             texts.append(_visible_text(message.get("content")))
     if any(_BUSINESS_INTENT_RE.search(text) for text in texts if text):
@@ -215,6 +215,8 @@ def begin_action(
     call_id = call_id or f"mystand_pre_{uuid.uuid4().hex}"
     args = dict(arguments or {})
     try:
+        if not turn.request_id or not turn.message_id:
+            return _record_denial(turn, call_id, action_id, "missing_turn_id")
         if is_write_action(action_id, args):
             # 写动作不属于只读合同，绝不经由只读链执行或采证。
             return _record_denial(turn, call_id, action_id, "write_isolated")
@@ -470,19 +472,17 @@ def finish_action(
         raw_text=raw_text if status == "success" else "",
     )
     turn.action_results.append(result)
-    _update_index_receipt(turn, contract, result)
-
     # PostAction Verify：只对真实返回的 ActionResult 执行。
     turn.enter("verifying")
-    if status != "success" or contract.kind == "index":
-        # 索引只负责资源发现与工作前置（记入 IndexReceipt），
-        # 不代替业务 Evidence（计划 §4.3）。
-        return result
     identity = turn.identity
     violations = _scope_violations(payload, identity, call.arguments)
     if violations:
-        # 跨账号/嵌套越权/不可核实 DataScope 的 payload：拒绝成为本轮证据。
         turn.rejected_cross_account += 1
+        return result
+    _update_index_receipt(turn, contract, result)
+    if status != "success" or contract.kind == "index":
+        # 索引只负责资源发现与工作前置（记入 IndexReceipt），
+        # 不代替业务 Evidence（计划 §4.3）。
         return result
     facts = _project_allowed_facts(contract, payload)
     turn.evidence.append(
@@ -513,7 +513,7 @@ def finish_action(
 
 
 def gate_registry_action(
-    name: str, args: Any
+    name: str, args: Any, *, call_id: str = ""
 ) -> Optional["tuple[Optional[WorkTurn], PreActionDecision]"]:
     """``ToolRegistry.dispatch`` 的 PreAction 钩子（Gemini 默认拒绝策略）。
 
@@ -535,7 +535,31 @@ def gate_registry_action(
         turn = current_turn()
         if turn is None:
             return None, PreActionDecision("deny", "no_active_turn")
-        decision = begin_action(turn, name, "v1", args if isinstance(args, dict) else {})
+        if not call_id:
+            from tools.approval import _approval_tool_call_id
+
+            call_id = _approval_tool_call_id.get()
+        pending = next(
+            (
+                call
+                for call in turn.action_calls
+                if call.call_id == call_id
+                and call.action_id == name
+                and not any(result.call_id == call_id for result in turn.action_results)
+            ),
+            None,
+        )
+        decision = (
+            PreActionDecision("allow", "already_allowed", pending)
+            if pending is not None
+            else begin_action(
+                turn,
+                name,
+                "v1",
+                args if isinstance(args, dict) else {},
+                call_id=call_id,
+            )
+        )
         return turn, decision
     except Exception:
         # 策略异常默认拒绝（只影响可信目录动作）。
@@ -595,6 +619,11 @@ def build_work_turn(
     模型/历史伪造的调用与回执会在 begin_action/finish_action 的同一
     套 PreAction、绑定与合同校验中被拒绝，不能借此洗白成证据。
     """
+    compat_id = hashlib.sha256(
+        json.dumps(_current_turn_messages(result), ensure_ascii=False, sort_keys=True).encode()
+    ).hexdigest()[:16]
+    request_id = request_id or f"compat-req-{compat_id}"
+    message_id = message_id or f"compat-msg-{compat_id}"
     turn = begin_turn(
         channel=channel,
         user_message=user_message,

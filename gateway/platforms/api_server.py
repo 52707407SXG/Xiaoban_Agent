@@ -864,7 +864,7 @@ def _verified_mystand_failure_response(
         except (TypeError, ValueError):
             status = 0
         if status == 403:
-            return "这份资料已找到，但当前没有授权给小伴读取。"
+            return "当前没有权限让小伴读取这份资料。"
         if status == 404:
             return "没有找到这份资料，或者这个站内 ID 已失效。"
         if status == 409:
@@ -957,6 +957,7 @@ def _guard_evidence_backed_response(
             result=result,
             channel="web",
             account_id=str(result.get("_mystand_user_id") or ""),
+            request_id=str(result.get("_mystand_request_id") or ""),
             message_id=str(result.get("_mystand_message_id") or ""),
         )
         if not completion.allowed:
@@ -5951,6 +5952,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 result["_mystand_request"] = mystand_request
                 if mystand_request:
                     result["_mystand_user_id"] = str(request_user_id or "")
+                    result["_mystand_request_id"] = str(trusted_turn.request_id)
                     result["_mystand_message_id"] = str(request_message_id or "")
                     result["_trusted_turn"] = trusted_turn
                 if initial_tool_choice:

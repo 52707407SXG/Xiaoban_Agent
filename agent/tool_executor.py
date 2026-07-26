@@ -75,6 +75,26 @@ def _ra():
     return run_agent
 
 
+def _trusted_preaction_denial(name: str, args: dict, call_id: str) -> str | None:
+    """Run the trusted gate before any public start event."""
+    try:
+        from xiaoban.trusted_runtime.turns import gate_registry_action
+
+        gate = gate_registry_action(name, args, call_id=call_id)
+    except Exception:
+        gate = None
+        if name.startswith("mystand_"):
+            return json.dumps(
+                {"ok": False, "status": 403, "code": "preaction_error"}
+            )
+    if gate is None or gate[1].decision == "allow":
+        return None
+    return json.dumps(
+        {"ok": False, "status": 403, "code": gate[1].reason},
+        ensure_ascii=False,
+    )
+
+
 def _emit_terminal_post_tool_call(
     agent,
     *,
@@ -409,6 +429,26 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                         error_message=getattr(guardrail_decision, "message", None) or "Tool blocked by guardrail policy",
                         middleware_trace=list(middleware_trace),
                     )
+
+        if block_result is None:
+            block_result = _trusted_preaction_denial(
+                function_name,
+                function_args,
+                getattr(tool_call, "id", "") or "",
+            )
+            if block_result is not None:
+                _emit_terminal_post_tool_call(
+                    agent,
+                    function_name=function_name,
+                    function_args=function_args,
+                    result=block_result,
+                    effective_task_id=effective_task_id,
+                    tool_call_id=getattr(tool_call, "id", "") or "",
+                    status="blocked",
+                    error_type="trusted_preaction",
+                    error_message=block_result,
+                    middleware_trace=list(middleware_trace),
+                )
 
         # ── Checkpoint preflight (only for tools that will execute) ──
         if block_result is None:
@@ -878,7 +918,19 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             if not guardrail_decision.allows_execution:
                 _guardrail_block_decision = guardrail_decision
 
-        _execution_blocked = _block_msg is not None or _guardrail_block_decision is not None
+        _trusted_block_result = None
+        if _block_msg is None and _guardrail_block_decision is None:
+            _trusted_block_result = _trusted_preaction_denial(
+                function_name,
+                function_args,
+                getattr(tool_call, "id", "") or "",
+            )
+
+        _execution_blocked = (
+            _block_msg is not None
+            or _guardrail_block_decision is not None
+            or _trusted_block_result is not None
+        )
 
         if _execution_blocked:
             # Tool blocked by plugin or guardrail policy — skip counters,
@@ -952,7 +1004,22 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
         tool_start_time = time.time()
 
-        if _block_msg is not None:
+        if _trusted_block_result is not None:
+            function_result = _trusted_block_result
+            tool_duration = 0.0
+            _emit_terminal_post_tool_call(
+                agent,
+                function_name=function_name,
+                function_args=function_args,
+                result=function_result,
+                effective_task_id=effective_task_id,
+                tool_call_id=getattr(tool_call, "id", "") or "",
+                status="blocked",
+                error_type="trusted_preaction",
+                error_message=function_result,
+                middleware_trace=list(middleware_trace),
+            )
+        elif _block_msg is not None:
             # Tool blocked by plugin policy — return error without executing.
             function_result = json.dumps({"error": _block_msg}, ensure_ascii=False)
             tool_duration = 0.0

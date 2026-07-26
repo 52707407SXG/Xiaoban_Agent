@@ -10,7 +10,7 @@ import json
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # 出口唯一允许的失败语义文案（与现网已验证的失败口径一致）
-DENIED_MESSAGE = "这份资料已找到，但当前没有授权给小伴读取。"
+DENIED_MESSAGE = "当前没有权限让小伴读取这份资料。"
 NOT_FOUND_MESSAGE = "没有找到这份资料，或者这个站内 ID 已失效。"
 AMBIGUOUS_MESSAGE = "这份资料目前无法唯一定位，请补充更完整的资料名称。"
 ERROR_MESSAGE = "站内资料读取暂时没有接稳，请稍后再试。"

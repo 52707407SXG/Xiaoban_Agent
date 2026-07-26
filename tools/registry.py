@@ -403,7 +403,9 @@ class ToolRegistry:
         try:
             from xiaoban.trusted_runtime.turns import gate_registry_action
 
-            gate = gate_registry_action(name, args)
+            gate = gate_registry_action(
+                name, args, call_id=str(kwargs.get("tool_call_id") or "")
+            )
         except Exception:
             if name.startswith("mystand_"):
                 # 可信目录动作的策略异常默认拒绝（Gemini policy 语义）。
