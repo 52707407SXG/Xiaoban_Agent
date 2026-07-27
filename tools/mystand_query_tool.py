@@ -716,7 +716,8 @@ def mystand_query_tool_handler(args, **_kwargs):
             code="trusted_query_text_required",
             status=409,
         )
-    payload["queryText"] = trusted_user_message
+    if "query_kind" not in payload or payload.get("query_kind") == "resource-read":
+        payload["queryText"] = trusted_user_message
     return _post_internal(payload, session)
 
 

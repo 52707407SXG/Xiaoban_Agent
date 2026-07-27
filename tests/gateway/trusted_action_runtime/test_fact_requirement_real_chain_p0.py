@@ -1330,9 +1330,7 @@ def test_typed_query_handler_injects_signed_fields_before_internal_call(
     assert sent["plan_id"] == requirement["plan_id"]
     assert sent["requirement_digest"] == requirement["requirement_digest"]
     assert sent["scope_fingerprint"] == IDENTITY.datascope_fingerprint
-    assert sent["queryText"] == normalized_fact_query_text(
-        "今年业绩第四名是谁？"
-    )
+    assert "queryText" not in sent
 
 
 @pytest.mark.parametrize(
