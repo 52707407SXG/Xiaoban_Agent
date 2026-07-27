@@ -6,6 +6,7 @@ context_length, causing the CLI status bar to show 'ctx --'.
 
 from unittest.mock import MagicMock, patch
 
+from agent.context_compressor import ContextCompressor
 from agent.context_engine import ContextEngine
 
 
@@ -65,6 +66,57 @@ def test_plugin_engine_gets_context_length_on_init():
     assert agent.context_compressor is engine
     assert engine.context_length == 204_800
     assert engine.threshold_tokens == int(204_800 * engine.threshold_percent)
+
+
+def test_strict_paid_init_never_loads_or_starts_context_engine_plugin():
+    """The fixed paid surface is sealed before configurable init hooks."""
+
+    cfg = {
+        "context": {"engine": "stub"},
+        "compression": {"enabled": True},
+        "agent": {"api_max_retries": 9},
+    }
+
+    with (
+        patch("xiaoban_cli.config.load_config", return_value=cfg),
+        patch(
+            "plugins.context_engine.load_context_engine",
+            side_effect=AssertionError("strict init loaded a context plugin"),
+        ) as load_engine,
+        patch.object(
+            ContextCompressor,
+            "on_session_start",
+            side_effect=AssertionError("strict init fired a lifecycle hook"),
+        ) as session_start,
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            model="deepseek-v4-pro",
+            provider="deepseek",
+            api_key="test-key-1234567890",
+            base_url="https://api.deepseek.com/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            fallback_model={
+                "provider": "openrouter",
+                "model": "fallback/model",
+            },
+            strict_no_automatic_paid_retry=True,
+        )
+
+    load_engine.assert_not_called()
+    session_start.assert_not_called()
+    assert isinstance(agent.context_compressor, ContextCompressor)
+    assert agent._strict_no_automatic_paid_retry is True
+    assert agent._disable_streaming is True
+    assert agent._api_max_retries == 1
+    assert agent._fallback_chain == []
+    assert agent.compression_enabled is False
 
 
 def test_active_context_engine_tools_survive_explicit_platform_toolsets():

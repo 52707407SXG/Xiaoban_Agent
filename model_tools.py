@@ -915,6 +915,7 @@ def handle_function_call(
     enabled_tools: Optional[List[str]] = None,
     skip_pre_tool_call_hook: bool = False,
     skip_tool_request_middleware: bool = False,
+    skip_extension_hooks: bool = False,
     tool_request_middleware_trace: Optional[List[Dict[str, Any]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
     disabled_toolsets: Optional[List[str]] = None,
@@ -1019,13 +1020,14 @@ def handle_function_call(
                 enabled_tools=enabled_tools,
                 skip_pre_tool_call_hook=skip_pre_tool_call_hook,
                 skip_tool_request_middleware=skip_tool_request_middleware,
+                skip_extension_hooks=skip_extension_hooks,
                 tool_request_middleware_trace=list(_tool_middleware_trace),
                 enabled_toolsets=enabled_toolsets,
                 disabled_toolsets=disabled_toolsets,
             )
 
     _tool_original_args = dict(function_args)
-    if not skip_tool_request_middleware:
+    if not skip_tool_request_middleware and not skip_extension_hooks:
         try:
             from xiaoban_cli.middleware import apply_tool_request_middleware
 
@@ -1058,7 +1060,7 @@ def handle_function_call(
         # directive (if any), so observer plugins see the hook on that same
         # pass. When skip=True, the caller already fired it — do nothing
         # here.
-        if not skip_pre_tool_call_hook:
+        if not skip_pre_tool_call_hook and not skip_extension_hooks:
             block_message: Optional[str] = None
             try:
                 from xiaoban_cli.plugins import get_pre_tool_call_block_message
@@ -1156,19 +1158,22 @@ def handle_function_call(
                         session_id=session_id,
                         user_task=user_task,
                     )
-            from xiaoban_cli.middleware import run_tool_execution_middleware
+            if skip_extension_hooks:
+                result = _dispatch(function_args)
+            else:
+                from xiaoban_cli.middleware import run_tool_execution_middleware
 
-            result = run_tool_execution_middleware(
-                function_name,
-                function_args,
-                _dispatch,
-                original_args=_tool_original_args,
-                task_id=task_id or "",
-                session_id=session_id or "",
-                tool_call_id=tool_call_id or "",
-                turn_id=turn_id or "",
-                api_request_id=api_request_id or "",
-            )
+                result = run_tool_execution_middleware(
+                    function_name,
+                    function_args,
+                    _dispatch,
+                    original_args=_tool_original_args,
+                    task_id=task_id or "",
+                    session_id=session_id or "",
+                    tool_call_id=tool_call_id or "",
+                    turn_id=turn_id or "",
+                    api_request_id=api_request_id or "",
+                )
         finally:
             if _approval_tokens is not None and reset_current_observability_context is not None:
                 try:
@@ -1177,18 +1182,19 @@ def handle_function_call(
                     pass
         duration_ms = int((time.monotonic() - _dispatch_start) * 1000)
 
-        _emit_post_tool_call_hook(
-            function_name=function_name,
-            function_args=function_args,
-            result=result,
-            task_id=task_id,
-            session_id=session_id,
-            tool_call_id=tool_call_id,
-            turn_id=turn_id,
-            api_request_id=api_request_id,
-            duration_ms=duration_ms,
-            middleware_trace=list(_tool_middleware_trace),
-        )
+        if not skip_extension_hooks:
+            _emit_post_tool_call_hook(
+                function_name=function_name,
+                function_args=function_args,
+                result=result,
+                task_id=task_id,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                turn_id=turn_id,
+                api_request_id=api_request_id,
+                duration_ms=duration_ms,
+                middleware_trace=list(_tool_middleware_trace),
+            )
 
         # Generic tool-result canonicalization seam: plugins receive the
         # final result string (JSON, usually) and may replace it by
@@ -1198,31 +1204,32 @@ def handle_function_call(
         # valid string return wins; non-string returns are ignored.
         # Gated on has_hook so the no-listener path skips both the result
         # field derivation and the payload dispatch.
-        try:
-            from xiaoban_cli.plugins import has_hook, invoke_hook
-            if has_hook("transform_tool_result"):
-                status, error_type, error_message = _tool_result_observer_fields(result)
-                hook_results = invoke_hook(
-                    "transform_tool_result",
-                    tool_name=function_name,
-                    args=function_args,
-                    result=result,
-                    task_id=task_id or "",
-                    session_id=session_id or "",
-                    tool_call_id=tool_call_id or "",
-                    turn_id=turn_id or "",
-                    api_request_id=api_request_id or "",
-                    duration_ms=duration_ms,
-                    status=status,
-                    error_type=error_type,
-                    error_message=error_message,
-                )
-                for hook_result in hook_results:
-                    if isinstance(hook_result, str):
-                        result = hook_result
-                        break
-        except Exception as _hook_err:
-            logger.debug("transform_tool_result hook error: %s", _hook_err)
+        if not skip_extension_hooks:
+            try:
+                from xiaoban_cli.plugins import has_hook, invoke_hook
+                if has_hook("transform_tool_result"):
+                    status, error_type, error_message = _tool_result_observer_fields(result)
+                    hook_results = invoke_hook(
+                        "transform_tool_result",
+                        tool_name=function_name,
+                        args=function_args,
+                        result=result,
+                        task_id=task_id or "",
+                        session_id=session_id or "",
+                        tool_call_id=tool_call_id or "",
+                        turn_id=turn_id or "",
+                        api_request_id=api_request_id or "",
+                        duration_ms=duration_ms,
+                        status=status,
+                        error_type=error_type,
+                        error_message=error_message,
+                    )
+                    for hook_result in hook_results:
+                        if isinstance(hook_result, str):
+                            result = hook_result
+                            break
+            except Exception as _hook_err:
+                logger.debug("transform_tool_result hook error: %s", _hook_err)
 
         return result
 

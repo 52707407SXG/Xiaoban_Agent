@@ -357,6 +357,32 @@ def interruptible_api_call(agent, api_kwargs: dict):
 
     t = threading.Thread(target=_call, daemon=True)
     t.start()
+
+    def _join_after_forced_close(reason: str) -> None:
+        """Do not let a strict paid call outlive its logical terminal state.
+
+        Normal turns retain the historical two-second best-effort join so a
+        broken third-party transport cannot wedge the whole gateway.  The fixed
+        true-MoA executor is different: returning while its provider worker is
+        still alive would make the three-slot usage receipt untrustworthy and
+        could continue billing after stop/timeout.  Its request-local client has
+        already been socket-aborted before this helper runs, so wait for the
+        worker's own ``finally`` close and actual thread exit.
+        """
+
+        if not getattr(agent, "_strict_no_automatic_paid_retry", False):
+            t.join(timeout=2.0)
+            return
+
+        strict_poll_count = 0
+        while t.is_alive():
+            t.join(timeout=0.3)
+            strict_poll_count += 1
+            if strict_poll_count % 100 == 0:
+                agent._touch_activity(
+                    f"waiting for strict paid worker shutdown ({reason})"
+                )
+
     _poll_count = 0
     while t.is_alive():
         t.join(timeout=0.3)
@@ -415,8 +441,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
             agent._touch_activity(
                 f"codex stream killed after {int(_elapsed)}s with no first byte"
             )
-            # Wait briefly for the worker to notice the closed connection.
-            t.join(timeout=2.0)
+            _join_after_forced_close("codex_ttfb_kill")
             if result["error"] is None and result["response"] is None:
                 if _silent_hint:
                     result["error"] = TimeoutError(
@@ -461,7 +486,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
             agent._touch_activity(
                 f"codex stream killed after {int(_event_stale_elapsed)}s with no SSE events"
             )
-            t.join(timeout=2.0)
+            _join_after_forced_close("codex_stream_idle_kill")
             if result["error"] is None and result["response"] is None:
                 result["error"] = TimeoutError(
                     f"Codex stream produced no SSE events for {int(_event_stale_elapsed)}s "
@@ -509,8 +534,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
             agent._touch_activity(
                 f"stale non-streaming call killed after {int(_elapsed)}s"
             )
-            # Wait briefly for the thread to notice the closed connection.
-            t.join(timeout=2.0)
+            _join_after_forced_close("stale_call_kill")
             if result["error"] is None and result["response"] is None:
                 if _silent_hint:
                     result["error"] = TimeoutError(
@@ -545,7 +569,19 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     _close_request_client_once("interrupt_abort")
             except Exception:
                 pass
+            _join_after_forced_close("interrupt_abort")
             raise InterruptedError("Agent interrupted during API call")
+    # The worker can publish a response and exit between the loop condition
+    # and its interrupt check.  For strict paid turns, cancellation must win
+    # before any response reaches progress callbacks, transcript persistence,
+    # tools, or the final cache.
+    if (
+        getattr(agent, "_strict_no_automatic_paid_retry", False)
+        and agent._interrupt_requested
+    ):
+        _request_cancelled["value"] = True
+        result["response"] = None
+        raise InterruptedError("Agent interrupted at provider terminal boundary")
     if result["error"] is not None:
         raise result["error"]
     return result["response"]

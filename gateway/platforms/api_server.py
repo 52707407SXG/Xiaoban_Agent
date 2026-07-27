@@ -35,6 +35,7 @@ Requires:
 
 import asyncio
 import base64
+import copy
 from collections import deque
 from datetime import datetime, time as dt_time, timedelta, timezone
 import hashlib
@@ -1092,6 +1093,7 @@ def _run_mystand_preexecuted_evidence(
     tool_complete_callback: Any,
     trusted_turn: Any = None,
     fact_requirement: Optional[Dict[str, Any]] = None,
+    terminal_controller: Any = None,
 ) -> List[Dict[str, Any]]:
     """Execute required read evidence in the harness, not by model choice.
 
@@ -1100,6 +1102,12 @@ def _run_mystand_preexecuted_evidence(
     and the result is bound to the gate-issued callId via PostAction.
     """
     evidence: List[Dict[str, Any]] = []
+
+    def _ensure_active() -> None:
+        if terminal_controller is not None and terminal_controller.is_set:
+            raise CompletionStoppedError(
+                "true MoA stopped during deterministic evidence"
+            )
 
     def _catalog_contains(name: str) -> bool:
         try:
@@ -1110,12 +1118,29 @@ def _run_mystand_preexecuted_evidence(
             return False
 
     def execute(name: str, args: Dict[str, Any], handler: Any) -> str:
+        _ensure_active()
+        call_id = f"mystand_pre_{uuid.uuid4().hex}"
+        if (
+            terminal_controller is not None
+            and not terminal_controller.try_begin_dispatch(
+                f"preexecuted-tool:{call_id}"
+            )
+        ):
+            raise CompletionStoppedError(
+                "true MoA stopped before deterministic evidence dispatch"
+            )
         decision = None
+        action_finished = False
         if trusted_turn is not None:
             from xiaoban.trusted_runtime.turns import begin_action, finish_action
 
             decision = begin_action(
-                trusted_turn, name, "v1", args, catalog_lookup=_catalog_contains
+                trusted_turn,
+                name,
+                "v1",
+                args,
+                call_id=call_id,
+                catalog_lookup=_catalog_contains,
             )
             if decision.decision != "allow":
                 # PreAction 拒绝：handler 调用数为 0，回执为确定性拒绝。
@@ -1129,9 +1154,36 @@ def _run_mystand_preexecuted_evidence(
                 )
                 return content
             call_id = decision.call.call_id
-        else:
-            call_id = f"mystand_pre_{uuid.uuid4().hex}"
+
+        def _ensure_action_active() -> None:
+            nonlocal action_finished
+            if terminal_controller is None or not terminal_controller.is_set:
+                return
+            if (
+                decision is not None
+                and decision.decision == "allow"
+                and not action_finished
+            ):
+                finish_action(
+                    trusted_turn,
+                    call_id,
+                    name,
+                    "v1",
+                    {
+                        "ok": False,
+                        "status": "cancelled",
+                        "code": "terminal_fence",
+                    },
+                    cancelled=True,
+                )
+                action_finished = True
+            raise CompletionStoppedError(
+                "true MoA stopped during deterministic evidence"
+            )
+
+        _ensure_action_active()
         tool_start_callback(call_id, name, args)
+        _ensure_action_active()
         try:
             content = handler(args)
         except Exception:
@@ -1146,9 +1198,13 @@ def _run_mystand_preexecuted_evidence(
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
+        _ensure_action_active()
         if decision is not None:
             finish_action(trusted_turn, call_id, name, "v1", content)
+            action_finished = True
+        _ensure_action_active()
         tool_complete_callback(call_id, name, args, content)
+        _ensure_action_active()
         evidence.append(
             {
                 "call_id": call_id,
@@ -2676,6 +2732,116 @@ class CompletionStoppedError(RuntimeError):
     """Raised when a trusted delivery is stopped before agent execution."""
 
 
+def _cancel_chat_agent_ref(agent_ref: Optional[list], reason: str) -> bool:
+    """Cancel both true-MoA advisor work and the acting agent, if registered."""
+
+    if agent_ref is None:
+        return False
+    while len(agent_ref) < 3:
+        agent_ref.append(None)
+    controller = agent_ref[2]
+    if controller is not None:
+        try:
+            if not controller.cancel():
+                return False
+        except Exception:
+            logger.warning("Failed to cancel true MoA advisor wave", exc_info=False)
+            return False
+    agent_ref[1] = True
+    agent = agent_ref[0]
+    if agent is not None:
+        try:
+            agent.interrupt(reason)
+        except Exception:
+            logger.warning("Failed to interrupt idempotent API run", exc_info=False)
+    return True
+
+
+def _true_moa_usage_summary(ledger: Any) -> Dict[str, Any]:
+    """Project one plaintext-free MoA ledger into aggregate OpenAI usage."""
+
+    payload = ledger.to_dict()
+    input_tokens = 0
+    output_tokens = 0
+    total_tokens = 0
+    for slot in payload.get("slots") or ():
+        if not isinstance(slot, dict):
+            continue
+        slot_input = slot.get("inputTokens")
+        slot_output = slot.get("outputTokens")
+        slot_total = slot.get("totalTokens")
+        if isinstance(slot_input, int) and not isinstance(slot_input, bool):
+            input_tokens += max(0, slot_input)
+        if isinstance(slot_output, int) and not isinstance(slot_output, bool):
+            output_tokens += max(0, slot_output)
+        if isinstance(slot_total, int) and not isinstance(slot_total, bool):
+            total_tokens += max(0, slot_total)
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "true_moa": payload,
+    }
+
+
+def _stopped_chat_completion_response(response: Any) -> Any:
+    """Return a plaintext-free stop result while preserving actual accounting.
+
+    The idempotency tombstone is authoritative even if the worker completes in
+    the same event-loop turn.  No assistant/provider text survives this
+    projection.  Reported token/cost fields remain available for settlement,
+    and a true-MoA final slot is marked cancelled without rewriting its
+    already-reported usage.
+    """
+
+    is_pair = isinstance(response, tuple) and len(response) == 2
+    raw_result, raw_usage = response if is_pair else (response, {})
+    result = raw_result if isinstance(raw_result, dict) else {}
+    usage = raw_usage if isinstance(raw_usage, dict) else {}
+
+    stopped_usage: Dict[str, Any] = {}
+    for name in ("input_tokens", "output_tokens", "total_tokens"):
+        value = usage.get(name)
+        if isinstance(value, int) and not isinstance(value, bool):
+            stopped_usage[name] = max(0, value)
+    for name in ("input_tokens", "output_tokens", "total_tokens"):
+        stopped_usage.setdefault(name, 0)
+
+    ledger_source = usage.get("true_moa")
+    if not isinstance(ledger_source, dict):
+        ledger_source = result.get("_true_moa_usage")
+    ledger = copy.deepcopy(ledger_source) if isinstance(ledger_source, dict) else None
+    if ledger is not None:
+        ledger["status"] = "cancelled"
+        slots = ledger.get("slots")
+        if isinstance(slots, list):
+            for slot in slots:
+                if not isinstance(slot, dict):
+                    continue
+                if (
+                    slot.get("role") == "final_executor"
+                    or slot.get("slotId") == "final-deepseek-v4-pro"
+                ):
+                    slot["status"] = "cancelled"
+                    slot["errorCategory"] = "terminal_fence_after_stop"
+        stopped_usage["true_moa"] = ledger
+
+    stopped_result: Dict[str, Any] = {
+        "final_response": "",
+        "messages": [],
+        "completed": False,
+        "failed": True,
+        "interrupted": True,
+        "error": "completion stopped",
+    }
+    session_id = result.get("session_id")
+    if isinstance(session_id, str) and session_id:
+        stopped_result["session_id"] = session_id
+    if ledger is not None:
+        stopped_result["_true_moa_usage"] = ledger
+    return (stopped_result, stopped_usage) if is_pair else stopped_result
+
+
 class _IdempotencyCache:
     """In-memory idempotency cache with TTL and basic LRU semantics."""
     def __init__(self, max_items: int = 1000, ttl_seconds: int = 300):
@@ -2709,7 +2875,9 @@ class _IdempotencyCache:
         item = self._store.get(key)
         if item:
             return "reusable" if item["fp"] == fingerprint else "conflict"
-        for existing_key, existing_fingerprint in self._inflight:
+        for (existing_key, existing_fingerprint), task in self._inflight.items():
+            if task.done():
+                continue
             if existing_key == key:
                 return "reusable" if existing_fingerprint == fingerprint else "conflict"
         return "missing"
@@ -2743,6 +2911,11 @@ class _IdempotencyCache:
         if task is None:
             async def _compute_and_store():
                 resp = await compute_coro()
+                if key in self._stopped:
+                    # Keep only the plaintext-free stop projection.  The
+                    # tombstone still wins delivery, while the actual usage
+                    # and cost receipt remains recoverable for settlement.
+                    resp = _stopped_chat_completion_response(resp)
                 import time as _t
                 self._store[key] = {"resp": resp, "fp": fingerprint, "ts": _t.time()}
                 self._purge()
@@ -2768,29 +2941,47 @@ class _IdempotencyCache:
         if key in self._store:
             return False
         matches = [item for item in self._inflight if item[0] == key]
+        accepted = not matches
+        for inflight_key in matches:
+            agent_ref = self._agent_refs.get(inflight_key)
+            if agent_ref is None:
+                accepted = True
+                continue
+            accepted = _cancel_chat_agent_ref(
+                agent_ref,
+                "Stop requested via My Stand delivery",
+            ) or accepted
+        if not accepted:
+            return False
         # Record a short-lived tombstone even before the completion request
         # reaches this process. This closes the create/stop HTTP race without
         # cancelling an unrelated account or attempt (the key is HMAC-scoped).
         self._stopped[key] = time.time() + self._ttl
-        for inflight_key in matches:
-            agent_ref = self._agent_refs.get(inflight_key)
-            if agent_ref is None:
-                continue
-            while len(agent_ref) < 2:
-                agent_ref.append(False)
-            agent_ref[1] = True
-            agent = agent_ref[0]
-            if agent is not None:
-                try:
-                    agent.interrupt("Stop requested via My Stand delivery")
-                except Exception:
-                    logger.warning("Failed to interrupt idempotent API run", exc_info=False)
         return True
 
     def is_stopped(self, key: str) -> bool:
         """Return True while a stop tombstone is active for a scoped key."""
         self._purge()
         return key in self._stopped
+
+    def result_state(self, key: str) -> tuple[str, Any]:
+        """Return missing/running/stopped/completed plus a cached response."""
+
+        self._purge()
+        if any(
+            existing_key == key and not task.done()
+            for (existing_key, _), task in self._inflight.items()
+        ):
+            return "running", None
+        item = self._store.get(key)
+        if key in self._stopped:
+            return (
+                "stopped",
+                item.get("resp") if item is not None else None,
+            )
+        if item is not None and item.get("resp") is not None:
+            return "completed", item["resp"]
+        return "missing", None
 
 
 _idem_cache = _IdempotencyCache()
@@ -3364,6 +3555,7 @@ class APIServerAdapter(BasePlatformAdapter):
         enabled_toolsets_override: Optional[List[str]] = None,
         request_user_id: Optional[str] = None,
         skip_memory: bool = False,
+        strict_no_automatic_paid_retry: bool = False,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -3437,6 +3629,11 @@ class APIServerAdapter(BasePlatformAdapter):
             gateway_session_key=gateway_session_key,
             user_id=request_user_id,
             skip_memory=skip_memory,
+            **(
+                {"strict_no_automatic_paid_retry": True}
+                if strict_no_automatic_paid_retry
+                else {}
+            ),
         )
         return agent
 
@@ -4172,6 +4369,14 @@ class APIServerAdapter(BasePlatformAdapter):
         except (json.JSONDecodeError, Exception):
             return web.json_response(_openai_error("Invalid JSON in request body"), status=400)
 
+        true_moa_snapshot, true_moa_error = self._true_moa_snapshot_error(
+            request.headers,
+            mystand_request=mystand_request,
+            api_authenticated=bool(self._api_key),
+        )
+        if true_moa_error is not None:
+            return true_moa_error
+
         messages = body.get("messages")
         if not messages or not isinstance(messages, list):
             return web.json_response(
@@ -4348,6 +4553,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
                 if identity_err is not None:
                     return identity_err
+            if true_moa_snapshot is not None and not stream_delivery_id:
+                return web.json_response(
+                    _openai_error(
+                        "True MoA requires a trusted delivery identity",
+                        code="true_moa_delivery_identity_required",
+                    ),
+                    status=400,
+                )
             stream_scoped_key = ""
             stream_binding_key = ""
             stream_idem_fp = ""
@@ -4507,7 +4720,7 @@ class APIServerAdapter(BasePlatformAdapter):
             # idempotency cache (inflight task + agent_ref), so a /stop with
             # the same delivery key interrupts this agent and a stop-before-
             # register race fails closed instead of running.
-            agent_ref = [None, False] if stream_scoped_key else [None]
+            agent_ref = [None, False, None]
 
             async def _stream_compute():
                 try:
@@ -4530,6 +4743,7 @@ class APIServerAdapter(BasePlatformAdapter):
                             else self._session_events_requested(request)
                         ),
                         fact_requirement=fact_requirement,
+                        true_moa_snapshot=true_moa_snapshot,
                     )
                 finally:
                     # Runs for success, provider/tool exceptions, explicit
@@ -4562,7 +4776,15 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         # Non-streaming: run the agent (with optional Idempotency-Key)
-        agent_ref = [None, False]
+        if true_moa_snapshot is not None and not request.headers.get("Idempotency-Key"):
+            return web.json_response(
+                _openai_error(
+                    "True MoA requires an idempotency key",
+                    code="true_moa_idempotency_required",
+                ),
+                status=400,
+            )
+        agent_ref = [None, False, None]
 
         async def _compute_completion():
             if agent_ref[1]:
@@ -4591,6 +4813,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     ),
                     agent_ref=agent_ref,
                     fact_requirement=fact_requirement,
+                    true_moa_snapshot=true_moa_snapshot,
                 )
                 if agent_ref[1]:
                     result = dict(result or {})
@@ -4685,6 +4908,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 "failed": True,
                 "interrupted": True,
             }
+            if isinstance(usage.get("true_moa"), dict):
+                stopped_body["error"]["xiaoban"]["true_moa_usage"] = usage["true_moa"]
             return web.json_response(
                 stopped_body,
                 status=409,
@@ -4721,6 +4946,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 "partial": is_partial,
                 "failed": is_failed,
             }
+            if isinstance(usage.get("true_moa"), dict):
+                err_body["error"]["xiaoban"]["true_moa_usage"] = usage["true_moa"]
             response_headers["X-Xiaoban-Completed"] = "false"
             response_headers["X-Xiaoban-Partial"] = "true" if is_partial else "false"
             return web.json_response(err_body, status=502, headers=response_headers)
@@ -4761,6 +4988,12 @@ class APIServerAdapter(BasePlatformAdapter):
             response_headers["X-Xiaoban-Partial"] = "true" if is_partial else "false"
             if err_msg:
                 response_headers["X-Xiaoban-Error"] = err_msg[:200]
+        if isinstance(usage.get("true_moa"), dict):
+            response_data.setdefault("xiaoban", {
+                "completed": completed,
+                "partial": is_partial,
+                "failed": is_failed,
+            })["true_moa_usage"] = usage["true_moa"]
         trusted_verification = result.get("_mystand_trusted_verification")
         if isinstance(trusted_verification, dict):
             xiaoban_state = response_data.setdefault(
@@ -4815,6 +5048,98 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=404,
             )
         return web.json_response({"ok": True, "status": "stopping"}, status=202)
+
+    async def _handle_chat_completion_usage(self, request: "web.Request") -> "web.Response":
+        """Recover the terminal true-MoA usage ledger after SSE cancellation."""
+
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        policy_err = self._request_toolset_policy_error(request.headers)
+        if policy_err is not None:
+            return policy_err
+        if not self._header_present(request.headers, "X-Xiaoban-Toolset-Policy"):
+            return web.json_response(
+                _openai_error(
+                    "My Stand tool policy is required",
+                    code="mystand_policy_required",
+                ),
+                status=403,
+            )
+        if not self._api_key:
+            return web.json_response(
+                _openai_error(
+                    "My Stand requests require configured API authentication",
+                    code="mystand_auth_unavailable",
+                ),
+                status=503,
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(_openai_error("Invalid JSON"), status=400)
+        if not isinstance(body, dict):
+            return web.json_response(
+                _openai_error("JSON body must be an object"),
+                status=400,
+            )
+        raw_key = str(
+            body.get("idempotency_key")
+            or request.headers.get("Idempotency-Key")
+            or ""
+        ).strip()
+        try:
+            scoped_key = self._scoped_idempotency_key(request.headers, raw_key)
+        except InvalidToolsetPolicy as exc:
+            return web.json_response(
+                _openai_error(str(exc), code="invalid_idempotency_key"),
+                status=400,
+            )
+        state, cached = _idem_cache.result_state(scoped_key)
+        if state == "missing":
+            return web.json_response(
+                _openai_error(
+                    "No completion ledger for this delivery",
+                    code="completion_ledger_not_found",
+                ),
+                status=404,
+            )
+        if state == "running":
+            return web.json_response(
+                {"ok": True, "status": "running", "final": False},
+                status=202,
+            )
+        if state == "stopped" and cached is None:
+            return web.json_response({
+                "ok": True,
+                "status": "stopped_before_start",
+                "final": True,
+                "usage": None,
+            })
+        usage = None
+        if (
+            isinstance(cached, tuple)
+            and len(cached) == 2
+            and isinstance(cached[1], dict)
+        ):
+            usage = cached[1].get("true_moa")
+        if not isinstance(usage, dict):
+            return web.json_response(
+                _openai_error(
+                    "Completion has no true MoA usage ledger",
+                    code="true_moa_usage_unavailable",
+                ),
+                status=409,
+            )
+        return web.json_response({
+            "ok": True,
+            "status": str(
+                usage.get("status")
+                or ("cancelled" if state == "stopped" else "completed")
+            ),
+            "final": True,
+            "usage": usage,
+        })
 
     async def _write_sse_chat_completion(
         self, request: "web.Request", completion_id: str, model: str,
@@ -4960,7 +5285,15 @@ class APIServerAdapter(BasePlatformAdapter):
             run_stopped = isinstance(result, dict) and bool(
                 result.get("interrupted") or result.get("stopped")
             )
-            if guarded_final and not run_stopped:
+            run_partial = isinstance(result, dict) and bool(result.get("partial"))
+            run_failed = not isinstance(result, dict) or bool(result.get("failed"))
+            run_completed = isinstance(result, dict) and bool(
+                result.get("completed", True)
+            )
+            run_terminal_failure = bool(
+                run_stopped or run_partial or run_failed or not run_completed
+            )
+            if guarded_final and not run_terminal_failure:
                 content_chunk = {
                     "id": completion_id, "object": "chat.completion.chunk",
                     "created": created, "model": model,
@@ -4975,7 +5308,7 @@ class APIServerAdapter(BasePlatformAdapter):
             if (
                 isinstance(result, dict)
                 and result.get("_mystand_request")
-                and not run_stopped
+                and not run_terminal_failure
             ):
                 fact_verification = result.get("_mystand_trusted_verification")
                 if isinstance(fact_verification, dict):
@@ -5010,11 +5343,52 @@ class APIServerAdapter(BasePlatformAdapter):
                         f"event: xiaoban.trusted.verification\ndata: {json.dumps(verification, ensure_ascii=False)}\n\n".encode()
                     )
 
+            true_moa_usage = usage.get("true_moa")
+            if isinstance(true_moa_usage, dict):
+                await response.write(
+                    (
+                        "event: xiaoban.moa.usage\n"
+                        f"data: {json.dumps(true_moa_usage, ensure_ascii=False)}\n\n"
+                    ).encode()
+                )
+
+            if run_terminal_failure:
+                if run_stopped:
+                    terminal_code = "completion_stopped"
+                    terminal_state = "stopped"
+                elif run_partial:
+                    terminal_code = "output_truncated"
+                    terminal_state = "partial"
+                else:
+                    terminal_code = "agent_incomplete"
+                    terminal_state = "failed"
+                error_event = {
+                    "code": terminal_code,
+                    "state": terminal_state,
+                    "completed": False,
+                    "partial": run_partial,
+                    "failed": True,
+                    "interrupted": run_stopped,
+                }
+                await response.write(
+                    (
+                        "event: xiaoban.error\n"
+                        f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
+                    ).encode()
+                )
+
             # Finish chunk
+            finish_reason = (
+                "length"
+                if run_partial
+                else "error"
+                if run_terminal_failure
+                else "stop"
+            )
             finish_chunk = {
                 "id": completion_id, "object": "chat.completion.chunk",
                 "created": created, "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
                 "usage": {
                     "prompt_tokens": usage.get("input_tokens", 0),
                     "completion_tokens": usage.get("output_tokens", 0),
@@ -5027,12 +5401,7 @@ class APIServerAdapter(BasePlatformAdapter):
             # Client disconnected mid-stream.  Interrupt the agent so it
             # stops making LLM API calls at the next loop iteration, then
             # cancel the asyncio task wrapper.
-            agent = agent_ref[0] if agent_ref else None
-            if agent is not None:
-                try:
-                    agent.interrupt("SSE client disconnected")
-                except Exception:
-                    pass
+            _cancel_chat_agent_ref(agent_ref, "SSE client disconnected")
             if not agent_task.done():
                 agent_task.cancel()
                 try:
@@ -6693,6 +7062,9 @@ class APIServerAdapter(BasePlatformAdapter):
             "X-Xiaoban-Session-Id",
             "X-Xiaoban-Message-Id",
             "X-Xiaoban-Reasoning-Mode",
+            "X-Xiaoban-Mode-Epoch",
+            "X-Xiaoban-MoA-Preset-Id",
+            "X-Xiaoban-MoA-Preset-Revision",
             "X-Xiaoban-Attempt",
             "X-Xiaoban-Email-Allowed",
             "X-Xiaoban-Async-Delivery",
@@ -6734,6 +7106,56 @@ class APIServerAdapter(BasePlatformAdapter):
         }
         encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _true_moa_snapshot_error(
+        cls,
+        headers: Any,
+        *,
+        mystand_request: bool,
+        api_authenticated: bool,
+    ) -> tuple[Any, Optional["web.Response"]]:
+        """Lazily validate true-MoA headers without loading MoA on normal turns."""
+
+        mode = cls._header_value(
+            headers,
+            "X-Xiaoban-Reasoning-Mode",
+        ).strip().lower()
+        moa_metadata = (
+            cls._header_value(headers, "X-Xiaoban-Mode-Epoch"),
+            cls._header_value(headers, "X-Xiaoban-MoA-Preset-Id"),
+            cls._header_value(headers, "X-Xiaoban-MoA-Preset-Revision"),
+        )
+        if mode in {"", "normal"} and not any(moa_metadata):
+            return None, None
+        if mode in {"", "normal"}:
+            return None, web.json_response(
+                _openai_error(
+                    "Normal mode cannot carry MoA preset metadata",
+                    code="normal_mode_cannot_carry_moa_metadata",
+                ),
+                status=400,
+            )
+        try:
+            from xiaoban.trusted_runtime.true_moa import (
+                TrueMoAContractError,
+                validate_true_moa_headers,
+            )
+
+            snapshot = validate_true_moa_headers(
+                headers,
+                mystand_request=mystand_request,
+                api_authenticated=api_authenticated,
+            )
+        except TrueMoAContractError as exc:
+            return None, web.json_response(
+                _openai_error(
+                    "Invalid true MoA request snapshot",
+                    code=exc.code,
+                ),
+                status=exc.status_code,
+            )
+        return snapshot, None
 
     @classmethod
     def _request_toolset_policy_error(cls, headers: Any) -> Optional["web.Response"]:
@@ -6955,6 +7377,7 @@ class APIServerAdapter(BasePlatformAdapter):
         request_headers: Any = None,
         async_delivery: bool = False,
         fact_requirement: Optional[Dict[str, Any]] = None,
+        true_moa_snapshot: Any = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -7051,6 +7474,9 @@ class APIServerAdapter(BasePlatformAdapter):
             from gateway.session_context import clear_session_vars
 
             run_system_prompt = effective_system_prompt
+            true_moa_controller = None
+            true_moa_ledger = None
+            agent = None
             memory_hit_count = 0
             if mystand_request and memory_identity and memory_identity[2] == "user":
                 try:
@@ -7075,85 +7501,371 @@ class APIServerAdapter(BasePlatformAdapter):
                         for part in (run_system_prompt, integrity_reminder)
                         if part
                     )
-            trusted_initial_tool_choice = (
-                _resolve_mystand_initial_tool_choice(
-                    user_message,
-                    run_system_prompt,
-                    fact_requirement=fact_requirement,
+            if true_moa_snapshot is not None:
+                from xiaoban.trusted_runtime.true_moa import (
+                    FINAL_EXECUTOR_SLOT,
+                    TrueMoACancelController,
+                    TrueMoAExecutionError,
+                    TrueMoAUsageLedger,
+                    run_true_moa_advisors,
                 )
-                if mystand_request
-                else ""
-            )
-            if metadata_trace is not None:
-                attempt_value = self._header_value(request_headers, "X-Xiaoban-Attempt")
+                from xiaoban.trusted_runtime.true_moa_providers import (
+                    strict_advisor_call,
+                )
+
+                true_moa_controller = TrueMoACancelController()
+                if agent_ref is not None:
+                    while len(agent_ref) < 3:
+                        agent_ref.append(None)
+                    agent_ref[2] = true_moa_controller
+                    if agent_ref[1]:
+                        true_moa_controller.cancel()
+
+                # Resolve and validate the fixed acting route before either
+                # advisor can spend tokens. Agent construction initializes the
+                # local runtime only; it performs no provider request.
                 try:
-                    attempt = max(0, int(attempt_value or "0"))
-                except ValueError:
-                    attempt = 0
-                metadata_trace.safe_emit(
-                    "request_started",
-                    status="accepted",
-                    attempt=attempt,
-                    memory_enabled=bool(memory_identity and memory_identity[2] == "user"),
-                    memory_hit_count=memory_hit_count,
+                    agent = self._create_agent(
+                        ephemeral_system_prompt=run_system_prompt,
+                        session_id=session_id,
+                        stream_delta_callback=stream_delta_callback,
+                        tool_progress_callback=tool_progress_callback,
+                        tool_start_callback=(
+                            _traced_tool_start
+                            if mystand_request
+                            else tool_start_callback
+                        ),
+                        tool_complete_callback=(
+                            _traced_tool_complete
+                            if mystand_request
+                            else tool_complete_callback
+                        ),
+                        gateway_session_key=gateway_session_key,
+                        enabled_toolsets_override=enabled_toolsets_override,
+                        request_user_id=request_user_id or None,
+                        skip_memory=mystand_request,
+                        strict_no_automatic_paid_retry=True,
+                    )
+                    from xiaoban_cli.model_normalize import (
+                        normalize_model_for_provider,
+                    )
+
+                    final_provider = str(
+                        getattr(agent, "provider", "") or ""
+                    ).lower()
+                    final_model = normalize_model_for_provider(
+                        str(getattr(agent, "model", "") or ""),
+                        "deepseek",
+                    )
+                    if (
+                        final_provider != FINAL_EXECUTOR_SLOT.provider
+                        or final_model != FINAL_EXECUTOR_SLOT.model
+                    ):
+                        raise RuntimeError("fixed true MoA final route mismatch")
+                except Exception:
+                    true_moa_ledger = TrueMoAUsageLedger(true_moa_snapshot)
+                    true_moa_ledger.finish_slot(
+                        FINAL_EXECUTOR_SLOT,
+                        status="failed",
+                        error_category="final_executor_preflight_failed",
+                    )
+                    true_moa_ledger.set_wave_status("failed")
+                    true_moa_controller.fail()
+                    usage = _true_moa_usage_summary(true_moa_ledger)
+                    return (
+                        {
+                            "final_response": "",
+                            "completed": False,
+                            "failed": True,
+                            "error": "true MoA final executor unavailable",
+                            "_mystand_request": True,
+                            "_true_moa_usage": usage["true_moa"],
+                        },
+                        usage,
+                    )
+
+                agent._api_max_retries = 1
+                agent._fallback_chain = []
+                agent._fallback_index = 0
+                agent._disable_streaming = True
+                agent._strict_no_automatic_paid_retry = True
+                agent._true_moa_cancel_controller = true_moa_controller
+                agent.compression_enabled = False
+                if agent_ref is not None:
+                    agent_ref[0] = agent
+                    if agent_ref[1]:
+                        true_moa_controller.cancel()
+                        agent.interrupt("Stop requested via My Stand delivery")
+                try:
+                    advisor_bundle = run_true_moa_advisors(
+                        true_moa_snapshot,
+                        current_question=user_message,
+                        conversation_history=conversation_history,
+                        strict_caller=strict_advisor_call,
+                        cancel_controller=true_moa_controller,
+                    )
+                except TrueMoAExecutionError as exc:
+                    true_moa_ledger = exc.ledger
+                    usage = _true_moa_usage_summary(true_moa_ledger)
+                    interrupted = true_moa_controller.state == "cancelled"
+                    return (
+                        {
+                            "final_response": "",
+                            "completed": False,
+                            "failed": True,
+                            "interrupted": interrupted,
+                            "error": (
+                                "true MoA request stopped"
+                                if interrupted
+                                else "true MoA advisor wave failed"
+                            ),
+                            "_mystand_request": True,
+                            "_true_moa_usage": usage["true_moa"],
+                        },
+                        usage,
+                    )
+                true_moa_ledger = advisor_bundle.ledger
+                if (
+                    true_moa_controller.is_set
+                    or (agent_ref is not None and agent_ref[1])
+                ):
+                    true_moa_controller.cancel()
+                    true_moa_ledger.set_wave_status("cancelled")
+                    usage = _true_moa_usage_summary(true_moa_ledger)
+                    return (
+                        {
+                            "final_response": "",
+                            "completed": False,
+                            "failed": True,
+                            "interrupted": True,
+                            "error": "true MoA request stopped",
+                            "_mystand_request": True,
+                            "_true_moa_usage": usage["true_moa"],
+                        },
+                        usage,
+                    )
+                run_system_prompt = "\n\n".join(
+                    part
+                    for part in (run_system_prompt, advisor_bundle.guidance)
+                    if isinstance(part, str) and part.strip()
                 )
-            tokens = self._bind_api_server_session(
-                source="mystand" if mystand_request else "",
-                chat_id=session_id or "",
-                session_key=gateway_session_key or session_id or "",
-                session_id=session_id or "",
-                user_id=request_user_id,
-                message_id=request_message_id,
-                user_message=_content_to_visible_text(user_message),
-                conversation_history=conversation_history,
-                async_delivery=async_delivery,
-            )
+            tokens = None
             trusted_turn = None
             trusted_turn_token = None
-            if mystand_request:
-                from xiaoban.trusted_runtime.turns import activate_turn, begin_turn, deactivate_turn
-                from xiaoban.trusted_runtime.types import TrustedIdentity
-
-                trusted_turn = begin_turn(
-                    channel="web",
-                    user_message=user_message,
-                    conversation_history=conversation_history,
-                    identity=(
-                        TrustedIdentity(
-                            account_id=str(request_user_id or ""),
-                            data_scope="mystand",
-                            source="server_session",
-                        )
-                        if request_user_id
-                        else None
-                    ),
-                    # Trusted deliveries bind the turn to the server-verified
-                    # delivery id; ad-hoc My Stand calls keep a random id.
-                    request_id=(
-                        request_delivery_id
-                        if request_delivery_id
-                        else f"mystand-req-{uuid.uuid4().hex}"
-                    ),
-                    message_id=str(request_message_id or ""),
-                    evidence_required=bool(
-                        trusted_initial_tool_choice or fact_requirement
-                    ),
-                    fact_requirement=fact_requirement,
-                )
-                trusted_turn_token = activate_turn(trusted_turn)
+            deactivate_turn = None
             try:
-                agent = self._create_agent(
-                    ephemeral_system_prompt=run_system_prompt,
-                    session_id=session_id,
-                    stream_delta_callback=stream_delta_callback,
-                    tool_progress_callback=tool_progress_callback,
-                    tool_start_callback=_traced_tool_start if mystand_request else tool_start_callback,
-                    tool_complete_callback=_traced_tool_complete if mystand_request else tool_complete_callback,
-                    gateway_session_key=gateway_session_key,
-                    enabled_toolsets_override=enabled_toolsets_override,
-                    request_user_id=request_user_id or None,
-                    skip_memory=mystand_request,
+                trusted_initial_tool_choice = (
+                    _resolve_mystand_initial_tool_choice(
+                        user_message,
+                        run_system_prompt,
+                        fact_requirement=fact_requirement,
+                    )
+                    if mystand_request
+                    else ""
                 )
+                if metadata_trace is not None:
+                    attempt_value = self._header_value(
+                        request_headers,
+                        "X-Xiaoban-Attempt",
+                    )
+                    try:
+                        attempt = max(0, int(attempt_value or "0"))
+                    except ValueError:
+                        attempt = 0
+                    metadata_trace.safe_emit(
+                        "request_started",
+                        status="accepted",
+                        attempt=attempt,
+                        memory_enabled=bool(
+                            memory_identity and memory_identity[2] == "user"
+                        ),
+                        memory_hit_count=memory_hit_count,
+                    )
+                tokens = self._bind_api_server_session(
+                    source="mystand" if mystand_request else "",
+                    chat_id=session_id or "",
+                    session_key=gateway_session_key or session_id or "",
+                    session_id=session_id or "",
+                    user_id=request_user_id,
+                    message_id=request_message_id,
+                    user_message=_content_to_visible_text(user_message),
+                    conversation_history=conversation_history,
+                    async_delivery=async_delivery,
+                )
+                if mystand_request:
+                    from xiaoban.trusted_runtime.turns import (
+                        activate_turn,
+                        begin_turn,
+                        deactivate_turn,
+                    )
+                    from xiaoban.trusted_runtime.types import TrustedIdentity
+
+                    trusted_turn = begin_turn(
+                        channel="web",
+                        user_message=user_message,
+                        conversation_history=conversation_history,
+                        identity=(
+                            TrustedIdentity(
+                                account_id=str(request_user_id or ""),
+                                data_scope="mystand",
+                                source="server_session",
+                            )
+                            if request_user_id
+                            else None
+                        ),
+                        # Trusted deliveries bind the turn to the server-verified
+                        # delivery id; ad-hoc My Stand calls keep a random id.
+                        request_id=(
+                            request_delivery_id
+                            if request_delivery_id
+                            else f"mystand-req-{uuid.uuid4().hex}"
+                        ),
+                        message_id=str(request_message_id or ""),
+                        evidence_required=bool(
+                            trusted_initial_tool_choice or fact_requirement
+                        ),
+                        fact_requirement=fact_requirement,
+                    )
+                    trusted_turn_token = activate_turn(trusted_turn)
+            except Exception:
+                if trusted_turn_token is not None and callable(deactivate_turn):
+                    try:
+                        deactivate_turn(trusted_turn_token)
+                    except Exception:
+                        pass
+                if tokens is not None:
+                    try:
+                        clear_session_vars(tokens)
+                    except Exception:
+                        pass
+                if true_moa_ledger is not None:
+                    interrupted = bool(
+                        true_moa_controller.state == "cancelled"
+                        or (
+                            agent_ref is not None
+                            and len(agent_ref) > 1
+                            and agent_ref[1]
+                        )
+                    )
+                    if interrupted:
+                        true_moa_controller.cancel()
+                        slot_status = "cancelled"
+                        wave_status = "cancelled"
+                        error_category = "final_setup_stopped"
+                    else:
+                        true_moa_controller.fail()
+                        slot_status = "failed"
+                        wave_status = "failed"
+                        error_category = "final_setup_error"
+                    true_moa_ledger.finish_slot(
+                        FINAL_EXECUTOR_SLOT,
+                        status=slot_status,
+                        error_category=error_category,
+                    )
+                    true_moa_ledger.set_wave_status(wave_status)
+                    usage = _true_moa_usage_summary(true_moa_ledger)
+                    return (
+                        {
+                            "final_response": "",
+                            "completed": False,
+                            "failed": True,
+                            "interrupted": interrupted,
+                            "error": (
+                                "true MoA request stopped"
+                                if interrupted
+                                else "true MoA final executor setup failed"
+                            ),
+                            "_mystand_request": True,
+                            "_true_moa_usage": usage["true_moa"],
+                        },
+                        usage,
+                    )
+                raise
+            try:
+                if agent is None:
+                    agent = self._create_agent(
+                        ephemeral_system_prompt=run_system_prompt,
+                        session_id=session_id,
+                        stream_delta_callback=stream_delta_callback,
+                        tool_progress_callback=tool_progress_callback,
+                        tool_start_callback=(
+                            _traced_tool_start
+                            if mystand_request
+                            else tool_start_callback
+                        ),
+                        tool_complete_callback=(
+                            _traced_tool_complete
+                            if mystand_request
+                            else tool_complete_callback
+                        ),
+                        gateway_session_key=gateway_session_key,
+                        enabled_toolsets_override=enabled_toolsets_override,
+                        request_user_id=request_user_id or None,
+                        skip_memory=mystand_request,
+                    )
+                elif true_moa_ledger is not None:
+                    # The agent was preflighted before advisor fan-out. Append
+                    # the bounded untrusted guidance to that exact instance so
+                    # route validation and execution cannot observe two configs.
+                    agent.ephemeral_system_prompt = "\n\n".join(
+                        part
+                        for part in (
+                            getattr(agent, "ephemeral_system_prompt", None),
+                            advisor_bundle.guidance,
+                        )
+                        if isinstance(part, str) and part.strip()
+                    )
+                if true_moa_ledger is not None:
+                    from xiaoban_cli.model_normalize import (
+                        normalize_model_for_provider,
+                    )
+
+                    final_provider = str(getattr(agent, "provider", "") or "").lower()
+                    final_model = normalize_model_for_provider(
+                        str(getattr(agent, "model", "") or ""),
+                        "deepseek",
+                    )
+                    if (
+                        final_provider != FINAL_EXECUTOR_SLOT.provider
+                        or final_model != FINAL_EXECUTOR_SLOT.model
+                    ):
+                        true_moa_ledger.finish_slot(
+                            FINAL_EXECUTOR_SLOT,
+                            status="failed",
+                            error_category="final_executor_route_mismatch",
+                        )
+                        true_moa_ledger.set_wave_status("failed")
+                        true_moa_controller.fail()
+                        usage = _true_moa_usage_summary(true_moa_ledger)
+                        return (
+                            {
+                                "final_response": "",
+                                "completed": False,
+                                "failed": True,
+                                "error": "true MoA final executor unavailable",
+                                "_mystand_request": True,
+                                "_true_moa_usage": usage["true_moa"],
+                            },
+                            usage,
+                        )
+                    # The fixed preset permits purposeful tool iterations but
+                    # never an automatic provider retry, continuation,
+                    # compression call, or fallback route.
+                    agent._api_max_retries = 1
+                    agent._fallback_chain = []
+                    agent._fallback_index = 0
+                    agent._disable_streaming = True
+                    agent._strict_no_automatic_paid_retry = True
+                    agent.compression_enabled = False
+                if agent_ref is not None:
+                    agent_ref[0] = agent
+                    if len(agent_ref) > 1 and agent_ref[1]:
+                        try:
+                            if true_moa_controller is not None:
+                                true_moa_controller.cancel()
+                            agent.interrupt("Stop requested via My Stand delivery")
+                        finally:
+                            raise CompletionStoppedError("request stopped before execution")
                 initial_tool_choice = trusted_initial_tool_choice
                 if (
                     not initial_tool_choice
@@ -7174,6 +7886,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         tool_complete_callback=_traced_tool_complete,
                         trusted_turn=trusted_turn,
                         fact_requirement=fact_requirement,
+                        terminal_controller=true_moa_controller,
                     )
                     evidence_prompt = _build_mystand_preexecuted_prompt(
                         preexecuted_evidence
@@ -7200,13 +7913,6 @@ class APIServerAdapter(BasePlatformAdapter):
                         agent,
                         trusted_turn,
                     )
-                if agent_ref is not None:
-                    agent_ref[0] = agent
-                    if len(agent_ref) > 1 and agent_ref[1]:
-                        try:
-                            agent.interrupt("Stop requested via My Stand delivery")
-                        finally:
-                            raise CompletionStoppedError("request stopped before execution")
                 effective_task_id = session_id or str(uuid.uuid4())
                 execution_history = (
                     []
@@ -7217,6 +7923,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     )
                     else conversation_history
                 )
+                if true_moa_ledger is not None:
+                    true_moa_ledger.start_slot(FINAL_EXECUTOR_SLOT)
                 result = agent.run_conversation(
                     user_message=user_message,
                     conversation_history=execution_history,
@@ -7263,7 +7971,14 @@ class APIServerAdapter(BasePlatformAdapter):
                     "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                     "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
                 }
-                if agent_ref is not None and len(agent_ref) > 1 and agent_ref[1]:
+                request_stopped = bool(
+                    (agent_ref is not None and len(agent_ref) > 1 and agent_ref[1])
+                    or (
+                        true_moa_controller is not None
+                        and true_moa_controller.state == "cancelled"
+                    )
+                )
+                if request_stopped:
                     result = dict(result or {})
                     result.update({
                         "final_response": "",
@@ -7272,6 +7987,59 @@ class APIServerAdapter(BasePlatformAdapter):
                         "interrupted": True,
                         "error": "completion stopped",
                     })
+                if true_moa_ledger is not None:
+                    result_interrupted = bool(result.get("interrupted"))
+                    result_partial = bool(result.get("partial"))
+                    result_failed = bool(result.get("failed"))
+                    result_completed = bool(result.get("completed", True))
+                    if request_stopped or result_interrupted:
+                        true_moa_controller.cancel()
+                        final_status = "cancelled"
+                        final_error = "completion_stopped"
+                        wave_status = "cancelled"
+                    elif result_partial or result_failed or not result_completed:
+                        true_moa_controller.fail()
+                        final_status = "failed"
+                        final_error = (
+                            "output_truncated"
+                            if result_partial
+                            else "final_executor_failed"
+                        )
+                        wave_status = "failed"
+                    elif true_moa_controller.complete():
+                        final_status = "completed"
+                        final_error = None
+                        wave_status = "completed"
+                    else:
+                        # A cancellation that wins the terminal-state lock
+                        # suppresses even a provider result that arrived at the
+                        # same time.
+                        result.update({
+                            "final_response": "",
+                            "completed": False,
+                            "failed": True,
+                            "interrupted": True,
+                            "error": "completion stopped",
+                        })
+                        final_status = "cancelled"
+                        final_error = "terminal_fence"
+                        wave_status = "cancelled"
+                    true_moa_ledger.finish_slot(
+                        FINAL_EXECUTOR_SLOT,
+                        status=final_status,
+                        usage=usage,
+                        error_category=final_error,
+                        cost_usd=(
+                            getattr(agent, "session_estimated_cost_usd", None)
+                            if getattr(agent, "session_cost_status", "") != "unavailable"
+                            else None
+                        ),
+                        cost_status=getattr(agent, "session_cost_status", None),
+                        cost_source=getattr(agent, "session_cost_source", None),
+                    )
+                    true_moa_ledger.set_wave_status(wave_status)
+                    usage = _true_moa_usage_summary(true_moa_ledger)
+                    result["_true_moa_usage"] = usage["true_moa"]
                 # Include the effective session ID in the result so callers
                 # (e.g. X-Xiaoban-Session-Id header) can track compression-
                 # triggered session rotations. (#16938)
@@ -7323,6 +8091,36 @@ class APIServerAdapter(BasePlatformAdapter):
                         tool_count=tool_count,
                         error_code="completion_stopped",
                     )
+                if true_moa_ledger is not None:
+                    true_moa_controller.cancel()
+                    true_moa_ledger.finish_slot(
+                        FINAL_EXECUTOR_SLOT,
+                        status="cancelled",
+                        usage=(
+                            {
+                                "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                                "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+                                "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                            }
+                            if agent is not None
+                            else None
+                        ),
+                        error_category="completion_stopped",
+                    )
+                    true_moa_ledger.set_wave_status("cancelled")
+                    usage = _true_moa_usage_summary(true_moa_ledger)
+                    return (
+                        {
+                            "final_response": "",
+                            "completed": False,
+                            "failed": True,
+                            "interrupted": True,
+                            "error": "completion stopped",
+                            "_mystand_request": True,
+                            "_true_moa_usage": usage["true_moa"],
+                        },
+                        usage,
+                    )
                 raise
             except Exception:
                 if metadata_trace is not None:
@@ -7333,11 +8131,47 @@ class APIServerAdapter(BasePlatformAdapter):
                         tool_count=tool_count,
                         error_code="agent_run_failed",
                     )
+                if true_moa_ledger is not None:
+                    true_moa_controller.fail()
+                    true_moa_ledger.finish_slot(
+                        FINAL_EXECUTOR_SLOT,
+                        status="failed",
+                        usage=(
+                            {
+                                "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                                "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+                                "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                            }
+                            if agent is not None
+                            else None
+                        ),
+                        error_category="final_executor_error",
+                    )
+                    true_moa_ledger.set_wave_status("failed")
+                    usage = _true_moa_usage_summary(true_moa_ledger)
+                    return (
+                        {
+                            "final_response": "",
+                            "completed": False,
+                            "failed": True,
+                            "error": "true MoA final executor failed",
+                            "_mystand_request": True,
+                            "_true_moa_usage": usage["true_moa"],
+                        },
+                        usage,
+                    )
                 raise
             finally:
-                if trusted_turn_token is not None:
-                    deactivate_turn(trusted_turn_token)
-                clear_session_vars(tokens)
+                if trusted_turn_token is not None and callable(deactivate_turn):
+                    try:
+                        deactivate_turn(trusted_turn_token)
+                    except Exception:
+                        pass
+                if tokens is not None:
+                    try:
+                        clear_session_vars(tokens)
+                    except Exception:
+                        pass
 
         self._inflight_agent_runs += 1
         try:
@@ -8016,6 +8850,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/api/sessions/{session_id}/events/stream", self._handle_session_events_stream)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/v1/chat/completions/stop", self._handle_stop_idempotent_chat_completion)
+            self._app.router.add_post("/v1/chat/completions/usage", self._handle_chat_completion_usage)
             self._app.router.add_post("/v1/responses", self._handle_responses)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
             self._app.router.add_delete("/v1/responses/{response_id}", self._handle_delete_response)

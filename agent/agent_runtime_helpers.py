@@ -1713,11 +1713,14 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     if not isinstance(function_args, dict):
         function_args = {}
 
+    _strict_paid_call = bool(
+        getattr(agent, "_strict_no_automatic_paid_retry", False)
+    )
     _tool_middleware_trace = list(tool_request_middleware_trace or [])
-    try:
-        from xiaoban_cli.middleware import apply_tool_request_middleware
+    if not skip_tool_request_middleware and not _strict_paid_call:
+        try:
+            from xiaoban_cli.middleware import apply_tool_request_middleware
 
-        if not skip_tool_request_middleware:
             _tool_request_mw = apply_tool_request_middleware(
                 function_name,
                 function_args,
@@ -1729,12 +1732,12 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             )
             function_args = _tool_request_mw.payload
             _tool_middleware_trace = _tool_request_mw.trace
-    except Exception as _mw_err:
-        logger.debug("tool_request middleware error: %s", _mw_err)
+        except Exception as _mw_err:
+            logger.debug("tool_request middleware error: %s", _mw_err)
 
     # Check plugin hooks for a block directive before executing anything.
     block_message: Optional[str] = None
-    if not pre_tool_block_checked:
+    if not pre_tool_block_checked and not _strict_paid_call:
         try:
             from xiaoban_cli.plugins import get_pre_tool_call_block_message
             block_message = get_pre_tool_call_block_message(
@@ -1775,6 +1778,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
 
     def _finish_agent_tool(result: Any, observed_args: Optional[dict] = None) -> Any:
         hook_args = observed_args if isinstance(observed_args, dict) else function_args
+        if _strict_paid_call:
+            return result
         try:
             from model_tools import _emit_post_tool_call_hook
             _emit_post_tool_call_hook(
@@ -1893,10 +1898,17 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                 disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                 tool_request_middleware_trace=list(_tool_middleware_trace),
+                **(
+                    {"skip_extension_hooks": True}
+                    if _strict_paid_call
+                    else {}
+                ),
             )
 
-    from xiaoban_cli.middleware import run_tool_execution_middleware
+    if _strict_paid_call:
+        return _execute(function_args)
 
+    from xiaoban_cli.middleware import run_tool_execution_middleware
     return run_tool_execution_middleware(
         function_name,
         function_args,

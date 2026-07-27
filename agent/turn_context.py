@@ -373,51 +373,56 @@ def build_turn_context(
 
     # Plugin hook: pre_llm_call (context injected into user message, not system prompt).
     plugin_user_context = ""
-    try:
-        from xiaoban_cli.plugins import invoke_hook as _invoke_hook
-        _pre_results = _invoke_hook(
-            "pre_llm_call",
-            session_id=agent.session_id,
-            task_id=effective_task_id,
-            turn_id=turn_id,
-            user_message=original_user_message,
-            conversation_history=list(messages),
-            is_first_turn=(not bool(conversation_history)),
-            model=agent.model,
-            platform=getattr(agent, "platform", None) or "",
-            sender_id=getattr(agent, "_user_id", None) or "",
-        )
-        _ctx_parts: list[str] = []
-        for r in _pre_results:
-            if isinstance(r, dict) and r.get("context"):
-                _ctx_parts.append(str(r["context"]))
-            elif isinstance(r, str) and r.strip():
-                _ctx_parts.append(r)
-        if _ctx_parts:
-            plugin_user_context = "\n\n".join(_ctx_parts)
-    except Exception as exc:
-        logger.warning("pre_llm_call hook failed: %s", exc)
+    strict_paid_call = bool(
+        getattr(agent, "_strict_no_automatic_paid_retry", False)
+    )
+    if not strict_paid_call:
+        try:
+            from xiaoban_cli.plugins import invoke_hook as _invoke_hook
+            _pre_results = _invoke_hook(
+                "pre_llm_call",
+                session_id=agent.session_id,
+                task_id=effective_task_id,
+                turn_id=turn_id,
+                user_message=original_user_message,
+                conversation_history=list(messages),
+                is_first_turn=(not bool(conversation_history)),
+                model=agent.model,
+                platform=getattr(agent, "platform", None) or "",
+                sender_id=getattr(agent, "_user_id", None) or "",
+            )
+            _ctx_parts: list[str] = []
+            for r in _pre_results:
+                if isinstance(r, dict) and r.get("context"):
+                    _ctx_parts.append(str(r["context"]))
+                elif isinstance(r, str) and r.strip():
+                    _ctx_parts.append(r)
+            if _ctx_parts:
+                plugin_user_context = "\n\n".join(_ctx_parts)
+        except Exception as exc:
+            logger.warning("pre_llm_call hook failed: %s", exc)
 
     # Auto-loaded task skills: web/API chat surfaces often need a clean
     # evidence workflow before the model burns turns on generic search.  This
     # context is injected into the current turn only, like plugin context, so it
     # does not mutate the cached system prompt or persisted transcript.
-    try:
-        from agent.auto_skill_context import collect_matching_skill_context
+    if not strict_paid_call:
+        try:
+            from agent.auto_skill_context import collect_matching_skill_context
 
-        _auto_skill_context = collect_matching_skill_context(
-            original_user_message,
-            available_tools=getattr(agent, "valid_tool_names", None),
-            available_toolsets=getattr(agent, "enabled_toolsets", None),
-        )
-        if _auto_skill_context:
-            plugin_user_context = (
-                f"{_auto_skill_context}\n\n{plugin_user_context}"
-                if plugin_user_context
-                else _auto_skill_context
+            _auto_skill_context = collect_matching_skill_context(
+                original_user_message,
+                available_tools=getattr(agent, "valid_tool_names", None),
+                available_toolsets=getattr(agent, "enabled_toolsets", None),
             )
-    except Exception as exc:
-        logger.warning("auto skill context failed: %s", exc)
+            if _auto_skill_context:
+                plugin_user_context = (
+                    f"{_auto_skill_context}\n\n{plugin_user_context}"
+                    if plugin_user_context
+                    else _auto_skill_context
+                )
+        except Exception as exc:
+            logger.warning("auto skill context failed: %s", exc)
 
     # Per-turn file-mutation verifier state.
     agent._turn_failed_file_mutations = {}
@@ -436,7 +441,7 @@ def build_turn_context(
         agent._interrupt_thread_signal_pending = False
 
     # Notify memory providers of the new turn (BEFORE prefetch_all).
-    if agent._memory_manager:
+    if agent._memory_manager and not strict_paid_call:
         try:
             _turn_msg = original_user_message if isinstance(original_user_message, str) else ""
             agent._memory_manager.on_turn_start(agent._user_turn_count, _turn_msg)
@@ -445,7 +450,7 @@ def build_turn_context(
 
     # External memory provider: prefetch once before the tool loop.
     ext_prefetch_cache = ""
-    if agent._memory_manager:
+    if agent._memory_manager and not strict_paid_call:
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
             ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
@@ -461,7 +466,9 @@ def build_turn_context(
         effective_task_id=effective_task_id,
         turn_id=turn_id,
         current_turn_user_idx=current_turn_user_idx,
-        should_review_memory=should_review_memory,
+        should_review_memory=(
+            False if strict_paid_call else should_review_memory
+        ),
         plugin_user_context=plugin_user_context,
         ext_prefetch_cache=ext_prefetch_cache,
     )

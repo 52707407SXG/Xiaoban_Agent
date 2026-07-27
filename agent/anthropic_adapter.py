@@ -703,6 +703,7 @@ def build_anthropic_client(
     timeout: float = None,
     *,
     drop_context_1m_beta: bool = False,
+    max_retries: int | None = None,
 ):
     """Create an Anthropic client, auto-detecting setup-tokens vs API keys.
 
@@ -758,6 +759,8 @@ def build_anthropic_client(
     kwargs = {
         "timeout": Timeout(timeout=float(_read_timeout), connect=10.0),
     }
+    if max_retries is not None:
+        kwargs["max_retries"] = max(0, int(max_retries))
     if normalized_base_url:
         # Azure Anthropic endpoints require an ``api-version`` query parameter.
         # Pass it via default_query so the SDK appends it to every request URL

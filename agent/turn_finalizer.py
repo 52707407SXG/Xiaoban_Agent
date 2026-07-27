@@ -50,10 +50,61 @@ def finalize_turn(
     """
     from agent.conversation_loop import logger
 
+    strict_paid_call = bool(
+        getattr(agent, "_strict_no_automatic_paid_retry", False)
+    )
+    _strict_controller = getattr(
+        agent,
+        "_true_moa_cancel_controller",
+        None,
+    )
+
+    def _strict_stop_won() -> bool:
+        if not strict_paid_call:
+            return False
+        controller_state = (
+            getattr(_strict_controller, "state", "")
+            if _strict_controller is not None
+            else ""
+        )
+        return controller_state == "cancelled" or (
+            bool(getattr(agent, "_interrupt_requested", False))
+            and controller_state != "completed"
+        )
+
+    def _drop_cancelled_turn_outputs() -> None:
+        """Remove provider/tool output after this turn's user boundary."""
+
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if isinstance(message, dict) and message.get("role") == "user":
+                del messages[index + 1 :]
+                return
+
+    if (
+        strict_paid_call
+        and _strict_controller is not None
+        and final_response is not None
+        and not failed
+        and not interrupted
+        and not getattr(agent, "_interrupt_requested", False)
+        and _strict_controller.state == "running"
+    ):
+        _strict_controller.try_commit_final(
+            f"finalizer-response:{turn_id}"
+        )
+
+    _strict_terminal_cancelled = _strict_stop_won()
+    if _strict_terminal_cancelled:
+        final_response = None
+        interrupted = True
+        failed = True
+        _turn_exit_reason = "strict_terminal_fence"
+        _drop_cancelled_turn_outputs()
     if final_response is None and (
         api_call_count >= agent.max_iterations
         or agent.iteration_budget.remaining <= 0
-    ):
+    ) and not strict_paid_call:
         # Budget exhausted — ask the model for a summary via one extra
         # API call with tools stripped.  _handle_max_iterations injects a
         # user message and makes a single toolless request.
@@ -121,6 +172,15 @@ def finalize_turn(
                     exc_info=True,
                 )
 
+    if final_response is None and strict_paid_call and (
+        api_call_count >= agent.max_iterations
+        or agent.iteration_budget.remaining <= 0
+    ):
+        _turn_exit_reason = (
+            f"strict_iteration_budget_reached({api_call_count}/{agent.max_iterations})"
+        )
+        failed = True
+
     # Determine if conversation completed successfully
     normal_text_response = str(_turn_exit_reason).startswith("text_response(")
     completed = (
@@ -148,6 +208,14 @@ def finalize_turn(
     # Save trajectory if enabled.  ``user_message`` may be a multimodal
     # list of parts; the trajectory format wants a plain string.
     try:
+        if _strict_stop_won():
+            _strict_terminal_cancelled = True
+            final_response = None
+            interrupted = True
+            failed = True
+            completed = False
+            _turn_exit_reason = "strict_terminal_fence"
+            _drop_cancelled_turn_outputs()
         agent._save_trajectory(messages, _summarize_user_message_for_log(user_message), completed)
     except Exception as _save_err:
         _cleanup_errors.append(f"save_trajectory: {_save_err}")
@@ -165,6 +233,14 @@ def finalize_turn(
     # can replay assistant("(empty)") / recovery nudges and fall into the
     # same empty-response loop again.
     try:
+        if _strict_stop_won():
+            _strict_terminal_cancelled = True
+            final_response = None
+            interrupted = True
+            failed = True
+            completed = False
+            _turn_exit_reason = "strict_terminal_fence"
+            _drop_cancelled_turn_outputs()
         agent._drop_trailing_empty_response_scaffolding(messages)
         agent._persist_session(messages, conversation_history)
     except Exception as _persist_err:
@@ -230,7 +306,7 @@ def finalize_turn(
     # Gate: only applied when a real text response exists for this
     # turn and the user didn't interrupt.  Empty/interrupted turns
     # already have other surface text that shouldn't be augmented.
-    if final_response and not interrupted:
+    if final_response and not interrupted and not strict_paid_call:
         try:
             _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
             if _failed and agent._file_mutation_verifier_enabled():
@@ -295,7 +371,7 @@ def finalize_turn(
     # Fired once per turn after the tool-calling loop completes.
     # Plugins can transform the LLM's output text before it's returned.
     # First hook to return a string wins; None/empty return leaves text unchanged.
-    if final_response and not interrupted:
+    if final_response and not interrupted and not strict_paid_call:
         try:
             from xiaoban_cli.plugins import invoke_hook as _invoke_hook
             _transform_results = _invoke_hook(
@@ -317,7 +393,7 @@ def finalize_turn(
     # Fired once per turn after the tool-calling loop completes.
     # Plugins can use this to persist conversation data (e.g. sync
     # to an external memory system).
-    if final_response and not interrupted:
+    if final_response and not interrupted and not strict_paid_call:
         try:
             from xiaoban_cli.plugins import invoke_hook as _invoke_hook
             _invoke_hook(
@@ -381,6 +457,8 @@ def finalize_turn(
         "cost_source": agent.session_cost_source,
         "session_id": agent.session_id,
     }
+    if _strict_terminal_cancelled:
+        result["error"] = "completion stopped"
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
     # Surface any post-loop cleanup failures so the caller can distinguish a
@@ -400,31 +478,41 @@ def finalize_turn(
     if interrupted and agent._interrupt_message:
         result["interrupt_message"] = agent._interrupt_message
 
-    # Clear interrupt state after handling
-    agent.clear_interrupt()
+    # A true-MoA stop remains terminal until the gateway settles the same
+    # request.  Clearing it here would reopen a late response/persistence
+    # window after the request-local controller already chose cancellation.
+    if not _strict_terminal_cancelled:
+        agent.clear_interrupt()
 
     # Clear stream callback so it doesn't leak into future calls
     agent._stream_callback = None
 
     # Check skill trigger NOW — based on how many tool iterations THIS turn used.
     _should_review_skills = False
-    if (agent._skill_nudge_interval > 0
+    if (not strict_paid_call
+            and agent._skill_nudge_interval > 0
             and agent._iters_since_skill >= agent._skill_nudge_interval
             and "skill_manage" in agent.valid_tool_names):
         _should_review_skills = True
         agent._iters_since_skill = 0
 
     # External memory provider: sync the completed turn + queue next prefetch.
-    agent._sync_external_memory_for_turn(
-        original_user_message=original_user_message,
-        final_response=final_response,
-        interrupted=interrupted,
-        messages=messages,
-    )
+    if not strict_paid_call:
+        agent._sync_external_memory_for_turn(
+            original_user_message=original_user_message,
+            final_response=final_response,
+            interrupted=interrupted,
+            messages=messages,
+        )
 
     # Background memory/skill review — runs AFTER the response is delivered
     # so it never competes with the user's task for model attention.
-    if final_response and not interrupted and (_should_review_memory or _should_review_skills):
+    if (
+        not strict_paid_call
+        and final_response
+        and not interrupted
+        and (_should_review_memory or _should_review_skills)
+    ):
         try:
             agent._spawn_background_review(
                 messages_snapshot=list(messages),
@@ -444,19 +532,20 @@ def finalize_turn(
     # Plugin hook: on_session_end
     # Fired at the very end of every run_conversation call.
     # Plugins can use this for cleanup, flushing buffers, etc.
-    try:
-        from xiaoban_cli.plugins import invoke_hook as _invoke_hook
-        _invoke_hook(
-            "on_session_end",
-            session_id=agent.session_id,
-            task_id=effective_task_id,
-            turn_id=turn_id,
-            completed=completed,
-            interrupted=interrupted,
-            model=agent.model,
-            platform=getattr(agent, "platform", None) or "",
-        )
-    except Exception as exc:
-        logger.warning("on_session_end hook failed: %s", exc)
+    if not strict_paid_call:
+        try:
+            from xiaoban_cli.plugins import invoke_hook as _invoke_hook
+            _invoke_hook(
+                "on_session_end",
+                session_id=agent.session_id,
+                task_id=effective_task_id,
+                turn_id=turn_id,
+                completed=completed,
+                interrupted=interrupted,
+                model=agent.model,
+                platform=getattr(agent, "platform", None) or "",
+            )
+        except Exception as exc:
+            logger.warning("on_session_end hook failed: %s", exc)
 
     return result

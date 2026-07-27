@@ -2182,6 +2182,287 @@ class TestExecuteToolCalls:
             or "interrupted" in messages[0]["content"].lower()
         )
 
+    def test_strict_cancelled_controller_blocks_sequential_tool_handler(
+        self,
+        agent,
+    ):
+        from xiaoban.trusted_runtime.true_moa import TrueMoACancelController
+
+        controller = TrueMoACancelController()
+        controller.cancel()
+        agent._strict_no_automatic_paid_retry = True
+        agent._true_moa_cancel_controller = controller
+        agent.tool_progress_callback = MagicMock()
+        agent.tool_start_callback = MagicMock()
+        agent.tool_complete_callback = MagicMock()
+        agent._checkpoint_mgr.enabled = True
+        tc = _mock_tool_call(
+            name="write_file",
+            arguments='{"path":"/tmp/must-not-run","content":"late"}',
+            call_id="strict-stop-sequential",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=AssertionError(
+                    "cancelled sequential tool dispatched"
+                ),
+            ) as handler,
+            patch(
+                "agent.tool_executor._trusted_preaction_denial",
+                side_effect=AssertionError(
+                    "cancelled sequential tool reached trusted PreAction"
+                ),
+            ) as preaction,
+            patch.object(
+                agent._tool_guardrails,
+                "before_call",
+                side_effect=AssertionError(
+                    "cancelled sequential tool reached guardrail"
+                ),
+            ) as guardrail,
+            patch.object(
+                agent._checkpoint_mgr,
+                "ensure_checkpoint",
+            ) as checkpoint,
+            patch.object(agent, "_touch_activity") as activity,
+        ):
+            agent._execute_tool_calls_sequential(
+                mock_msg,
+                messages,
+                "task-1",
+            )
+
+        handler.assert_not_called()
+        preaction.assert_not_called()
+        guardrail.assert_not_called()
+        checkpoint.assert_not_called()
+        agent.tool_progress_callback.assert_not_called()
+        agent.tool_start_callback.assert_not_called()
+        agent.tool_complete_callback.assert_not_called()
+        activity.assert_not_called()
+        assert len(messages) == 1
+        assert '"status": "cancelled"' in messages[0]["content"]
+
+    def test_strict_cancelled_controller_blocks_concurrent_tool_handler(
+        self,
+        agent,
+    ):
+        from xiaoban.trusted_runtime.true_moa import TrueMoACancelController
+
+        controller = TrueMoACancelController()
+        controller.cancel()
+        agent._strict_no_automatic_paid_retry = True
+        agent._true_moa_cancel_controller = controller
+        agent.tool_progress_callback = MagicMock()
+        agent.tool_start_callback = MagicMock()
+        agent.tool_complete_callback = MagicMock()
+        agent._checkpoint_mgr.enabled = True
+        tc = _mock_tool_call(
+            name="write_file",
+            arguments='{"path":"/tmp/must-not-run","content":"late"}',
+            call_id="strict-stop-concurrent",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+
+        with (
+            patch.object(
+                agent,
+                "_invoke_tool",
+                side_effect=AssertionError(
+                    "cancelled concurrent tool dispatched"
+                ),
+            ) as handler,
+            patch(
+                "agent.tool_executor._trusted_preaction_denial",
+                side_effect=AssertionError(
+                    "cancelled concurrent tool reached trusted PreAction"
+                ),
+            ) as preaction,
+            patch.object(
+                agent._tool_guardrails,
+                "before_call",
+                side_effect=AssertionError(
+                    "cancelled concurrent tool reached guardrail"
+                ),
+            ) as guardrail,
+            patch.object(
+                agent._checkpoint_mgr,
+                "ensure_checkpoint",
+            ) as checkpoint,
+            patch.object(agent, "_touch_activity") as activity,
+        ):
+            agent._execute_tool_calls_concurrent(
+                mock_msg,
+                messages,
+                "task-1",
+            )
+
+        handler.assert_not_called()
+        preaction.assert_not_called()
+        guardrail.assert_not_called()
+        checkpoint.assert_not_called()
+        agent.tool_progress_callback.assert_not_called()
+        agent.tool_start_callback.assert_not_called()
+        agent.tool_complete_callback.assert_not_called()
+        activity.assert_not_called()
+        assert len(messages) == 1
+        assert '"status": "cancelled"' in messages[0]["content"]
+
+    @pytest.mark.parametrize("concurrent", [False, True])
+    def test_strict_stop_after_admission_blocks_handler_start_callbacks(
+        self,
+        agent,
+        concurrent,
+    ):
+        from xiaoban.trusted_runtime.true_moa import TrueMoACancelController
+
+        controller = TrueMoACancelController()
+        original_gate = controller.try_begin_dispatch
+        agent._strict_no_automatic_paid_retry = True
+        agent._true_moa_cancel_controller = controller
+        agent.tool_progress_callback = MagicMock()
+        agent.tool_start_callback = MagicMock()
+        agent.tool_complete_callback = MagicMock()
+        tc = _mock_tool_call(
+            name="web_search",
+            arguments="{}",
+            call_id=f"strict-between-gates-{concurrent}",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+
+        def _cancel_after_admission(key):
+            accepted = original_gate(key)
+            if accepted and str(key).startswith("final-tool:"):
+                controller.cancel()
+            return accepted
+
+        with patch.object(
+            controller,
+            "try_begin_dispatch",
+            side_effect=_cancel_after_admission,
+        ):
+            if concurrent:
+                with patch.object(
+                    agent,
+                    "_invoke_tool",
+                    side_effect=AssertionError(
+                        "handler ran after stop won the handler-start gate"
+                    ),
+                ) as handler:
+                    agent._execute_tool_calls_concurrent(
+                        mock_msg,
+                        messages,
+                        "task-1",
+                    )
+            else:
+                with patch(
+                    "run_agent.handle_function_call",
+                    side_effect=AssertionError(
+                        "handler ran after stop won the handler-start gate"
+                    ),
+                ) as handler:
+                    agent._execute_tool_calls_sequential(
+                        mock_msg,
+                        messages,
+                        "task-1",
+                    )
+
+        handler.assert_not_called()
+        agent.tool_progress_callback.assert_not_called()
+        agent.tool_start_callback.assert_not_called()
+        agent.tool_complete_callback.assert_not_called()
+        assert len(messages) == 1
+        assert '"status": "cancelled"' in messages[0]["content"]
+
+    @pytest.mark.parametrize("concurrent", [False, True])
+    def test_strict_stop_before_result_commit_discards_private_tool_result(
+        self,
+        agent,
+        concurrent,
+    ):
+        from xiaoban.trusted_runtime.true_moa import TrueMoACancelController
+
+        controller = TrueMoACancelController()
+        agent._strict_no_automatic_paid_retry = True
+        agent._true_moa_cancel_controller = controller
+        agent.tool_progress_callback = MagicMock()
+        agent.tool_start_callback = MagicMock()
+        agent.tool_complete_callback = MagicMock()
+        tc = _mock_tool_call(
+            name="web_search",
+            arguments="{}",
+            call_id=f"strict-late-result-{concurrent}",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+
+        def _late_handler(*_args, **_kwargs):
+            controller.cancel()
+            return "PRIVATE_LATE_TOOL_RESULT"
+
+        with (
+            patch(
+                "agent.tool_executor.maybe_persist_tool_result",
+                side_effect=AssertionError("late result reached persistence"),
+            ) as persist,
+            patch.object(
+                agent,
+                "_append_guardrail_observation",
+                side_effect=AssertionError(
+                    "late result reached guardrail post-processing"
+                ),
+            ) as post_guardrail,
+            patch.object(
+                agent._subdirectory_hints,
+                "check_tool_call",
+                side_effect=AssertionError(
+                    "late result reached subdirectory discovery"
+                ),
+            ) as subdir,
+        ):
+            if concurrent:
+                with patch.object(
+                    agent,
+                    "_invoke_tool",
+                    side_effect=_late_handler,
+                ) as handler:
+                    agent._execute_tool_calls_concurrent(
+                        mock_msg,
+                        messages,
+                        "task-1",
+                    )
+            else:
+                with patch(
+                    "run_agent.handle_function_call",
+                    side_effect=_late_handler,
+                ) as handler:
+                    agent._execute_tool_calls_sequential(
+                        mock_msg,
+                        messages,
+                        "task-1",
+                    )
+
+        handler.assert_called_once()
+        persist.assert_not_called()
+        post_guardrail.assert_not_called()
+        subdir.assert_not_called()
+        agent.tool_start_callback.assert_called_once()
+        agent.tool_complete_callback.assert_not_called()
+        progress_events = [
+            call.args[0]
+            for call in agent.tool_progress_callback.call_args_list
+        ]
+        assert progress_events == ["tool.started"]
+        serialized = json.dumps(messages, ensure_ascii=False)
+        assert "PRIVATE_LATE_TOOL_RESULT" not in serialized
+        assert "cancelled" in serialized
+
     def test_invalid_json_args_defaults_empty(self, agent):
         tc = _mock_tool_call(
             name="web_search", arguments="not valid json", call_id="c1"
@@ -3610,6 +3891,554 @@ class TestRunConversation:
         assert any(msg.get("role") == "user" and msg.get("content") == "search something" for msg in pre_request_calls[0]["request_messages"])
         assert all("usage" in c and "response" in c for c in post_request_calls)
         assert all("assistant_message" in c["response"] for c in post_request_calls)
+
+    def test_strict_paid_turn_allows_tools_but_skips_untracked_extensions(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        tc = _mock_tool_call(
+            name="web_search",
+            arguments="{}",
+            call_id="strict-tool-1",
+        )
+        responses = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[tc],
+            ),
+            _mock_response(
+                content="Strict final answer",
+                finish_reason="stop",
+            ),
+        ]
+        extension_calls = []
+
+        def _unexpected_extension(*_args, **_kwargs):
+            extension_calls.append(
+                str(_args[0]) if _args else "extension"
+            )
+            raise AssertionError("strict paid turn invoked an untracked extension")
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=responses,
+            ) as api_call,
+            patch(
+                "run_agent.handle_function_call",
+                return_value="trusted tool result",
+            ) as tool_call,
+            patch(
+                "xiaoban_cli.plugins.has_hook",
+                side_effect=_unexpected_extension,
+            ),
+            patch(
+                "xiaoban_cli.plugins.invoke_hook",
+                side_effect=_unexpected_extension,
+            ),
+            patch(
+                "xiaoban_cli.middleware.apply_llm_request_middleware",
+                side_effect=_unexpected_extension,
+            ),
+            patch(
+                "xiaoban_cli.middleware.run_llm_execution_middleware",
+                side_effect=_unexpected_extension,
+            ),
+            patch(
+                "xiaoban_cli.middleware.apply_tool_request_middleware",
+                side_effect=_unexpected_extension,
+            ),
+            patch(
+                "xiaoban_cli.middleware.run_tool_execution_middleware",
+                side_effect=_unexpected_extension,
+            ),
+            patch(
+                "agent.auto_skill_context.collect_matching_skill_context",
+                side_effect=_unexpected_extension,
+            ),
+            patch.object(
+                agent,
+                "_spawn_background_review",
+                side_effect=_unexpected_extension,
+            ),
+            patch.object(
+                agent,
+                "_sync_external_memory_for_turn",
+                side_effect=_unexpected_extension,
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("use one trusted tool")
+
+        assert result["final_response"] == "Strict final answer"
+        assert result["completed"] is True
+        assert api_call.call_count == 2
+        assert tool_call.call_count == 1
+        assert tool_call.call_args.kwargs["skip_extension_hooks"] is True
+        assert extension_calls == []
+
+    def test_strict_late_tool_result_cannot_start_next_provider_call(
+        self,
+        agent,
+    ):
+        from xiaoban.trusted_runtime.true_moa import TrueMoACancelController
+
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        controller = TrueMoACancelController()
+        agent._true_moa_cancel_controller = controller
+        agent.tool_progress_callback = MagicMock()
+        agent.tool_complete_callback = MagicMock()
+        tc = _mock_tool_call(
+            name="web_search",
+            arguments="{}",
+            call_id="strict-stop-in-tool",
+        )
+        first = _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[tc],
+        )
+        forbidden_next = _mock_response(
+            content="PRIVATE_FORBIDDEN_NEXT_RESPONSE",
+            finish_reason="stop",
+        )
+        persisted: list[str] = []
+
+        def _late_tool(*_args, **_kwargs):
+            controller.cancel()
+            return "PRIVATE_LATE_TOOL_RESULT"
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=[first, forbidden_next],
+            ) as api_call,
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=_late_tool,
+            ) as tool_call,
+            patch.object(
+                agent,
+                "_persist_session",
+                side_effect=lambda messages, _history: persisted.append(
+                    json.dumps(messages, ensure_ascii=False)
+                ),
+            ),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("stop inside the trusted tool")
+
+        assert tool_call.call_count == 1
+        assert api_call.call_count == 1
+        assert result["final_response"] is None
+        assert result["completed"] is False
+        assert result["failed"] is True
+        serialized = json.dumps(result, ensure_ascii=False)
+        assert "PRIVATE_LATE_TOOL_RESULT" not in serialized
+        assert "PRIVATE_FORBIDDEN_NEXT_RESPONSE" not in serialized
+        assert all("PRIVATE_LATE_TOOL_RESULT" not in item for item in persisted)
+        agent.tool_complete_callback.assert_not_called()
+        assert [
+            call.args[0]
+            for call in agent.tool_progress_callback.call_args_list
+        ] == ["tool.started"]
+
+    def test_strict_stop_after_provider_return_blocks_content_and_persistence(
+        self,
+        agent,
+    ):
+        from xiaoban.trusted_runtime.true_moa import TrueMoACancelController
+
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        controller = TrueMoACancelController()
+        agent._true_moa_cancel_controller = controller
+        agent.tool_progress_callback = MagicMock()
+        late_response = _mock_response(
+            content="PRIVATE_LATE_FINAL",
+            finish_reason="stop",
+            usage={
+                "prompt_tokens": 19,
+                "completion_tokens": 4,
+                "total_tokens": 23,
+            },
+        )
+        persisted: list[str] = []
+
+        def _provider_return_then_stop(_kwargs):
+            controller.cancel()
+            agent._interrupt_requested = True
+            return late_response
+
+        def _capture_persist(messages, _history):
+            persisted.append(json.dumps(messages, ensure_ascii=False))
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=_provider_return_then_stop,
+            ) as api_call,
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=AssertionError("late final response reached a tool"),
+            ) as tool_call,
+            patch.object(
+                agent,
+                "_persist_session",
+                side_effect=_capture_persist,
+            ),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("stop at the response boundary")
+
+        assert api_call.call_count == 1
+        tool_call.assert_not_called()
+        assert result["final_response"] is None
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["interrupted"] is True
+        assert "PRIVATE_LATE_FINAL" not in json.dumps(result, ensure_ascii=False)
+        assert all("PRIVATE_LATE_FINAL" not in item for item in persisted)
+        agent.tool_progress_callback.assert_not_called()
+        assert agent.session_prompt_tokens == 19
+        assert agent.session_completion_tokens == 4
+        assert agent.session_total_tokens == 23
+        assert controller.state == "cancelled"
+        assert agent._interrupt_requested is True
+
+    def test_strict_stop_during_normalize_blocks_progress_and_content(
+        self,
+        agent,
+    ):
+        from xiaoban.trusted_runtime.true_moa import TrueMoACancelController
+
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        controller = TrueMoACancelController()
+        agent._true_moa_cancel_controller = controller
+        agent.tool_progress_callback = MagicMock()
+        response = _mock_response(
+            content="PRIVATE_LATE_AFTER_NORMALIZE",
+            finish_reason="stop",
+            usage={
+                "prompt_tokens": 29,
+                "completion_tokens": 6,
+                "total_tokens": 35,
+            },
+        )
+        transport = agent._get_transport()
+        original_normalize = transport.normalize_response
+        normalize_calls = 0
+        persisted: list[str] = []
+
+        def _normalize_then_stop(*args, **kwargs):
+            nonlocal normalize_calls
+            normalized = original_normalize(*args, **kwargs)
+            normalize_calls += 1
+            if normalize_calls == 1:
+                controller.cancel()
+                agent._interrupt_requested = True
+            return normalized
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                return_value=response,
+            ),
+            patch.object(agent, "_get_transport", return_value=transport),
+            patch.object(
+                transport,
+                "normalize_response",
+                side_effect=_normalize_then_stop,
+            ),
+            patch.object(
+                agent,
+                "_persist_session",
+                side_effect=lambda messages, _history: persisted.append(
+                    json.dumps(messages, ensure_ascii=False)
+                ),
+            ),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("stop while normalizing")
+
+        assert normalize_calls >= 1
+        assert result["final_response"] is None
+        assert result["completed"] is False
+        assert result["interrupted"] is True
+        assert "PRIVATE_LATE_AFTER_NORMALIZE" not in json.dumps(
+            result,
+            ensure_ascii=False,
+        )
+        assert all(
+            "PRIVATE_LATE_AFTER_NORMALIZE" not in item
+            for item in persisted
+        )
+        agent.tool_progress_callback.assert_not_called()
+        assert agent.session_prompt_tokens == 29
+        assert agent.session_completion_tokens == 6
+        assert agent.session_total_tokens == 35
+
+    def test_strict_paid_turn_never_adds_budget_summary_call(self, agent):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent.max_iterations = 1
+        tc = _mock_tool_call(
+            name="web_search",
+            arguments="{}",
+            call_id="strict-budget-tool",
+        )
+        only_response = _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[tc],
+        )
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                return_value=only_response,
+            ) as api_call,
+            patch("run_agent.handle_function_call", return_value="tool result"),
+            patch.object(
+                agent,
+                "_handle_max_iterations",
+                side_effect=AssertionError("strict turn requested a paid summary"),
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("use the last iteration")
+
+        assert api_call.call_count == 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["turn_exit_reason"].startswith(
+            "strict_iteration_budget_reached",
+        )
+
+    def test_strict_paid_length_is_terminal_and_preserves_usage(self, agent):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        truncated = _mock_response(
+            content="partial",
+            finish_reason="length",
+            usage={
+                "prompt_tokens": 5,
+                "completion_tokens": 2,
+                "total_tokens": 7,
+            },
+        )
+        later_success = _mock_response(
+            content="must not run",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=[truncated, later_success],
+            ) as api_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("one strict call")
+
+        assert api_call.call_count == 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert agent.session_prompt_tokens == 5
+        assert agent.session_completion_tokens == 2
+        assert agent.session_total_tokens == 7
+
+    def test_strict_paid_refusal_is_terminal_and_preserves_usage(self, agent):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        refusal = _mock_response(
+            content="request declined",
+            finish_reason="content_filter",
+            usage={
+                "prompt_tokens": 11,
+                "completion_tokens": 3,
+                "total_tokens": 14,
+            },
+        )
+        later_success = _mock_response(
+            content="must not run",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=[refusal, later_success],
+            ) as api_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("one strict refusal")
+
+        assert api_call.call_count == 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert "content_policy_blocked" in result["error"]
+        assert agent.session_prompt_tokens == 11
+        assert agent.session_completion_tokens == 3
+        assert agent.session_total_tokens == 14
+
+    def test_strict_paid_provider_error_is_terminal_without_retry(self, agent):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        later_success = _mock_response(
+            content="must not run",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=[RuntimeError("provider failed"), later_success],
+            ) as api_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("one strict error")
+
+        assert api_call.call_count == 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+
+    def test_strict_paid_invalid_response_is_terminal_and_preserves_usage(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        invalid = SimpleNamespace(
+            choices=[],
+            model="deepseek-v4-pro",
+            usage=SimpleNamespace(
+                prompt_tokens=17,
+                completion_tokens=0,
+                total_tokens=17,
+            ),
+            error=None,
+        )
+        later_success = _mock_response(
+            content="must not run",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=[invalid, later_success],
+            ) as api_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("one malformed strict response")
+
+        assert api_call.call_count == 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert agent.session_prompt_tokens == 17
+        assert agent.session_completion_tokens == 0
+        assert agent.session_total_tokens == 17
+
+    @pytest.mark.parametrize(
+        "tool_call",
+        [
+            _mock_tool_call(
+                name="nonexistent_tool",
+                arguments="{}",
+                call_id="strict-invalid-name",
+            ),
+            _mock_tool_call(
+                name="web_search",
+                arguments='{"broken":',
+                call_id="strict-invalid-json",
+            ),
+        ],
+    )
+    def test_strict_paid_invalid_tool_shape_is_terminal(
+        self,
+        agent,
+        tool_call,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        malformed = _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[tool_call],
+        )
+        later_success = _mock_response(
+            content="must not run",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=[malformed, later_success],
+            ) as api_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("malformed strict tool")
+
+        assert api_call.call_count == 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
 
     def test_api_request_error_hook_skips_payload_work_without_listener(self, agent, monkeypatch):
         payload_built = False

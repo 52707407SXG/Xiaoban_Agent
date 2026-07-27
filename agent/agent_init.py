@@ -223,6 +223,7 @@ def init_agent(
     checkpoint_max_total_size_mb: int = 500,
     checkpoint_max_file_size_mb: int = 10,
     pass_session_id: bool = False,
+    strict_no_automatic_paid_retry: bool = False,
 ):
     """
     Initialize the AI Agent.
@@ -274,6 +275,17 @@ def init_agent(
             remain skipped.
     """
     _install_safe_stdio()
+
+    # This flag must exist before any configurable runtime component is
+    # resolved.  A context-engine or fallback plugin can run lifecycle code
+    # during construction, so setting the flag after ``AIAgent(...)`` returns
+    # is too late to guarantee a fixed, fully-accounted paid-call surface.
+    agent._strict_no_automatic_paid_retry = bool(
+        strict_no_automatic_paid_retry
+    )
+    agent._disable_streaming = agent._strict_no_automatic_paid_retry
+    if agent._strict_no_automatic_paid_retry:
+        fallback_model = None
 
     agent.model = model
     agent.max_iterations = max_iterations
@@ -1289,7 +1301,9 @@ def init_agent(
         _api_retries = max(_api_retries, 1)  # 1 = no retry (single attempt)
     except (TypeError, ValueError):
         _api_retries = 3
-    agent._api_max_retries = _api_retries
+    agent._api_max_retries = (
+        1 if agent._strict_no_automatic_paid_retry else _api_retries
+    )
 
     # Initialize context compressor for automatic context management
     # Compresses conversation when approaching model's context limit
@@ -1513,6 +1527,12 @@ def init_agent(
     except Exception:
         pass
 
+    if agent._strict_no_automatic_paid_retry:
+        # Fixed true-MoA final execution uses only the built-in compressor.
+        # Configurable context engines can run arbitrary lifecycle/plugin work
+        # during construction, outside the three-slot usage ledger.
+        _engine_name = "compressor"
+
     if _engine_name != "compressor":
         # Try loading from plugins/context_engine/<name>/
         try:
@@ -1577,7 +1597,11 @@ def init_agent(
             abort_on_summary_failure=compression_abort_on_summary_failure,
             max_tokens=agent.max_tokens,
         )
-    agent.compression_enabled = compression_enabled
+    agent.compression_enabled = (
+        False
+        if agent._strict_no_automatic_paid_retry
+        else compression_enabled
+    )
     agent.compression_in_place = compression_in_place
 
     # Reject models whose context window is below the minimum required
@@ -1633,7 +1657,11 @@ def init_agent(
                 _existing_tool_names.add(_tname)
 
     # Notify context engine of session start
-    if hasattr(agent, "context_compressor") and agent.context_compressor:
+    if (
+        not agent._strict_no_automatic_paid_retry
+        and hasattr(agent, "context_compressor")
+        and agent.context_compressor
+    ):
         try:
             agent.context_compressor.on_session_start(
                 agent.session_id,

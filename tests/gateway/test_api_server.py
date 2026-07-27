@@ -370,7 +370,13 @@ class TestIdempotencyCache:
         assert agent_ref[1] is True
         agent.interrupt.assert_called_once_with("Stop requested via My Stand delivery")
         gate.set()
-        assert await task == "done"
+        stopped = await task
+        assert stopped["final_response"] == ""
+        assert stopped["messages"] == []
+        assert stopped["interrupted"] is True
+        state, cached = cache.result_state("scoped-key")
+        assert state == "stopped"
+        assert cached == stopped
 
     @pytest.mark.asyncio
     async def test_cancelled_waiter_does_not_drop_shared_inflight_task(self):
