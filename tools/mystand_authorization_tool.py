@@ -21,6 +21,11 @@ from gateway.session_context import (
     get_session_env,
     get_session_user_message,
 )
+from tools.mystand_authorization_write_payload import (
+    AuthorizationWritePayloadError,
+    build_authorization_write_payload_schema,
+    normalize_authorization_write_payload,
+)
 from tools.registry import registry
 
 _DEFAULT_API_URL = "http://127.0.0.1:18081"
@@ -76,7 +81,8 @@ MYSTAND_AUTHORIZATION_SCHEMA = {
         "from the final authorized result.\n\n"
         "WRITES: OUT can never write. Only the fixed allowlisted actions are supported. "
         "First call preview_write with an internal AUTH whose canWrite is true, "
-        "the target's current expected_version, and a fresh idempotency_key. "
+        "the action payload, and a fresh idempotency_key; My Stand reads the "
+        "current target version authoritatively. "
         "Show the returned exact preview to the user and stop. Call commit_write "
         "only in a later user message whose complete reply is an unambiguous "
         "standalone confirmation such as '确认写入' or '预览没问题，确认写入'; "
@@ -142,14 +148,7 @@ MYSTAND_AUTHORIZATION_SCHEMA = {
                 "enum": sorted(_WRITE_ACTIONS),
                 "description": "Fixed write action for preview_write.",
             },
-            "payload": {
-                "type": "object",
-                "description": "Action-specific payload. Extra fields and generic patches are rejected by My Stand.",
-            },
-            "expected_version": {
-                "type": "string",
-                "description": "Current target version returned by an authorized read or domain view.",
-            },
+            "payload": build_authorization_write_payload_schema(),
             "idempotency_key": {
                 "type": "string",
                 "description": "Fresh stable key for one logical write; reuse it for preview and commit retries.",
@@ -690,11 +689,11 @@ def mystand_authorization_tool_handler(args, **_kwargs):
             payload = args.get("payload")
             if not isinstance(payload, dict):
                 return _error("payload 必须是动作对应的对象。", code="invalid_write_payload")
+            payload = normalize_authorization_write_payload(action, payload)
             body.update({
                 "authorizationId": _require_text(args, "authorization_id"),
                 "action": action,
                 "payload": payload,
-                "expectedVersion": _require_text(args, "expected_version"),
                 "idempotencyKey": _require_text(args, "idempotency_key"),
             })
         else:
@@ -712,6 +711,8 @@ def mystand_authorization_tool_handler(args, **_kwargs):
                 "idempotencyKey": _require_text(args, "idempotency_key"),
                 "confirmationPhrase": _EXPLICIT_CONFIRMATION,
             })
+    except AuthorizationWritePayloadError as exc:
+        return _error(str(exc), code=exc.code, status=exc.status)
     except ValueError as exc:
         return _error(str(exc), code="authorization_argument_missing")
 

@@ -12,6 +12,11 @@ from tools.mystand_authorization_tool import (
     _post_internal,
     mystand_authorization_tool_handler,
 )
+from tools.mystand_authorization_write_payload import (
+    AuthorizationWritePayloadError,
+    build_authorization_write_payload_schema,
+    normalize_authorization_write_payload,
+)
 from tools.registry import registry
 
 MYSTAND_AUTHORIZATION_WRITE_SCHEMA = {
@@ -63,9 +68,7 @@ MYSTAND_AUTHORIZATION_WRITE_SCHEMA = {
                 "type": "string",
                 "enum": sorted(_WRITE_ACTIONS),
             },
-            "payload": {
-                "type": "object",
-            },
+            "payload": build_authorization_write_payload_schema(),
             "idempotency_key": {
                 "type": "string",
                 "description": (
@@ -202,6 +205,10 @@ def mystand_authorization_write_tool_handler(args, **kwargs):
     payload = args.get("payload")
     if not isinstance(payload, dict):
         return _error("payload 必须是动作对应的对象。", code="invalid_write_payload")
+    try:
+        payload = normalize_authorization_write_payload(action, payload)
+    except AuthorizationWritePayloadError as exc:
+        return _error(str(exc), code=exc.code, status=exc.status)
     resource = args.get("resource")
     if not isinstance(resource, dict) or set(resource) - {"name", "type_hint"}:
         return _error("写入目标资料无效。", code="invalid_write_resource")

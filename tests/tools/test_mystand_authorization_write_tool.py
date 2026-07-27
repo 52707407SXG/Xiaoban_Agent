@@ -29,6 +29,330 @@ def test_schema_exposes_only_write_operations():
     assert parameters["additionalProperties"] is False
 
 
+def test_schema_exposes_structured_knowledge_graph_node_payloads_without_graph_id():
+    payload = bridge.MYSTAND_AUTHORIZATION_WRITE_SCHEMA["parameters"]["properties"]["payload"]
+    properties = payload["properties"]
+    node = properties["node"]
+    changes = properties["changes"]
+
+    assert payload["type"] == "object"
+    assert payload["additionalProperties"] is False
+    assert node["type"] == "object"
+    assert node["additionalProperties"] is False
+    assert {
+        "id",
+        "label",
+        "type",
+        "summary",
+        "body",
+        "x",
+        "y",
+        "color",
+        "nodeId",
+        "name",
+        "nodeType",
+        "content",
+    } == set(node["properties"])
+    assert {
+        "nodeId",
+        "label",
+        "type",
+        "summary",
+        "body",
+        "x",
+        "y",
+        "color",
+    } <= set(properties)
+    assert changes["type"] == "object"
+    assert changes["minProperties"] == 1
+    assert changes["additionalProperties"] is False
+    assert {
+        "label",
+        "type",
+        "summary",
+        "body",
+        "x",
+        "y",
+        "color",
+        "name",
+        "nodeType",
+        "content",
+    } <= set(changes["properties"])
+    assert properties["nodeId"]["type"] == "string"
+    assert "graphId" not in properties
+    assert "Never include graphId" in payload["description"]
+
+
+def test_add_node_model_payloads_are_normalized_to_canonical_node(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bridge, "mark_mystand_private_query_turn", lambda: None)
+    monkeypatch.setattr(
+        bridge,
+        "_current_session",
+        lambda: {
+            "platform": "api_server",
+            "user_id": "ZYJ005",
+            "message_id": "msg-graph-add-flat",
+            "session_id": "session-graph-add-flat",
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda path, payload, **kwargs: calls.append((path, payload, kwargs))
+        or '{"ok":true}',
+    )
+
+    flat_result = json.loads(
+        bridge.mystand_authorization_write_tool_handler(
+            {
+                "operation": "preview_write",
+                "resource": {
+                    "name": "经纪人经验知识图谱",
+                    "type_hint": "knowledge-graph",
+                },
+                "action": "knowledge-graph.add-node",
+                "payload": {
+                    "nodeId": "model-node-1",
+                    "label": "先核对真实资料",
+                    "type": "skill",
+                    "summary": "写入前先读取权威来源",
+                    "body": "不得根据模型记忆猜测。",
+                    "x": 640,
+                    "y": 360,
+                    "color": "#2563eb",
+                },
+                "idempotency_key": "graph-add-flat-preview-0001",
+            }
+        )
+    )
+    nested_result = json.loads(
+        bridge.mystand_authorization_write_tool_handler(
+            {
+                "operation": "preview_write",
+                "resource": {
+                    "name": "经纪人经验知识图谱",
+                    "type_hint": "knowledge-graph",
+                },
+                "action": "knowledge-graph.add-node",
+                "payload": {
+                    "node": {
+                        "nodeId": "model-node-2",
+                        "name": "复盘真实结果",
+                        "nodeType": "skill",
+                        "content": "写入后必须回读。",
+                    }
+                },
+                "idempotency_key": "graph-add-nested-preview-0002",
+            }
+        )
+    )
+
+    assert flat_result["ok"] is True
+    assert nested_result["ok"] is True
+    assert calls[0][1]["payload"] == {
+        "node": {
+            "id": "model-node-1",
+            "label": "先核对真实资料",
+            "type": "skill",
+            "summary": "写入前先读取权威来源",
+            "body": "不得根据模型记忆猜测。",
+            "x": 640,
+            "y": 360,
+            "color": "#2563eb",
+        }
+    }
+    assert "graphId" not in calls[0][1]["payload"]
+    assert calls[1][1]["payload"] == {
+        "node": {
+            "id": "model-node-2",
+            "label": "复盘真实结果",
+            "type": "skill",
+            "body": "写入后必须回读。",
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "nodeId": "model-node-1",
+            "label": "节点",
+            "type": "skill",
+            "ownerUser": "forged-owner",
+        },
+        {
+            "node": {"label": "节点", "type": "skill"},
+            "label": "混用字段",
+        },
+        {
+            "graphId": "KGREF-FORGED",
+            "node": {"label": "节点", "type": "skill"},
+        },
+        {
+            "node": {
+                "label": "节点",
+                "type": "skill",
+                "graphId": "KGREF-FORGED",
+            },
+        },
+        {
+            "node": {
+                "label": "规范名",
+                "name": "别名冲突",
+                "type": "skill",
+            },
+        },
+    ],
+)
+def test_add_node_rejects_unknown_mixed_or_graph_id_payload(
+    payload,
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(bridge, "mark_mystand_private_query_turn", lambda: None)
+    monkeypatch.setattr(
+        bridge,
+        "_current_session",
+        lambda: {
+            "platform": "api_server",
+            "user_id": "ZYJ005",
+            "message_id": "msg-graph-add-rejected",
+            "session_id": "session-graph-add-rejected",
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or '{"ok":true}',
+    )
+
+    result = json.loads(
+        bridge.mystand_authorization_write_tool_handler(
+            {
+                "operation": "preview_write",
+                "resource": {
+                    "name": "经纪人经验知识图谱",
+                    "type_hint": "knowledge-graph",
+                },
+                "action": "knowledge-graph.add-node",
+                "payload": payload,
+                "idempotency_key": "graph-add-rejected-preview-0001",
+            }
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "write_payload_fields_not_allowed"
+    assert calls == []
+
+
+def test_update_node_requires_canonical_node_id_and_changes(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bridge, "mark_mystand_private_query_turn", lambda: None)
+    monkeypatch.setattr(
+        bridge,
+        "_current_session",
+        lambda: {
+            "platform": "api_server",
+            "user_id": "ZYJ005",
+            "message_id": "msg-graph-update",
+            "session_id": "session-graph-update",
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda path, payload, **kwargs: calls.append((path, payload, kwargs))
+        or '{"ok":true}',
+    )
+    base = {
+        "operation": "preview_write",
+        "resource": {
+            "name": "经纪人经验知识图谱",
+            "type_hint": "knowledge-graph",
+        },
+        "action": "knowledge-graph.update-node",
+        "idempotency_key": "graph-update-preview-0001",
+    }
+
+    valid = json.loads(
+        bridge.mystand_authorization_write_tool_handler(
+            {
+                **base,
+                "payload": {
+                    "nodeId": "node-1",
+                    "changes": {"summary": "仅更新摘要"},
+                },
+            }
+        )
+    )
+    aliased = json.loads(
+        bridge.mystand_authorization_write_tool_handler(
+            {
+                **base,
+                "payload": {
+                    "nodeId": "node-1",
+                    "changes": {
+                        "name": "新名称",
+                        "nodeType": "skill",
+                        "content": "更新正文",
+                        "color": "#2563eb",
+                    },
+                },
+            }
+        )
+    )
+    flat = json.loads(
+        bridge.mystand_authorization_write_tool_handler(
+            {
+                **base,
+                "payload": {
+                    "nodeId": "node-1",
+                    "summary": "不得推测性兼容扁平更新",
+                },
+            }
+        )
+    )
+    conflict = json.loads(
+        bridge.mystand_authorization_write_tool_handler(
+            {
+                **base,
+                "payload": {
+                    "nodeId": "node-1",
+                    "changes": {
+                        "label": "规范名",
+                        "name": "别名冲突",
+                    },
+                },
+            }
+        )
+    )
+
+    assert valid["ok"] is True
+    assert aliased["ok"] is True
+    assert calls[0][1]["payload"] == {
+        "nodeId": "node-1",
+        "changes": {"summary": "仅更新摘要"},
+    }
+    assert "graphId" not in calls[0][1]["payload"]
+    assert calls[1][1]["payload"] == {
+        "nodeId": "node-1",
+        "changes": {
+            "label": "新名称",
+            "type": "skill",
+            "body": "更新正文",
+            "color": "#2563eb",
+        },
+    }
+    assert flat["ok"] is False
+    assert flat["code"] == "write_payload_fields_not_allowed"
+    assert conflict["ok"] is False
+    assert conflict["code"] == "write_payload_fields_not_allowed"
+    assert len(calls) == 2
+
+
 def test_finance_archive_write_preview_uses_semantic_resource(monkeypatch):
     calls = []
     monkeypatch.setattr(bridge, "mark_mystand_private_query_turn", lambda: None)

@@ -55,6 +55,8 @@ def _call(
 def test_schema_exposes_only_fixed_operations_and_write_actions():
     operation = bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]["operation"]
     action = bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]["action"]
+    payload = bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]["payload"]
+    payload_properties = payload["properties"]
 
     assert operation["enum"] == ["list", "resolve", "preview_write", "commit_write"]
     assert set(action["enum"]) == {
@@ -68,7 +70,14 @@ def test_schema_exposes_only_fixed_operations_and_write_actions():
     }
     assert bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["additionalProperties"] is False
     assert "resource_query" in bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]
+    assert "expected_version" not in bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]
     assert "never narrate" in bridge.MYSTAND_AUTHORIZATION_SCHEMA["description"]
+    assert payload["additionalProperties"] is False
+    assert {"node", "nodeId", "label", "type", "changes", "edge"} <= set(
+        payload_properties
+    )
+    assert "graphId" not in payload_properties
+    assert "Never include graphId" in payload["description"]
 
 
 @pytest.mark.parametrize(
@@ -812,7 +821,6 @@ def test_preview_requires_trusted_write_context(
             "authorization_id": "AUTH-ABC123",
             "action": "knowledge-graph.add-node",
             "payload": {"label": "客户需求"},
-            "expected_version": "v3",
             "idempotency_key": "write-001",
         },
         message_id=message_id,
@@ -823,28 +831,66 @@ def test_preview_requires_trusted_write_context(
     assert internal_calls == []
 
 
-def test_preview_passes_fixed_action_payload_version_and_idempotency(internal_calls):
-    payload = {"label": "客户需求", "kind": "topic"}
+def test_preview_normalizes_flat_add_node_and_ignores_model_version(
+    internal_calls,
+):
+    payload = {
+        "nodeId": "model-node-1",
+        "label": "客户需求",
+        "type": "skill",
+        "summary": "先核对需求",
+        "body": "以授权资料为准。",
+        "x": 640,
+        "y": 360,
+        "color": "#2563eb",
+    }
     result = _call(
         {
             "operation": "preview_write",
             "authorization_id": "AUTH-ABC123",
             "action": "knowledge-graph.add-node",
             "payload": payload,
-            "expected_version": "v3",
+            "expected_version": "model-guessed-v999",
             "idempotency_key": "write-001",
+        }
+    )
+    nested_result = _call(
+        {
+            "operation": "preview_write",
+            "authorization_id": "AUTH-ABC123",
+            "action": "knowledge-graph.add-node",
+            "payload": {
+                "node": {
+                    "nodeId": "model-node-2",
+                    "name": "复盘真实结果",
+                    "nodeType": "skill",
+                    "content": "写入后必须回读。",
+                }
+            },
+            "idempotency_key": "write-002",
         }
     )
 
     assert result["ok"] is True
-    assert internal_calls == [
+    assert nested_result["ok"] is True
+    assert internal_calls[0] == (
         {
             "path": "/api/xiaoban/internal/authorization/write/preview",
             "payload": {
                 "authorizationId": "AUTH-ABC123",
                 "action": "knowledge-graph.add-node",
-                "payload": payload,
-                "expectedVersion": "v3",
+                "payload": {
+                    "node": {
+                        "id": "model-node-1",
+                        "label": "客户需求",
+                        "type": "skill",
+                        "summary": "先核对需求",
+                        "body": "以授权资料为准。",
+                        "x": 640,
+                        "y": 360,
+                        "color": "#2563eb",
+                    }
+                },
                 "idempotencyKey": "write-001",
             },
             "session": {
@@ -855,7 +901,65 @@ def test_preview_passes_fixed_action_payload_version_and_idempotency(internal_ca
             },
             "explicit_confirmation": False,
         }
-    ]
+    )
+    assert internal_calls[1]["payload"] == {
+        "authorizationId": "AUTH-ABC123",
+        "action": "knowledge-graph.add-node",
+        "payload": {
+            "node": {
+                "id": "model-node-2",
+                "label": "复盘真实结果",
+                "type": "skill",
+                "body": "写入后必须回读。",
+            }
+        },
+        "idempotencyKey": "write-002",
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "nodeId": "model-node-1",
+            "label": "节点",
+            "type": "skill",
+            "ownerUser": "forged-owner",
+        },
+        {
+            "node": {"label": "节点", "type": "skill"},
+            "label": "混用字段",
+        },
+        {
+            "graphId": "KGREF-FORGED",
+            "node": {"label": "节点", "type": "skill"},
+        },
+        {
+            "node": {
+                "label": "规范名",
+                "name": "别名冲突",
+                "type": "skill",
+            },
+        },
+    ],
+)
+def test_preview_rejects_add_node_unknown_mixed_or_graph_id_before_transport(
+    internal_calls,
+    payload,
+):
+    result = _call(
+        {
+            "operation": "preview_write",
+            "authorization_id": "AUTH-ABC123",
+            "action": "knowledge-graph.add-node",
+            "payload": payload,
+            "idempotency_key": "write-001",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "write_payload_fields_not_allowed"
+    assert internal_calls == []
 
 
 def test_preview_rejects_unknown_write_action_before_transport(internal_calls):
@@ -865,7 +969,6 @@ def test_preview_rejects_unknown_write_action_before_transport(internal_calls):
             "authorization_id": "AUTH-ABC123",
             "action": "knowledge-graph.delete-node",
             "payload": {"nodeId": "node-1"},
-            "expected_version": "v3",
             "idempotency_key": "write-001",
         }
     )
