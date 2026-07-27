@@ -25,9 +25,11 @@ from xiaoban.trusted_runtime.true_moa import (
     REASONING_MODE_HEADER,
     StrictAdvisorResult,
     TRUE_MOA_ADVISOR_SLOTS,
+    TRUE_MOA_FINAL_CALL_LIMIT,
     TRUE_MOA_MODE,
     TRUE_MOA_PRESET_ID,
     TRUE_MOA_PRESET_REVISION,
+    TRUE_MOA_TOTAL_CALL_LIMIT,
     TrueMoACancelController,
     TrueMoAContractError,
     TrueMoAExecutionError,
@@ -211,7 +213,8 @@ def test_fixed_two_advisors_run_once_in_parallel_without_tools_or_shared_input()
     message_views: dict[str, tuple] = {}
     tool_views: dict[str, tuple] = {}
 
-    def strict_caller(*, slot, messages, tools, **_kwargs):
+    def strict_caller(*, slot, messages, tools, dispatch_callback, **_kwargs):
+        dispatch_callback()
         with lock:
             calls[slot.slot_id] += 1
             message_views[slot.slot_id] = messages
@@ -223,7 +226,11 @@ def test_fixed_two_advisors_run_once_in_parallel_without_tools_or_shared_input()
             messages[0].content = "mutated"
         return StrictAdvisorResult(
             content=f"建议 <{slot.slot_id}>",
-            usage={"input_tokens": 10, "output_tokens": 3},
+            usage={
+                "input_tokens": 10,
+                "output_tokens": 3,
+                "cached_input_tokens": 0,
+            },
             cost_usd=0.01,
             cost_status="reported",
             cost_source="fake-provider",
@@ -263,7 +270,13 @@ def test_fixed_two_advisors_run_once_in_parallel_without_tools_or_shared_input()
         assert receipt["inputTokens"] == 10
         assert receipt["outputTokens"] == 3
         assert receipt["totalTokens"] == 13
+        assert receipt["cachedInputTokens"] == 0
         assert receipt["costUsd"] == 0.01
+    assert [call["slotId"] for call in ledger["calls"]] == [
+        KIMI_ADVISOR_SLOT.slot_id,
+        DEEPSEEK_ADVISOR_SLOT.slot_id,
+    ]
+    assert all(call["status"] == "completed" for call in ledger["calls"])
     assert receipts[FINAL_EXECUTOR_SLOT.slot_id]["status"] == "not_started"
 
     # Advisor completion is a stage boundary, not the request terminal state.
@@ -281,7 +294,8 @@ def test_any_advisor_failure_closes_peer_and_waits_for_all_dispatched_calls():
     calls: Counter[str] = Counter()
     lock = threading.Lock()
 
-    def strict_caller(*, slot, cancel_controller, **_kwargs):
+    def strict_caller(*, slot, cancel_controller, dispatch_callback, **_kwargs):
+        dispatch_callback()
         with lock:
             calls[slot.slot_id] += 1
         if slot == DEEPSEEK_ADVISOR_SLOT:
@@ -329,7 +343,8 @@ def test_timeout_invokes_transport_close_callbacks_and_waits_for_exit():
     exited: set[str] = set()
     lock = threading.Lock()
 
-    def strict_caller(*, slot, cancel_controller, **_kwargs):
+    def strict_caller(*, slot, cancel_controller, dispatch_callback, **_kwargs):
+        dispatch_callback()
         close_event = callback_events[slot.slot_id]
         cancel_controller.register_cancel_callback(slot.slot_id, close_event.set)
         rendezvous.wait()
@@ -394,7 +409,8 @@ def test_running_cancel_closes_both_calls_and_late_results_cannot_escape():
     lock = threading.Lock()
     outcome: list[object] = []
 
-    def strict_caller(*, slot, cancel_controller, **_kwargs):
+    def strict_caller(*, slot, cancel_controller, dispatch_callback, **_kwargs):
+        dispatch_callback()
         close_event = callback_events[slot.slot_id]
         cancel_controller.register_cancel_callback(slot.slot_id, close_event.set)
         with lock:
@@ -410,6 +426,7 @@ def test_running_cancel_closes_both_calls_and_late_results_cannot_escape():
                 "input_tokens": 9,
                 "output_tokens": 2,
                 "total_tokens": 11,
+                "cached_input_tokens": 0,
             }
             error.cost_usd = 0.04
             error.cost_status = "reported"
@@ -457,6 +474,7 @@ def test_running_cancel_closes_both_calls_and_late_results_cannot_escape():
     kimi_receipt = receipts[KIMI_ADVISOR_SLOT.slot_id]
     assert kimi_receipt["usageStatus"] == "reported"
     assert kimi_receipt["totalTokens"] == 11
+    assert kimi_receipt["cachedInputTokens"] == 0
     assert kimi_receipt["costUsd"] == 0.04
 
 
@@ -466,7 +484,12 @@ def test_usage_and_cost_are_fill_once_after_terminal_status():
     ledger.finish_slot(
         KIMI_ADVISOR_SLOT,
         status="completed",
-        usage={"input_tokens": 10, "output_tokens": 3, "total_tokens": 13},
+        usage={
+            "input_tokens": 10,
+            "output_tokens": 3,
+            "total_tokens": 13,
+            "cached_input_tokens": 0,
+        },
         cost_usd=0.01,
         cost_status="reported",
         cost_source="first-provider-receipt",
@@ -474,7 +497,12 @@ def test_usage_and_cost_are_fill_once_after_terminal_status():
     ledger.finish_slot(
         KIMI_ADVISOR_SLOT,
         status="cancelled",
-        usage={"input_tokens": 999, "output_tokens": 999, "total_tokens": 1998},
+        usage={
+            "input_tokens": 999,
+            "output_tokens": 999,
+            "total_tokens": 1998,
+            "cached_input_tokens": 999,
+        },
         cost_usd=9.99,
         cost_status="estimated",
         cost_source="late-overwrite",
@@ -489,7 +517,12 @@ def test_usage_and_cost_are_fill_once_after_terminal_status():
     ledger.finish_slot(
         DEEPSEEK_ADVISOR_SLOT,
         status="completed",
-        usage={"input_tokens": 7, "output_tokens": 2, "total_tokens": 9},
+        usage={
+            "input_tokens": 7,
+            "output_tokens": 2,
+            "total_tokens": 9,
+            "cached_input_tokens": 2,
+        },
         cost_usd=0.02,
         cost_status="reported",
         cost_source="late-actual-receipt",
@@ -508,7 +541,49 @@ def test_usage_and_cost_are_fill_once_after_terminal_status():
     assert late["errorCategory"] == "terminal_fence"
     assert late["usageStatus"] == "reported"
     assert late["totalTokens"] == 9
+    assert late["cachedInputTokens"] == 2
     assert late["costUsd"] == 0.02
+
+
+@pytest.mark.parametrize(
+    ("cache_fields", "expected_cached", "expected_status"),
+    [
+        ({"prompt_cache_hit_tokens": 4}, 4, "reported"),
+        ({"cached_prompt_tokens": 5}, 5, "reported"),
+        ({"prompt_tokens_details": {"cached_tokens": 6}}, 6, "reported"),
+        ({"prompt_cache_hit_tokens": 0}, 0, "reported"),
+        ({}, None, "partial"),
+        ({"prompt_cache_hit_tokens": True}, None, "partial"),
+    ],
+)
+def test_cache_split_requires_a_trusted_nonnegative_integer(
+    cache_fields,
+    expected_cached,
+    expected_status,
+):
+    ledger = TrueMoAUsageLedger(_snapshot())
+    ledger.start_slot(DEEPSEEK_ADVISOR_SLOT)
+    call_id = ledger.start_advisor_call(DEEPSEEK_ADVISOR_SLOT)
+    usage = {
+        "prompt_tokens": 11,
+        "completion_tokens": 3,
+        "total_tokens": 14,
+        **cache_fields,
+    }
+    ledger.finish_advisor_call(
+        call_id,
+        status="completed",
+        usage=usage,
+    )
+    ledger.finish_slot(
+        DEEPSEEK_ADVISOR_SLOT,
+        status="completed",
+        usage=usage,
+    )
+
+    call = ledger.to_dict()["calls"][0]
+    assert call["cachedInputTokens"] == expected_cached
+    assert call["usageStatus"] == expected_status
 
 
 @pytest.mark.parametrize(
@@ -526,7 +601,8 @@ def test_malformed_or_tool_call_advisor_output_fails_whole_wave(result):
     calls: Counter[str] = Counter()
     lock = threading.Lock()
 
-    def strict_caller(*, slot, **_kwargs):
+    def strict_caller(*, slot, dispatch_callback, **_kwargs):
+        dispatch_callback()
         with lock:
             calls[slot.slot_id] += 1
         rendezvous.wait()
@@ -554,7 +630,8 @@ def test_malformed_or_tool_call_advisor_output_fails_whole_wave(result):
 def test_malformed_advisor_result_preserves_reported_usage_and_cost():
     rendezvous = threading.Barrier(2, timeout=1)
 
-    def strict_caller(**_kwargs):
+    def strict_caller(*, dispatch_callback, **_kwargs):
+        dispatch_callback()
         rendezvous.wait()
         return StrictAdvisorResult(
             content="tool attempts are forbidden",
@@ -563,6 +640,7 @@ def test_malformed_advisor_result_preserves_reported_usage_and_cost():
                 "input_tokens": 12,
                 "output_tokens": 4,
                 "total_tokens": 16,
+                "cached_input_tokens": 3,
             },
             cost_usd=0.02,
             cost_status="reported",
@@ -585,6 +663,7 @@ def test_malformed_advisor_result_preserves_reported_usage_and_cost():
         assert receipt["inputTokens"] == 12
         assert receipt["outputTokens"] == 4
         assert receipt["totalTokens"] == 16
+        assert receipt["cachedInputTokens"] == 3
         assert receipt["costUsd"] == 0.02
 
 
@@ -592,7 +671,8 @@ def test_output_is_redacted_bounded_escaped_and_absent_from_ledger():
     rendezvous = threading.Barrier(2, timeout=1)
     secret = "sk-do-not-leak-123456789"
 
-    def strict_caller(*, slot, **_kwargs):
+    def strict_caller(*, slot, dispatch_callback, **_kwargs):
+        dispatch_callback()
         rendezvous.wait()
         return StrictAdvisorResult(
             content=f"<danger>{slot.slot_id}</danger> api_key={secret} " + "x" * 500,
@@ -625,3 +705,26 @@ def test_output_is_redacted_bounded_escaped_and_absent_from_ledger():
     assert secret not in ledger_text
     assert "danger" not in ledger_text
     assert "净化测试" not in ledger_text
+
+
+def test_fixed_preset_has_two_advisors_and_at_most_eight_final_calls():
+    assert len(TRUE_MOA_ADVISOR_SLOTS) == 2
+    assert TRUE_MOA_FINAL_CALL_LIMIT == 8
+    assert TRUE_MOA_TOTAL_CALL_LIMIT == 10
+    assert (
+        len(TRUE_MOA_ADVISOR_SLOTS) + TRUE_MOA_FINAL_CALL_LIMIT
+        == TRUE_MOA_TOTAL_CALL_LIMIT
+    )
+
+    ledger = TrueMoAUsageLedger(
+        _snapshot(),
+        wave_id="8" * 32,
+    )
+    for index in range(TRUE_MOA_FINAL_CALL_LIMIT):
+        ledger.start_final_call(f"final-{index}")
+    with pytest.raises(
+        RuntimeError,
+        match="final provider call limit exceeded",
+    ):
+        ledger.start_final_call("final-over-limit")
+    assert len(ledger.to_dict()["calls"]) == TRUE_MOA_FINAL_CALL_LIMIT

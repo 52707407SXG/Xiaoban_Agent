@@ -3896,12 +3896,33 @@ class TestRunConversation:
         self,
         agent,
     ):
+        from xiaoban.trusted_runtime.true_moa import (
+            TRUE_MOA_MODE,
+            TRUE_MOA_PRESET_ID,
+            TRUE_MOA_PRESET_REVISION,
+            TrueMoASnapshot,
+            TrueMoAUsageLedger,
+        )
+
         self._setup_agent(agent)
         agent._strict_no_automatic_paid_retry = True
         agent._disable_streaming = True
         agent._api_max_retries = 1
         agent._fallback_chain = []
         agent._fallback_index = 0
+        agent.provider = "deepseek"
+        agent.model = "deepseek-v4-pro"
+        agent.max_tokens = 4096
+        ledger = TrueMoAUsageLedger(
+            TrueMoASnapshot(
+                mode=TRUE_MOA_MODE,
+                mode_epoch="strict-two-call-fixture",
+                preset_id=TRUE_MOA_PRESET_ID,
+                preset_revision=TRUE_MOA_PRESET_REVISION,
+            ),
+            wave_id="strict-two-call-wave",
+        )
+        agent._true_moa_usage_ledger = ledger
         tc = _mock_tool_call(
             name="web_search",
             arguments="{}",
@@ -3912,10 +3933,22 @@ class TestRunConversation:
                 content="",
                 finish_reason="tool_calls",
                 tool_calls=[tc],
+                usage={
+                    "prompt_tokens": 11,
+                    "completion_tokens": 3,
+                    "total_tokens": 14,
+                    "prompt_cache_hit_tokens": 2,
+                },
             ),
             _mock_response(
                 content="Strict final answer",
                 finish_reason="stop",
+                usage={
+                    "prompt_tokens": 17,
+                    "completion_tokens": 5,
+                    "total_tokens": 22,
+                    "prompt_tokens_details": {"cached_tokens": 5},
+                },
             ),
         ]
         extension_calls = []
@@ -3986,6 +4019,84 @@ class TestRunConversation:
         assert tool_call.call_count == 1
         assert tool_call.call_args.kwargs["skip_extension_hooks"] is True
         assert extension_calls == []
+        final_calls = [
+            item
+            for item in ledger.to_dict()["calls"]
+            if item["role"] == "final_executor"
+        ]
+        assert len(final_calls) == 2
+        assert len({item["callId"] for item in final_calls}) == 2
+        assert [item["totalTokens"] for item in final_calls] == [14, 22]
+        assert [item["cachedInputTokens"] for item in final_calls] == [2, 5]
+        assert all(item["usageStatus"] == "reported" for item in final_calls)
+        assert all(item["status"] == "completed" for item in final_calls)
+
+    @pytest.mark.parametrize(
+        ("max_tokens", "user_message"),
+        [
+            (4097, "output cap must fail before dispatch"),
+            (4096, "x" * 131_072),
+        ],
+    )
+    def test_true_moa_final_cost_cap_rejects_before_provider_dispatch(
+        self,
+        agent,
+        max_tokens,
+        user_message,
+    ):
+        from xiaoban.trusted_runtime.true_moa import (
+            TRUE_MOA_MODE,
+            TRUE_MOA_PRESET_ID,
+            TRUE_MOA_PRESET_REVISION,
+            TrueMoASnapshot,
+            TrueMoAUsageLedger,
+        )
+
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        agent.provider = "deepseek"
+        agent.model = "deepseek-v4-pro"
+        agent.max_tokens = max_tokens
+        ledger = TrueMoAUsageLedger(
+            TrueMoASnapshot(
+                mode=TRUE_MOA_MODE,
+                mode_epoch="1",
+                preset_id=TRUE_MOA_PRESET_ID,
+                preset_revision=TRUE_MOA_PRESET_REVISION,
+            ),
+            wave_id="9" * 32,
+        )
+        agent._true_moa_usage_ledger = ledger
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=AssertionError(
+                    "over-budget true MoA request reached provider"
+                ),
+            ) as api_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(user_message)
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["error"] == (
+            "Provider call failed; automatic retry is disabled"
+        )
+        api_call.assert_not_called()
+        assert [
+            item
+            for item in ledger.to_dict()["calls"]
+            if item["role"] == "final_executor"
+        ] == []
 
     def test_strict_late_tool_result_cannot_start_next_provider_call(
         self,

@@ -1420,6 +1420,12 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
         keepalive_http = agent._build_keepalive_http_client(client_kwargs.get("base_url", ""))
         if keepalive_http is not None:
             client_kwargs["http_client"] = keepalive_http
+    if getattr(agent, "_strict_no_automatic_paid_retry", False):
+        # The application loop is already single-attempt in strict true-MoA
+        # mode.  Seal the SDK layer too: OpenAI otherwise retries a single
+        # recorded final call internally, making real dispatch and billing
+        # exceed the durable call receipt.
+        client_kwargs["max_retries"] = 0
     # Uses the module-level `OpenAI` name, resolved lazily on first
     # access via __getattr__ below. Tests patch via `run_agent.OpenAI`.
     client = _ra().OpenAI(**client_kwargs)

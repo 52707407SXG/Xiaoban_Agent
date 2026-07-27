@@ -51,7 +51,7 @@ def test_plugin_engine_gets_context_length_on_init():
         patch("agent.model_metadata.get_model_context_length", return_value=204_800),
         patch("run_agent.get_tool_definitions", return_value=[]),
         patch("run_agent.check_toolset_requirements", return_value={}),
-        patch("run_agent.OpenAI"),
+        patch("run_agent.OpenAI") as openai_cls,
     ):
         from run_agent import AIAgent
 
@@ -66,6 +66,7 @@ def test_plugin_engine_gets_context_length_on_init():
     assert agent.context_compressor is engine
     assert engine.context_length == 204_800
     assert engine.threshold_tokens == int(204_800 * engine.threshold_percent)
+    assert "max_retries" not in openai_cls.call_args.kwargs
 
 
 def test_strict_paid_init_never_loads_or_starts_context_engine_plugin():
@@ -90,7 +91,7 @@ def test_strict_paid_init_never_loads_or_starts_context_engine_plugin():
         ) as session_start,
         patch("run_agent.get_tool_definitions", return_value=[]),
         patch("run_agent.check_toolset_requirements", return_value={}),
-        patch("run_agent.OpenAI"),
+        patch("run_agent.OpenAI") as openai_cls,
     ):
         from run_agent import AIAgent
 
@@ -117,6 +118,7 @@ def test_strict_paid_init_never_loads_or_starts_context_engine_plugin():
     assert agent._api_max_retries == 1
     assert agent._fallback_chain == []
     assert agent.compression_enabled is False
+    assert openai_cls.call_args.kwargs["max_retries"] == 0
 
 
 def test_active_context_engine_tools_survive_explicit_platform_toolsets():

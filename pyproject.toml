@@ -84,6 +84,9 @@ dependencies = [
   "Markdown==3.10.2",
   # Skills Hub (GitHub App JWT auth — optional, only needed for bot identity)
   "PyJWT[crypto]==2.13.0",  # PYSEC-2026-175/177/178/179
+  # True MoA durable outcomes import AES-GCM and HKDF directly. Keep this a
+  # first-class exact pin instead of relying on PyJWT[crypto]'s transitive edge.
+  "cryptography==46.0.7",
   # urllib3 2.7.0 fixes GHSA-mf9v-mfxr-j63j (decompression-bomb bypass)
   # and GHSA-qccp-gfcp-xxvc (header leak across origins).
   "urllib3>=2.7.0,<3",

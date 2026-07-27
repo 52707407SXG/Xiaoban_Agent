@@ -14,6 +14,7 @@ from collections import Counter
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 import queue
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -38,14 +39,18 @@ from xiaoban.trusted_runtime.true_moa import (
     REASONING_MODE_HEADER,
     StrictAdvisorResult,
     TRUE_MOA_MODE,
+    TRUE_MOA_FINAL_CALL_LIMIT,
+    TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS,
     TRUE_MOA_PRESET_ID,
     TRUE_MOA_PRESET_REVISION,
     TRUE_MOA_USAGE_SCHEMA,
+    TrueMoAUsageLedger,
     validate_true_moa_headers,
 )
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+_OUTCOME_KEYS = {"test-v1": b"\x31" * 32}
 
 
 def _adapter() -> APIServerAdapter:
@@ -110,6 +115,7 @@ class _FakeFinalAgent:
     session_prompt_tokens = 17
     session_completion_tokens = 7
     session_total_tokens = 24
+    session_cached_input_tokens = 2
     session_estimated_cost_usd = 0.03
     session_cost_status = "reported"
     session_cost_source = "fake-final-agent"
@@ -122,6 +128,24 @@ class _FakeFinalAgent:
 
     def run_conversation(self, **kwargs):
         self.run_calls.append(kwargs)
+        ledger = getattr(self, "_true_moa_usage_ledger", None)
+        if ledger is not None:
+            call_id = ledger.start_final_call(
+                f"fake-final-{len(self.run_calls)}",
+            )
+            ledger.finish_final_call(
+                call_id,
+                status="completed",
+                usage={
+                    "input_tokens": self.session_prompt_tokens,
+                    "output_tokens": self.session_completion_tokens,
+                    "total_tokens": self.session_total_tokens,
+                    "cached_input_tokens": self.session_cached_input_tokens,
+                },
+                cost_usd=self.session_estimated_cost_usd,
+                cost_status=self.session_cost_status,
+                cost_source=self.session_cost_source,
+            )
         return {
             "final_response": "fake final synthesis",
             "completed": True,
@@ -131,6 +155,56 @@ class _FakeFinalAgent:
 
     def interrupt(self, reason: str) -> None:
         self.interrupt_calls.append(reason)
+
+
+def _completed_usage(
+    snapshot,
+    *,
+    wave_id: str = "f" * 32,
+) -> dict:
+    ledger = TrueMoAUsageLedger(snapshot, wave_id=wave_id)
+    for slot, input_tokens, output_tokens in (
+        (KIMI_ADVISOR_SLOT, 2, 1),
+        (DEEPSEEK_ADVISOR_SLOT, 3, 1),
+    ):
+        ledger.start_slot(slot)
+        advisor_call_id = ledger.start_advisor_call(slot)
+        slot_usage = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "cached_input_tokens": 0,
+        }
+        ledger.finish_advisor_call(
+            advisor_call_id,
+            status="completed",
+            usage=slot_usage,
+        )
+        ledger.finish_slot(
+            slot,
+            status="completed",
+            usage=slot_usage,
+        )
+    ledger.start_slot(FINAL_EXECUTOR_SLOT)
+    final_call_id = ledger.start_final_call(f"fake-final-{wave_id[:8]}")
+    final_usage = {
+        "input_tokens": 5,
+        "output_tokens": 2,
+        "total_tokens": 7,
+        "cached_input_tokens": 0,
+    }
+    ledger.finish_final_call(
+        final_call_id,
+        status="completed",
+        usage=final_usage,
+    )
+    ledger.finish_slot(
+        FINAL_EXECUTOR_SLOT,
+        status="completed",
+        usage=final_usage,
+    )
+    ledger.set_wave_status("completed")
+    return ledger.to_dict()
 
 
 def test_normal_fresh_subprocess_does_not_import_true_moa_or_fan_out():
@@ -333,19 +407,42 @@ def test_mode_epoch_and_preset_headers_are_bound_into_idempotency_fingerprint(
 
 
 @pytest.mark.asyncio
-async def test_http_passes_one_frozen_true_moa_snapshot_into_run_agent():
+async def test_http_passes_one_frozen_true_moa_snapshot_into_run_agent(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
     adapter = _adapter()
     captured: dict[str, object] = {}
+    cache = api_server._IdempotencyCache(
+        max_items=8,
+        ttl_seconds=30,
+        durable_path=str(tmp_path / "snapshot-ledger.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
 
     async def _fake_run_agent(**kwargs):
         captured.update(kwargs)
+        usage_ledger = _completed_usage(
+            kwargs["true_moa_snapshot"],
+            wave_id="2" * 32,
+        )
         return (
             {
                 "final_response": "snapshot accepted",
                 "completed": True,
                 "messages": [],
+                "_mystand_request": True,
+                "_true_moa_usage": usage_ledger,
             },
-            {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "total_tokens": 14,
+                "true_moa": usage_ledger,
+            },
         )
 
     headers = _mystand_headers(f"snapshot-{uuid.uuid4().hex}", epoch="23")
@@ -374,6 +471,484 @@ async def test_http_passes_one_frozen_true_moa_snapshot_into_run_agent():
     assert snapshot.preset_revision == TRUE_MOA_PRESET_REVISION
     with pytest.raises(FrozenInstanceError):
         snapshot.mode_epoch = "24"
+    cache._durable.close()
+
+
+@pytest.mark.asyncio
+async def test_true_moa_missing_outcome_key_fails_before_any_agent_dispatch(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    cache = api_server._IdempotencyCache(
+        durable_path=str(tmp_path / "missing-key.sqlite"),
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    run_agent = AsyncMock(
+        side_effect=AssertionError("missing outcome key reached provider path"),
+    )
+    monkeypatch.setattr(adapter, "_run_agent", run_agent)
+    headers = _mystand_headers(f"missing-key-{uuid.uuid4().hex}")
+
+    async with TestClient(TestServer(_app(adapter))) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": "xiaoban-agent",
+                "messages": [{"role": "user", "content": "must preflight"}],
+            },
+        )
+        payload = await response.json()
+
+    assert response.status == 503
+    assert payload["error"]["code"] == "true_moa_outcome_key_unavailable"
+    run_agent.assert_not_awaited()
+    cache._durable.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_http_outcome_replays_after_restart_recovers_and_acks(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    path = tmp_path / "completed-outcome.sqlite"
+    raw_key = f"completed-{uuid.uuid4().hex}"
+    headers = _mystand_headers(raw_key, epoch="51")
+    body = {
+        "model": "xiaoban-agent",
+        "messages": [{"role": "user", "content": "sealed completion"}],
+    }
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    completed_usage = _completed_usage(
+        snapshot,
+        wave_id="5" * 32,
+    )
+    dispatches = 0
+
+    async def _fake_run_agent(**_kwargs):
+        nonlocal dispatches
+        dispatches += 1
+        return (
+            {
+                "final_response": "sealed exact answer",
+                "completed": True,
+                "failed": False,
+                "messages": [],
+                "_mystand_request": True,
+                "_true_moa_usage": completed_usage,
+            },
+            {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "total_tokens": 14,
+                "true_moa": completed_usage,
+            },
+        )
+
+    monkeypatch.setattr(adapter, "_run_agent", _fake_run_agent)
+    cache = api_server._IdempotencyCache(
+        durable_path=str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions",
+        adapter._handle_chat_completions,
+    )
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+
+    async with TestClient(TestServer(app)) as client:
+        first = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json=body,
+        )
+        first_payload = await first.json()
+        assert first.status == 200
+        assert (
+            first_payload["choices"][0]["message"]["content"]
+            == "sealed exact answer"
+        )
+        outcome_id = first_payload["xiaoban"]["outcome_id"]
+        assert first_payload["xiaoban"]["output_digest"] == hashlib.sha256(
+            b"sealed exact answer"
+        ).hexdigest()
+        assert dispatches == 1
+
+        cache._durable.close()
+        restarted = api_server._IdempotencyCache(
+            durable_path=str(path),
+            outcome_keys=_OUTCOME_KEYS,
+        )
+        monkeypatch.setattr(api_server, "_idem_cache", restarted)
+
+        replay = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json=body,
+        )
+        replay_payload = await replay.json()
+        assert replay.status == 200
+        assert (
+            replay_payload["choices"][0]["message"]["content"]
+            == "sealed exact answer"
+        )
+        assert replay_payload["xiaoban"]["outcome_id"] == outcome_id
+        assert dispatches == 1
+
+        recovered = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        recovered_payload = await recovered.json()
+        assert recovered.status == 200
+        assert recovered_payload["status"] == "completed"
+        assert recovered_payload["settlementBlocked"] is False
+        assert recovered_payload["outcomeStatus"] == "sealed"
+        assert recovered_payload["outcomeId"] == outcome_id
+        assert (
+            recovered_payload["outcome"]["finalResponse"]
+            == "sealed exact answer"
+        )
+        assert recovered_payload["usage"] == completed_usage
+        assert dispatches == 1
+
+        wrong_message_headers = {
+            **headers,
+            "X-Xiaoban-Message-Id": "different-message",
+        }
+        wrong_message = await client.post(
+            "/v1/chat/completions/usage",
+            headers=wrong_message_headers,
+            json={"idempotency_key": raw_key},
+        )
+        assert wrong_message.status == 409
+        assert (await wrong_message.json())["error"]["code"] == (
+            "true_moa_outcome_binding_invalid"
+        )
+
+        wrong_fingerprint_headers = {
+            **headers,
+            "X-Xiaoban-Request-Fingerprint": hashlib.sha256(
+                b"different-request"
+            ).hexdigest(),
+        }
+        wrong_fingerprint = await client.post(
+            "/v1/chat/completions/usage",
+            headers=wrong_fingerprint_headers,
+            json={"idempotency_key": raw_key},
+        )
+        assert wrong_fingerprint.status == 409
+
+        foreign_headers = {
+            **headers,
+            "X-Xiaoban-User-Id": "foreign-user",
+        }
+        foreign = await client.post(
+            "/v1/chat/completions/usage",
+            headers=foreign_headers,
+            json={"idempotency_key": raw_key},
+        )
+        assert foreign.status == 404
+
+        wrong_attempt_headers = {
+            **headers,
+            "X-Xiaoban-Attempt": "2",
+        }
+        wrong_attempt = await client.post(
+            "/v1/chat/completions/usage",
+            headers=wrong_attempt_headers,
+            json={"idempotency_key": raw_key},
+        )
+        assert wrong_attempt.status == 404
+
+        acknowledged = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={
+                "action": "ack",
+                "idempotency_key": raw_key,
+                "outcome_id": outcome_id,
+            },
+        )
+        acknowledged_payload = await acknowledged.json()
+        assert acknowledged.status == 200
+        assert acknowledged_payload["status"] == "acknowledged"
+        assert acknowledged_payload["outcomeStatus"] == "acked"
+        assert acknowledged_payload["usage"] == completed_usage
+
+        repeat_ack = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={
+                "action": "ack",
+                "idempotency_key": raw_key,
+                "outcome_id": outcome_id,
+            },
+        )
+        assert repeat_ack.status == 200
+        assert (await repeat_ack.json())["status"] == (
+            "already_acknowledged"
+        )
+
+        after_ack = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        after_ack_payload = await after_ack.json()
+        assert after_ack.status == 200
+        assert after_ack_payload["status"] == "acknowledged"
+        assert after_ack_payload["outcomeStatus"] == "acked"
+        assert "outcome" not in after_ack_payload
+        assert after_ack_payload["usage"] == completed_usage
+
+        with sqlite3.connect(path) as connection:
+            cleared = connection.execute(
+                """
+                SELECT length(outcome_nonce), length(outcome_ciphertext),
+                       length(usage_json)
+                FROM true_moa_idempotency
+                """
+            ).fetchone()
+        assert cleared[0] == 0
+        assert cleared[1] == 0
+        assert cleared[2] > 0
+        restarted._durable.close()
+
+
+@pytest.mark.asyncio
+async def test_tampered_completed_outcome_fails_closed_without_redispatch(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    path = tmp_path / "tampered-http.sqlite"
+    raw_key = f"tampered-{uuid.uuid4().hex}"
+    headers = _mystand_headers(raw_key, epoch="52")
+    body = {
+        "model": "xiaoban-agent",
+        "messages": [{"role": "user", "content": "tamper test"}],
+    }
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    completed_usage = _completed_usage(
+        snapshot,
+        wave_id="6" * 32,
+    )
+    dispatches = 0
+
+    async def _fake_run_agent(**_kwargs):
+        nonlocal dispatches
+        dispatches += 1
+        return (
+            {
+                "final_response": "tamper protected answer",
+                "completed": True,
+                "messages": [],
+                "_mystand_request": True,
+                "_true_moa_usage": completed_usage,
+            },
+            {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "total_tokens": 14,
+                "true_moa": completed_usage,
+            },
+        )
+
+    monkeypatch.setattr(adapter, "_run_agent", _fake_run_agent)
+    cache = api_server._IdempotencyCache(
+        durable_path=str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions",
+        adapter._handle_chat_completions,
+    )
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+    async with TestClient(TestServer(app)) as client:
+        initial = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json=body,
+        )
+        assert initial.status == 200
+        assert dispatches == 1
+        cache._durable.close()
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                """
+                UPDATE true_moa_idempotency
+                SET outcome_ciphertext = zeroblob(32)
+                """
+            )
+        restarted = api_server._IdempotencyCache(
+            durable_path=str(path),
+            outcome_keys=_OUTCOME_KEYS,
+        )
+        monkeypatch.setattr(api_server, "_idem_cache", restarted)
+
+        replay = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json=body,
+        )
+        replay_payload = await replay.json()
+        assert replay.status == 409
+        assert replay_payload["error"]["code"] == (
+            "true_moa_outcome_binding_invalid"
+        )
+        assert dispatches == 1
+
+        recovery = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        recovery_payload = await recovery.json()
+        assert recovery.status == 409
+        assert recovery_payload["error"]["code"] == (
+            "true_moa_outcome_binding_invalid"
+        )
+        assert dispatches == 1
+        restarted._durable.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_sse_buffers_until_sealed_and_emits_outcome_receipt(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    delivery_id = "xbd_" + ("7" * 40)
+    headers = _mystand_headers("stream-sealed", epoch="53")
+    headers.pop("Idempotency-Key")
+    headers["X-Xiaoban-Delivery-Id"] = delivery_id
+    headers["X-Xiaoban-Delivery-Attempt"] = headers[
+        "X-Xiaoban-Attempt"
+    ]
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    completed_usage = _completed_usage(
+        snapshot,
+        wave_id="7" * 32,
+    )
+    dispatches = 0
+
+    async def _fake_run_agent(**kwargs):
+        nonlocal dispatches
+        dispatches += 1
+        callback = kwargs.get("stream_delta_callback")
+        if callback is not None:
+            callback("UNSEALED_PRIVATE_DELTA")
+        return (
+            {
+                "final_response": "SSE sealed exact answer",
+                "completed": True,
+                "messages": [],
+                "_mystand_request": True,
+                "_true_moa_usage": completed_usage,
+            },
+            {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "total_tokens": 14,
+                "true_moa": completed_usage,
+            },
+        )
+
+    monkeypatch.setattr(adapter, "_run_agent", _fake_run_agent)
+    cache = api_server._IdempotencyCache(
+        durable_path=str(tmp_path / "sse-sealed.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions",
+        adapter._handle_chat_completions,
+    )
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": "xiaoban-agent",
+                "stream": True,
+                "messages": [
+                    {"role": "user", "content": "sealed SSE completion"}
+                ],
+            },
+        )
+        wire = await response.text()
+        assert response.status == 200
+        assert "UNSEALED_PRIVATE_DELTA" not in wire
+        assert "SSE sealed exact answer" in wire
+        assert "event: xiaoban.moa.outcome" in wire
+        assert "event: xiaoban.moa.usage" in wire
+        assert wire.index("event: xiaoban.moa.outcome") < wire.index(
+            "event: xiaoban.moa.usage"
+        )
+        outcome_event = wire.split(
+            "event: xiaoban.moa.outcome\ndata: ",
+            1,
+        )[1].split("\n\n", 1)[0]
+        outcome_payload = json.loads(outcome_event)
+        assert len(outcome_payload["outcomeId"]) == 64
+        assert outcome_payload["outputDigest"] == hashlib.sha256(
+            b"SSE sealed exact answer"
+        ).hexdigest()
+        assert dispatches == 1
+
+        recovered = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": delivery_id},
+        )
+        recovered_payload = await recovered.json()
+        assert recovered.status == 200
+        assert (
+            recovered_payload["outcome"]["finalResponse"]
+            == "SSE sealed exact answer"
+        )
+        assert recovered_payload["outcomeId"] == outcome_payload["outcomeId"]
+        assert dispatches == 1
+    cache._durable.close()
 
 
 @pytest.mark.asyncio
@@ -393,14 +968,19 @@ async def test_gateway_runs_two_fake_advisors_and_one_fake_final_with_one_ledger
     advisor_calls: Counter[str] = Counter()
     calls_lock = threading.Lock()
 
-    def _fake_strict_advisor(*, slot, tools, **_kwargs):
+    def _fake_strict_advisor(*, slot, tools, dispatch_callback, **_kwargs):
         assert tools == ()
+        dispatch_callback()
         with calls_lock:
             advisor_calls[slot.slot_id] += 1
         if slot == KIMI_ADVISOR_SLOT:
             return StrictAdvisorResult(
                 content="fake kimi advice",
-                usage={"input_tokens": 11, "output_tokens": 3},
+                usage={
+                    "input_tokens": 11,
+                    "output_tokens": 3,
+                    "cached_input_tokens": 0,
+                },
                 cost_usd=0.01,
                 cost_status="reported",
                 cost_source="fake-kimi",
@@ -412,6 +992,7 @@ async def test_gateway_runs_two_fake_advisors_and_one_fake_final_with_one_ledger
                 "prompt_tokens": 13,
                 "completion_tokens": 5,
                 "total_tokens": 18,
+                "prompt_cache_hit_tokens": 4,
             },
             cost_usd=0.02,
             cost_status="reported",
@@ -455,6 +1036,8 @@ async def test_gateway_runs_two_fake_advisors_and_one_fake_final_with_one_ledger
     )
     assert len(final_agent.run_calls) == 1
     assert create_kwargs["strict_no_automatic_paid_retry"] is True
+    assert final_agent.max_iterations == TRUE_MOA_FINAL_CALL_LIMIT
+    assert final_agent.max_tokens == TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
     assert "[MY STAND TRUE MOA - UNTRUSTED ADVISORY CONTEXT]" in str(
         final_agent.ephemeral_system_prompt,
     )
@@ -478,6 +1061,12 @@ async def test_gateway_runs_two_fake_advisors_and_one_fake_final_with_one_ledger
     assert all(slot["status"] == "completed" for slot in ledger["slots"])
     assert all(slot["usageStatus"] == "reported" for slot in ledger["slots"])
     assert len({slot["callId"] for slot in ledger["slots"]}) == 3
+    assert [call["cachedInputTokens"] for call in ledger["calls"]] == [
+        0,
+        4,
+        2,
+    ]
+    assert ledger["slots"][-1]["cachedInputTokens"] == 2
 
 
 @pytest.mark.asyncio
@@ -500,7 +1089,8 @@ async def test_advisor_failure_closes_gateway_before_final_or_tools(
     advisor_calls: Counter[str] = Counter()
     lock = threading.Lock()
 
-    def _fake_advisor(*, slot, **_kwargs):
+    def _fake_advisor(*, slot, dispatch_callback, **_kwargs):
+        dispatch_callback()
         with lock:
             advisor_calls[slot.slot_id] += 1
         rendezvous.wait()
@@ -508,7 +1098,11 @@ async def test_advisor_failure_closes_gateway_before_final_or_tools(
             raise RuntimeError("sanitized fake provider failure")
         return StrictAdvisorResult(
             content="PRIVATE_LATE_ADVISOR",
-            usage={"input_tokens": 5, "output_tokens": 2},
+            usage={
+                "input_tokens": 5,
+                "output_tokens": 2,
+                "cached_input_tokens": 0,
+            },
         )
 
     monkeypatch.setattr(
@@ -725,6 +1319,7 @@ async def test_stop_tombstone_wins_completion_commit_without_text_leak():
                 "inputTokens": 7,
                 "outputTokens": 3,
                 "totalTokens": 10,
+                "cachedInputTokens": 0,
                 "usageStatus": "reported",
                 "costUsd": 0.02,
             },
@@ -780,8 +1375,338 @@ async def test_stop_tombstone_wins_completion_commit_without_text_leak():
 
 
 @pytest.mark.asyncio
+async def test_stop_before_create_is_scope_bound_and_stops_without_dispatch(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    path = tmp_path / "stop-before-create.sqlite"
+    raw_key = f"stop-before-create-{uuid.uuid4().hex}"
+    headers = _mystand_headers(raw_key, epoch="39")
+    target_key = adapter._scoped_idempotency_key(headers, raw_key)
+    body = {
+        "model": "xiaoban-agent",
+        "messages": [{"role": "user", "content": "must never dispatch"}],
+    }
+    cache = api_server._IdempotencyCache(
+        max_items=16,
+        ttl_seconds=30,
+        durable_path=str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    run_agent = AsyncMock(
+        side_effect=AssertionError("pre-stopped create reached provider path"),
+    )
+    monkeypatch.setattr(adapter, "_run_agent", run_agent)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions",
+        adapter._handle_chat_completions,
+    )
+    app.router.add_post(
+        "/v1/chat/completions/stop",
+        adapter._handle_stop_idempotent_chat_completion,
+    )
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+
+    async with TestClient(TestServer(app)) as client:
+        # A valid stop for another site, owner, attempt, or raw delivery key
+        # gets its own pre-create fence and cannot mutate this target scope.
+        foreign_stops = (
+            ({**headers, "X-Xiaoban-Site-Id": "foreign-site"}, raw_key),
+            ({**headers, "X-Xiaoban-User-Id": "foreign-user"}, raw_key),
+            ({**headers, "X-Xiaoban-Attempt": "2"}, raw_key),
+            (headers, f"{raw_key}-foreign"),
+        )
+        for foreign_headers, foreign_key in foreign_stops:
+            foreign_scoped_key = adapter._scoped_idempotency_key(
+                foreign_headers,
+                foreign_key,
+            )
+            assert foreign_scoped_key != target_key
+            foreign = await client.post(
+                "/v1/chat/completions/stop",
+                headers=foreign_headers,
+                json={"idempotency_key": foreign_key},
+            )
+            assert foreign.status == 202
+            assert cache.durable_record(target_key) is None
+
+        stopped = await client.post(
+            "/v1/chat/completions/stop",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        assert stopped.status == 202
+        stopped_record = cache.durable_record(target_key)
+        assert stopped_record["state"] == "stopped"
+        assert stopped_record["fingerprint"] == ""
+        assert stopped_record["usage"] is None
+
+        create = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json=body,
+        )
+        create_payload = await create.json()
+        assert create.status == 409
+        assert create_payload["error"]["code"] == "completion_stopped"
+        run_agent.assert_not_awaited()
+
+        usage_response = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        usage_payload = await usage_response.json()
+        assert usage_response.status == 200
+        assert usage_payload == {
+            "ok": True,
+            "status": "stopped_before_start",
+            "final": True,
+            "usage": None,
+            "outcomeStatus": "none",
+        }
+
+    cache._durable.close()
+
+
+@pytest.mark.asyncio
+async def test_create_restart_stop_fences_late_completion_and_keeps_usage(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+    from xiaoban.trusted_runtime.true_moa_durable import (
+        TrueMoAOutcomeBindingError,
+    )
+
+    adapter = _adapter()
+    path = tmp_path / "restart-stop-late-completion.sqlite"
+    raw_key = f"restart-stop-{uuid.uuid4().hex}"
+    headers = _mystand_headers(raw_key, epoch="41")
+    body = {
+        "model": "xiaoban-agent",
+        "messages": [{"role": "user", "content": "late completion"}],
+    }
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    scoped_key = adapter._scoped_idempotency_key(headers, raw_key)
+    fingerprint = adapter._chat_idempotency_fingerprint(body, headers)
+    outcome_binding = adapter._true_moa_outcome_binding(
+        headers,
+        snapshot=snapshot,
+        delivery_id=raw_key,
+    )
+
+    ledger = TrueMoAUsageLedger(snapshot, wave_id="e" * 32)
+    for slot, input_tokens, output_tokens in (
+        (KIMI_ADVISOR_SLOT, 4, 2),
+        (DEEPSEEK_ADVISOR_SLOT, 6, 3),
+    ):
+        ledger.start_slot(slot)
+        call_id = ledger.start_advisor_call(slot)
+        call_usage = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "cached_input_tokens": 0,
+        }
+        ledger.finish_advisor_call(
+            call_id,
+            status="completed",
+            usage=call_usage,
+        )
+        ledger.finish_slot(
+            slot,
+            status="completed",
+            usage=call_usage,
+        )
+    ledger.set_wave_status("advisors_completed")
+    ledger.start_slot(FINAL_EXECUTOR_SLOT)
+    final_call_id = ledger.start_final_call("restart-late-final")
+    dispatched_usage = ledger.to_dict()
+
+    final_usage = {
+        "input_tokens": 13,
+        "output_tokens": 5,
+        "total_tokens": 18,
+        "cached_input_tokens": 2,
+    }
+    ledger.finish_final_call(
+        final_call_id,
+        status="completed",
+        usage=final_usage,
+        cost_usd=0.05,
+        cost_status="reported",
+        cost_source="fake-late-provider",
+    )
+    ledger.finish_slot(
+        FINAL_EXECUTOR_SLOT,
+        status="completed",
+        usage=final_usage,
+        cost_usd=0.05,
+        cost_status="reported",
+        cost_source="fake-late-provider",
+    )
+    ledger.set_wave_status("completed")
+    completed_usage = ledger.to_dict()
+
+    original = api_server._IdempotencyCache(
+        max_items=8,
+        ttl_seconds=30,
+        durable_path=str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    compute_started = asyncio.Event()
+    release_late_completion = asyncio.Event()
+    late_text = "PRIVATE_LATE_RESTART_RESULT"
+
+    async def _late_compute():
+        original.persist_usage(
+            scoped_key,
+            fingerprint,
+            dispatched_usage,
+        )
+        compute_started.set()
+        await release_late_completion.wait()
+        # Provider usage can arrive after the durable stop fence. It must
+        # still merge for settlement, while the visible answer stays fenced.
+        original.persist_usage(
+            scoped_key,
+            fingerprint,
+            completed_usage,
+        )
+        return (
+            {
+                "final_response": late_text,
+                "messages": [{"role": "assistant", "content": late_text}],
+                "completed": True,
+                "failed": False,
+                "_mystand_request": True,
+                "_mystand_egress_finalized": True,
+                "_mystand_egress_output_digest": hashlib.sha256(
+                    late_text.encode(),
+                ).hexdigest(),
+                "_true_moa_usage": completed_usage,
+            },
+            {
+                "input_tokens": 23,
+                "output_tokens": 10,
+                "total_tokens": 33,
+                "true_moa": completed_usage,
+            },
+        )
+
+    late_task = asyncio.create_task(
+        original.get_or_set(
+            scoped_key,
+            fingerprint,
+            _late_compute,
+            agent_ref=[None, False, None],
+            durable=True,
+            outcome_binding=outcome_binding,
+        )
+    )
+    await compute_started.wait()
+    before_restart = original.durable_record(scoped_key)
+    assert before_restart["state"] == "running"
+    assert before_restart["usage"]["calls"][-1]["status"] == "running"
+
+    # Release the single-process durable lock just as a real old process
+    # exits, then create the replacement process over the same SQLite file.
+    original._durable.close()
+    restarted = api_server._IdempotencyCache(
+        max_items=8,
+        ttl_seconds=30,
+        durable_path=str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", restarted)
+    interrupted = restarted.durable_record(scoped_key)
+    assert interrupted["state"] == "interrupted"
+
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions/stop",
+        adapter._handle_stop_idempotent_chat_completion,
+    )
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+    async with TestClient(TestServer(app)) as client:
+        stop_response = await client.post(
+            "/v1/chat/completions/stop",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        assert stop_response.status == 202
+        assert restarted.durable_record(scoped_key)["state"] == "stopped"
+
+        pending_usage = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        pending_payload = await pending_usage.json()
+        assert pending_usage.status == 200
+        assert pending_payload["status"] == "settlement_blocked"
+        assert pending_payload["terminalState"] == "stopped"
+        assert pending_payload["settlementBlocked"] is True
+        assert pending_payload["outcomeStatus"] == "none"
+        assert pending_payload["usage"]["calls"][-1]["status"] == "running"
+        assert pending_payload["usage"]["calls"][0]["totalTokens"] == 6
+
+        release_late_completion.set()
+        with pytest.raises(
+            TrueMoAOutcomeBindingError,
+            match="terminal fence",
+        ):
+            await late_task
+
+        stopped_record = restarted.durable_record(scoped_key)
+        assert stopped_record["state"] == "stopped"
+        assert stopped_record["usage"] == completed_usage
+        assert stopped_record["outcomeState"] == "none"
+
+        recovered = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        recovered_payload = await recovered.json()
+        assert recovered.status == 200
+        assert recovered_payload["status"] == "cancelled"
+        assert recovered_payload["terminalState"] == "stopped"
+        assert recovered_payload["settlementBlocked"] is False
+        assert recovered_payload["outcomeStatus"] == "none"
+        assert recovered_payload["usage"] == completed_usage
+        assert recovered_payload["usage"]["calls"][-1]["totalTokens"] == 18
+        assert recovered_payload["usage"]["calls"][-1]["costUsd"] == 0.05
+        assert "outcome" not in recovered_payload
+        assert late_text not in json.dumps(
+            recovered_payload,
+            ensure_ascii=False,
+        )
+
+    assert late_text.encode() not in path.read_bytes()
+    restarted._durable.close()
+
+
+@pytest.mark.asyncio
 async def test_stopped_completion_usage_endpoint_recovers_actual_receipt(
     monkeypatch,
+    tmp_path,
 ):
     from gateway.platforms import api_server
 
@@ -789,26 +1714,77 @@ async def test_stopped_completion_usage_endpoint_recovers_actual_receipt(
     raw_key = f"usage-recovery-{uuid.uuid4().hex}"
     headers = _mystand_headers(raw_key, epoch="40")
     scoped_key = adapter._scoped_idempotency_key(headers, raw_key)
-    cache = api_server._IdempotencyCache(max_items=8, ttl_seconds=30)
-    ledger = {
-        "schema": TRUE_MOA_USAGE_SCHEMA,
-        "status": "completed",
-        "slots": [
-            {
-                "slotId": FINAL_EXECUTOR_SLOT.slot_id,
-                "role": "final_executor",
-                "status": "completed",
-                "inputTokens": 11,
-                "outputTokens": 5,
-                "totalTokens": 16,
-                "usageStatus": "reported",
-                "costUsd": 0.04,
+    cache = api_server._IdempotencyCache(
+        max_items=8,
+        ttl_seconds=30,
+        durable_path=str(tmp_path / "usage-ledger.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    usage_ledger = TrueMoAUsageLedger(snapshot, wave_id="a" * 32)
+    for slot, input_tokens, output_tokens in (
+        (KIMI_ADVISOR_SLOT, 2, 1),
+        (DEEPSEEK_ADVISOR_SLOT, 3, 1),
+    ):
+        usage_ledger.start_slot(slot)
+        advisor_call_id = usage_ledger.start_advisor_call(slot)
+        usage_ledger.finish_advisor_call(
+            advisor_call_id,
+            status="completed",
+            usage={
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+                "cached_input_tokens": 0,
             },
-        ],
-    }
+        )
+        usage_ledger.finish_slot(
+            slot,
+            status="completed",
+            usage={
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+                "cached_input_tokens": 0,
+            },
+        )
+    usage_ledger.start_slot(FINAL_EXECUTOR_SLOT)
+    final_call_id = usage_ledger.start_final_call("usage-recovery-call")
+    usage_ledger.finish_final_call(
+        final_call_id,
+        status="completed",
+        usage={
+            "input_tokens": 11,
+            "output_tokens": 5,
+            "total_tokens": 16,
+            "cached_input_tokens": 3,
+        },
+        cost_usd=0.04,
+        cost_status="reported",
+        cost_source="fake-final",
+    )
+    usage_ledger.finish_slot(
+        FINAL_EXECUTOR_SLOT,
+        status="completed",
+        usage={
+            "input_tokens": 11,
+            "output_tokens": 5,
+            "total_tokens": 16,
+            "cached_input_tokens": 3,
+        },
+        cost_usd=0.04,
+        cost_status="reported",
+        cost_source="fake-final",
+    )
+    usage_ledger.set_wave_status("completed")
+    ledger = usage_ledger.to_dict()
 
     async def _compute():
-        assert cache.stop(scoped_key) is True
+        assert cache.stop(scoped_key, durable=True) is True
         return (
             {
                 "final_response": "PRIVATE_STOPPED_TEXT",
@@ -830,6 +1806,7 @@ async def test_stopped_completion_usage_endpoint_recovers_actual_receipt(
         "fingerprint",
         _compute,
         agent_ref=[None, False, None],
+        durable=True,
     )
     monkeypatch.setattr(api_server, "_idem_cache", cache)
     app = web.Application()
@@ -852,9 +1829,212 @@ async def test_stopped_completion_usage_endpoint_recovers_actual_receipt(
     assert response.status == 200
     assert payload["status"] == "cancelled"
     assert payload["final"] is True
-    assert payload["usage"]["slots"][0]["totalTokens"] == 16
-    assert payload["usage"]["slots"][0]["costUsd"] == 0.04
+    recovered_final_call = payload["usage"]["calls"][-1]
+    assert recovered_final_call["totalTokens"] == 16
+    assert recovered_final_call["costUsd"] == 0.04
     assert "PRIVATE_STOPPED_TEXT" not in json.dumps(payload, ensure_ascii=False)
+    cache._durable.close()
+
+
+@pytest.mark.asyncio
+async def test_usage_endpoint_blocks_unknown_cache_split(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    raw_key = f"unknown-cache-{uuid.uuid4().hex}"
+    headers = _mystand_headers(raw_key, epoch="43")
+    scoped_key = adapter._scoped_idempotency_key(headers, raw_key)
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    ledger = TrueMoAUsageLedger(snapshot, wave_id="b" * 32)
+    for slot, usage in (
+        (
+            KIMI_ADVISOR_SLOT,
+            {
+                "input_tokens": 5,
+                "output_tokens": 2,
+                "total_tokens": 7,
+                "cache_read_input_tokens": 0,
+            },
+        ),
+        (
+            DEEPSEEK_ADVISOR_SLOT,
+            {
+                "prompt_tokens": 8,
+                "completion_tokens": 3,
+                "total_tokens": 11,
+            },
+        ),
+    ):
+        ledger.start_slot(slot)
+        call_id = ledger.start_advisor_call(slot)
+        ledger.finish_advisor_call(call_id, status="completed", usage=usage)
+        ledger.finish_slot(slot, status="completed", usage=usage)
+    ledger.start_slot(FINAL_EXECUTOR_SLOT)
+    final_usage = {
+        "prompt_tokens": 13,
+        "completion_tokens": 4,
+        "total_tokens": 17,
+        "prompt_cache_hit_tokens": 2,
+    }
+    final_call_id = ledger.start_final_call("unknown-cache-final")
+    ledger.finish_final_call(
+        final_call_id,
+        status="completed",
+        usage=final_usage,
+    )
+    ledger.finish_slot(
+        FINAL_EXECUTOR_SLOT,
+        status="completed",
+        usage=final_usage,
+    )
+    ledger.set_wave_status("completed")
+    usage = ledger.to_dict()
+    assert [call["usageStatus"] for call in usage["calls"]] == [
+        "reported",
+        "partial",
+        "reported",
+    ]
+
+    cache = api_server._IdempotencyCache(
+        max_items=8,
+        ttl_seconds=30,
+        durable_path=str(tmp_path / "unknown-cache.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    outcome_binding = adapter._true_moa_outcome_binding(
+        headers,
+        snapshot=snapshot,
+        delivery_id=raw_key,
+    )
+
+    async def _compute():
+        result = {
+            "final_response": "answer",
+            "messages": [],
+            "completed": True,
+            "_mystand_request": True,
+            "_true_moa_usage": usage,
+        }
+        api_server._finalize_mystand_egress_result(
+            result,
+            user_message="unknown cache split",
+            conversation_history=[],
+        )
+        return (
+            result,
+            {
+                "input_tokens": 26,
+                "output_tokens": 9,
+                "total_tokens": 35,
+                "true_moa": usage,
+            },
+        )
+
+    await cache.get_or_set(
+        scoped_key,
+        "fingerprint",
+        _compute,
+        agent_ref=[None, False, None],
+        durable=True,
+        outcome_binding=outcome_binding,
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        response = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        payload = await response.json()
+    finally:
+        await client.close()
+
+    assert response.status == 200
+    assert payload["status"] == "settlement_blocked"
+    assert payload["terminalState"] == "completed"
+    assert payload["usage"]["calls"][1]["cachedInputTokens"] is None
+    cache._durable.close()
+
+
+@pytest.mark.asyncio
+async def test_usage_endpoint_surfaces_completed_callback_crash_gap(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    raw_key = f"outcome-crash-gap-{uuid.uuid4().hex}"
+    headers = _mystand_headers(raw_key, epoch="44")
+    scoped_key = adapter._scoped_idempotency_key(headers, raw_key)
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    usage = _completed_usage(snapshot, wave_id="c" * 32)
+    fingerprint = "crash-gap-fingerprint"
+    cache = api_server._IdempotencyCache(
+        max_items=8,
+        ttl_seconds=30,
+        durable_path=str(tmp_path / "outcome-crash-gap.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    assert cache._durable.claim(
+        scoped_key,
+        fingerprint,
+        kind="execution",
+    ) == "missing"
+    # This is the exact durable state left by a hard process exit between the
+    # completed usage callback and the atomic completed-outcome seal.
+    cache.persist_usage(scoped_key, fingerprint, usage)
+    crash_record = cache.durable_record(scoped_key)
+    assert crash_record["state"] == "running"
+    assert crash_record["usage"]["status"] == "completed"
+    assert crash_record["outcomeState"] == "none"
+
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        response = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        payload = await response.json()
+    finally:
+        await client.close()
+
+    assert response.status == 200
+    assert payload["status"] == "settlement_blocked"
+    assert payload["terminalState"] == "running"
+    assert payload["final"] is True
+    assert payload["usage"]["status"] == "completed"
+    assert payload["outcomeStatus"] == "none"
+    assert payload["settlementBlocked"] is True
+    assert payload["errorCode"] == "true_moa_outcome_unavailable"
+    assert "outcome" not in payload
+    cache._durable.close()
 
 
 @pytest.mark.asyncio
@@ -956,10 +2136,15 @@ async def test_post_advisor_setup_failure_returns_complete_partial_ledger(
         api_authenticated=True,
     )
 
-    def _fake_advisor(*, slot, **_kwargs):
+    def _fake_advisor(*, slot, dispatch_callback, **_kwargs):
+        dispatch_callback()
         return StrictAdvisorResult(
             content=f"advice from {slot.slot_id}",
-            usage={"input_tokens": 6, "output_tokens": 2},
+            usage={
+                "input_tokens": 6,
+                "output_tokens": 2,
+                "cached_input_tokens": 0,
+            },
         )
 
     monkeypatch.setattr(

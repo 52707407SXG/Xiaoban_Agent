@@ -9,16 +9,18 @@ it is never logged or emitted directly.
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from xiaoban.trusted_runtime.true_moa import (
     DEEPSEEK_ADVISOR_SLOT,
     KIMI_ADVISOR_SLOT,
+    TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS,
     AdvisorMessage,
     StrictAdvisorResult,
     TrueMoACancelController,
     TrueMoASlot,
+    enforce_true_moa_dispatch_budget,
 )
 
 
@@ -26,7 +28,6 @@ _KIMI_ORIGIN = "https://api.kimi.com"
 _KIMI_PATH = "/coding"
 _DEEPSEEK_ORIGIN = "https://api.deepseek.com"
 _DEEPSEEK_PATH = "/v1"
-_ADVISOR_MAX_OUTPUT_TOKENS = 4_096
 _ADVISOR_SYSTEM_PROMPT = (
     "You are one isolated advisory analyst for My Stand. Analyze only the "
     "user's question and the small adjacent context supplied here. Return a "
@@ -60,6 +61,51 @@ class StrictAdvisorCancelled(TimeoutError):
         self.cost_source = cost_source
 
 
+def _trusted_usage_receipt(
+    usage: Any,
+    *,
+    input_field: str,
+    output_field: str,
+    total_field: str | None = None,
+) -> dict[str, Any]:
+    """Copy only trusted counters needed for true-MoA settlement."""
+
+    def _member(source: Any, name: str) -> tuple[bool, Any]:
+        if isinstance(source, Mapping):
+            return (name in source, source.get(name))
+        if hasattr(source, name):
+            return (True, getattr(source, name, None))
+        return (False, None)
+
+    receipt: dict[str, Any] = {}
+    for field in (input_field, output_field, total_field):
+        if not field:
+            continue
+        present, value = _member(usage, field)
+        if present and value is not None:
+            receipt[field] = value
+    for field in (
+        "prompt_cache_hit_tokens",
+        "cached_prompt_tokens",
+        "cache_read_input_tokens",
+        "cache_read_tokens",
+    ):
+        present, value = _member(usage, field)
+        if present and value is not None:
+            receipt[field] = value
+    for details_field in (
+        "prompt_tokens_details",
+        "input_tokens_details",
+    ):
+        present, details = _member(usage, details_field)
+        if not present or details is None:
+            continue
+        cached_present, cached_tokens = _member(details, "cached_tokens")
+        if cached_present and cached_tokens is not None:
+            receipt[details_field] = {"cached_tokens": cached_tokens}
+    return receipt
+
+
 def strict_advisor_call(
     *,
     slot: TrueMoASlot,
@@ -67,11 +113,14 @@ def strict_advisor_call(
     tools: tuple[Any, ...],
     timeout_seconds: float,
     cancel_controller: TrueMoACancelController,
+    dispatch_callback: Callable[[], None],
 ) -> StrictAdvisorResult:
     """Make exactly one fixed, tool-less provider request for ``slot``."""
 
     if tools:
         raise StrictAdvisorProviderError("advisor_tools_must_be_empty")
+    if not callable(dispatch_callback):
+        raise StrictAdvisorProviderError("advisor_dispatch_callback_required")
     if cancel_controller.is_set:
         raise StrictAdvisorCancelled("advisor_cancelled_before_client")
     frozen_messages = tuple(messages)
@@ -80,12 +129,14 @@ def strict_advisor_call(
             frozen_messages,
             timeout_seconds=timeout_seconds,
             cancel_controller=cancel_controller,
+            dispatch_callback=dispatch_callback,
         )
     if slot == DEEPSEEK_ADVISOR_SLOT:
         return _call_deepseek(
             frozen_messages,
             timeout_seconds=timeout_seconds,
             cancel_controller=cancel_controller,
+            dispatch_callback=dispatch_callback,
         )
     raise StrictAdvisorProviderError("advisor_slot_not_in_fixed_preset")
 
@@ -95,7 +146,19 @@ def _call_kimi(
     *,
     timeout_seconds: float,
     cancel_controller: TrueMoACancelController,
+    dispatch_callback: Callable[[], None],
 ) -> StrictAdvisorResult:
+    request_kwargs = {
+        "model": KIMI_ADVISOR_SLOT.model,
+        "max_tokens": TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS,
+        "system": _ADVISOR_SYSTEM_PROMPT,
+        "messages": _anthropic_messages(messages),
+        "tools": [],
+    }
+    enforce_true_moa_dispatch_budget(
+        role="advisor",
+        payload=request_kwargs,
+    )
     credentials = _fixed_credentials(
         "kimi-coding",
         expected_origin=_KIMI_ORIGIN,
@@ -117,18 +180,14 @@ def _call_kimi(
     try:
         if not cancel_controller.try_begin_dispatch(cancel_key):
             raise StrictAdvisorCancelled("advisor_cancelled_before_dispatch")
-        response = client.messages.create(
-            model=KIMI_ADVISOR_SLOT.model,
-            max_tokens=_ADVISOR_MAX_OUTPUT_TOKENS,
-            system=_ADVISOR_SYSTEM_PROMPT,
-            messages=_anthropic_messages(messages),
-            tools=[],
-        )
+        dispatch_callback()
+        response = client.messages.create(**request_kwargs)
         usage = getattr(response, "usage", None)
-        reported_usage = {
-            "input_tokens": getattr(usage, "input_tokens", None),
-            "output_tokens": getattr(usage, "output_tokens", None),
-        }
+        reported_usage = _trusted_usage_receipt(
+            usage,
+            input_field="input_tokens",
+            output_field="output_tokens",
+        )
         if cancel_controller.is_set:
             raise StrictAdvisorCancelled(
                 "advisor_cancelled_after_response",
@@ -163,7 +222,26 @@ def _call_deepseek(
     *,
     timeout_seconds: float,
     cancel_controller: TrueMoACancelController,
+    dispatch_callback: Callable[[], None],
 ) -> StrictAdvisorResult:
+    request_kwargs = {
+        "model": DEEPSEEK_ADVISOR_SLOT.model,
+        "messages": [
+            {"role": "system", "content": _ADVISOR_SYSTEM_PROMPT},
+            *[
+                {"role": message.role, "content": message.content}
+                for message in messages
+            ],
+        ],
+        "tools": [],
+        "stream": False,
+        "max_tokens": TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS,
+        "extra_body": {"thinking": {"type": "enabled"}},
+    }
+    enforce_true_moa_dispatch_budget(
+        role="advisor",
+        payload=request_kwargs,
+    )
     credentials = _fixed_credentials(
         "deepseek",
         expected_origin=_DEEPSEEK_ORIGIN,
@@ -185,26 +263,15 @@ def _call_deepseek(
     try:
         if not cancel_controller.try_begin_dispatch(cancel_key):
             raise StrictAdvisorCancelled("advisor_cancelled_before_dispatch")
-        response = client.chat.completions.create(
-            model=DEEPSEEK_ADVISOR_SLOT.model,
-            messages=[
-                {"role": "system", "content": _ADVISOR_SYSTEM_PROMPT},
-                *[
-                    {"role": message.role, "content": message.content}
-                    for message in messages
-                ],
-            ],
-            tools=[],
-            stream=False,
-            max_tokens=_ADVISOR_MAX_OUTPUT_TOKENS,
-            extra_body={"thinking": {"type": "enabled"}},
-        )
+        dispatch_callback()
+        response = client.chat.completions.create(**request_kwargs)
         usage = getattr(response, "usage", None)
-        reported_usage = {
-            "prompt_tokens": getattr(usage, "prompt_tokens", None),
-            "completion_tokens": getattr(usage, "completion_tokens", None),
-            "total_tokens": getattr(usage, "total_tokens", None),
-        }
+        reported_usage = _trusted_usage_receipt(
+            usage,
+            input_field="prompt_tokens",
+            output_field="completion_tokens",
+            total_field="total_tokens",
+        )
         if cancel_controller.is_set:
             raise StrictAdvisorCancelled(
                 "advisor_cancelled_after_response",

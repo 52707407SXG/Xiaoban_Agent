@@ -14,6 +14,7 @@ so the gateway can complete the same receipt after the acting turn finishes.
 from __future__ import annotations
 
 import html
+import json
 import math
 import re
 import threading
@@ -28,6 +29,12 @@ TRUE_MOA_MODE = "moa"
 TRUE_MOA_PRESET_ID = "mystand-true-moa-v1"
 TRUE_MOA_PRESET_REVISION = "2026-07-27.1"
 TRUE_MOA_USAGE_SCHEMA = "mystand.true-moa.usage.v1"
+TRUE_MOA_FINAL_CALL_LIMIT = 8
+TRUE_MOA_TOTAL_CALL_LIMIT = 10
+TRUE_MOA_ADVISOR_INPUT_MAX_BYTES = 65_536
+TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS = 4_096
+TRUE_MOA_FINAL_INPUT_MAX_BYTES = 131_072
+TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS = 4_096
 
 REASONING_MODE_HEADER = "X-Xiaoban-Reasoning-Mode"
 MODE_EPOCH_HEADER = "X-Xiaoban-Mode-Epoch"
@@ -89,6 +96,77 @@ class TrueMoAExecutionError(RuntimeError):
         super().__init__(f"true MoA advisor wave failed: {category}")
 
 
+class TrueMoACostCapError(RuntimeError):
+    """A fixed-preset provider request exceeded its prepaid hard ceiling."""
+
+    def __init__(self, code: str):
+        self.code = str(code or "true_moa_cost_cap_invalid")
+        super().__init__(self.code)
+
+
+def enforce_true_moa_dispatch_budget(
+    *,
+    role: str,
+    payload: Any,
+) -> int:
+    """Reject an over-budget provider payload before its dispatch boundary."""
+
+    normalized_role = str(role or "").strip().lower()
+    if normalized_role == "advisor":
+        input_max_bytes = TRUE_MOA_ADVISOR_INPUT_MAX_BYTES
+        output_max_tokens = TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS
+    elif normalized_role == "final_executor":
+        input_max_bytes = TRUE_MOA_FINAL_INPUT_MAX_BYTES
+        output_max_tokens = TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
+    else:
+        raise TrueMoACostCapError("true_moa_cost_cap_role_invalid")
+    if not isinstance(payload, Mapping):
+        raise TrueMoACostCapError("true_moa_input_payload_invalid")
+    output_limits: list[int] = []
+    for field in (
+        "max_tokens",
+        "max_completion_tokens",
+        "max_output_tokens",
+    ):
+        if field not in payload:
+            continue
+        value = payload.get(field)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value <= 0
+        ):
+            raise TrueMoACostCapError(
+                "true_moa_output_token_cap_invalid"
+            )
+        output_limits.append(value)
+    if (
+        not output_limits
+        or len(set(output_limits)) != 1
+        or output_limits[0] > output_max_tokens
+    ):
+        raise TrueMoACostCapError(
+            "true_moa_output_token_cap_exceeded"
+        )
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise TrueMoACostCapError(
+            "true_moa_input_payload_invalid"
+        ) from exc
+    if len(encoded) > input_max_bytes:
+        raise TrueMoACostCapError(
+            "true_moa_input_byte_cap_exceeded"
+        )
+    return len(encoded)
+
+
 @dataclass(frozen=True)
 class TrueMoASnapshot:
     mode: str
@@ -137,6 +215,7 @@ class _SlotReceipt:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    cached_input_tokens: int | None = None
     usage_status: str = "unavailable"
     cost_usd: float | None = None
     cost_status: str | None = None
@@ -147,10 +226,17 @@ class _SlotReceipt:
 class TrueMoAUsageLedger:
     """Thread-safe, plaintext-free per-slot usage receipt."""
 
-    def __init__(self, snapshot: TrueMoASnapshot, *, wave_id: str | None = None):
+    def __init__(
+        self,
+        snapshot: TrueMoASnapshot,
+        *,
+        wave_id: str | None = None,
+        on_change: Callable[[dict[str, Any]], None] | None = None,
+    ):
         self.snapshot = snapshot
         self.wave_id = wave_id or uuid.uuid4().hex
         self._lock = threading.Lock()
+        self._on_change = on_change
         self._wave_status = "pending"
         self._receipts = {
             slot.slot_id: _SlotReceipt(
@@ -160,10 +246,13 @@ class TrueMoAUsageLedger:
             )
             for slot in TRUE_MOA_ALL_SLOTS
         }
+        self._advisor_calls: dict[str, _SlotReceipt] = {}
+        self._final_calls: dict[str, _SlotReceipt] = {}
 
     def set_wave_status(self, status: str) -> None:
         with self._lock:
             self._wave_status = status
+        self._notify_change()
 
     def start_slot(self, slot: TrueMoASlot, *, started_at_ms: int | None = None) -> None:
         with self._lock:
@@ -172,6 +261,7 @@ class TrueMoAUsageLedger:
                 raise RuntimeError(f"slot already started: {slot.slot_id}")
             receipt.status = "running"
             receipt.started_at_ms = started_at_ms or _now_ms()
+        self._notify_change()
 
     def finish_slot(
         self,
@@ -185,7 +275,13 @@ class TrueMoAUsageLedger:
         cost_status: str | None = None,
         cost_source: str | None = None,
     ) -> None:
-        input_tokens, output_tokens, total_tokens, usage_status = _normalize_usage(usage)
+        (
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            cached_input_tokens,
+            usage_status,
+        ) = _normalize_usage(usage)
         with self._lock:
             receipt = self._receipts[slot.slot_id]
             # A timeout/cancel terminal fence wins over a late provider result.
@@ -196,20 +292,21 @@ class TrueMoAUsageLedger:
                 receipt.ended_at_ms = ended_at_ms or _now_ms()
             elif receipt.ended_at_ms is None:
                 receipt.ended_at_ms = ended_at_ms or _now_ms()
-            if (
-                usage_status == "reported"
-                and receipt.usage_status != "reported"
-            ):
-                receipt.input_tokens = input_tokens
-                receipt.output_tokens = output_tokens
-                receipt.total_tokens = total_tokens
-                receipt.usage_status = usage_status
+            _fill_usage_once(
+                receipt,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                cached_input_tokens=cached_input_tokens,
+                usage_status=usage_status,
+            )
             if cost_usd is not None and receipt.cost_usd is None:
                 receipt.cost_usd = float(cost_usd)
             if cost_status and not receipt.cost_status:
                 receipt.cost_status = _safe_category(cost_status)
             if cost_source and not receipt.cost_source:
                 receipt.cost_source = _safe_category(cost_source)
+        self._notify_change()
 
     def terminate_unfinished(self, *, status: str, error_category: str) -> None:
         ended_at_ms = _now_ms()
@@ -221,35 +318,238 @@ class TrueMoAUsageLedger:
                     receipt.status = status
                     receipt.error_category = error_category
                     receipt.ended_at_ms = ended_at_ms
+            for receipt in self._advisor_calls.values():
+                if receipt.status == "running":
+                    receipt.status = status
+                    receipt.error_category = error_category
+                    receipt.ended_at_ms = ended_at_ms
+        self._notify_change()
+
+    def start_advisor_call(
+        self,
+        slot: TrueMoASlot,
+        *,
+        started_at_ms: int | None = None,
+    ) -> str:
+        """Record one advisor call only at the provider dispatch boundary."""
+
+        if slot not in TRUE_MOA_ADVISOR_SLOTS:
+            raise RuntimeError(f"invalid true MoA advisor slot: {slot.slot_id}")
+        call_id = f"{self.wave_id}:{slot.slot_id}"
+        with self._lock:
+            if slot.slot_id in self._advisor_calls:
+                raise RuntimeError(f"advisor provider call already started: {call_id}")
+            self._advisor_calls[slot.slot_id] = _SlotReceipt(
+                slot=slot,
+                call_id=call_id,
+                status="running",
+                started_at_ms=started_at_ms or _now_ms(),
+            )
+        self._notify_change()
+        return call_id
+
+    def finish_advisor_call(
+        self,
+        call_id: str,
+        *,
+        status: str,
+        usage: Any = None,
+        ended_at_ms: int | None = None,
+        error_category: str | None = None,
+        cost_usd: float | None = None,
+        cost_status: str | None = None,
+        cost_source: str | None = None,
+    ) -> None:
+        """Fill one dispatched advisor call without rewriting its terminal fence."""
+
+        (
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            cached_input_tokens,
+            usage_status,
+        ) = _normalize_usage(usage)
+        with self._lock:
+            receipt = next(
+                (
+                    item
+                    for item in self._advisor_calls.values()
+                    if item.call_id == str(call_id or "")
+                ),
+                None,
+            )
+            if receipt is None:
+                raise RuntimeError(f"unknown advisor provider call: {call_id}")
+            if receipt.status == "running":
+                receipt.status = status
+                receipt.error_category = error_category
+                receipt.ended_at_ms = ended_at_ms or _now_ms()
+            elif receipt.ended_at_ms is None:
+                receipt.ended_at_ms = ended_at_ms or _now_ms()
+            _fill_usage_once(
+                receipt,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                cached_input_tokens=cached_input_tokens,
+                usage_status=usage_status,
+            )
+            if cost_usd is not None and receipt.cost_usd is None:
+                receipt.cost_usd = float(cost_usd)
+            if cost_status and not receipt.cost_status:
+                receipt.cost_status = _safe_category(cost_status)
+            if cost_source and not receipt.cost_source:
+                receipt.cost_source = _safe_category(cost_source)
+        self._notify_change()
+
+    def start_final_call(
+        self,
+        request_id: str,
+        *,
+        started_at_ms: int | None = None,
+    ) -> str:
+        """Open one independently billable final-executor provider call."""
+
+        safe_request_id = _safe_category(request_id)
+        call_id = (
+            f"{self.wave_id}:{FINAL_EXECUTOR_SLOT.slot_id}:{safe_request_id}"
+        )
+        with self._lock:
+            if call_id in self._final_calls:
+                raise RuntimeError(f"final provider call already started: {call_id}")
+            if len(self._final_calls) >= TRUE_MOA_FINAL_CALL_LIMIT:
+                raise RuntimeError("true MoA final provider call limit exceeded")
+            self._final_calls[call_id] = _SlotReceipt(
+                slot=FINAL_EXECUTOR_SLOT,
+                call_id=call_id,
+                status="running",
+                started_at_ms=started_at_ms or _now_ms(),
+            )
+        self._notify_change()
+        return call_id
+
+    def finish_final_call(
+        self,
+        call_id: str,
+        *,
+        status: str,
+        usage: Any = None,
+        ended_at_ms: int | None = None,
+        error_category: str | None = None,
+        cost_usd: float | None = None,
+        cost_status: str | None = None,
+        cost_source: str | None = None,
+    ) -> None:
+        """Fill one final-executor call exactly once without rewriting a fence."""
+
+        (
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            cached_input_tokens,
+            usage_status,
+        ) = _normalize_usage(usage)
+        with self._lock:
+            receipt = self._final_calls.get(str(call_id or ""))
+            if receipt is None:
+                raise RuntimeError(f"unknown final provider call: {call_id}")
+            if receipt.status == "running":
+                receipt.status = status
+                receipt.error_category = error_category
+                receipt.ended_at_ms = ended_at_ms or _now_ms()
+            elif receipt.ended_at_ms is None:
+                receipt.ended_at_ms = ended_at_ms or _now_ms()
+            _fill_usage_once(
+                receipt,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                cached_input_tokens=cached_input_tokens,
+                usage_status=usage_status,
+            )
+            if cost_usd is not None and receipt.cost_usd is None:
+                receipt.cost_usd = float(cost_usd)
+            if cost_status and not receipt.cost_status:
+                receipt.cost_status = _safe_category(cost_status)
+            if cost_source and not receipt.cost_source:
+                receipt.cost_source = _safe_category(cost_source)
+        self._notify_change()
+
+    def final_call_usage(self) -> dict[str, int] | None:
+        """Aggregate only counters actually reported by every final call."""
+
+        with self._lock:
+            receipts = list(self._final_calls.values())
+            if not receipts:
+                return None
+            usage: dict[str, int] = {}
+            for output_name, field in (
+                ("input_tokens", "input_tokens"),
+                ("output_tokens", "output_tokens"),
+                ("total_tokens", "total_tokens"),
+                ("cached_input_tokens", "cached_input_tokens"),
+            ):
+                values = [getattr(receipt, field) for receipt in receipts]
+                if all(
+                    isinstance(value, int) and not isinstance(value, bool)
+                    for value in values
+                ):
+                    usage[output_name] = sum(values)
+            return usage or None
+
+    def _notify_change(self) -> None:
+        callback = self._on_change
+        if callback is None:
+            return
+        try:
+            callback(self.to_dict())
+        except Exception as exc:
+            raise RuntimeError(
+                "true MoA durable usage ledger unavailable"
+            ) from exc
+
+    @staticmethod
+    def _receipt_dict(receipt: _SlotReceipt) -> dict[str, Any]:
+        item: dict[str, Any] = {
+            "slotId": receipt.slot.slot_id,
+            "callId": receipt.call_id,
+            "provider": receipt.slot.provider,
+            "model": receipt.slot.model,
+            "role": receipt.slot.role,
+            "startedAtMs": receipt.started_at_ms,
+            "endedAtMs": receipt.ended_at_ms,
+            "status": receipt.status,
+            "inputTokens": receipt.input_tokens,
+            "outputTokens": receipt.output_tokens,
+            "totalTokens": receipt.total_tokens,
+            "cachedInputTokens": receipt.cached_input_tokens,
+            "usageStatus": receipt.usage_status,
+        }
+        if receipt.error_category:
+            item["errorCategory"] = receipt.error_category
+        if receipt.cost_usd is not None:
+            item["costUsd"] = receipt.cost_usd
+        if receipt.cost_status:
+            item["costStatus"] = receipt.cost_status
+        if receipt.cost_source:
+            item["costSource"] = receipt.cost_source
+        return item
 
     def to_dict(self) -> dict[str, Any]:
         with self._lock:
-            slots = []
-            for slot in TRUE_MOA_ALL_SLOTS:
-                receipt = self._receipts[slot.slot_id]
-                item: dict[str, Any] = {
-                    "slotId": slot.slot_id,
-                    "callId": receipt.call_id,
-                    "provider": slot.provider,
-                    "model": slot.model,
-                    "role": slot.role,
-                    "startedAtMs": receipt.started_at_ms,
-                    "endedAtMs": receipt.ended_at_ms,
-                    "status": receipt.status,
-                    "inputTokens": receipt.input_tokens,
-                    "outputTokens": receipt.output_tokens,
-                    "totalTokens": receipt.total_tokens,
-                    "usageStatus": receipt.usage_status,
-                }
-                if receipt.error_category:
-                    item["errorCategory"] = receipt.error_category
-                if receipt.cost_usd is not None:
-                    item["costUsd"] = receipt.cost_usd
-                if receipt.cost_status:
-                    item["costStatus"] = receipt.cost_status
-                if receipt.cost_source:
-                    item["costSource"] = receipt.cost_source
-                slots.append(item)
+            slots = [
+                self._receipt_dict(self._receipts[slot.slot_id])
+                for slot in TRUE_MOA_ALL_SLOTS
+            ]
+            calls = [
+                self._receipt_dict(self._advisor_calls[slot.slot_id])
+                for slot in TRUE_MOA_ADVISOR_SLOTS
+                if slot.slot_id in self._advisor_calls
+            ]
+            calls.extend(
+                self._receipt_dict(receipt)
+                for receipt in self._final_calls.values()
+            )
             return {
                 "schema": TRUE_MOA_USAGE_SCHEMA,
                 "waveId": self.wave_id,
@@ -259,6 +559,7 @@ class TrueMoAUsageLedger:
                 "presetRevision": self.snapshot.preset_revision,
                 "status": self._wave_status,
                 "slots": slots,
+                "calls": calls,
             }
 
 
@@ -470,6 +771,7 @@ def run_true_moa_advisors(
     conversation_history: Iterable[Mapping[str, Any]] | None,
     strict_caller: StrictAdvisorCaller,
     cancel_controller: TrueMoACancelController | None = None,
+    usage_ledger: TrueMoAUsageLedger | None = None,
     timeout_seconds: float = DEFAULT_ADVISOR_TIMEOUT_SECONDS,
     output_max_chars: int = DEFAULT_ADVISOR_OUTPUT_MAX_CHARS,
 ) -> TrueMoAAdvisorBundle:
@@ -499,7 +801,9 @@ def run_true_moa_advisors(
         raise TrueMoAContractError("invalid_advisor_output_limit")
 
     controller = cancel_controller or TrueMoACancelController()
-    ledger = TrueMoAUsageLedger(snapshot)
+    ledger = usage_ledger or TrueMoAUsageLedger(snapshot)
+    if ledger.snapshot != snapshot:
+        raise TrueMoAContractError("invalid_true_moa_usage_ledger")
     if controller.is_set:
         ledger.set_wave_status("cancelled")
         ledger.terminate_unfinished(status="cancelled", error_category="cancelled_before_start")
@@ -527,6 +831,35 @@ def run_true_moa_advisors(
         with started_lock:
             started_monotonic[slot.slot_id] = time.monotonic()
         strict_result: StrictAdvisorResult | None = None
+        advisor_call_id: str | None = None
+
+        def _record_dispatch() -> None:
+            nonlocal advisor_call_id
+            if advisor_call_id is not None:
+                raise RuntimeError("advisor provider call already dispatched")
+            advisor_call_id = ledger.start_advisor_call(slot)
+
+        def _finish_actual_call(
+            *,
+            status: str,
+            usage: Any = None,
+            error_category: str | None = None,
+            cost_usd: float | None = None,
+            cost_status: str | None = None,
+            cost_source: str | None = None,
+        ) -> None:
+            if advisor_call_id is None:
+                return
+            ledger.finish_advisor_call(
+                advisor_call_id,
+                status=status,
+                usage=usage,
+                error_category=error_category,
+                cost_usd=cost_usd,
+                cost_status=cost_status,
+                cost_source=cost_source,
+            )
+
         try:
             # A fresh immutable tuple is passed to each slot.  No advisor ever
             # receives another advisor's output or a tool definition.
@@ -539,12 +872,23 @@ def run_true_moa_advisors(
                 tools=(),
                 timeout_seconds=timeout_seconds,
                 cancel_controller=controller,
+                dispatch_callback=_record_dispatch,
             )
             strict_result = _coerce_strict_result(result)
+            if advisor_call_id is None:
+                raise _MalformedAdvisorResult("advisor_dispatch_not_recorded")
             if strict_result.tool_calls:
                 raise _MalformedAdvisorResult("advisor_returned_tool_calls")
             cleaned = _sanitize_advisor_output(strict_result.content, output_max_chars)
             if controller.is_set:
+                _finish_actual_call(
+                    status="cancelled",
+                    usage=strict_result.usage,
+                    error_category="late_result_after_terminal",
+                    cost_usd=strict_result.cost_usd,
+                    cost_status=strict_result.cost_status,
+                    cost_source=strict_result.cost_source,
+                )
                 ledger.finish_slot(
                     slot,
                     status="cancelled",
@@ -555,6 +899,13 @@ def run_true_moa_advisors(
                     cost_source=strict_result.cost_source,
                 )
                 raise _SlotTerminal("cancelled")
+            _finish_actual_call(
+                status="completed",
+                usage=strict_result.usage,
+                cost_usd=strict_result.cost_usd,
+                cost_status=strict_result.cost_status,
+                cost_source=strict_result.cost_source,
+            )
             ledger.finish_slot(
                 slot,
                 status="completed",
@@ -566,6 +917,20 @@ def run_true_moa_advisors(
             return cleaned
         except _MalformedAdvisorResult as exc:
             if controller.is_set:
+                _finish_actual_call(
+                    status="cancelled",
+                    usage=strict_result.usage if strict_result is not None else None,
+                    error_category="late_malformed_result_after_terminal",
+                    cost_usd=(
+                        strict_result.cost_usd if strict_result is not None else None
+                    ),
+                    cost_status=(
+                        strict_result.cost_status if strict_result is not None else None
+                    ),
+                    cost_source=(
+                        strict_result.cost_source if strict_result is not None else None
+                    ),
+                )
                 ledger.finish_slot(
                     slot,
                     status="cancelled",
@@ -582,6 +947,20 @@ def run_true_moa_advisors(
                     ),
                 )
                 raise _SlotTerminal("cancelled") from None
+            _finish_actual_call(
+                status="failed",
+                usage=strict_result.usage if strict_result is not None else None,
+                error_category=exc.category,
+                cost_usd=(
+                    strict_result.cost_usd if strict_result is not None else None
+                ),
+                cost_status=(
+                    strict_result.cost_status if strict_result is not None else None
+                ),
+                cost_source=(
+                    strict_result.cost_source if strict_result is not None else None
+                ),
+            )
             ledger.finish_slot(
                 slot,
                 status="failed",
@@ -606,6 +985,14 @@ def run_true_moa_advisors(
             late_cost_status = getattr(exc, "cost_status", None)
             late_cost_source = getattr(exc, "cost_source", None)
             if controller.is_set:
+                _finish_actual_call(
+                    status="cancelled",
+                    usage=late_usage,
+                    error_category="provider_cancelled_after_terminal",
+                    cost_usd=late_cost_usd,
+                    cost_status=late_cost_status,
+                    cost_source=late_cost_source,
+                )
                 ledger.finish_slot(
                     slot,
                     status="cancelled",
@@ -616,6 +1003,14 @@ def run_true_moa_advisors(
                     cost_source=late_cost_source,
                 )
                 raise _SlotTerminal("cancelled") from None
+            _finish_actual_call(
+                status="timed_out",
+                usage=late_usage,
+                error_category="provider_timeout",
+                cost_usd=late_cost_usd,
+                cost_status=late_cost_status,
+                cost_source=late_cost_source,
+            )
             ledger.finish_slot(
                 slot,
                 status="timed_out",
@@ -628,12 +1023,20 @@ def run_true_moa_advisors(
             raise _SlotTerminal("provider_timeout") from None
         except Exception:
             if controller.is_set:
+                _finish_actual_call(
+                    status="cancelled",
+                    error_category="provider_error_after_terminal",
+                )
                 ledger.finish_slot(
                     slot,
                     status="cancelled",
                     error_category="provider_error_after_terminal",
                 )
                 raise _SlotTerminal("cancelled") from None
+            _finish_actual_call(
+                status="failed",
+                error_category="provider_error",
+            )
             ledger.finish_slot(slot, status="failed", error_category="provider_error")
             raise _SlotTerminal("provider_error") from None
 
@@ -826,31 +1229,151 @@ def _bounded_safe_text(value: str, max_chars: int) -> str:
     return text
 
 
-def _normalize_usage(usage: Any) -> tuple[int | None, int | None, int | None, str]:
+def _fill_usage_once(
+    receipt: _SlotReceipt,
+    *,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    total_tokens: int | None,
+    cached_input_tokens: int | None,
+    usage_status: str,
+) -> None:
+    if usage_status == "unavailable":
+        return
+    for field, value in (
+        ("input_tokens", input_tokens),
+        ("output_tokens", output_tokens),
+        ("total_tokens", total_tokens),
+        ("cached_input_tokens", cached_input_tokens),
+    ):
+        if value is not None and getattr(receipt, field) is None:
+            setattr(receipt, field, value)
+    if usage_status == "reported" and all(
+        isinstance(getattr(receipt, field), int)
+        and not isinstance(getattr(receipt, field), bool)
+        for field in (
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cached_input_tokens",
+        )
+    ):
+        receipt.usage_status = "reported"
+    elif receipt.usage_status != "reported":
+        receipt.usage_status = "partial"
+
+
+def _normalize_usage(
+    usage: Any,
+) -> tuple[int | None, int | None, int | None, int | None, str]:
     if usage is None:
-        return None, None, None, "unavailable"
+        return None, None, None, None, "unavailable"
+
+    def _member(source: Any, name: str) -> tuple[bool, Any]:
+        if isinstance(source, Mapping):
+            return (name in source, source.get(name))
+        if hasattr(source, name):
+            return (True, getattr(source, name, None))
+        return (False, None)
+
+    def _nonnegative_int(raw: Any) -> int | None:
+        if isinstance(raw, bool):
+            return None
+        if isinstance(raw, int):
+            return raw if raw >= 0 else None
+        if isinstance(raw, str) and re.fullmatch(r"(?:0|[1-9][0-9]*)", raw):
+            return int(raw)
+        return None
 
     def _value(*names: str) -> int | None:
         for name in names:
-            raw = usage.get(name) if isinstance(usage, Mapping) else getattr(usage, name, None)
-            if raw is None:
+            present, raw = _member(usage, name)
+            if not present or raw is None:
                 continue
-            try:
-                value = int(raw)
-            except (TypeError, ValueError):
-                continue
-            if value >= 0:
+            value = _nonnegative_int(raw)
+            if value is not None:
                 return value
         return None
+
+    def _cached_value() -> int | None:
+        values: list[int] = []
+        invalid = False
+        for name in (
+            "cached_input_tokens",
+            "cachedInputTokens",
+            "prompt_cache_hit_tokens",
+            "cached_prompt_tokens",
+            "cache_read_input_tokens",
+            "cache_read_tokens",
+        ):
+            present, raw = _member(usage, name)
+            if not present or raw is None:
+                continue
+            value = _nonnegative_int(raw)
+            if value is None:
+                invalid = True
+                continue
+            values.append(value)
+        for details_name in (
+            "prompt_tokens_details",
+            "input_tokens_details",
+        ):
+            present, details = _member(usage, details_name)
+            if not present or details is None:
+                continue
+            cached_present, raw = _member(details, "cached_tokens")
+            if not cached_present or raw is None:
+                continue
+            value = _nonnegative_int(raw)
+            if value is None:
+                invalid = True
+                continue
+            values.append(value)
+        if invalid or not values or len(set(values)) != 1:
+            return None
+        return values[0]
 
     input_tokens = _value("input_tokens", "prompt_tokens")
     output_tokens = _value("output_tokens", "completion_tokens")
     total_tokens = _value("total_tokens")
     if total_tokens is None and input_tokens is not None and output_tokens is not None:
         total_tokens = input_tokens + output_tokens
+    if (
+        input_tokens is not None
+        and output_tokens is not None
+        and total_tokens is not None
+        and total_tokens != input_tokens + output_tokens
+    ):
+        total_tokens = None
     if input_tokens is None and output_tokens is None and total_tokens is None:
-        return None, None, None, "unavailable"
-    return input_tokens, output_tokens, total_tokens, "reported"
+        return None, None, None, None, "unavailable"
+    cached_input_tokens = _cached_value()
+    if (
+        cached_input_tokens is not None
+        and input_tokens is not None
+        and cached_input_tokens > input_tokens
+    ):
+        cached_input_tokens = None
+    status = (
+        "reported"
+        if all(
+            value is not None
+            for value in (
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                cached_input_tokens,
+            )
+        )
+        else "partial"
+    )
+    return (
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        cached_input_tokens,
+        status,
+    )
 
 
 def _header_value(headers: Any, name: str) -> str:
@@ -903,19 +1426,27 @@ __all__ = [
     "MOA_PRESET_REVISION_HEADER",
     "REASONING_MODE_HEADER",
     "StrictAdvisorResult",
+    "TRUE_MOA_ADVISOR_INPUT_MAX_BYTES",
+    "TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS",
     "TRUE_MOA_ADVISOR_SLOTS",
+    "TRUE_MOA_FINAL_CALL_LIMIT",
+    "TRUE_MOA_FINAL_INPUT_MAX_BYTES",
+    "TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS",
     "TRUE_MOA_MODE",
     "TRUE_MOA_PRESET_ID",
     "TRUE_MOA_PRESET_REVISION",
     "TRUE_MOA_USAGE_SCHEMA",
+    "TRUE_MOA_TOTAL_CALL_LIMIT",
     "TrueMoAAdvisorBundle",
     "TrueMoACancelController",
     "TrueMoAContractError",
+    "TrueMoACostCapError",
     "TrueMoAExecutionError",
     "TrueMoASlot",
     "TrueMoASnapshot",
     "TrueMoAUsageLedger",
     "build_minimal_advisor_messages",
+    "enforce_true_moa_dispatch_budget",
     "run_true_moa_advisors",
     "validate_true_moa_headers",
 ]

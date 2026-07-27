@@ -50,7 +50,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Mapping, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
@@ -1913,6 +1913,68 @@ def _guard_evidence_backed_response(
     return _bind_verification_to_visible_text(final_text, result)
 
 
+def _finalize_mystand_egress_result(
+    result: Any,
+    *,
+    user_message: Any,
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Apply the one server-owned egress projection before durable sealing."""
+
+    if not isinstance(result, dict):
+        raise RuntimeError("true MoA result is unavailable")
+    existing = result.get("final_response")
+    existing_digest = result.get("_mystand_egress_output_digest")
+    if result.get("_mystand_egress_finalized") is True:
+        if (
+            not isinstance(existing, str)
+            or not isinstance(existing_digest, str)
+            or hashlib.sha256(existing.encode("utf-8")).hexdigest()
+            != existing_digest
+        ):
+            raise RuntimeError("My Stand finalized egress digest mismatch")
+        return existing
+    final_text = _guard_evidence_backed_response(
+        existing or "",
+        user_message=user_message,
+        conversation_history=conversation_history or [],
+        result=result,
+    )
+    result["final_response"] = final_text
+    result["_mystand_egress_output_digest"] = hashlib.sha256(
+        final_text.encode("utf-8")
+    ).hexdigest()
+    result["_mystand_egress_finalized"] = True
+    return final_text
+
+
+def _resolved_mystand_egress_text(
+    result: Any,
+    *,
+    user_message: Any,
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Reuse a sealed projection; otherwise apply the ordinary egress guard."""
+
+    if isinstance(result, dict) and result.get("_mystand_egress_finalized") is True:
+        final_text = result.get("final_response")
+        output_digest = result.get("_mystand_egress_output_digest")
+        if (
+            not isinstance(final_text, str)
+            or not isinstance(output_digest, str)
+            or hashlib.sha256(final_text.encode("utf-8")).hexdigest()
+            != output_digest
+        ):
+            raise RuntimeError("My Stand finalized egress digest mismatch")
+        return final_text
+    return _guard_evidence_backed_response(
+        result.get("final_response", "") if isinstance(result, dict) else "",
+        user_message=user_message,
+        conversation_history=conversation_history or [],
+        result=result,
+    )
+
+
 def _install_signed_fact_persistence_guard(
     agent: Any,
     trusted_turn: Any,
@@ -2764,18 +2826,21 @@ def _true_moa_usage_summary(ledger: Any) -> Dict[str, Any]:
     input_tokens = 0
     output_tokens = 0
     total_tokens = 0
-    for slot in payload.get("slots") or ():
-        if not isinstance(slot, dict):
+    call_receipts = payload.get("calls")
+    if not isinstance(call_receipts, list):
+        call_receipts = payload.get("slots") or ()
+    for call in call_receipts:
+        if not isinstance(call, dict):
             continue
-        slot_input = slot.get("inputTokens")
-        slot_output = slot.get("outputTokens")
-        slot_total = slot.get("totalTokens")
-        if isinstance(slot_input, int) and not isinstance(slot_input, bool):
-            input_tokens += max(0, slot_input)
-        if isinstance(slot_output, int) and not isinstance(slot_output, bool):
-            output_tokens += max(0, slot_output)
-        if isinstance(slot_total, int) and not isinstance(slot_total, bool):
-            total_tokens += max(0, slot_total)
+        call_input = call.get("inputTokens")
+        call_output = call.get("outputTokens")
+        call_total = call.get("totalTokens")
+        if isinstance(call_input, int) and not isinstance(call_input, bool):
+            input_tokens += max(0, call_input)
+        if isinstance(call_output, int) and not isinstance(call_output, bool):
+            output_tokens += max(0, call_output)
+        if isinstance(call_total, int) and not isinstance(call_total, bool):
+            total_tokens += max(0, call_total)
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -2824,6 +2889,13 @@ def _stopped_chat_completion_response(response: Any) -> Any:
                 ):
                     slot["status"] = "cancelled"
                     slot["errorCategory"] = "terminal_fence_after_stop"
+        calls = ledger.get("calls")
+        if isinstance(calls, list):
+            for call in calls:
+                if not isinstance(call, dict) or call.get("status") != "running":
+                    continue
+                call["status"] = "cancelled"
+                call["errorCategory"] = "terminal_fence_after_stop"
         stopped_usage["true_moa"] = ledger
 
     stopped_result: Dict[str, Any] = {
@@ -2843,8 +2915,18 @@ def _stopped_chat_completion_response(response: Any) -> Any:
 
 
 class _IdempotencyCache:
-    """In-memory idempotency cache with TTL and basic LRU semantics."""
-    def __init__(self, max_items: int = 1000, ttl_seconds: int = 300):
+    """Fast in-process replay cache backed by a plaintext-free durable fence."""
+
+    def __init__(
+        self,
+        max_items: int = 1000,
+        ttl_seconds: int = 300,
+        durable_path: str = "",
+        *,
+        outcome_keys: Optional[Mapping[str, bytes]] = None,
+        active_outcome_key_id: str = "",
+        outcome_ttl_seconds: Optional[int] = None,
+    ):
         from collections import OrderedDict
         self._store = OrderedDict()
         self._inflight: Dict[tuple[str, str], "asyncio.Task[Any]"] = {}
@@ -2852,6 +2934,129 @@ class _IdempotencyCache:
         self._stopped: Dict[str, float] = {}
         self._ttl = ttl_seconds
         self._max = max_items
+        self._durable = None
+        self._durable_error = None
+        if str(durable_path or "").strip():
+            try:
+                from xiaoban.trusted_runtime.true_moa_durable import (
+                    TrueMoADurableStore,
+                )
+
+                self._durable = TrueMoADurableStore(
+                    str(durable_path).strip(),
+                    outcome_keys=outcome_keys,
+                    active_outcome_key_id=(
+                        str(active_outcome_key_id or "") or None
+                    ),
+                    outcome_ttl_seconds=outcome_ttl_seconds,
+                )
+            except Exception as exc:
+                # Normal requests stay available.  A true-MoA request checks
+                # durable_ready before any provider dispatch and receives a
+                # stable fail-closed 503 without reflecting filesystem detail.
+                self._durable_error = exc
+
+    @property
+    def durable_ready(self) -> bool:
+        return self._durable is not None
+
+    @property
+    def outcome_ready(self) -> bool:
+        return bool(
+            self._durable is not None
+            and self._durable.outcome_ready
+        )
+
+    @staticmethod
+    def _durable_response(
+        record: Dict[str, Any],
+        *,
+        outcome: Optional[Mapping[str, Any]] = None,
+    ) -> Any:
+        usage_ledger = copy.deepcopy(record.get("usage"))
+        if isinstance(usage_ledger, dict):
+            if record.get("state") == "interrupted":
+                usage_ledger["status"] = "failed"
+                for collection_name in ("slots", "calls"):
+                    collection = usage_ledger.get(collection_name)
+                    if not isinstance(collection, list):
+                        continue
+                    for receipt in collection:
+                        if (
+                            isinstance(receipt, dict)
+                            and receipt.get("status") == "running"
+                        ):
+                            receipt["status"] = "failed"
+                            receipt["errorCategory"] = (
+                                "agent_restart_outcome_unknown"
+                            )
+            input_tokens = 0
+            output_tokens = 0
+            total_tokens = 0
+            receipts = usage_ledger.get("calls")
+            if not isinstance(receipts, list):
+                receipts = usage_ledger.get("slots") or []
+            for receipt in receipts:
+                if not isinstance(receipt, dict):
+                    continue
+                input_tokens += max(0, int(receipt.get("inputTokens") or 0))
+                output_tokens += max(0, int(receipt.get("outputTokens") or 0))
+                total_tokens += max(0, int(receipt.get("totalTokens") or 0))
+            usage = {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+                "true_moa": usage_ledger,
+            }
+        else:
+            usage = {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+            }
+        if (
+            isinstance(outcome, Mapping)
+            and outcome.get("completed") is True
+            and isinstance(outcome.get("finalResponse"), str)
+            and isinstance(outcome.get("outputDigest"), str)
+        ):
+            result: Dict[str, Any] = {
+                "final_response": outcome["finalResponse"],
+                "messages": [],
+                "completed": True,
+                "failed": False,
+                "_mystand_request": True,
+                "_mystand_egress_finalized": True,
+                "_mystand_egress_output_digest": outcome["outputDigest"],
+                "_true_moa_outcome_id": outcome.get("outcomeId"),
+                **(
+                    {"_true_moa_usage": usage_ledger}
+                    if isinstance(usage_ledger, dict)
+                    else {}
+                ),
+            }
+            verification = outcome.get("trustedVerification")
+            if isinstance(verification, Mapping):
+                result["_mystand_trusted_verification"] = dict(
+                    verification
+                )
+            return result, usage
+        return (
+            {
+                "final_response": "",
+                "messages": [],
+                "completed": False,
+                "failed": True,
+                "interrupted": True,
+                "error": "durable completion replay has no public output",
+                **(
+                    {"_true_moa_usage": usage_ledger}
+                    if isinstance(usage_ledger, dict)
+                    else {}
+                ),
+            },
+            usage,
+        )
 
     def _purge(self):
         now = time.time()
@@ -2869,7 +3074,13 @@ class _IdempotencyCache:
             oldest = min(self._stopped, key=self._stopped.get)
             self._stopped.pop(oldest, None)
 
-    def lookup_state(self, key: str, fingerprint: str) -> str:
+    def lookup_state(
+        self,
+        key: str,
+        fingerprint: str,
+        *,
+        durable: bool = False,
+    ) -> str:
         """Return missing, reusable, or conflict for a scoped request key."""
         self._purge()
         item = self._store.get(key)
@@ -2880,26 +3091,103 @@ class _IdempotencyCache:
                 continue
             if existing_key == key:
                 return "reusable" if existing_fingerprint == fingerprint else "conflict"
+        if durable and self._durable is not None:
+            durable_record = self._durable.get(key)
+            if durable_record is not None:
+                return (
+                    "reusable"
+                    if durable_record["fingerprint"] in {"", fingerprint}
+                    else "conflict"
+                )
         return "missing"
 
-    def claim(self, key: str, fingerprint: str) -> str:
+    def claim(
+        self,
+        key: str,
+        fingerprint: str,
+        *,
+        durable: bool = False,
+    ) -> str:
         """Bind a stable identity before work starts, returning its prior state."""
-        state = self.lookup_state(key, fingerprint)
+        state = self.lookup_state(key, fingerprint, durable=durable)
         if state == "missing":
             self._store[key] = {
                 "resp": None,
                 "fp": fingerprint,
                 "ts": time.time(),
             }
+            if durable and self._durable is not None:
+                durable_state = self._durable.claim(
+                    key,
+                    fingerprint,
+                    kind="binding",
+                )
+                if durable_state == "conflict":
+                    self._store.pop(key, None)
+                    return "conflict"
             self._purge()
         return state
 
-    async def get_or_set(self, key: str, fingerprint: str, compute_coro, agent_ref=None):
-        state = self.lookup_state(key, fingerprint)
+    @staticmethod
+    def _completed_outcome_payload(
+        result: Any,
+    ) -> Dict[str, Any]:
+        from xiaoban.trusted_runtime.true_moa_durable import (
+            TRUE_MOA_COMPLETED_OUTCOME_SCHEMA,
+        )
+
+        if (
+            not isinstance(result, dict)
+            or result.get("completed") is not True
+            or result.get("failed")
+            or result.get("partial")
+            or result.get("interrupted")
+            or result.get("_mystand_egress_finalized") is not True
+        ):
+            raise RuntimeError(
+                "true MoA completed outcome was not finalized"
+            )
+        final_response = result.get("final_response")
+        output_digest = result.get("_mystand_egress_output_digest")
+        if (
+            not isinstance(final_response, str)
+            or not isinstance(output_digest, str)
+            or hashlib.sha256(final_response.encode("utf-8")).hexdigest()
+            != output_digest
+        ):
+            raise RuntimeError(
+                "true MoA finalized outcome digest mismatch"
+            )
+        payload: Dict[str, Any] = {
+            "schema": TRUE_MOA_COMPLETED_OUTCOME_SCHEMA,
+            "completed": True,
+            "finalResponse": final_response,
+            "outputDigest": output_digest,
+            "factGuardRequired": isinstance(
+                result.get("_mystand_fact_requirement"),
+                dict,
+            ),
+        }
+        verification = result.get("_mystand_trusted_verification")
+        if isinstance(verification, dict):
+            payload["trustedVerification"] = dict(verification)
+        return payload
+
+    async def get_or_set(
+        self,
+        key: str,
+        fingerprint: str,
+        compute_coro,
+        agent_ref=None,
+        *,
+        durable: bool = False,
+        outcome_binding: Optional[Mapping[str, Any]] = None,
+    ):
+        state = self.lookup_state(key, fingerprint, durable=durable)
         if state == "conflict":
             raise IdempotencyConflictError("idempotency key was reused with a different request")
         item = self._store.get(key)
-        if item:
+        if item and item.get("resp") is not None:
             return item["resp"]
         if key in self._stopped and agent_ref is not None:
             while len(agent_ref) < 2:
@@ -2908,18 +3196,174 @@ class _IdempotencyCache:
 
         inflight_key = (key, fingerprint)
         task = self._inflight.get(inflight_key)
+        if task is not None:
+            return await asyncio.shield(task)
+        durable_store = self._durable if durable else None
+        if durable_store is not None:
+            durable_record = durable_store.get(key)
+            if durable_record is not None:
+                if durable_record["fingerprint"] not in {"", fingerprint}:
+                    raise IdempotencyConflictError(
+                        "idempotency key was reused with a different request"
+                    )
+                if not durable_record["fingerprint"]:
+                    durable_state = durable_store.claim(
+                        key,
+                        fingerprint,
+                        kind="execution",
+                    )
+                    if durable_state == "conflict":
+                        raise IdempotencyConflictError(
+                            "idempotency key was reused with a different request"
+                        )
+                    durable_record = durable_store.get(key) or durable_record
+                outcome = None
+                if (
+                    durable_record.get("state") == "completed"
+                    and outcome_binding is not None
+                ):
+                    try:
+                        outcome = durable_store.recover_completed_outcome(
+                            key,
+                            binding=outcome_binding,
+                        )
+                    except Exception as exc:
+                        from xiaoban.trusted_runtime.true_moa_durable import (
+                            TrueMoAOutcomeUnavailableError,
+                        )
+
+                        if not isinstance(
+                            exc,
+                            TrueMoAOutcomeUnavailableError,
+                        ):
+                            raise
+                return self._durable_response(
+                    durable_record,
+                    outcome=outcome,
+                )
+            durable_state = durable_store.claim(
+                key,
+                fingerprint,
+                kind="execution",
+            )
+            if durable_state != "missing":
+                durable_record = durable_store.get(key)
+                if durable_record is not None:
+                    outcome = None
+                    if (
+                        durable_record.get("state") == "completed"
+                        and outcome_binding is not None
+                    ):
+                        try:
+                            outcome = durable_store.recover_completed_outcome(
+                                key,
+                                binding=outcome_binding,
+                            )
+                        except Exception as exc:
+                            from xiaoban.trusted_runtime.true_moa_durable import (
+                                TrueMoAOutcomeUnavailableError,
+                            )
+
+                            if not isinstance(
+                                exc,
+                                TrueMoAOutcomeUnavailableError,
+                            ):
+                                raise
+                    return self._durable_response(
+                        durable_record,
+                        outcome=outcome,
+                    )
         if task is None:
             async def _compute_and_store():
-                resp = await compute_coro()
-                if key in self._stopped:
-                    # Keep only the plaintext-free stop projection.  The
-                    # tombstone still wins delivery, while the actual usage
-                    # and cost receipt remains recoverable for settlement.
-                    resp = _stopped_chat_completion_response(resp)
-                import time as _t
-                self._store[key] = {"resp": resp, "fp": fingerprint, "ts": _t.time()}
-                self._purge()
-                return resp
+                if durable_store is not None:
+                    durable_store.set_state(key, state="running")
+                try:
+                    resp = await compute_coro()
+                    if key in self._stopped:
+                        # Keep only the plaintext-free stop projection.  The
+                        # tombstone still wins delivery, while actual usage
+                        # remains recoverable for settlement.
+                        resp = _stopped_chat_completion_response(resp)
+                    raw_result, raw_usage = (
+                        resp
+                        if isinstance(resp, tuple) and len(resp) == 2
+                        else (resp, {})
+                    )
+                    ledger = (
+                        raw_usage.get("true_moa")
+                        if isinstance(raw_usage, dict)
+                        else None
+                    )
+                    if (
+                        not isinstance(ledger, dict)
+                        and isinstance(raw_result, dict)
+                    ):
+                        ledger = raw_result.get("_true_moa_usage")
+                    if durable_store is not None:
+                        if isinstance(ledger, dict):
+                            ledger_status = str(
+                                ledger.get("status") or ""
+                            )
+                            if (
+                                ledger_status == "completed"
+                                and key not in self._stopped
+                            ):
+                                if outcome_binding is None:
+                                    raise RuntimeError(
+                                        "true MoA outcome binding is required"
+                                    )
+                                outcome_id = (
+                                    durable_store.save_completed_outcome(
+                                        key,
+                                        fingerprint,
+                                        ledger,
+                                        self._completed_outcome_payload(
+                                            raw_result
+                                        ),
+                                        binding=outcome_binding,
+                                    )
+                                )
+                                if isinstance(raw_result, dict):
+                                    raw_result[
+                                        "_true_moa_outcome_id"
+                                    ] = outcome_id
+                            else:
+                                durable_store.save_usage(
+                                    key,
+                                    fingerprint,
+                                    ledger,
+                                    state=(
+                                        "stopped"
+                                        if key in self._stopped
+                                        or ledger_status == "cancelled"
+                                        else "failed"
+                                        if ledger_status == "failed"
+                                        else "interrupted"
+                                    ),
+                                )
+                        else:
+                            raise RuntimeError(
+                                "true MoA terminal usage ledger is required"
+                            )
+                    import time as _t
+
+                    self._store[key] = {
+                        "resp": resp,
+                        "fp": fingerprint,
+                        "ts": _t.time(),
+                    }
+                    self._purge()
+                    return resp
+                except BaseException:
+                    if durable_store is not None:
+                        try:
+                            durable_store.set_state(
+                                key,
+                                state="interrupted",
+                            )
+                        except Exception:
+                            pass
+                    raise
 
             task = asyncio.create_task(_compute_and_store())
             self._inflight[inflight_key] = task
@@ -2935,7 +3379,7 @@ class _IdempotencyCache:
 
         return await asyncio.shield(task)
 
-    def stop(self, key: str) -> bool:
+    def stop(self, key: str, *, durable: bool = False) -> bool:
         """Interrupt the one in-flight computation for a scoped key."""
         self._purge()
         if key in self._store:
@@ -2952,6 +3396,15 @@ class _IdempotencyCache:
                 "Stop requested via My Stand delivery",
             ) or accepted
         if not accepted:
+            return False
+        if (
+            durable
+            and self._durable is not None
+            and not self._durable.mark_stopped(key)
+        ):
+            # The durable transaction is the cross-restart source of truth.
+            # A completed/failed terminal state that committed first wins;
+            # never install a process-local tombstone after that race.
             return False
         # Record a short-lived tombstone even before the completion request
         # reaches this process. This closes the create/stop HTTP race without
@@ -2981,10 +3434,81 @@ class _IdempotencyCache:
             )
         if item is not None and item.get("resp") is not None:
             return "completed", item["resp"]
+        if self._durable is not None:
+            durable = self._durable.get(key)
+            if durable is not None:
+                if durable["state"] in {"claimed", "running"}:
+                    return "running", None
+                if durable["state"] == "stopped" and durable.get("usage") is None:
+                    return "stopped", None
+                durable_response = self._durable_response(durable)
+                return str(durable["state"]), durable_response
         return "missing", None
 
+    def durable_record(self, key: str) -> Optional[Dict[str, Any]]:
+        if self._durable is None:
+            return None
+        return self._durable.get(key)
 
-_idem_cache = _IdempotencyCache()
+    def recover_outcome(
+        self,
+        key: str,
+        *,
+        binding: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        if self._durable is None:
+            raise RuntimeError("true MoA durable ledger is unavailable")
+        return self._durable.recover_completed_outcome(
+            key,
+            binding=binding,
+        )
+
+    def acknowledge_outcome(
+        self,
+        key: str,
+        *,
+        binding: Mapping[str, Any],
+        outcome_id: str,
+    ) -> str:
+        if self._durable is None:
+            raise RuntimeError("true MoA durable ledger is unavailable")
+        return self._durable.acknowledge_completed_outcome(
+            key,
+            binding=binding,
+            outcome_id=outcome_id,
+        )
+
+    def persist_usage(
+        self,
+        key: str,
+        fingerprint: str,
+        ledger: Dict[str, Any],
+    ) -> None:
+        if self._durable is None:
+            raise RuntimeError("true MoA durable ledger is unavailable")
+        state = str(ledger.get("status") or "running")
+        durable_state = (
+            "stopped"
+            if state == "cancelled"
+            else "failed"
+            if state == "failed"
+            else "running"
+        )
+        self._durable.save_usage(
+            key,
+            fingerprint,
+            ledger,
+            state=durable_state,
+        )
+
+
+_idem_cache = _IdempotencyCache(
+    durable_path=os.environ.get("XIAOBAN_TRUE_MOA_LEDGER_DB", ""),
+    active_outcome_key_id=os.environ.get(
+        "XIAOBAN_TRUE_MOA_OUTCOME_ACTIVE_KEY_ID",
+        "",
+    ),
+)
 
 
 def _make_request_fingerprint(body: Dict[str, Any], keys: List[str]) -> str:
@@ -4362,7 +4886,6 @@ class APIServerAdapter(BasePlatformAdapter):
                 ),
                 status=503,
             )
-
         # Parse request body
         try:
             body = await request.json()
@@ -4376,6 +4899,22 @@ class APIServerAdapter(BasePlatformAdapter):
         )
         if true_moa_error is not None:
             return true_moa_error
+        if true_moa_snapshot is not None and not _idem_cache.durable_ready:
+            return web.json_response(
+                _openai_error(
+                    "True MoA durable idempotency ledger is unavailable",
+                    code="true_moa_durable_ledger_unavailable",
+                ),
+                status=503,
+            )
+        if true_moa_snapshot is not None and not _idem_cache.outcome_ready:
+            return web.json_response(
+                _openai_error(
+                    "True MoA sealed outcome key is unavailable",
+                    code="true_moa_outcome_key_unavailable",
+                ),
+                status=503,
+            )
 
         messages = body.get("messages")
         if not messages or not isinstance(messages, list):
@@ -4564,6 +5103,7 @@ class APIServerAdapter(BasePlatformAdapter):
             stream_scoped_key = ""
             stream_binding_key = ""
             stream_idem_fp = ""
+            stream_outcome_binding = None
             if stream_delivery_id:
                 try:
                     stream_scoped_key = self._scoped_idempotency_key(
@@ -4573,12 +5113,24 @@ class APIServerAdapter(BasePlatformAdapter):
                         request.headers, stream_delivery_id
                     )
                     stream_idem_fp = self._chat_idempotency_fingerprint(body, request.headers)
+                    if true_moa_snapshot is not None:
+                        stream_outcome_binding = (
+                            self._true_moa_outcome_binding(
+                                request.headers,
+                                snapshot=true_moa_snapshot,
+                                delivery_id=stream_delivery_id,
+                            )
+                        )
                 except InvalidToolsetPolicy as e:
                     return web.json_response(
                         _openai_error(str(e), code="invalid_idempotency_scope"),
                         status=400,
                     )
-                if _idem_cache.lookup_state(stream_scoped_key, stream_idem_fp) == "conflict":
+                if _idem_cache.lookup_state(
+                    stream_scoped_key,
+                    stream_idem_fp,
+                    durable=true_moa_snapshot is not None,
+                ) == "conflict":
                     return web.json_response(
                         _openai_error(
                             "idempotency key was reused with a different request",
@@ -4586,7 +5138,11 @@ class APIServerAdapter(BasePlatformAdapter):
                         ),
                         status=409,
                     )
-                if _idem_cache.claim(stream_binding_key, stream_idem_fp) == "conflict":
+                if _idem_cache.claim(
+                    stream_binding_key,
+                    stream_idem_fp,
+                    durable=true_moa_snapshot is not None,
+                ) == "conflict":
                     return web.json_response(
                         _openai_error(
                             "delivery identity was reused with a different request",
@@ -4608,12 +5164,15 @@ class APIServerAdapter(BasePlatformAdapter):
                 return limited
             import queue as _q
             _stream_q: _q.Queue = _q.Queue()
-            guard_stream_deltas = _should_buffer_stream_deltas(
-                user_message,
-                mystand_request=mystand_request,
-                system_prompt=system_prompt,
-                conversation_history=history,
-                fact_requirement=fact_requirement,
+            guard_stream_deltas = bool(
+                true_moa_snapshot is not None
+                or _should_buffer_stream_deltas(
+                    user_message,
+                    mystand_request=mystand_request,
+                    system_prompt=system_prompt,
+                    conversation_history=history,
+                    fact_requirement=fact_requirement,
+                )
             )
 
             def _on_delta(delta):
@@ -4726,7 +5285,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 try:
                     if stream_scoped_key and agent_ref[1]:
                         raise CompletionStoppedError("request stopped before execution")
-                    return await self._run_agent(
+                    result, usage = await self._run_agent(
                         user_message=user_message,
                         conversation_history=history,
                         ephemeral_system_prompt=system_prompt,
@@ -4744,7 +5303,32 @@ class APIServerAdapter(BasePlatformAdapter):
                         ),
                         fact_requirement=fact_requirement,
                         true_moa_snapshot=true_moa_snapshot,
+                        true_moa_usage_callback=(
+                            (
+                                lambda ledger: _idem_cache.persist_usage(
+                                    stream_scoped_key,
+                                    stream_idem_fp,
+                                    ledger,
+                                )
+                            )
+                            if true_moa_snapshot is not None
+                            else None
+                        ),
                     )
+                    if (
+                        true_moa_snapshot is not None
+                        and isinstance(result, dict)
+                        and result.get("completed", True)
+                        and not result.get("failed")
+                        and not result.get("partial")
+                        and not result.get("interrupted")
+                    ):
+                        _finalize_mystand_egress_result(
+                            result,
+                            user_message=user_message,
+                            conversation_history=history,
+                        )
+                    return result, usage
                 finally:
                     # Runs for success, provider/tool exceptions, explicit
                     # /stop cancellation, client disconnect cancellation and
@@ -4758,6 +5342,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     stream_idem_fp,
                     _stream_compute,
                     agent_ref=agent_ref,
+                    durable=true_moa_snapshot is not None,
+                    outcome_binding=stream_outcome_binding,
                 ))
             else:
                 agent_task = asyncio.ensure_future(_stream_compute())
@@ -4784,7 +5370,25 @@ class APIServerAdapter(BasePlatformAdapter):
                 ),
                 status=400,
             )
+        idempotency_key = request.headers.get("Idempotency-Key")
+        nonstream_outcome_binding = None
+        if true_moa_snapshot is not None:
+            try:
+                nonstream_outcome_binding = self._true_moa_outcome_binding(
+                    request.headers,
+                    snapshot=true_moa_snapshot,
+                    delivery_id=str(idempotency_key or ""),
+                )
+            except InvalidToolsetPolicy:
+                return web.json_response(
+                    _openai_error(
+                        "Invalid true MoA outcome binding",
+                        code="invalid_true_moa_outcome_binding",
+                    ),
+                    status=400,
+                )
         agent_ref = [None, False, None]
+        true_moa_usage_callback = None
 
         async def _compute_completion():
             if agent_ref[1]:
@@ -4814,6 +5418,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     agent_ref=agent_ref,
                     fact_requirement=fact_requirement,
                     true_moa_snapshot=true_moa_snapshot,
+                    true_moa_usage_callback=true_moa_usage_callback,
                 )
                 if agent_ref[1]:
                     result = dict(result or {})
@@ -4824,6 +5429,19 @@ class APIServerAdapter(BasePlatformAdapter):
                         "interrupted": True,
                         "error": "completion stopped",
                     })
+                if (
+                    true_moa_snapshot is not None
+                    and isinstance(result, dict)
+                    and result.get("completed", True)
+                    and not result.get("failed")
+                    and not result.get("partial")
+                    and not result.get("interrupted")
+                ):
+                    _finalize_mystand_egress_result(
+                        result,
+                        user_message=user_message,
+                        conversation_history=history,
+                    )
                 return result, usage
             except CompletionStoppedError:
                 return (
@@ -4837,12 +5455,23 @@ class APIServerAdapter(BasePlatformAdapter):
                     {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
                 )
 
-        idempotency_key = request.headers.get("Idempotency-Key")
         if idempotency_key:
             try:
                 scoped_key = self._scoped_idempotency_key(request.headers, idempotency_key)
                 fp = self._chat_idempotency_fingerprint(body, request.headers)
-                state = _idem_cache.lookup_state(scoped_key, fp)
+                if true_moa_snapshot is not None:
+                    true_moa_usage_callback = (
+                        lambda ledger: _idem_cache.persist_usage(
+                            scoped_key,
+                            fp,
+                            ledger,
+                        )
+                    )
+                state = _idem_cache.lookup_state(
+                    scoped_key,
+                    fp,
+                    durable=true_moa_snapshot is not None,
+                )
                 if state == "conflict":
                     raise IdempotencyConflictError("idempotency key conflict")
                 if state == "missing":
@@ -4854,6 +5483,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     fp,
                     _compute_completion,
                     agent_ref=agent_ref,
+                    durable=true_moa_snapshot is not None,
+                    outcome_binding=nonstream_outcome_binding,
                 )
             except InvalidToolsetPolicy as e:
                 return web.json_response(
@@ -4866,6 +5497,27 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=409,
                 )
             except Exception as e:
+                from xiaoban.trusted_runtime.true_moa_durable import (
+                    TrueMoAOutcomeBindingError,
+                    TrueMoAOutcomeUnavailableError,
+                )
+
+                if isinstance(e, TrueMoAOutcomeBindingError):
+                    return web.json_response(
+                        _openai_error(
+                            "True MoA outcome binding did not verify",
+                            code="true_moa_outcome_binding_invalid",
+                        ),
+                        status=409,
+                    )
+                if isinstance(e, TrueMoAOutcomeUnavailableError):
+                    return web.json_response(
+                        _openai_error(
+                            "True MoA completed outcome is unavailable",
+                            code="true_moa_outcome_unavailable",
+                        ),
+                        status=409,
+                    )
                 logger.error("Error running agent for chat completions: %s", e, exc_info=True)
                 return web.json_response(
                     _openai_error(f"Internal server error: {e}", err_type="server_error"),
@@ -4884,11 +5536,10 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=500,
                 )
 
-        final_response = _guard_evidence_backed_response(
-            result.get("final_response") or "",
+        final_response = _resolved_mystand_egress_text(
+            result,
             user_message=user_message,
             conversation_history=history,
-            result=result,
         )
         is_partial = bool(result.get("partial"))
         is_failed = bool(result.get("failed"))
@@ -4994,6 +5645,27 @@ class APIServerAdapter(BasePlatformAdapter):
                 "partial": is_partial,
                 "failed": is_failed,
             })["true_moa_usage"] = usage["true_moa"]
+        outcome_id = result.get("_true_moa_outcome_id")
+        output_digest = result.get("_mystand_egress_output_digest")
+        if (
+            completed
+            and not is_partial
+            and not is_failed
+            and isinstance(outcome_id, str)
+            and _MYSTAND_STREAM_FINGERPRINT_RE.fullmatch(outcome_id)
+            and isinstance(output_digest, str)
+            and _MYSTAND_STREAM_FINGERPRINT_RE.fullmatch(output_digest)
+        ):
+            xiaoban_state = response_data.setdefault(
+                "xiaoban",
+                {
+                    "completed": True,
+                    "partial": False,
+                    "failed": False,
+                },
+            )
+            xiaoban_state["outcome_id"] = outcome_id
+            xiaoban_state["output_digest"] = output_digest
         trusted_verification = result.get("_mystand_trusted_verification")
         if isinstance(trusted_verification, dict):
             xiaoban_state = response_data.setdefault(
@@ -5031,6 +5703,21 @@ class APIServerAdapter(BasePlatformAdapter):
                 ),
                 status=503,
             )
+        true_moa_snapshot, true_moa_error = self._true_moa_snapshot_error(
+            request.headers,
+            mystand_request=True,
+            api_authenticated=True,
+        )
+        if true_moa_error is not None:
+            return true_moa_error
+        if true_moa_snapshot is not None and not _idem_cache.durable_ready:
+            return web.json_response(
+                _openai_error(
+                    "True MoA durable idempotency ledger is unavailable",
+                    code="true_moa_durable_ledger_unavailable",
+                ),
+                status=503,
+            )
         try:
             body = await request.json()
         except Exception:
@@ -5042,7 +5729,10 @@ class APIServerAdapter(BasePlatformAdapter):
             scoped_key = self._scoped_idempotency_key(request.headers, raw_key)
         except InvalidToolsetPolicy as exc:
             return web.json_response(_openai_error(str(exc), code="invalid_idempotency_key"), status=400)
-        if not _idem_cache.stop(scoped_key):
+        if not _idem_cache.stop(
+            scoped_key,
+            durable=true_moa_snapshot is not None,
+        ):
             return web.json_response(
                 _openai_error("No active completion for this delivery", code="completion_not_running"),
                 status=404,
@@ -5074,6 +5764,29 @@ class APIServerAdapter(BasePlatformAdapter):
                 ),
                 status=503,
             )
+        true_moa_snapshot, true_moa_error = self._true_moa_snapshot_error(
+            request.headers,
+            mystand_request=True,
+            api_authenticated=True,
+        )
+        if true_moa_error is not None:
+            return true_moa_error
+        if true_moa_snapshot is None:
+            return web.json_response(
+                _openai_error(
+                    "True MoA mode snapshot is required",
+                    code="true_moa_snapshot_required",
+                ),
+                status=400,
+            )
+        if not _idem_cache.durable_ready:
+            return web.json_response(
+                _openai_error(
+                    "True MoA durable idempotency ledger is unavailable",
+                    code="true_moa_durable_ledger_unavailable",
+                ),
+                status=503,
+            )
         try:
             body = await request.json()
         except Exception:
@@ -5088,15 +5801,32 @@ class APIServerAdapter(BasePlatformAdapter):
             or request.headers.get("Idempotency-Key")
             or ""
         ).strip()
-        try:
-            scoped_key = self._scoped_idempotency_key(request.headers, raw_key)
-        except InvalidToolsetPolicy as exc:
+        action = str(body.get("action") or "recover").strip().lower()
+        if action not in {"recover", "ack"}:
             return web.json_response(
-                _openai_error(str(exc), code="invalid_idempotency_key"),
+                _openai_error(
+                    "Unsupported true MoA usage action",
+                    code="invalid_true_moa_usage_action",
+                ),
                 status=400,
             )
-        state, cached = _idem_cache.result_state(scoped_key)
-        if state == "missing":
+        try:
+            scoped_key = self._scoped_idempotency_key(request.headers, raw_key)
+            outcome_binding = self._true_moa_outcome_binding(
+                request.headers,
+                snapshot=true_moa_snapshot,
+                delivery_id=raw_key,
+            )
+        except InvalidToolsetPolicy as exc:
+            return web.json_response(
+                _openai_error(
+                    str(exc),
+                    code="invalid_true_moa_outcome_binding",
+                ),
+                status=400,
+            )
+        record = _idem_cache.durable_record(scoped_key)
+        if record is None:
             return web.json_response(
                 _openai_error(
                     "No completion ledger for this delivery",
@@ -5104,25 +5834,36 @@ class APIServerAdapter(BasePlatformAdapter):
                 ),
                 status=404,
             )
-        if state == "running":
+        state = str(record.get("state") or "")
+        usage = record.get("usage")
+        # A process can die after the completed-ledger callback is durably
+        # persisted but before save_completed_outcome atomically seals the
+        # user-visible result.  The durable execution state intentionally
+        # stays provisional until that seal.  Do not report this crash gap as
+        # "running" forever after restart: surface the completed usage below
+        # as settlement-blocked with the missing-outcome error.
+        provisional_completed_usage = bool(
+            isinstance(usage, dict)
+            and usage.get("status") == "completed"
+        )
+        if (
+            state in {"claimed", "running"}
+            and not provisional_completed_usage
+        ):
             return web.json_response(
                 {"ok": True, "status": "running", "final": False},
                 status=202,
             )
-        if state == "stopped" and cached is None:
+        if state == "stopped" and not isinstance(usage, dict):
             return web.json_response({
                 "ok": True,
                 "status": "stopped_before_start",
                 "final": True,
                 "usage": None,
+                "outcomeStatus": str(
+                    record.get("outcomeState") or "none"
+                ),
             })
-        usage = None
-        if (
-            isinstance(cached, tuple)
-            and len(cached) == 2
-            and isinstance(cached[1], dict)
-        ):
-            usage = cached[1].get("true_moa")
         if not isinstance(usage, dict):
             return web.json_response(
                 _openai_error(
@@ -5131,15 +5872,157 @@ class APIServerAdapter(BasePlatformAdapter):
                 ),
                 status=409,
             )
-        return web.json_response({
+        usage_settlement_blocked = any(
+            not isinstance(call, dict)
+            or call.get("status") == "running"
+            or (
+                call.get("startedAtMs") is not None
+                and call.get("status") != "not_started"
+                and (
+                    call.get("usageStatus") != "reported"
+                    or not all(
+                        isinstance(call.get(name), int)
+                        and not isinstance(call.get(name), bool)
+                        for name in (
+                            "inputTokens",
+                            "outputTokens",
+                            "totalTokens",
+                            "cachedInputTokens",
+                        )
+                    )
+                )
+            )
+            for call in (usage.get("calls") or ())
+        )
+        outcome_state = str(record.get("outcomeState") or "none")
+
+        from xiaoban.trusted_runtime.true_moa_durable import (
+            TrueMoAOutcomeBindingError,
+            TrueMoAOutcomeUnavailableError,
+        )
+
+        if action == "ack":
+            outcome_id = body.get("outcome_id")
+            if not isinstance(outcome_id, str):
+                return web.json_response(
+                    _openai_error(
+                        "True MoA outcome id is required",
+                        code="true_moa_outcome_id_required",
+                    ),
+                    status=400,
+                )
+            try:
+                acknowledgment = _idem_cache.acknowledge_outcome(
+                    scoped_key,
+                    binding=outcome_binding,
+                    outcome_id=outcome_id,
+                )
+            except TrueMoAOutcomeBindingError:
+                return web.json_response(
+                    _openai_error(
+                        "True MoA outcome binding did not verify",
+                        code="true_moa_outcome_binding_invalid",
+                    ),
+                    status=409,
+                )
+            except TrueMoAOutcomeUnavailableError:
+                return web.json_response(
+                    _openai_error(
+                        "True MoA completed outcome is unavailable",
+                        code="true_moa_outcome_unavailable",
+                    ),
+                    status=409,
+                )
+            return web.json_response({
+                "ok": True,
+                "status": acknowledgment,
+                "final": True,
+                "usage": usage,
+                "terminalState": state,
+                "outcomeStatus": "acked",
+                "settlementBlocked": usage_settlement_blocked,
+            })
+
+        recovered_outcome = None
+        outcome_unavailable = False
+        if outcome_state == "sealed":
+            try:
+                recovered_outcome = _idem_cache.recover_outcome(
+                    scoped_key,
+                    binding=outcome_binding,
+                )
+            except TrueMoAOutcomeBindingError:
+                return web.json_response(
+                    _openai_error(
+                        "True MoA outcome binding did not verify",
+                        code="true_moa_outcome_binding_invalid",
+                    ),
+                    status=409,
+                )
+            except TrueMoAOutcomeUnavailableError:
+                outcome_unavailable = True
+        expects_outcome = bool(
+            state != "stopped"
+            and (
+                state == "completed"
+                or usage.get("status") == "completed"
+            )
+        )
+        outcome_settlement_blocked = bool(
+            expects_outcome
+            and outcome_state != "acked"
+            and not isinstance(recovered_outcome, dict)
+        )
+        settlement_blocked = bool(
+            usage_settlement_blocked or outcome_settlement_blocked
+        )
+        response_payload: Dict[str, Any] = {
             "ok": True,
             "status": str(
-                usage.get("status")
-                or ("cancelled" if state == "stopped" else "completed")
+                "settlement_blocked"
+                if settlement_blocked
+                else "acknowledged"
+                if outcome_state == "acked"
+                else "cancelled"
+                if state == "stopped"
+                else usage.get("status")
+                or state
             ),
             "final": True,
             "usage": usage,
-        })
+            "terminalState": state,
+            "outcomeStatus": (
+                "unavailable"
+                if outcome_unavailable
+                else outcome_state
+            ),
+            "settlementBlocked": settlement_blocked,
+        }
+        if outcome_unavailable:
+            response_payload["errorCode"] = (
+                "true_moa_outcome_unavailable"
+            )
+        elif outcome_settlement_blocked:
+            response_payload["errorCode"] = (
+                "true_moa_outcome_unavailable"
+            )
+        if isinstance(recovered_outcome, dict):
+            public_outcome: Dict[str, Any] = {
+                "finalResponse": recovered_outcome["finalResponse"],
+                "outputDigest": recovered_outcome["outputDigest"],
+                "factGuardRequired": recovered_outcome[
+                    "factGuardRequired"
+                ],
+            }
+            verification = recovered_outcome.get("trustedVerification")
+            if isinstance(verification, dict):
+                public_outcome["trustedVerification"] = verification
+            response_payload["outcome"] = public_outcome
+            response_payload["outcomeId"] = recovered_outcome["outcomeId"]
+            response_payload["retentionOverdue"] = bool(
+                recovered_outcome.get("retentionOverdue")
+            )
+        return web.json_response(response_payload)
 
     async def _write_sse_chat_completion(
         self, request: "web.Request", completion_id: str, model: str,
@@ -5270,11 +6153,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 result, agent_usage = await agent_task
                 usage = agent_usage or usage
                 if evidence_guard_context is not None:
-                    guarded_final = _guard_evidence_backed_response(
-                        result.get("final_response", "") if isinstance(result, dict) else "",
+                    guarded_final = _resolved_mystand_egress_text(
+                        result,
                         user_message=evidence_guard_context.get("user_message", ""),
                         conversation_history=evidence_guard_context.get("conversation_history") or [],
-                        result=result,
                     )
             except Exception as exc:
                 result = None
@@ -5342,6 +6224,38 @@ class APIServerAdapter(BasePlatformAdapter):
                     await response.write(
                         f"event: xiaoban.trusted.verification\ndata: {json.dumps(verification, ensure_ascii=False)}\n\n".encode()
                     )
+
+            outcome_id = (
+                result.get("_true_moa_outcome_id")
+                if isinstance(result, dict)
+                else None
+            )
+            output_digest = (
+                result.get("_mystand_egress_output_digest")
+                if isinstance(result, dict)
+                else None
+            )
+            if (
+                not run_terminal_failure
+                and isinstance(outcome_id, str)
+                and _MYSTAND_STREAM_FINGERPRINT_RE.fullmatch(outcome_id)
+                and isinstance(output_digest, str)
+                and _MYSTAND_STREAM_FINGERPRINT_RE.fullmatch(output_digest)
+            ):
+                await response.write(
+                    (
+                        "event: xiaoban.moa.outcome\n"
+                        "data: "
+                        + json.dumps(
+                            {
+                                "outcomeId": outcome_id,
+                                "outputDigest": output_digest,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n\n"
+                    ).encode()
+                )
 
             true_moa_usage = usage.get("true_moa")
             if isinstance(true_moa_usage, dict):
@@ -7108,6 +8022,69 @@ class APIServerAdapter(BasePlatformAdapter):
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     @classmethod
+    def _true_moa_outcome_binding(
+        cls,
+        headers: Any,
+        *,
+        snapshot: Any,
+        delivery_id: str,
+    ) -> Dict[str, Any]:
+        """Project the authenticated identity used as sealed-outcome AAD."""
+
+        from xiaoban.trusted_runtime.true_moa_durable import (
+            TRUE_MOA_OUTCOME_BINDING_SCHEMA,
+            project_true_moa_outcome_binding,
+        )
+        from xiaoban.trusted_runtime.types import TrustedIdentity
+
+        site_id = cls._header_value(headers, "X-Xiaoban-Site-Id")
+        user_id = cls._header_value(headers, "X-Xiaoban-User-Id")
+        message_id = cls._header_value(headers, "X-Xiaoban-Message-Id")
+        attempt_text = cls._header_value(
+            headers,
+            "X-Xiaoban-Attempt",
+        )
+        trusted_delivery_id = (
+            cls._header_value(headers, "X-Xiaoban-Delivery-Id")
+            or str(delivery_id or "").strip()
+        )
+        request_fingerprint = cls._header_value(
+            headers,
+            "X-Xiaoban-Request-Fingerprint",
+        ).lower()
+        try:
+            attempt = int(attempt_text)
+        except (TypeError, ValueError) as exc:
+            raise InvalidToolsetPolicy(
+                "Invalid true MoA outcome binding"
+            ) from exc
+        binding = {
+            "schema": TRUE_MOA_OUTCOME_BINDING_SCHEMA,
+            "siteId": site_id,
+            "userId": user_id,
+            "deliveryId": trusted_delivery_id,
+            "messageId": message_id,
+            "attempt": attempt,
+            "requestFingerprint": request_fingerprint,
+            "datascopeFingerprint": TrustedIdentity(
+                account_id=user_id,
+                data_scope="mystand",
+                source="server_session",
+            ).datascope_fingerprint,
+            "modeEpoch": str(getattr(snapshot, "mode_epoch", "") or ""),
+            "presetId": str(getattr(snapshot, "preset_id", "") or ""),
+            "presetRevision": str(
+                getattr(snapshot, "preset_revision", "") or ""
+            ),
+        }
+        try:
+            return project_true_moa_outcome_binding(binding)
+        except ValueError as exc:
+            raise InvalidToolsetPolicy(
+                "Invalid true MoA outcome binding"
+            ) from exc
+
+    @classmethod
     def _true_moa_snapshot_error(
         cls,
         headers: Any,
@@ -7378,6 +8355,7 @@ class APIServerAdapter(BasePlatformAdapter):
         async_delivery: bool = False,
         fact_requirement: Optional[Dict[str, Any]] = None,
         true_moa_snapshot: Any = None,
+        true_moa_usage_callback=None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -7504,6 +8482,8 @@ class APIServerAdapter(BasePlatformAdapter):
             if true_moa_snapshot is not None:
                 from xiaoban.trusted_runtime.true_moa import (
                     FINAL_EXECUTOR_SLOT,
+                    TRUE_MOA_FINAL_CALL_LIMIT,
+                    TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS,
                     TrueMoACancelController,
                     TrueMoAExecutionError,
                     TrueMoAUsageLedger,
@@ -7514,6 +8494,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
 
                 true_moa_controller = TrueMoACancelController()
+                true_moa_ledger = TrueMoAUsageLedger(
+                    true_moa_snapshot,
+                    on_change=true_moa_usage_callback,
+                )
                 if agent_ref is not None:
                     while len(agent_ref) < 3:
                         agent_ref.append(None)
@@ -7563,7 +8547,6 @@ class APIServerAdapter(BasePlatformAdapter):
                     ):
                         raise RuntimeError("fixed true MoA final route mismatch")
                 except Exception:
-                    true_moa_ledger = TrueMoAUsageLedger(true_moa_snapshot)
                     true_moa_ledger.finish_slot(
                         FINAL_EXECUTOR_SLOT,
                         status="failed",
@@ -7591,6 +8574,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 agent._strict_no_automatic_paid_retry = True
                 agent._true_moa_cancel_controller = true_moa_controller
                 agent.compression_enabled = False
+                agent.max_tokens = TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
                 if agent_ref is not None:
                     agent_ref[0] = agent
                     if agent_ref[1]:
@@ -7603,6 +8587,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         conversation_history=conversation_history,
                         strict_caller=strict_advisor_call,
                         cancel_controller=true_moa_controller,
+                        usage_ledger=true_moa_ledger,
                     )
                 except TrueMoAExecutionError as exc:
                     true_moa_ledger = exc.ledger
@@ -7625,6 +8610,21 @@ class APIServerAdapter(BasePlatformAdapter):
                         usage,
                     )
                 true_moa_ledger = advisor_bundle.ledger
+                agent._true_moa_usage_ledger = true_moa_ledger
+                agent.max_iterations = min(
+                    max(
+                        1,
+                        int(
+                            getattr(
+                                agent,
+                                "max_iterations",
+                                TRUE_MOA_FINAL_CALL_LIMIT,
+                            )
+                            or TRUE_MOA_FINAL_CALL_LIMIT
+                        ),
+                    ),
+                    TRUE_MOA_FINAL_CALL_LIMIT,
+                )
                 if (
                     true_moa_controller.is_set
                     or (agent_ref is not None and agent_ref[1])
@@ -8027,7 +9027,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     true_moa_ledger.finish_slot(
                         FINAL_EXECUTOR_SLOT,
                         status=final_status,
-                        usage=usage,
+                        usage=true_moa_ledger.final_call_usage(),
                         error_category=final_error,
                         cost_usd=(
                             getattr(agent, "session_estimated_cost_usd", None)
@@ -8096,15 +9096,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     true_moa_ledger.finish_slot(
                         FINAL_EXECUTOR_SLOT,
                         status="cancelled",
-                        usage=(
-                            {
-                                "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                                "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                                "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-                            }
-                            if agent is not None
-                            else None
-                        ),
+                        usage=true_moa_ledger.final_call_usage(),
                         error_category="completion_stopped",
                     )
                     true_moa_ledger.set_wave_status("cancelled")
@@ -8136,15 +9128,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     true_moa_ledger.finish_slot(
                         FINAL_EXECUTOR_SLOT,
                         status="failed",
-                        usage=(
-                            {
-                                "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                                "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                                "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-                            }
-                            if agent is not None
-                            else None
-                        ),
+                        usage=true_moa_ledger.final_call_usage(),
                         error_category="final_executor_error",
                     )
                     true_moa_ledger.set_wave_status("failed")

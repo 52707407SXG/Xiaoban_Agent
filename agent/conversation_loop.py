@@ -104,6 +104,57 @@ def _record_strict_terminal_usage(agent: Any, response: Any) -> None:
     agent.session_cost_source = cost_result.source
 
 
+def _finish_true_moa_final_call(
+    agent: Any,
+    call_id: str | None,
+    *,
+    status: str,
+    response: Any = None,
+    error_category: str | None = None,
+) -> None:
+    """Commit one paid final-executor request to the true-MoA call ledger."""
+
+    if not call_id:
+        return
+    ledger = getattr(agent, "_true_moa_usage_ledger", None)
+    if ledger is None:
+        return
+    raw_usage = getattr(response, "usage", None)
+    usage = None
+    cost_usd = None
+    cost_status = None
+    cost_source = None
+    if raw_usage is not None:
+        canonical = normalize_usage(
+            raw_usage,
+            provider=agent.provider,
+            api_mode=agent.api_mode,
+        )
+        cost_result = estimate_usage_cost(
+            agent.model,
+            canonical,
+            provider=agent.provider,
+            base_url=agent.base_url,
+            api_key=getattr(agent, "api_key", ""),
+        )
+        # Preserve the raw provider usage object for the true-MoA ledger so its
+        # cache split is derived only from trusted provider counters.  The
+        # ledger projects numeric fields only; no raw usage object is persisted.
+        usage = raw_usage
+        cost_usd = cost_result.amount_usd
+        cost_status = cost_result.status
+        cost_source = cost_result.source
+    ledger.finish_final_call(
+        call_id,
+        status=status,
+        usage=usage,
+        error_category=error_category,
+        cost_usd=cost_usd,
+        cost_status=cost_status,
+        cost_source=cost_source,
+    )
+
+
 def _image_error_max_dimension(error: Exception) -> Optional[int]:
     """Extract a provider-reported image dimension ceiling, if present."""
     parts = []
@@ -365,7 +416,8 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     # prompt) — build from scratch.
     agent._cached_system_prompt = agent._build_system_prompt(system_message)
 
-    # The fixed true-MoA path has exactly three accounted provider slots.
+    # The fixed true-MoA path has three routes and at most ten paid calls
+    # (two advisors plus eight final-executor iterations).
     # Session hooks are intentionally absent there because a plugin may perform
     # arbitrary external/model work outside that ledger.
     if not getattr(agent, "_strict_no_automatic_paid_retry", False):
@@ -1188,6 +1240,20 @@ def run_conversation(
                     return agent._interruptible_api_call(next_api_kwargs)
 
                 if _strict_paid_call:
+                    _true_moa_ledger = getattr(
+                        agent,
+                        "_true_moa_usage_ledger",
+                        None,
+                    )
+                    if _true_moa_ledger is not None:
+                        from xiaoban.trusted_runtime.true_moa import (
+                            enforce_true_moa_dispatch_budget,
+                        )
+
+                        enforce_true_moa_dispatch_budget(
+                            role="final_executor",
+                            payload=api_kwargs,
+                        )
                     _terminal_controller = getattr(
                         agent,
                         "_true_moa_cancel_controller",
@@ -1202,7 +1268,39 @@ def run_conversation(
                         raise InterruptedError(
                             "True MoA cancelled before final provider dispatch"
                         )
-                    response = _perform_api_call(api_kwargs)
+                    _true_moa_call_id = (
+                        _true_moa_ledger.start_final_call(api_request_id)
+                        if _true_moa_ledger is not None
+                        else None
+                    )
+                    try:
+                        response = _perform_api_call(api_kwargs)
+                    except BaseException as exc:
+                        _cancelled = bool(
+                            agent._interrupt_requested
+                            or (
+                                _terminal_controller is not None
+                                and _terminal_controller.state != "running"
+                            )
+                        )
+                        _finish_true_moa_final_call(
+                            agent,
+                            _true_moa_call_id,
+                            status="cancelled" if _cancelled else "failed",
+                            response=exc,
+                            error_category=(
+                                "completion_stopped"
+                                if _cancelled
+                                else "provider_call_failed"
+                            ),
+                        )
+                        raise
+                    _finish_true_moa_final_call(
+                        agent,
+                        _true_moa_call_id,
+                        status="completed",
+                        response=response,
+                    )
                     if (
                         agent._interrupt_requested
                         or (
