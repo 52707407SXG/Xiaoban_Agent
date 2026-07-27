@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import re
+import threading
 import uuid
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -2381,6 +2382,68 @@ class TestExecuteToolCalls:
         assert '"status": "cancelled"' in messages[0]["content"]
 
     @pytest.mark.parametrize("concurrent", [False, True])
+    def test_strict_stop_while_start_callback_blocks_never_runs_handler(
+        self,
+        agent,
+        concurrent,
+    ):
+        from xiaoban.trusted_runtime.true_moa import TrueMoACancelController
+
+        controller = TrueMoACancelController()
+        agent._strict_no_automatic_paid_retry = True
+        agent._true_moa_cancel_controller = controller
+        callback_started = threading.Event()
+        release_callback = threading.Event()
+        agent.tool_progress_callback = MagicMock()
+
+        def _blocking_start(*_args):
+            callback_started.set()
+            assert release_callback.wait(1)
+
+        agent.tool_start_callback = _blocking_start
+        agent.tool_complete_callback = MagicMock()
+        tc = _mock_tool_call(
+            name="web_search",
+            arguments="{}",
+            call_id=f"strict-blocking-start-{concurrent}",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+        handler = MagicMock(
+            side_effect=AssertionError(
+                "tool handler ran after cancellation won during start callback"
+            )
+        )
+
+        def _execute():
+            if concurrent:
+                with patch.object(agent, "_invoke_tool", handler):
+                    agent._execute_tool_calls_concurrent(
+                        mock_msg,
+                        messages,
+                        "task-1",
+                    )
+            else:
+                with patch("run_agent.handle_function_call", handler):
+                    agent._execute_tool_calls_sequential(
+                        mock_msg,
+                        messages,
+                        "task-1",
+                    )
+
+        worker = threading.Thread(target=_execute, daemon=True)
+        worker.start()
+        assert callback_started.wait(1)
+        assert controller.cancel() is True
+        release_callback.set()
+        worker.join(1)
+
+        assert not worker.is_alive()
+        handler.assert_not_called()
+        agent.tool_complete_callback.assert_not_called()
+        assert "cancelled" in json.dumps(messages).lower()
+
+    @pytest.mark.parametrize("concurrent", [False, True])
     def test_strict_stop_before_result_commit_discards_private_tool_result(
         self,
         agent,
@@ -4097,6 +4160,84 @@ class TestRunConversation:
             for item in ledger.to_dict()["calls"]
             if item["role"] == "final_executor"
         ] == []
+
+    def test_final_reservation_released_after_terminal_never_dispatches_provider(
+        self,
+        agent,
+    ):
+        from xiaoban.trusted_runtime.true_moa import (
+            TRUE_MOA_MODE,
+            TRUE_MOA_PRESET_ID,
+            TRUE_MOA_PRESET_REVISION,
+            TrueMoACancelController,
+            TrueMoASnapshot,
+            TrueMoAUsageLedger,
+        )
+
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        agent.provider = "deepseek"
+        agent.model = "deepseek-v4-pro"
+        agent.max_tokens = 4096
+        controller = TrueMoACancelController()
+        callback_started = threading.Event()
+        release_callback = threading.Event()
+
+        def _persist(payload):
+            if any(
+                item["role"] == "final_executor"
+                for item in payload.get("calls", [])
+            ):
+                callback_started.set()
+                release_callback.wait(1)
+
+        ledger = TrueMoAUsageLedger(
+            TrueMoASnapshot(
+                mode=TRUE_MOA_MODE,
+                mode_epoch="final-reservation-race",
+                preset_id=TRUE_MOA_PRESET_ID,
+                preset_revision=TRUE_MOA_PRESET_REVISION,
+            ),
+            wave_id="final-reservation-wave",
+            on_change=_persist,
+        )
+        agent._true_moa_usage_ledger = ledger
+        agent._true_moa_cancel_controller = controller
+        result_box = {}
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=AssertionError(
+                    "provider dispatched after terminal won reservation race"
+                ),
+            ) as api_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            worker = threading.Thread(
+                target=lambda: result_box.setdefault(
+                    "result",
+                    agent.run_conversation("reservation race"),
+                ),
+                daemon=True,
+            )
+            worker.start()
+            assert callback_started.wait(1)
+            assert controller.fail() is True
+            release_callback.set()
+            worker.join(1)
+
+        assert not worker.is_alive()
+        api_call.assert_not_called()
+        assert result_box["result"]["completed"] is False
+        assert result_box["result"]["failed"] is True
 
     def test_strict_late_tool_result_cannot_start_next_provider_call(
         self,
@@ -7388,6 +7529,32 @@ class TestStreamCallbackNonStreamingProvider:
 
 class TestPersistUserMessageOverride:
     """Synthetic API-only user prefixes should never leak into transcripts."""
+
+    def test_true_moa_deferred_turn_cannot_persist_before_gateway_commit(
+        self,
+        agent,
+    ):
+        messages = [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "PRIVATE_UNCOMMITTED"},
+        ]
+        agent._defer_true_moa_final_commit = True
+        agent._save_session_log = MagicMock()
+        agent._flush_messages_to_session_db = MagicMock()
+
+        agent._persist_session(messages, [])
+
+        agent._save_session_log.assert_not_called()
+        agent._flush_messages_to_session_db.assert_not_called()
+
+        agent._true_moa_gateway_persisting_committed = True
+        agent._persist_session(messages, [])
+
+        agent._save_session_log.assert_called_once_with(messages)
+        agent._flush_messages_to_session_db.assert_called_once_with(
+            messages,
+            [],
+        )
 
     def test_persist_session_rewrites_current_turn_user_message(self, agent):
         agent._session_db = MagicMock()

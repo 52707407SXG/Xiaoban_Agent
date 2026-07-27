@@ -152,7 +152,9 @@ def _finish_true_moa_final_call(
         cost_usd=cost_usd,
         cost_status=cost_status,
         cost_source=cost_source,
+        notify=False,
     )
+    ledger.notify_change_async()
 
 
 def _image_error_max_dimension(error: Exception) -> Optional[int]:
@@ -1247,6 +1249,7 @@ def run_conversation(
                     )
                     if _true_moa_ledger is not None:
                         from xiaoban.trusted_runtime.true_moa import (
+                            TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS,
                             enforce_true_moa_dispatch_budget,
                         )
 
@@ -1262,25 +1265,48 @@ def run_conversation(
                     if (
                         _terminal_controller is not None
                         and not _terminal_controller.try_begin_dispatch(
-                            f"final-llm:{api_request_id}"
+                            f"final-llm-reservation:{api_request_id}"
                         )
                     ):
                         raise InterruptedError(
                             "True MoA cancelled before final provider dispatch"
                         )
                     _true_moa_call_id = (
-                        _true_moa_ledger.start_final_call(api_request_id)
+                        _true_moa_ledger.start_final_call(
+                            api_request_id,
+                            notify=False,
+                        )
                         if _true_moa_ledger is not None
                         else None
                     )
                     try:
+                        if (
+                            _true_moa_ledger is not None
+                            and not _true_moa_ledger.confirm_change(
+                                TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS,
+                            )
+                        ):
+                            if _terminal_controller is not None:
+                                _terminal_controller.fail()
+                            raise RuntimeError(
+                                "true MoA durable final-call reservation failed"
+                            )
+                        if (
+                            _terminal_controller is not None
+                            and not _terminal_controller.try_begin_dispatch(
+                                f"final-llm:{api_request_id}"
+                            )
+                        ):
+                            raise InterruptedError(
+                                "True MoA cancelled before final provider dispatch"
+                            )
                         response = _perform_api_call(api_kwargs)
                     except BaseException as exc:
                         _cancelled = bool(
                             agent._interrupt_requested
                             or (
                                 _terminal_controller is not None
-                                and _terminal_controller.state != "running"
+                                and _terminal_controller.state == "cancelled"
                             )
                         )
                         _finish_true_moa_final_call(
@@ -4355,11 +4381,22 @@ def run_conversation(
                             _guardrail_commit_allowed
                             and _terminal_controller is not None
                         ):
-                            _guardrail_commit_allowed = (
-                                _terminal_controller.try_commit_final(
-                                    f"guardrail-response:{api_request_id}"
+                            if getattr(
+                                agent,
+                                "_defer_true_moa_final_commit",
+                                False,
+                            ):
+                                _guardrail_commit_allowed = (
+                                    _terminal_controller.try_begin_dispatch(
+                                        f"guardrail-response-stage:{api_request_id}"
+                                    )
                                 )
-                            )
+                            else:
+                                _guardrail_commit_allowed = (
+                                    _terminal_controller.try_commit_final(
+                                        f"guardrail-response:{api_request_id}"
+                                    )
+                                )
                         if not _guardrail_commit_allowed:
                             if _terminal_controller is not None:
                                 _terminal_controller.cancel()
@@ -4814,11 +4851,22 @@ def run_conversation(
                     )
                     _final_commit_allowed = not agent._interrupt_requested
                     if _final_commit_allowed and _terminal_controller is not None:
-                        _final_commit_allowed = (
-                            _terminal_controller.try_commit_final(
-                                f"final-response:{api_request_id}"
+                        if getattr(
+                            agent,
+                            "_defer_true_moa_final_commit",
+                            False,
+                        ):
+                            _final_commit_allowed = (
+                                _terminal_controller.try_begin_dispatch(
+                                    f"final-response-stage:{api_request_id}"
+                                )
                             )
-                        )
+                        else:
+                            _final_commit_allowed = (
+                                _terminal_controller.try_commit_final(
+                                    f"final-response:{api_request_id}"
+                                )
+                            )
                     if not _final_commit_allowed:
                         if _terminal_controller is not None:
                             _terminal_controller.cancel()

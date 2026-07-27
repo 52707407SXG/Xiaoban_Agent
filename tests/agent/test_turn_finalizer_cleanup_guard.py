@@ -28,6 +28,8 @@ class _StubAgent:
 
     def __init__(self, *, raise_in):
         self._raise_in = set(raise_in)
+        self.save_trajectory_calls = 0
+        self.persist_session_calls = 0
         self.max_iterations = 3
         self.iteration_budget = _StubBudget()
         self.context_compressor = _StubCompressor()
@@ -60,6 +62,7 @@ class _StubAgent:
 
     # --- fallible cleanup surfaces -------------------------------------
     def _save_trajectory(self, *a, **k):
+        self.save_trajectory_calls += 1
         if "save_trajectory" in self._raise_in:
             raise RuntimeError("trajectory disk full")
 
@@ -71,6 +74,7 @@ class _StubAgent:
         pass
 
     def _persist_session(self, *a, **k):
+        self.persist_session_calls += 1
         if "persist_session" in self._raise_in:
             raise RuntimeError("sqlite database is locked")
 
@@ -182,3 +186,29 @@ def test_text_response_on_last_allowed_call_is_completed():
     )
     assert result["final_response"] == "final report"
     assert result["completed"] is True
+
+
+def test_failed_deferred_true_moa_worker_drops_text_without_persistence():
+    from xiaoban.trusted_runtime.true_moa import TrueMoACancelController
+
+    agent = _StubAgent(raise_in=())
+    controller = TrueMoACancelController()
+    agent._strict_no_automatic_paid_retry = True
+    agent._true_moa_cancel_controller = controller
+    agent._defer_true_moa_final_commit = True
+    assert controller.fail() is True
+
+    result = _run(
+        agent,
+        final_response="PRIVATE_LATE_FINAL_TEXT",
+        api_call_count=1,
+        turn_exit_reason="text_response(finish_reason=stop)",
+    )
+
+    assert result["final_response"] is None
+    assert result["completed"] is False
+    assert result["failed"] is True
+    assert result["interrupted"] is True
+    assert "PRIVATE_LATE_FINAL_TEXT" not in str(result["messages"])
+    assert agent.save_trajectory_calls == 0
+    assert agent.persist_session_calls == 0

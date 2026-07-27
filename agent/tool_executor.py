@@ -183,6 +183,21 @@ def _claim_strict_tool_handler(agent, tool_call_id: str) -> bool:
     )
 
 
+def _claim_strict_tool_execute(agent, tool_call_id: str) -> bool:
+    """Final one-shot fence immediately before the real tool handler."""
+
+    if not getattr(agent, "_strict_no_automatic_paid_retry", False):
+        return True
+    if getattr(agent, "_interrupt_requested", False):
+        return False
+    controller = getattr(agent, "_true_moa_cancel_controller", None)
+    if controller is None:
+        return True
+    return controller.try_begin_dispatch(
+        f"final-tool-execute:{tool_call_id}"
+    )
+
+
 def _claim_strict_tool_result(agent, tool_call_id: str) -> bool:
     """Atomically commit one real tool result against terminal stop."""
 
@@ -724,6 +739,25 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                         logging.debug(
                             f"Tool start callback error: {cb_err}"
                         )
+            if not _claim_strict_tool_execute(
+                agent,
+                getattr(tool_call, "id", "") or "",
+            ):
+                result = _cancelled_tool_result("terminal fence")
+                with terminal_fenced_lock:
+                    terminal_fenced_call_ids.add(
+                        getattr(tool_call, "id", "") or ""
+                    )
+                results[index] = (
+                    function_name,
+                    function_args,
+                    result,
+                    time.time() - start,
+                    True,
+                    True,
+                    middleware_trace,
+                )
+                return
             tool_error = None
             try:
                 result = agent._invoke_tool(
@@ -1294,6 +1328,16 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                         logging.debug(
                             f"Tool start callback error: {cb_err}"
                         )
+
+        if (
+            _handler_dispatched
+            and not _claim_strict_tool_execute(
+                agent,
+                getattr(tool_call, "id", "") or "",
+            )
+        ):
+            _terminal_dispatch_denied = True
+            _execution_blocked = True
 
         tool_start_time = time.time()
 

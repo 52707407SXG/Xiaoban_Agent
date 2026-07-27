@@ -345,6 +345,67 @@ def test_cancel_winning_atomic_dispatch_gate_means_zero_provider_calls(
     assert dispatch_calls == 0
 
 
+def test_cancel_during_durable_reservation_never_reaches_provider(
+    monkeypatch,
+):
+    controller = TrueMoACancelController()
+    callback_started = threading.Event()
+    release_callback = threading.Event()
+    create_calls = []
+    outcome = []
+
+    class _Completions:
+        def create(self, **_kwargs):
+            create_calls.append("deepseek")
+            raise AssertionError("late durable callback reached provider")
+
+    class _Client:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(completions=_Completions())
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        providers,
+        "_fixed_credentials",
+        lambda *_args, **_kwargs: {
+            "api_key": "fake-key",
+            "base_url": "https://api.deepseek.com/v1",
+        },
+    )
+    monkeypatch.setattr("openai.OpenAI", _Client)
+
+    def _reserve():
+        callback_started.set()
+        assert release_callback.wait(1)
+
+    def _call():
+        try:
+            providers.strict_advisor_call(
+                slot=DEEPSEEK_ADVISOR_SLOT,
+                messages=_messages(),
+                tools=(),
+                timeout_seconds=1,
+                cancel_controller=controller,
+                dispatch_callback=_reserve,
+            )
+        except BaseException as exc:
+            outcome.append(exc)
+
+    worker = threading.Thread(target=_call, daemon=True)
+    worker.start()
+    assert callback_started.wait(1)
+    assert controller.fail() is True
+    release_callback.set()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert create_calls == []
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], providers.StrictAdvisorCancelled)
+
+
 @pytest.mark.parametrize(
     "slot",
     [KIMI_ADVISOR_SLOT, DEEPSEEK_ADVISOR_SLOT],

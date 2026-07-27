@@ -19,6 +19,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 import types
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -125,6 +126,9 @@ class _FakeFinalAgent:
         self.run_calls: list[dict[str, object]] = []
         self.interrupt_calls: list[str] = []
         self.ephemeral_system_prompt = ""
+        self.persisted_sessions: list[str] = []
+        self.saved_trajectories: list[str] = []
+        self.persistence_raise_in: set[str] = set()
 
     def run_conversation(self, **kwargs):
         self.run_calls.append(kwargs)
@@ -155,6 +159,20 @@ class _FakeFinalAgent:
 
     def interrupt(self, reason: str) -> None:
         self.interrupt_calls.append(reason)
+
+    def _drop_trailing_empty_response_scaffolding(self, _messages) -> None:
+        if "drop_scaffolding" in self.persistence_raise_in:
+            raise RuntimeError("fake scaffold cleanup failure")
+
+    def _save_trajectory(self, messages, *_args) -> None:
+        if "save_trajectory" in self.persistence_raise_in:
+            raise RuntimeError("fake trajectory failure")
+        self.saved_trajectories.append(json.dumps(messages, ensure_ascii=False))
+
+    def _persist_session(self, messages, *_args) -> None:
+        if "persist_session" in self.persistence_raise_in:
+            raise RuntimeError("fake session failure")
+        self.persisted_sessions.append(json.dumps(messages, ensure_ascii=False))
 
 
 def _completed_usage(
@@ -205,6 +223,16 @@ def _completed_usage(
     )
     ledger.set_wave_status("completed")
     return ledger.to_dict()
+
+
+def _sealed_mystand_result(payload: dict) -> dict:
+    result = dict(payload)
+    final_text = str(result.get("final_response") or "")
+    result["_mystand_egress_finalized"] = True
+    result["_mystand_egress_output_digest"] = hashlib.sha256(
+        final_text.encode("utf-8"),
+    ).hexdigest()
+    return result
 
 
 def test_normal_fresh_subprocess_does_not_import_true_moa_or_fan_out():
@@ -430,13 +458,13 @@ async def test_http_passes_one_frozen_true_moa_snapshot_into_run_agent(
             wave_id="2" * 32,
         )
         return (
-            {
+            _sealed_mystand_result({
                 "final_response": "snapshot accepted",
                 "completed": True,
                 "messages": [],
                 "_mystand_request": True,
                 "_true_moa_usage": usage_ledger,
-            },
+            }),
             {
                 "input_tokens": 10,
                 "output_tokens": 4,
@@ -539,14 +567,14 @@ async def test_completed_http_outcome_replays_after_restart_recovers_and_acks(
         nonlocal dispatches
         dispatches += 1
         return (
-            {
+            _sealed_mystand_result({
                 "final_response": "sealed exact answer",
                 "completed": True,
                 "failed": False,
                 "messages": [],
                 "_mystand_request": True,
                 "_true_moa_usage": completed_usage,
-            },
+            }),
             {
                 "input_tokens": 10,
                 "output_tokens": 4,
@@ -762,13 +790,13 @@ async def test_tampered_completed_outcome_fails_closed_without_redispatch(
         nonlocal dispatches
         dispatches += 1
         return (
-            {
+            _sealed_mystand_result({
                 "final_response": "tamper protected answer",
                 "completed": True,
                 "messages": [],
                 "_mystand_request": True,
                 "_true_moa_usage": completed_usage,
-            },
+            }),
             {
                 "input_tokens": 10,
                 "output_tokens": 4,
@@ -873,13 +901,13 @@ async def test_completed_sse_buffers_until_sealed_and_emits_outcome_receipt(
         if callback is not None:
             callback("UNSEALED_PRIVATE_DELTA")
         return (
-            {
+            _sealed_mystand_result({
                 "final_response": "SSE sealed exact answer",
                 "completed": True,
                 "messages": [],
                 "_mystand_request": True,
                 "_true_moa_usage": completed_usage,
-            },
+            }),
             {
                 "input_tokens": 10,
                 "output_tokens": 4,
@@ -2286,3 +2314,912 @@ async def test_sse_failed_true_moa_never_emits_success_stop(
     assert f'"code": "{expected_code}"' in wire
     assert "partial text must not escape" not in wire
     assert "late stopped text must not escape" not in wire
+
+
+class _BlockingFinalAgent(_FakeFinalAgent):
+    """One deterministic fixture for timeout, interrupt, and late-exit races."""
+
+    def __init__(self, behavior: str = "ignore") -> None:
+        super().__init__()
+        self.behavior = behavior
+        self.provider_started = threading.Event()
+        self.release_provider = threading.Event()
+        self.run_exited = threading.Event()
+        self.interrupt_started = threading.Event()
+        self.release_interrupt = threading.Event()
+        self.interrupt_exited = threading.Event()
+        self.late_text = "PRIVATE_LATE_FINAL_TIMEOUT_OUTPUT"
+        self.worker_commit_result: bool | None = None
+        self.context: tuple[str, str, str] = ("", "", "")
+
+    def run_conversation(self, **kwargs):
+        from gateway.session_context import get_session_env
+        from xiaoban.trusted_runtime.turns import current_turn
+
+        self.run_calls.append(kwargs)
+        turn = current_turn()
+        self.context = (
+            get_session_env("XIAOBAN_SESSION_USER_ID"),
+            get_session_env("XIAOBAN_SESSION_MESSAGE_ID"),
+            str(getattr(turn, "request_id", "") or ""),
+        )
+        if self.behavior == "worker_commit":
+            self.worker_commit_result = (
+                self._true_moa_cancel_controller.try_commit_final(
+                    f"gateway-final-handoff:{turn.request_id}",
+                )
+            )
+        if self.behavior != "late_error":
+            call_id = self._true_moa_usage_ledger.start_final_call("blocked")
+        self.provider_started.set()
+        assert self.release_provider.wait(1)
+        if self.behavior == "late_error":
+            self.run_exited.set()
+            raise RuntimeError("PRIVATE_LATE_PROVIDER_FAILURE")
+        try:
+            self._true_moa_usage_ledger.finish_final_call(
+                call_id,
+                status="completed",
+                usage={
+                    "input_tokens": 19,
+                    "output_tokens": 5,
+                    "total_tokens": 24,
+                    "cached_input_tokens": 3,
+                },
+            )
+        finally:
+            self.run_exited.set()
+        return {
+            "final_response": self.late_text,
+            "completed": True,
+            "failed": False,
+            "messages": [{"role": "assistant", "content": self.late_text}],
+        }
+
+    def interrupt(self, reason: str) -> None:
+        self.interrupt_calls.append(reason)
+        if self.behavior == "release":
+            self.release_provider.set()
+        elif self.behavior == "raise":
+            raise RuntimeError("fake interrupt failure")
+        elif self.behavior == "block":
+            self.interrupt_started.set()
+            self.release_interrupt.wait(1)
+            self.interrupt_exited.set()
+
+
+def _gateway_case(monkeypatch, *, agent=None, epoch="60"):
+    from xiaoban.trusted_runtime import true_moa_providers
+
+    adapter = _adapter()
+    headers = _mystand_headers(f"case-{uuid.uuid4().hex}", epoch=epoch)
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    monkeypatch.setattr(
+        true_moa_providers,
+        "strict_advisor_call",
+        lambda *, slot, dispatch_callback, **_kwargs: (
+            dispatch_callback(),
+            StrictAdvisorResult(content=f"safe {slot.slot_id}"),
+        )[1],
+    )
+    final_agent = agent or _FakeFinalAgent()
+    monkeypatch.setattr(
+        adapter,
+        "_create_agent",
+        lambda **_kwargs: final_agent,
+    )
+    return adapter, headers, snapshot, final_agent
+
+
+async def _run_gateway_case(case, **kwargs):
+    adapter, headers, snapshot, _agent = case
+    return await adapter._run_agent(
+        user_message=kwargs.pop("user_message", "deterministic test"),
+        conversation_history=kwargs.pop("conversation_history", []),
+        session_id=kwargs.pop("session_id", "compact-gateway-test"),
+        request_headers=headers,
+        agent_ref=kwargs.pop("agent_ref", [None, False, None]),
+        true_moa_snapshot=snapshot,
+        **kwargs,
+    )
+
+
+def _final_slot(usage: dict) -> dict:
+    return {
+        item["slotId"]: item for item in usage["true_moa"]["slots"]
+    }[FINAL_EXECUTOR_SLOT.slot_id]
+
+
+def _assert_closed(result, usage, *, slot, wave, error):
+    assert {
+        "text": result["final_response"],
+        "messages": result["messages"],
+        "completed": result["completed"],
+        "failed": result["failed"],
+        "error": result["error"],
+        "wave": usage["true_moa"]["status"],
+        "slot": _final_slot(usage)["status"],
+    } == {
+        "text": "",
+        "messages": [],
+        "completed": False,
+        "failed": True,
+        "error": error,
+        "wave": wave,
+        "slot": slot,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["cleanup", "durable_final"])
+async def test_terminal_persistence_failures_stay_fail_closed(
+    monkeypatch,
+    failure_kind,
+):
+    case = _gateway_case(monkeypatch)
+    final_agent = case[3]
+    callback_payloads = []
+    callback = None
+    if failure_kind == "cleanup":
+        final_agent.persistence_raise_in = {
+            "drop_scaffolding",
+            "save_trajectory",
+            "persist_session",
+        }
+    else:
+        def callback(payload):
+            callback_payloads.append(payload)
+            if _final_slot({"true_moa": payload})["status"] == "completed":
+                raise RuntimeError("fake durable final ledger failure")
+
+    result, usage = await _run_gateway_case(
+        case,
+        true_moa_usage_callback=callback,
+    )
+    assert final_agent.saved_trajectories == []
+    assert final_agent.persisted_sessions == []
+    assert final_agent._true_moa_cancel_controller.state == "completed"
+    if failure_kind == "cleanup":
+        assert result["final_response"] == "fake final synthesis"
+        assert result["completed"] is True
+        assert usage["true_moa"]["status"] == "completed"
+        assert [x.split(":", 1)[0] for x in result["cleanup_errors"]] == [
+            "drop_trailing_scaffolding",
+            "save_trajectory",
+            "persist_session",
+        ]
+    else:
+        assert callback_payloads
+        _assert_closed(
+            result,
+            usage,
+            slot="completed",
+            wave="failed",
+            error="true MoA final settlement failed",
+        )
+        assert final_agent._defer_true_moa_final_commit is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guard_kind", ["fact", "authorization"])
+async def test_only_guarded_public_transcript_is_persisted(
+    monkeypatch,
+    guard_kind,
+):
+    from gateway.platforms import api_server
+    from xiaoban.trusted_runtime import completion_guard
+
+    raw_text = f"PRIVATE_RAW_{guard_kind.upper()}_TEXT"
+    raw_tool = f"PRIVATE_RAW_{guard_kind.upper()}_TOOL"
+    public_text = f"PUBLIC_GUARDED_{guard_kind.upper()}_ANSWER"
+    case = _gateway_case(monkeypatch)
+    adapter, _headers, _snapshot, agent = case
+    tool_name = (
+        "mystand_resource_index"
+        if guard_kind == "fact"
+        else "mystand_authorization"
+    )
+    agent.valid_tool_names = {tool_name}
+    monkeypatch.setattr(
+        api_server,
+        "_run_mystand_preexecuted_evidence",
+        lambda *_args, **_kwargs: [{
+            "call_id": "trusted-read",
+            "name": tool_name,
+            "args": {},
+            "content": json.dumps({"ok": True, "privateRaw": raw_tool}),
+        }],
+    )
+    if guard_kind == "fact":
+        guard_inputs = []
+
+        def guard(text, _turn):
+            guard_inputs.append(str(text))
+            return types.SimpleNamespace(
+                allowed=True,
+                text=public_text,
+                reason="projected_test",
+                verification=None,
+            )
+
+        monkeypatch.setattr(completion_guard, "check_completion", guard)
+    else:
+        monkeypatch.setattr(
+            api_server,
+            "_resolve_mystand_initial_tool_choice",
+            lambda *_args, **_kwargs: tool_name,
+        )
+        monkeypatch.setattr(
+            completion_guard,
+            "check_mystand_final_answer",
+            lambda *_args, **_kwargs: types.SimpleNamespace(
+                allowed=True,
+                text=public_text,
+                reason="projected_test",
+                verification=None,
+            ),
+        )
+
+    def raw_final(**kwargs):
+        result = _FakeFinalAgent.run_conversation(agent, **kwargs)
+        result.update({
+            "final_response": raw_text,
+            "messages": [
+                {"role": "user", "content": "当前可信问题"},
+                {"role": "tool", "content": raw_tool},
+                {"role": "assistant", "content": raw_text},
+            ],
+        })
+        return result
+
+    agent.run_conversation = raw_final
+    run_kwargs = {
+        "user_message": "当前可信问题",
+        "conversation_history": [
+            {"role": "user", "content": "可信旧问题"},
+            {"role": "assistant", "content": "可信旧回答"},
+            {"role": "tool", "content": "PRIVATE_OLD_TOOL_BYTES"},
+        ],
+    }
+    if guard_kind == "fact":
+        run_kwargs["fact_requirement"] = {
+            "schema": "mystand.fact-requirement.v1",
+            "fact_kind": "collection",
+            "module_id": "finance-ledger",
+        }
+    result, usage = await _run_gateway_case(case, **run_kwargs)
+    persisted = "\n".join(
+        agent.saved_trajectories + agent.persisted_sessions,
+    )
+    assert result["final_response"] == public_text
+    assert result["completed"] is True
+    assert usage["true_moa"]["status"] == "completed"
+    assert all(x in persisted for x in (
+        public_text,
+        "当前可信问题",
+        "可信旧问题",
+        "可信旧回答",
+    ))
+    assert all(x not in persisted for x in (
+        raw_text,
+        raw_tool,
+        "PRIVATE_OLD_TOOL_BYTES",
+    ))
+    assert raw_text not in json.dumps(result, ensure_ascii=False, default=str)
+    assert raw_tool not in json.dumps(result, ensure_ascii=False, default=str)
+    if guard_kind == "fact":
+        assert guard_inputs == [raw_text, public_text]
+        assert result["messages"] == []
+    else:
+        assert result["_mystand_egress_finalized"] is True
+        assert result["_mystand_egress_output_digest"] == hashlib.sha256(
+            public_text.encode(),
+        ).hexdigest()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guard_kind", ["fact", "egress"])
+async def test_guard_projection_is_watchdog_bounded_and_turn_isolated(
+    monkeypatch,
+    guard_kind,
+):
+    from gateway.platforms import api_server
+    from xiaoban.trusted_runtime import completion_guard, true_moa
+
+    case = _gateway_case(monkeypatch)
+    adapter, _headers, _snapshot, agent = case
+    monkeypatch.setattr(true_moa, "TRUE_MOA_FINAL_TIMEOUT_SECONDS", 0.03)
+    monkeypatch.setattr(
+        true_moa,
+        "TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS",
+        0.03,
+    )
+    tool_name = (
+        "mystand_resource_index"
+        if guard_kind == "fact"
+        else "mystand_authorization"
+    )
+    agent.valid_tool_names = {tool_name}
+    original_turns, projected_turns = [], []
+    started, release, finished = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+    monkeypatch.setattr(
+        api_server,
+        "_run_mystand_preexecuted_evidence",
+        lambda *_args, **kwargs: (
+            original_turns.append(kwargs["trusted_turn"])
+            or [{"name": tool_name, "content": '{"ok":true}'}]
+        ),
+    )
+    late_text = "PRIVATE_LATE_GUARD_TEXT"
+    if guard_kind == "fact":
+        def blocking_guard(_text, turn):
+            projected_turns.append(turn)
+            started.set()
+            release.wait(1)
+            finished.set()
+            return types.SimpleNamespace(
+                allowed=True,
+                text=late_text,
+                reason="test",
+                verification=None,
+            )
+
+        monkeypatch.setattr(
+            completion_guard,
+            "check_completion",
+            blocking_guard,
+        )
+    else:
+        monkeypatch.setattr(
+            api_server,
+            "_resolve_mystand_initial_tool_choice",
+            lambda *_args, **_kwargs: tool_name,
+        )
+
+        def blocking_guard(_text, **kwargs):
+            projected_turns.append(kwargs["result"]["_trusted_turn"])
+            started.set()
+            release.wait(1)
+            finished.set()
+            return types.SimpleNamespace(
+                allowed=True,
+                text=late_text,
+                reason="test",
+                verification=None,
+            )
+
+        monkeypatch.setattr(
+            completion_guard,
+            "check_mystand_final_answer",
+            blocking_guard,
+        )
+    kwargs = {"user_message": "受保护事实请求"}
+    if guard_kind == "fact":
+        kwargs["fact_requirement"] = {
+            "schema": "mystand.fact-requirement.v1",
+            "fact_kind": "collection",
+            "module_id": "finance-ledger",
+        }
+    before = time.monotonic()
+    result, usage = await _run_gateway_case(case, **kwargs)
+    assert time.monotonic() - before < 0.5
+    assert started.is_set()
+    _assert_closed(
+        result,
+        usage,
+        slot="timed_out",
+        wave="failed",
+        error="true MoA final executor timed out",
+    )
+    assert len(original_turns) == len(projected_turns) == 1
+    assert projected_turns[0] is not original_turns[0]
+    original = original_turns[0]
+    state = (original.state, list(original.states), original.terminal_reason)
+    release.set()
+    assert finished.wait(1)
+    time.sleep(0.02)
+    assert (original.state, original.states, original.terminal_reason) == state
+    assert late_text not in json.dumps(
+        {"result": result, "usage": usage},
+        ensure_ascii=False,
+    )
+    assert agent.saved_trajectories == agent.persisted_sessions == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_final_dispatch_never_persists(monkeypatch):
+    from xiaoban.trusted_runtime import true_moa_providers
+
+    case = _gateway_case(monkeypatch)
+    advisor = MagicMock(side_effect=AssertionError("advisor dispatched"))
+    monkeypatch.setattr(true_moa_providers, "strict_advisor_call", advisor)
+    result, usage = await _run_gateway_case(
+        case,
+        agent_ref=[None, True, None],
+    )
+    assert result["interrupted"] is True
+    assert usage["true_moa"]["status"] == "cancelled"
+    assert case[3].run_calls == []
+    assert case[3].saved_trajectories == case[3].persisted_sessions == []
+    advisor.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "behavior",
+    ["release", "ignore", "raise", "worker_commit", "block"],
+)
+async def test_final_deadline_fences_every_worker_and_interrupt_race(
+    monkeypatch,
+    behavior,
+):
+    from xiaoban.trusted_runtime import true_moa
+
+    agent = _BlockingFinalAgent(behavior)
+    case = _gateway_case(monkeypatch, agent=agent)
+    monkeypatch.setattr(true_moa, "TRUE_MOA_FINAL_TIMEOUT_SECONDS", 0.03)
+    monkeypatch.setattr(
+        true_moa,
+        "TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS",
+        0.03,
+    )
+    before = time.monotonic()
+    result, usage = await _run_gateway_case(case)
+    assert time.monotonic() - before < 0.5
+    assert agent.provider_started.is_set()
+    assert len(agent.interrupt_calls) == 1
+    _assert_closed(
+        result,
+        usage,
+        slot="timed_out",
+        wave="failed",
+        error="true MoA final executor timed out",
+    )
+    assert agent.late_text not in json.dumps(
+        {"result": result, "usage": usage},
+        default=str,
+    )
+    assert agent.saved_trajectories == agent.persisted_sessions == []
+    assert agent._true_moa_cancel_controller.state == "failed"
+    if behavior == "release":
+        assert agent.run_exited.is_set()
+        assert agent.context[0] == "test-user"
+        assert agent.context[1] == case[1]["X-Xiaoban-Message-Id"]
+        assert agent.context[2].startswith("mystand-req-")
+    elif behavior == "worker_commit":
+        assert agent.worker_commit_result is False
+    elif behavior == "block":
+        assert agent.interrupt_started.wait(1)
+        assert not agent.interrupt_exited.is_set()
+    else:
+        assert not agent.run_exited.is_set()
+    agent.release_interrupt.set()
+    agent.release_provider.set()
+    assert agent.run_exited.wait(1)
+    if behavior == "block":
+        assert agent.interrupt_exited.wait(1)
+    late = {"true_moa": agent._true_moa_usage_ledger.to_dict()}
+    assert _final_slot(late)["status"] == "timed_out"
+    assert _final_slot(late)["totalTokens"] == 24
+    assert agent.late_text not in json.dumps(late)
+    assert agent.saved_trajectories == agent.persisted_sessions == []
+
+
+@pytest.mark.asyncio
+async def test_final_deadline_includes_preexecuted_trusted_evidence(monkeypatch):
+    from gateway.platforms import api_server
+    from xiaoban.trusted_runtime import true_moa
+
+    case = _gateway_case(monkeypatch)
+    agent = case[3]
+    agent.valid_tool_names = {"mystand_resource_index"}
+    started, release, exited = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+
+    def blocking_evidence(*_args, **_kwargs):
+        from gateway.session_context import get_session_env
+        from xiaoban.trusted_runtime.turns import current_turn
+
+        assert get_session_env("XIAOBAN_SESSION_USER_ID") == "test-user"
+        assert current_turn() is not None
+        started.set()
+        assert release.wait(1)
+        exited.set()
+        return [{"name": "mystand_resource_index", "content": '{"ok":true}'}]
+
+    monkeypatch.setattr(true_moa, "TRUE_MOA_FINAL_TIMEOUT_SECONDS", 0.03)
+    monkeypatch.setattr(
+        true_moa,
+        "TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS",
+        0.03,
+    )
+    monkeypatch.setattr(
+        api_server,
+        "_resolve_mystand_initial_tool_choice",
+        lambda *_args, **_kwargs: "mystand_resource_index",
+    )
+    monkeypatch.setattr(
+        api_server,
+        "_run_mystand_preexecuted_evidence",
+        blocking_evidence,
+    )
+    result, usage = await _run_gateway_case(case)
+    assert started.is_set()
+    _assert_closed(
+        result,
+        usage,
+        slot="timed_out",
+        wave="failed",
+        error="true MoA final executor timed out",
+    )
+    assert agent.run_calls == []
+    release.set()
+    assert exited.wait(1)
+    assert agent.run_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_status", ["running", "timed_out"])
+async def test_durable_callback_cannot_hold_final_watchdog(
+    monkeypatch,
+    blocked_status,
+):
+    from xiaoban.trusted_runtime import true_moa
+
+    agent = _BlockingFinalAgent()
+    case = _gateway_case(monkeypatch, agent=agent)
+    monkeypatch.setattr(true_moa, "TRUE_MOA_FINAL_TIMEOUT_SECONDS", 0.03)
+    monkeypatch.setattr(
+        true_moa,
+        "TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS",
+        0.03,
+    )
+    started, release = threading.Event(), threading.Event()
+
+    def callback(payload):
+        if _final_slot({"true_moa": payload})["status"] == blocked_status:
+            started.set()
+            release.wait(1)
+
+    before = time.monotonic()
+    result, usage = await _run_gateway_case(
+        case,
+        true_moa_usage_callback=callback,
+    )
+    assert time.monotonic() - before < 0.5
+    assert started.is_set()
+    _assert_closed(
+        result,
+        usage,
+        slot="timed_out",
+        wave="failed",
+        error="true MoA final settlement failed",
+    )
+    assert agent.saved_trajectories == agent.persisted_sessions == []
+    release.set()
+    agent.release_provider.set()
+    if blocked_status == "running":
+        assert not agent.provider_started.is_set()
+        assert not agent.run_exited.is_set()
+    else:
+        assert agent.run_exited.wait(1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("terminal_kind", "expected_slot", "expected_wave"),
+    [
+        ("timed_out", "timed_out", "failed"),
+        ("cancelled", "cancelled", "cancelled"),
+        ("failed", "failed", "failed"),
+    ],
+)
+async def test_terminal_callback_failure_is_attempted_once(
+    monkeypatch,
+    terminal_kind,
+    expected_slot,
+    expected_wave,
+):
+    from xiaoban.trusted_runtime import true_moa
+
+    if terminal_kind == "timed_out":
+        agent = _BlockingFinalAgent()
+    else:
+        agent = _FakeFinalAgent()
+        if terminal_kind == "cancelled":
+            def terminal_result(**_kwargs):
+                raise KeyboardInterrupt("PRIVATE_CANCEL_CALLBACK")
+        else:
+            def terminal_result(**_kwargs):
+                return {
+                    "final_response": "PRIVATE_FAILED_TEXT",
+                    "completed": False,
+                    "failed": True,
+                    "messages": [{
+                        "role": "assistant",
+                        "content": "PRIVATE_FAILED_TEXT",
+                    }],
+                }
+        agent.run_conversation = terminal_result
+    case = _gateway_case(monkeypatch, agent=agent)
+    if terminal_kind == "timed_out":
+        monkeypatch.setattr(
+            true_moa,
+            "TRUE_MOA_FINAL_TIMEOUT_SECONDS",
+            0.03,
+        )
+        monkeypatch.setattr(
+            true_moa,
+            "TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS",
+            0.03,
+        )
+    callback_count = 0
+
+    def callback(payload):
+        nonlocal callback_count
+        if _final_slot({"true_moa": payload})["status"] == expected_slot:
+            callback_count += 1
+            raise RuntimeError("fake terminal durable failure")
+
+    result, usage = await _run_gateway_case(
+        case,
+        true_moa_usage_callback=callback,
+    )
+    assert callback_count == 1
+    _assert_closed(
+        result,
+        usage,
+        slot=expected_slot,
+        wave=expected_wave,
+        error="true MoA final settlement failed",
+    )
+    assert agent.saved_trajectories == agent.persisted_sessions == []
+    if terminal_kind == "timed_out":
+        agent.release_provider.set()
+        assert agent.run_exited.wait(1)
+        late = {"true_moa": agent._true_moa_usage_ledger.to_dict()}
+        assert _final_slot(late)["status"] == "timed_out"
+        assert _final_slot(late)["totalTokens"] == 24
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["preflight", "turn_setup"])
+async def test_early_terminal_callback_block_is_bounded(
+    monkeypatch,
+    failure_stage,
+):
+    from xiaoban.trusted_runtime import true_moa
+
+    case = _gateway_case(monkeypatch)
+    adapter = case[0]
+    monkeypatch.setattr(
+        true_moa,
+        "TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS",
+        0.03,
+    )
+    if failure_stage == "preflight":
+        monkeypatch.setattr(
+            adapter,
+            "_create_agent",
+            lambda **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("PRIVATE_PREFLIGHT_FAILURE"),
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            adapter,
+            "_bind_api_server_session",
+            lambda **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("PRIVATE_SETUP_FAILURE"),
+            ),
+        )
+    started, release = threading.Event(), threading.Event()
+
+    def callback(payload):
+        if _final_slot({"true_moa": payload})["status"] == "failed":
+            started.set()
+            release.wait(1)
+
+    before = time.monotonic()
+    result, usage = await _run_gateway_case(
+        case,
+        true_moa_usage_callback=callback,
+    )
+    assert time.monotonic() - before < 0.5
+    assert started.is_set()
+    _assert_closed(
+        result,
+        usage,
+        slot="failed",
+        wave="failed",
+        error="true MoA final settlement failed",
+    )
+    release.set()
+
+
+def test_stop_returns_before_a_blocking_agent_interrupt():
+    from gateway.platforms import api_server
+    from xiaoban.trusted_runtime.true_moa import TrueMoACancelController
+
+    controller = TrueMoACancelController()
+    started, release, finished = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+
+    class Agent:
+        def interrupt(self, _reason):
+            started.set()
+            release.wait(1)
+            finished.set()
+
+    agent_ref = [Agent(), False, controller]
+    before = time.monotonic()
+    assert api_server._cancel_chat_agent_ref(agent_ref, "test stop") is True
+    assert time.monotonic() - before < 0.1
+    assert controller.state == "cancelled"
+    assert agent_ref[1] is True
+    assert started.wait(1) and not finished.is_set()
+    release.set()
+    assert finished.wait(1)
+
+
+@pytest.mark.parametrize("durable_accepts", [False, True])
+def test_durable_stop_fence_wins_before_local_cancel(durable_accepts):
+    from gateway.platforms import api_server
+    from xiaoban.trusted_runtime.true_moa import TrueMoACancelController
+
+    cache = api_server._IdempotencyCache(max_items=4, ttl_seconds=30)
+    key, fingerprint = "durable-stop", "fingerprint"
+    controller = TrueMoACancelController()
+    interrupted = threading.Event()
+    order = []
+
+    class Agent:
+        def interrupt(self, _reason):
+            if durable_accepts:
+                assert key in cache._stopped
+            order.append("interrupt")
+            interrupted.set()
+
+    def mark_stopped(actual):
+        assert actual == key
+        assert controller.state == "running"
+        assert key not in cache._stopped
+        order.append("durable")
+        return durable_accepts
+
+    agent_ref = [Agent(), False, controller]
+    cache._inflight[(key, fingerprint)] = object()
+    cache._agent_refs[(key, fingerprint)] = agent_ref
+    cache._durable = types.SimpleNamespace(mark_stopped=mark_stopped)
+    assert cache.stop(key, durable=True) is durable_accepts
+    if durable_accepts:
+        assert controller.state == "cancelled"
+        assert agent_ref[1] is True
+        assert key in cache._stopped
+        assert interrupted.wait(1)
+        assert order == ["durable", "interrupt"]
+    else:
+        assert controller.state == "running"
+        assert agent_ref[1] is False
+        assert not interrupted.wait(0.05)
+        assert order == ["durable"]
+        assert key not in cache._stopped
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_type", "state", "interrupted"),
+    [(KeyboardInterrupt, "cancelled", True), (SystemExit, "failed", False)],
+)
+async def test_final_worker_baseexception_stays_inside_request(
+    monkeypatch,
+    error_type,
+    state,
+    interrupted,
+):
+    agent = _FakeFinalAgent()
+
+    def raise_error(**_kwargs):
+        raise error_type("PRIVATE_BASEEXCEPTION")
+
+    agent.run_conversation = raise_error
+    result, usage = await _run_gateway_case(
+        _gateway_case(monkeypatch, agent=agent),
+    )
+    assert result["interrupted"] is interrupted
+    assert agent._true_moa_cancel_controller.state == state
+    _assert_closed(
+        result,
+        usage,
+        slot=state,
+        wave=state,
+        error=(
+            "completion stopped"
+            if interrupted
+            else "true MoA final executor failed"
+        ),
+    )
+    assert "PRIVATE_BASEEXCEPTION" not in json.dumps(
+        {"result": result, "usage": usage},
+    )
+    assert agent.saved_trajectories == agent.persisted_sessions == []
+
+
+@pytest.mark.asyncio
+async def test_preexecuted_tool_keyboardinterrupt_becomes_cancelled(monkeypatch):
+    from gateway.platforms import api_server
+    from tools import mystand_resource_index_tool
+
+    case = _gateway_case(monkeypatch)
+    agent = case[3]
+    agent.valid_tool_names = {"mystand_authorization"}
+    monkeypatch.setattr(
+        api_server,
+        "_resolve_mystand_initial_tool_choice",
+        lambda *_args, **_kwargs: "mystand_authorization",
+    )
+
+    def stop_tool(_args):
+        raise KeyboardInterrupt("PRIVATE_TOOL_INTERRUPT")
+
+    monkeypatch.setattr(
+        mystand_resource_index_tool,
+        "mystand_resource_index_tool_handler",
+        stop_tool,
+    )
+    result, usage = await _run_gateway_case(
+        case,
+        user_message="读取 AUTH-ABCDEF1",
+    )
+    _assert_closed(
+        result,
+        usage,
+        slot="cancelled",
+        wave="cancelled",
+        error="completion stopped",
+    )
+    assert result["interrupted"] is True
+    assert agent.run_calls == []
+    assert agent._true_moa_cancel_controller.state == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_stop_first_beats_late_worker_error(monkeypatch):
+    agent = _BlockingFinalAgent("late_error")
+    agent_ref = [None, False, None]
+    task = asyncio.create_task(
+        _run_gateway_case(
+            _gateway_case(monkeypatch, agent=agent),
+            agent_ref=agent_ref,
+        ),
+    )
+    assert await asyncio.to_thread(agent.provider_started.wait, 1)
+    assert agent_ref[2].cancel() is True
+    agent.release_provider.set()
+    result, usage = await task
+    _assert_closed(
+        result,
+        usage,
+        slot="cancelled",
+        wave="cancelled",
+        error="completion stopped",
+    )
+    assert result["interrupted"] is True
+    assert agent._true_moa_cancel_controller.state == "cancelled"
+    assert "PRIVATE_LATE_PROVIDER_FAILURE" not in json.dumps(
+        {"result": result, "usage": usage},
+    )

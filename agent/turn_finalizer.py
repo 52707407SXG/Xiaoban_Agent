@@ -27,6 +27,77 @@ import os
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 
 
+def persist_deferred_true_moa_turn(
+    agent,
+    *,
+    messages,
+    conversation_history,
+    user_message,
+    completed,
+):
+    """Persist a true-MoA turn only after the gateway owns final completion."""
+
+    controller = getattr(agent, "_true_moa_cancel_controller", None)
+    if (
+        not getattr(agent, "_defer_true_moa_final_commit", False)
+        or controller is None
+        or controller.state != "completed"
+    ):
+        return []
+
+    from agent.conversation_loop import logger
+
+    errors = []
+    agent._true_moa_gateway_persisting_committed = True
+    try:
+        drop_scaffolding = getattr(
+            agent,
+            "_drop_trailing_empty_response_scaffolding",
+            None,
+        )
+        if callable(drop_scaffolding):
+            try:
+                drop_scaffolding(messages)
+            except Exception as exc:
+                errors.append(f"drop_trailing_scaffolding: {exc}")
+                logger.error(
+                    "persist_deferred_true_moa_turn: "
+                    "_drop_trailing_empty_response_scaffolding failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+        save_trajectory = getattr(agent, "_save_trajectory", None)
+        if callable(save_trajectory):
+            try:
+                save_trajectory(
+                    messages,
+                    _summarize_user_message_for_log(user_message),
+                    completed,
+                )
+            except Exception as exc:
+                errors.append(f"save_trajectory: {exc}")
+                logger.error(
+                    "persist_deferred_true_moa_turn: _save_trajectory failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+        persist_session = getattr(agent, "_persist_session", None)
+        if callable(persist_session):
+            try:
+                persist_session(messages, conversation_history)
+            except Exception as exc:
+                errors.append(f"persist_session: {exc}")
+                logger.error(
+                    "persist_deferred_true_moa_turn: _persist_session failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+    finally:
+        agent._true_moa_gateway_persisting_committed = False
+        agent._defer_true_moa_final_commit = False
+    return errors
+
+
 def finalize_turn(
     agent,
     *,
@@ -58,6 +129,9 @@ def finalize_turn(
         "_true_moa_cancel_controller",
         None,
     )
+    _defer_true_moa_final_commit = bool(
+        getattr(agent, "_defer_true_moa_final_commit", False)
+    )
 
     def _strict_stop_won() -> bool:
         if not strict_paid_call:
@@ -67,7 +141,7 @@ def finalize_turn(
             if _strict_controller is not None
             else ""
         )
-        return controller_state == "cancelled" or (
+        return controller_state in {"cancelled", "failed"} or (
             bool(getattr(agent, "_interrupt_requested", False))
             and controller_state != "completed"
         )
@@ -89,6 +163,7 @@ def finalize_turn(
         and not interrupted
         and not getattr(agent, "_interrupt_requested", False)
         and _strict_controller.state == "running"
+        and not _defer_true_moa_final_commit
     ):
         _strict_controller.try_commit_final(
             f"finalizer-response:{turn_id}"
@@ -207,19 +282,28 @@ def finalize_turn(
 
     # Save trajectory if enabled.  ``user_message`` may be a multimodal
     # list of parts; the trajectory format wants a plain string.
-    try:
-        if _strict_stop_won():
-            _strict_terminal_cancelled = True
-            final_response = None
-            interrupted = True
-            failed = True
-            completed = False
-            _turn_exit_reason = "strict_terminal_fence"
-            _drop_cancelled_turn_outputs()
-        agent._save_trajectory(messages, _summarize_user_message_for_log(user_message), completed)
-    except Exception as _save_err:
-        _cleanup_errors.append(f"save_trajectory: {_save_err}")
-        logger.error("finalize_turn: _save_trajectory failed: %s", _save_err, exc_info=True)
+    if not _defer_true_moa_final_commit:
+        try:
+            if _strict_stop_won():
+                _strict_terminal_cancelled = True
+                final_response = None
+                interrupted = True
+                failed = True
+                completed = False
+                _turn_exit_reason = "strict_terminal_fence"
+                _drop_cancelled_turn_outputs()
+            agent._save_trajectory(
+                messages,
+                _summarize_user_message_for_log(user_message),
+                completed,
+            )
+        except Exception as _save_err:
+            _cleanup_errors.append(f"save_trajectory: {_save_err}")
+            logger.error(
+                "finalize_turn: _save_trajectory failed: %s",
+                _save_err,
+                exc_info=True,
+            )
 
     # Clean up VM and browser for this task after conversation completes
     try:
@@ -232,20 +316,25 @@ def finalize_turn(
     # scaffolding has been removed. Otherwise a later user "continue" turn
     # can replay assistant("(empty)") / recovery nudges and fall into the
     # same empty-response loop again.
-    try:
-        if _strict_stop_won():
-            _strict_terminal_cancelled = True
-            final_response = None
-            interrupted = True
-            failed = True
-            completed = False
-            _turn_exit_reason = "strict_terminal_fence"
-            _drop_cancelled_turn_outputs()
-        agent._drop_trailing_empty_response_scaffolding(messages)
-        agent._persist_session(messages, conversation_history)
-    except Exception as _persist_err:
-        _cleanup_errors.append(f"persist_session: {_persist_err}")
-        logger.error("finalize_turn: _persist_session failed: %s", _persist_err, exc_info=True)
+    if not _defer_true_moa_final_commit:
+        try:
+            if _strict_stop_won():
+                _strict_terminal_cancelled = True
+                final_response = None
+                interrupted = True
+                failed = True
+                completed = False
+                _turn_exit_reason = "strict_terminal_fence"
+                _drop_cancelled_turn_outputs()
+            agent._drop_trailing_empty_response_scaffolding(messages)
+            agent._persist_session(messages, conversation_history)
+        except Exception as _persist_err:
+            _cleanup_errors.append(f"persist_session: {_persist_err}")
+            logger.error(
+                "finalize_turn: _persist_session failed: %s",
+                _persist_err,
+                exc_info=True,
+            )
 
     # ── Turn-exit diagnostic log ─────────────────────────────────────
     # Always logged at INFO so agent.log captures WHY every turn ended.

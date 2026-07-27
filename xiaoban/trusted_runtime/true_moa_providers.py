@@ -178,9 +178,11 @@ def _call_kimi(
         lambda: _abort_client_sockets(client),
     )
     try:
-        if not cancel_controller.try_begin_dispatch(cancel_key):
+        if not cancel_controller.try_begin_dispatch(f"{cancel_key}:reservation"):
             raise StrictAdvisorCancelled("advisor_cancelled_before_dispatch")
         dispatch_callback()
+        if not cancel_controller.try_begin_dispatch(cancel_key):
+            raise StrictAdvisorCancelled("advisor_cancelled_before_dispatch")
         response = client.messages.create(**request_kwargs)
         usage = getattr(response, "usage", None)
         reported_usage = _trusted_usage_receipt(
@@ -261,9 +263,11 @@ def _call_deepseek(
         lambda: _abort_client_sockets(client),
     )
     try:
-        if not cancel_controller.try_begin_dispatch(cancel_key):
+        if not cancel_controller.try_begin_dispatch(f"{cancel_key}:reservation"):
             raise StrictAdvisorCancelled("advisor_cancelled_before_dispatch")
         dispatch_callback()
+        if not cancel_controller.try_begin_dispatch(cancel_key):
+            raise StrictAdvisorCancelled("advisor_cancelled_before_dispatch")
         response = client.chat.completions.create(**request_kwargs)
         usage = getattr(response, "usage", None)
         reported_usage = _trusted_usage_receipt(

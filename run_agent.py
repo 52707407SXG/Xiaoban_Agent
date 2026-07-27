@@ -1516,6 +1516,15 @@ class AIAgent:
 
         Ensures conversations are never lost, even on errors or early returns.
         """
+        if (
+            getattr(self, "_defer_true_moa_final_commit", False)
+            and not getattr(
+                self,
+                "_true_moa_gateway_persisting_committed",
+                False,
+            )
+        ):
+            return
         self._drop_trailing_empty_response_scaffolding(messages)
         self._apply_persist_user_message_override(messages)
         self._session_messages = messages
@@ -1724,6 +1733,15 @@ class AIAgent:
             user_query (str): Original user query
             completed (bool): Whether the conversation completed successfully
         """
+        if (
+            getattr(self, "_defer_true_moa_final_commit", False)
+            and not getattr(
+                self,
+                "_true_moa_gateway_persisting_committed",
+                False,
+            )
+        ):
+            return
         if not self.save_trajectories:
             return
         

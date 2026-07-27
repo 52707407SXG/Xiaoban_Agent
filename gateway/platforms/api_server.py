@@ -36,6 +36,7 @@ Requires:
 import asyncio
 import base64
 import copy
+import contextvars
 from collections import deque
 from datetime import datetime, time as dt_time, timedelta, timezone
 import hashlib
@@ -1369,6 +1370,44 @@ def _append_mystand_preexecuted_evidence(
                 "content": item.get("content"),
             },
         ])
+
+
+def _build_guarded_fact_persistence_transcript(
+    conversation_history: Any,
+    *,
+    user_message: Any,
+    guarded_final_response: Any,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Build a transcript without raw fact-model or tool-result bytes.
+
+    The returned history objects are reused by identity in the full messages
+    list so ``AIAgent._flush_messages_to_session_db`` recognizes them as prior
+    history instead of appending duplicates.
+    """
+
+    safe_history: List[Dict[str, Any]] = []
+    if isinstance(conversation_history, list):
+        for item in conversation_history:
+            if not isinstance(item, Mapping):
+                continue
+            role = str(item.get("role") or "").strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            safe_history.append({
+                "role": role,
+                "content": _content_to_visible_text(item.get("content")),
+            })
+    safe_messages = list(safe_history)
+    safe_messages.append({
+        "role": "user",
+        "content": _content_to_visible_text(user_message),
+    })
+    safe_messages.append({
+        "role": "assistant",
+        "content": str(guarded_final_response or ""),
+    })
+    return safe_history, safe_messages
+
 
 _LOCAL_PATH_RE = re.compile(
     r"(?<![:/\w])/(?:root|opt|srv|var|etc)(?:/[^\s`'\"<>()\[\]{}，。；;]*)*"
@@ -2794,6 +2833,22 @@ class CompletionStoppedError(RuntimeError):
     """Raised when a trusted delivery is stopped before agent execution."""
 
 
+def _interrupt_agent_async(agent: Any, reason: str) -> None:
+    """Best-effort SDK interruption that cannot hold a true-MoA stop request."""
+
+    def _interrupt() -> None:
+        try:
+            agent.interrupt(reason)
+        except BaseException:
+            logger.warning("Failed to interrupt idempotent API run", exc_info=False)
+
+    threading.Thread(
+        target=_interrupt,
+        name="xiaoban-true-moa-agent-interrupt",
+        daemon=True,
+    ).start()
+
+
 def _cancel_chat_agent_ref(agent_ref: Optional[list], reason: str) -> bool:
     """Cancel both true-MoA advisor work and the acting agent, if registered."""
 
@@ -2806,16 +2861,19 @@ def _cancel_chat_agent_ref(agent_ref: Optional[list], reason: str) -> bool:
         try:
             if not controller.cancel():
                 return False
-        except Exception:
+        except BaseException:
             logger.warning("Failed to cancel true MoA advisor wave", exc_info=False)
             return False
     agent_ref[1] = True
     agent = agent_ref[0]
     if agent is not None:
-        try:
-            agent.interrupt(reason)
-        except Exception:
-            logger.warning("Failed to interrupt idempotent API run", exc_info=False)
+        if controller is not None:
+            _interrupt_agent_async(agent, reason)
+        else:
+            try:
+                agent.interrupt(reason)
+            except Exception:
+                logger.warning("Failed to interrupt idempotent API run", exc_info=False)
     return True
 
 
@@ -3385,6 +3443,24 @@ class _IdempotencyCache:
         if key in self._store:
             return False
         matches = [item for item in self._inflight if item[0] == key]
+        if durable:
+            # The SQLite transition is the true-MoA stop linearization point.
+            # A completed/failed terminal state that committed first must leave
+            # the live controller and provider untouched.  Once the durable
+            # stop wins, install the process-local fence before any cancellation
+            # callback can observe or return a late result.
+            if self._durable is None or not self._durable.mark_stopped(key):
+                return False
+            self._stopped[key] = time.time() + self._ttl
+            for inflight_key in matches:
+                agent_ref = self._agent_refs.get(inflight_key)
+                if agent_ref is not None:
+                    _cancel_chat_agent_ref(
+                        agent_ref,
+                        "Stop requested via My Stand delivery",
+                    )
+            return True
+
         accepted = not matches
         for inflight_key in matches:
             agent_ref = self._agent_refs.get(inflight_key)
@@ -3396,15 +3472,6 @@ class _IdempotencyCache:
                 "Stop requested via My Stand delivery",
             ) or accepted
         if not accepted:
-            return False
-        if (
-            durable
-            and self._durable is not None
-            and not self._durable.mark_stopped(key)
-        ):
-            # The durable transaction is the cross-restart source of truth.
-            # A completed/failed terminal state that committed first wins;
-            # never install a process-local tombstone after that race.
             return False
         # Record a short-lived tombstone even before the completion request
         # reaches this process. This closes the create/stop HTTP race without
@@ -5323,7 +5390,14 @@ class APIServerAdapter(BasePlatformAdapter):
                         and not result.get("partial")
                         and not result.get("interrupted")
                     ):
-                        _finalize_mystand_egress_result(
+                        if (
+                            result.get("_mystand_egress_finalized")
+                            is not True
+                        ):
+                            raise RuntimeError(
+                                "true MoA egress was not sealed",
+                            )
+                        _resolved_mystand_egress_text(
                             result,
                             user_message=user_message,
                             conversation_history=history,
@@ -5437,7 +5511,9 @@ class APIServerAdapter(BasePlatformAdapter):
                     and not result.get("partial")
                     and not result.get("interrupted")
                 ):
-                    _finalize_mystand_egress_result(
+                    if result.get("_mystand_egress_finalized") is not True:
+                        raise RuntimeError("true MoA egress was not sealed")
+                    _resolved_mystand_egress_text(
                         result,
                         user_message=user_message,
                         conversation_history=history,
@@ -8454,6 +8530,9 @@ class APIServerAdapter(BasePlatformAdapter):
             run_system_prompt = effective_system_prompt
             true_moa_controller = None
             true_moa_ledger = None
+            true_moa_final_commit_key = ""
+            true_moa_terminal_notification = None
+            true_moa_terminal_settlement_deadline: float | None = None
             agent = None
             memory_hit_count = 0
             if mystand_request and memory_identity and memory_identity[2] == "user":
@@ -8484,6 +8563,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     FINAL_EXECUTOR_SLOT,
                     TRUE_MOA_FINAL_CALL_LIMIT,
                     TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS,
+                    TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS,
+                    TRUE_MOA_FINAL_TIMEOUT_SECONDS,
                     TrueMoACancelController,
                     TrueMoAExecutionError,
                     TrueMoAUsageLedger,
@@ -8498,6 +8579,103 @@ class APIServerAdapter(BasePlatformAdapter):
                     true_moa_snapshot,
                     on_change=true_moa_usage_callback,
                 )
+
+                def _begin_true_moa_terminal_settlement(
+                    *,
+                    slot_status: str,
+                    wave_status: str,
+                    error_category: str | None,
+                    timeout_final: bool = False,
+                ) -> None:
+                    """Land the local terminal receipt before durable I/O."""
+
+                    nonlocal true_moa_terminal_notification
+                    nonlocal true_moa_terminal_settlement_deadline
+                    if timeout_final:
+                        true_moa_ledger.timeout_final_execution(
+                            error_category=(
+                                error_category or "final_executor_timeout"
+                            ),
+                            notify=False,
+                        )
+                    true_moa_ledger.finish_slot(
+                        FINAL_EXECUTOR_SLOT,
+                        status=slot_status,
+                        usage=true_moa_ledger.final_call_usage(),
+                        error_category=error_category,
+                        cost_usd=(
+                            getattr(
+                                agent,
+                                "session_estimated_cost_usd",
+                                None,
+                            )
+                            if agent is not None
+                            and getattr(
+                                agent,
+                                "session_cost_status",
+                                "",
+                            )
+                            != "unavailable"
+                            else None
+                        ),
+                        cost_status=(
+                            getattr(agent, "session_cost_status", None)
+                            if agent is not None
+                            else None
+                        ),
+                        cost_source=(
+                            getattr(agent, "session_cost_source", None)
+                            if agent is not None
+                            else None
+                        ),
+                        notify=False,
+                    )
+                    true_moa_ledger.set_wave_status(
+                        wave_status,
+                        notify=False,
+                    )
+                    if true_moa_terminal_notification is None:
+                        true_moa_terminal_settlement_deadline = (
+                            time.monotonic()
+                            + TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS
+                        )
+                        true_moa_terminal_notification = (
+                            true_moa_ledger.notify_change_async()
+                        )
+
+                def _true_moa_terminal_settlement_confirmed() -> bool:
+                    receipt = true_moa_terminal_notification
+                    if receipt is None:
+                        return False
+                    deadline = true_moa_terminal_settlement_deadline
+                    remaining = (
+                        max(0.0, deadline - time.monotonic())
+                        if deadline is not None
+                        else 0.0
+                    )
+                    receipt.wait(remaining)
+                    return receipt.confirmed
+
+                def _interrupt_true_moa_agent_async(reason: str) -> None:
+                    target = agent
+                    if target is None:
+                        return
+
+                    def _interrupt() -> None:
+                        try:
+                            target.interrupt(reason)
+                        except BaseException:
+                            logger.warning(
+                                "True MoA final interrupt failed",
+                                exc_info=False,
+                            )
+
+                    threading.Thread(
+                        target=_interrupt,
+                        name="xiaoban-true-moa-final-interrupt",
+                        daemon=True,
+                    ).start()
+
                 if agent_ref is not None:
                     while len(agent_ref) < 3:
                         agent_ref.append(None)
@@ -8547,20 +8725,27 @@ class APIServerAdapter(BasePlatformAdapter):
                     ):
                         raise RuntimeError("fixed true MoA final route mismatch")
                 except Exception:
-                    true_moa_ledger.finish_slot(
-                        FINAL_EXECUTOR_SLOT,
-                        status="failed",
+                    true_moa_controller.fail()
+                    _begin_true_moa_terminal_settlement(
+                        slot_status="failed",
+                        wave_status="failed",
                         error_category="final_executor_preflight_failed",
                     )
-                    true_moa_ledger.set_wave_status("failed")
-                    true_moa_controller.fail()
+                    settlement_confirmed = (
+                        _true_moa_terminal_settlement_confirmed()
+                    )
                     usage = _true_moa_usage_summary(true_moa_ledger)
                     return (
                         {
                             "final_response": "",
+                            "messages": [],
                             "completed": False,
                             "failed": True,
-                            "error": "true MoA final executor unavailable",
+                            "error": (
+                                "true MoA final executor unavailable"
+                                if settlement_confirmed
+                                else "true MoA final settlement failed"
+                            ),
                             "_mystand_request": True,
                             "_true_moa_usage": usage["true_moa"],
                         },
@@ -8573,13 +8758,16 @@ class APIServerAdapter(BasePlatformAdapter):
                 agent._disable_streaming = True
                 agent._strict_no_automatic_paid_retry = True
                 agent._true_moa_cancel_controller = true_moa_controller
+                agent._defer_true_moa_final_commit = True
                 agent.compression_enabled = False
                 agent.max_tokens = TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
                 if agent_ref is not None:
                     agent_ref[0] = agent
                     if agent_ref[1]:
                         true_moa_controller.cancel()
-                        agent.interrupt("Stop requested via My Stand delivery")
+                        _interrupt_true_moa_agent_async(
+                            "Stop requested via My Stand delivery",
+                        )
                 try:
                     advisor_bundle = run_true_moa_advisors(
                         true_moa_snapshot,
@@ -8593,14 +8781,20 @@ class APIServerAdapter(BasePlatformAdapter):
                     true_moa_ledger = exc.ledger
                     usage = _true_moa_usage_summary(true_moa_ledger)
                     interrupted = true_moa_controller.state == "cancelled"
+                    settlement_failed = (
+                        exc.category == "durable_settlement_failed"
+                    )
                     return (
                         {
                             "final_response": "",
+                            "messages": [],
                             "completed": False,
                             "failed": True,
                             "interrupted": interrupted,
                             "error": (
-                                "true MoA request stopped"
+                                "true MoA final settlement failed"
+                                if settlement_failed
+                                else "true MoA request stopped"
                                 if interrupted
                                 else "true MoA advisor wave failed"
                             ),
@@ -8630,15 +8824,27 @@ class APIServerAdapter(BasePlatformAdapter):
                     or (agent_ref is not None and agent_ref[1])
                 ):
                     true_moa_controller.cancel()
-                    true_moa_ledger.set_wave_status("cancelled")
+                    _begin_true_moa_terminal_settlement(
+                        slot_status="cancelled",
+                        wave_status="cancelled",
+                        error_category="completion_stopped",
+                    )
+                    settlement_confirmed = (
+                        _true_moa_terminal_settlement_confirmed()
+                    )
                     usage = _true_moa_usage_summary(true_moa_ledger)
                     return (
                         {
                             "final_response": "",
+                            "messages": [],
                             "completed": False,
                             "failed": True,
                             "interrupted": True,
-                            "error": "true MoA request stopped",
+                            "error": (
+                                "true MoA request stopped"
+                                if settlement_confirmed
+                                else "true MoA final settlement failed"
+                            ),
                             "_mystand_request": True,
                             "_true_moa_usage": usage["true_moa"],
                         },
@@ -8757,21 +8963,26 @@ class APIServerAdapter(BasePlatformAdapter):
                         slot_status = "failed"
                         wave_status = "failed"
                         error_category = "final_setup_error"
-                    true_moa_ledger.finish_slot(
-                        FINAL_EXECUTOR_SLOT,
-                        status=slot_status,
+                    _begin_true_moa_terminal_settlement(
+                        slot_status=slot_status,
+                        wave_status=wave_status,
                         error_category=error_category,
                     )
-                    true_moa_ledger.set_wave_status(wave_status)
+                    settlement_confirmed = (
+                        _true_moa_terminal_settlement_confirmed()
+                    )
                     usage = _true_moa_usage_summary(true_moa_ledger)
                     return (
                         {
                             "final_response": "",
+                            "messages": [],
                             "completed": False,
                             "failed": True,
                             "interrupted": interrupted,
                             "error": (
-                                "true MoA request stopped"
+                                "true MoA final settlement failed"
+                                if not settlement_confirmed
+                                else "true MoA request stopped"
                                 if interrupted
                                 else "true MoA final executor setup failed"
                             ),
@@ -8829,20 +9040,27 @@ class APIServerAdapter(BasePlatformAdapter):
                         final_provider != FINAL_EXECUTOR_SLOT.provider
                         or final_model != FINAL_EXECUTOR_SLOT.model
                     ):
-                        true_moa_ledger.finish_slot(
-                            FINAL_EXECUTOR_SLOT,
-                            status="failed",
+                        true_moa_controller.fail()
+                        _begin_true_moa_terminal_settlement(
+                            slot_status="failed",
+                            wave_status="failed",
                             error_category="final_executor_route_mismatch",
                         )
-                        true_moa_ledger.set_wave_status("failed")
-                        true_moa_controller.fail()
+                        settlement_confirmed = (
+                            _true_moa_terminal_settlement_confirmed()
+                        )
                         usage = _true_moa_usage_summary(true_moa_ledger)
                         return (
                             {
                                 "final_response": "",
+                                "messages": [],
                                 "completed": False,
                                 "failed": True,
-                                "error": "true MoA final executor unavailable",
+                                "error": (
+                                    "true MoA final executor unavailable"
+                                    if settlement_confirmed
+                                    else "true MoA final settlement failed"
+                                ),
                                 "_mystand_request": True,
                                 "_true_moa_usage": usage["true_moa"],
                             },
@@ -8856,6 +9074,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     agent._fallback_index = 0
                     agent._disable_streaming = True
                     agent._strict_no_automatic_paid_retry = True
+                    agent._defer_true_moa_final_commit = True
                     agent.compression_enabled = False
                 if agent_ref is not None:
                     agent_ref[0] = agent
@@ -8863,123 +9082,463 @@ class APIServerAdapter(BasePlatformAdapter):
                         try:
                             if true_moa_controller is not None:
                                 true_moa_controller.cancel()
-                            agent.interrupt("Stop requested via My Stand delivery")
+                            _interrupt_true_moa_agent_async(
+                                "Stop requested via My Stand delivery",
+                            )
                         finally:
                             raise CompletionStoppedError("request stopped before execution")
-                initial_tool_choice = trusted_initial_tool_choice
-                if (
-                    not initial_tool_choice
-                    or initial_tool_choice not in agent.valid_tool_names
-                ):
-                    initial_tool_choice = ""
-                evidence_followup["agent"] = agent
-                evidence_followup["resource_index_required"] = (
-                    initial_tool_choice == "mystand_resource_index"
-                )
-                preexecuted_evidence: List[Dict[str, Any]] = []
-                if initial_tool_choice:
-                    preexecuted_evidence = _run_mystand_preexecuted_evidence(
-                        initial_tool_choice,
-                        user_message=user_message,
-                        system_prompt=run_system_prompt,
-                        tool_start_callback=_traced_tool_start,
-                        tool_complete_callback=_traced_tool_complete,
-                        trusted_turn=trusted_turn,
-                        fact_requirement=fact_requirement,
-                        terminal_controller=true_moa_controller,
-                    )
-                    evidence_prompt = _build_mystand_preexecuted_prompt(
-                        preexecuted_evidence
-                    )
-                    if evidence_prompt:
-                        agent.ephemeral_system_prompt = "\n\n".join(
-                            part
-                            for part in (
-                                agent.ephemeral_system_prompt,
-                                evidence_prompt,
-                            )
-                            if isinstance(part, str) and part.strip()
-                        )
-                    # The harness already executed the authoritative read.
-                    # Never ask the provider to repeat it through a hint.
-                    agent._ephemeral_tool_choice = ""
-                if fact_requirement is not None:
-                    # The signed plan has already executed deterministically.
-                    # The provider only writes prose; it cannot repeat or
-                    # branch into another business tool call.
-                    agent.tools = []
-                    agent.valid_tool_names = set()
-                    _install_signed_fact_persistence_guard(
-                        agent,
-                        trusted_turn,
-                    )
                 effective_task_id = session_id or str(uuid.uuid4())
-                execution_history = (
-                    []
-                    if initial_tool_choice
-                    and any(
-                        _tool_result_looks_successful(item.get("content"))
-                        for item in preexecuted_evidence
-                    )
-                    else conversation_history
-                )
-                if true_moa_ledger is not None:
-                    true_moa_ledger.start_slot(FINAL_EXECUTOR_SLOT)
-                result = agent.run_conversation(
-                    user_message=user_message,
-                    conversation_history=execution_history,
-                    task_id=effective_task_id,
-                )
-                result = dict(result) if isinstance(result, dict) else {}
-                _append_mystand_preexecuted_evidence(
-                    result,
-                    preexecuted_evidence,
-                )
-                if fact_requirement is not None:
-                    from xiaoban.trusted_runtime.completion_guard import (
-                        check_completion,
+                if true_moa_controller is not None:
+                    true_moa_final_commit_key = (
+                        f"gateway-final-handoff:{trusted_turn.request_id}"
                     )
 
-                    guarded_fact = check_completion(
-                        result.get("final_response", ""),
-                        trusted_turn,
+                def _execute_final_stage() -> dict[str, Any]:
+                    if (
+                        true_moa_controller is not None
+                        and true_moa_controller.state != "running"
+                    ):
+                        raise CompletionStoppedError(
+                            "true MoA final stage stopped before tools",
+                        )
+                    initial_tool_choice = trusted_initial_tool_choice
+                    if (
+                        not initial_tool_choice
+                        or initial_tool_choice not in agent.valid_tool_names
+                    ):
+                        initial_tool_choice = ""
+                    evidence_followup["agent"] = agent
+                    evidence_followup["resource_index_required"] = (
+                        initial_tool_choice == "mystand_resource_index"
                     )
-                    result["final_response"] = guarded_fact.text
-                    # Raw provider prose/tool attempts are diagnostic-only and
-                    # must not become an alternate transcript delivery path.
+                    preexecuted_evidence: List[Dict[str, Any]] = []
+                    if initial_tool_choice:
+                        preexecuted_evidence = _run_mystand_preexecuted_evidence(
+                            initial_tool_choice,
+                            user_message=user_message,
+                            system_prompt=run_system_prompt,
+                            tool_start_callback=_traced_tool_start,
+                            tool_complete_callback=_traced_tool_complete,
+                            trusted_turn=trusted_turn,
+                            fact_requirement=fact_requirement,
+                            terminal_controller=true_moa_controller,
+                        )
+                        evidence_prompt = _build_mystand_preexecuted_prompt(
+                            preexecuted_evidence
+                        )
+                        if evidence_prompt:
+                            agent.ephemeral_system_prompt = "\n\n".join(
+                                part
+                                for part in (
+                                    agent.ephemeral_system_prompt,
+                                    evidence_prompt,
+                                )
+                                if isinstance(part, str) and part.strip()
+                            )
+                        # The harness already executed the authoritative read.
+                        # Never ask the provider to repeat it through a hint.
+                        agent._ephemeral_tool_choice = ""
+                    if (
+                        true_moa_controller is not None
+                        and true_moa_controller.state != "running"
+                    ):
+                        raise CompletionStoppedError(
+                            "true MoA final stage stopped after evidence",
+                        )
+                    if fact_requirement is not None:
+                        # The signed plan has already executed deterministically.
+                        # The provider only writes prose; it cannot repeat or
+                        # branch into another business tool call.
+                        agent.tools = []
+                        agent.valid_tool_names = set()
+                        _install_signed_fact_persistence_guard(
+                            agent,
+                            trusted_turn,
+                        )
+                    execution_history = (
+                        []
+                        if initial_tool_choice
+                        and any(
+                            _tool_result_looks_successful(item.get("content"))
+                            for item in preexecuted_evidence
+                        )
+                        else conversation_history
+                    )
+                    if (
+                        true_moa_controller is not None
+                        and true_moa_controller.state != "running"
+                    ):
+                        raise CompletionStoppedError(
+                            "true MoA final stage stopped before executor",
+                        )
+                    stage_result = agent.run_conversation(
+                        user_message=user_message,
+                        conversation_history=execution_history,
+                        task_id=effective_task_id,
+                    )
+                    if true_moa_ledger is None:
+                        return {
+                            "initial_tool_choice": initial_tool_choice,
+                            "preexecuted_evidence": preexecuted_evidence,
+                            "result": stage_result,
+                        }
+                    result = (
+                        dict(stage_result)
+                        if isinstance(stage_result, dict)
+                        else {}
+                    )
+                    _append_mystand_preexecuted_evidence(
+                        result,
+                        preexecuted_evidence,
+                    )
+                    guarded_turn = copy.deepcopy(trusted_turn)
+                    result["_mystand_request"] = mystand_request
+                    if mystand_request:
+                        result["_mystand_user_id"] = str(
+                            request_user_id or "",
+                        )
+                        result["_mystand_request_id"] = str(
+                            trusted_turn.request_id,
+                        )
+                        result["_mystand_message_id"] = str(
+                            request_message_id or "",
+                        )
+                        # Completion/egress guards mutate terminal WorkTurn
+                        # fields.  Project on an isolated copy so a guard that
+                        # returns after timeout cannot mutate the live turn.
+                        result["_trusted_turn"] = guarded_turn
+                        result["_mystand_evidence_required"] = bool(
+                            trusted_initial_tool_choice or fact_requirement
+                        )
+                        if fact_requirement is not None:
+                            result["_mystand_fact_requirement"] = (
+                                fact_requirement
+                            )
+                    if initial_tool_choice:
+                        result["_mystand_required_evidence_groups"] = [
+                            sorted(group)
+                            for group in _required_mystand_evidence_groups(
+                                initial_tool_choice
+                            )
+                        ]
+                    # Full My Stand egress projection, including
+                    # check_mystand_final_answer and its digest, is part of the
+                    # same watchdog worker as the provider and trusted tools.
+                    # The parent may commit only this sealed projection.
+                    visible_text = _finalize_mystand_egress_result(
+                        result,
+                        user_message=user_message,
+                        conversation_history=conversation_history,
+                    )
+                    (
+                        safe_persistence_history,
+                        safe_persistence_messages,
+                    ) = _build_guarded_fact_persistence_transcript(
+                        conversation_history,
+                        user_message=user_message,
+                        guarded_final_response=visible_text,
+                    )
+                    # Raw provider/tool bytes remain worker-local diagnostics.
                     result["messages"] = []
-                result["_mystand_request"] = mystand_request
-                if mystand_request:
-                    result["_mystand_user_id"] = str(request_user_id or "")
-                    result["_mystand_request_id"] = str(trusted_turn.request_id)
-                    result["_mystand_message_id"] = str(request_message_id or "")
-                    result["_trusted_turn"] = trusted_turn
-                    result["_mystand_evidence_required"] = bool(
-                        trusted_initial_tool_choice or fact_requirement
+                    return {
+                        "initial_tool_choice": initial_tool_choice,
+                        "preexecuted_evidence": preexecuted_evidence,
+                        "result": result,
+                        "safe_persistence_history": (
+                            safe_persistence_history
+                        ),
+                        "safe_persistence_messages": (
+                            safe_persistence_messages
+                        ),
+                        "guarded_turn_projection": {
+                            "state": guarded_turn.state,
+                            "states": list(guarded_turn.states),
+                            "terminal_reason": guarded_turn.terminal_reason,
+                        },
+                    }
+
+                final_deadline_timed_out = False
+                final_deadline_at: float | None = None
+                final_stage_error: BaseException | None = None
+
+                def _fence_expired_final_deadline() -> None:
+                    nonlocal final_deadline_timed_out
+                    if (
+                        final_deadline_timed_out
+                        or true_moa_ledger is None
+                        or true_moa_controller is None
+                        or final_deadline_at is None
+                        or time.monotonic() < final_deadline_at
+                    ):
+                        return
+                    if true_moa_controller.fail():
+                        final_deadline_timed_out = True
+                        _begin_true_moa_terminal_settlement(
+                            slot_status="timed_out",
+                            wave_status="failed",
+                            error_category="final_executor_timeout",
+                            timeout_final=True,
+                        )
+
+                if true_moa_ledger is not None:
+                    # The final slot begins before deterministic evidence or
+                    # any model-selected trusted tool. Its copied Context keeps
+                    # request identity, DataScope and the active WorkTurn while
+                    # the caller thread enforces a hard bounded return.
+                    final_deadline_at = (
+                        time.monotonic() + TRUE_MOA_FINAL_TIMEOUT_SECONDS
+                    )
+                    if not true_moa_controller.reserve_final_commit(
+                        true_moa_final_commit_key,
+                        deadline_monotonic=final_deadline_at,
+                    ):
+                        raise CompletionStoppedError(
+                            "true MoA stopped before final handoff reservation",
+                        )
+                    # This is a local in-memory mutation only.  Any durable
+                    # running notification happens in the worker; the terminal
+                    # snapshot is always dispatched asynchronously.
+                    true_moa_ledger.start_slot(
+                        FINAL_EXECUTOR_SLOT,
+                        notify=False,
+                    )
+                    if not true_moa_ledger.confirm_change(
+                        TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS,
+                    ):
+                        true_moa_controller.fail()
+                        true_moa_ledger.timeout_final_execution(
+                            error_category="final_executor_timeout",
+                            notify=False,
+                        )
+                        raise RuntimeError(
+                            "true MoA durable final-slot reservation failed"
+                        )
+                    final_stage_done = threading.Event()
+                    final_stage_box: dict[str, Any] = {}
+                    final_stage_context = contextvars.copy_context()
+
+                    def _run_final_stage_worker() -> None:
+                        try:
+                            final_stage_box["payload"] = _execute_final_stage()
+                        except BaseException as exc:
+                            final_stage_box["error"] = exc
+                        finally:
+                            final_stage_done.set()
+
+                    final_stage_thread = threading.Thread(
+                        target=lambda: final_stage_context.run(
+                            _run_final_stage_worker,
+                        ),
+                        name="xiaoban-true-moa-final-stage",
+                        daemon=True,
+                    )
+                    final_stage_thread.start()
+                    while not final_stage_done.is_set():
+                        controller_state = true_moa_controller.state
+                        if controller_state in {"cancelled", "failed"}:
+                            break
+                        remaining = final_deadline_at - time.monotonic()
+                        if remaining <= 0:
+                            _fence_expired_final_deadline()
+                            break
+                        final_stage_done.wait(timeout=min(0.05, remaining))
+
+                    if (
+                        not final_stage_done.is_set()
+                        and true_moa_controller.state in {"cancelled", "failed"}
+                    ):
+                        if (
+                            true_moa_controller.state == "cancelled"
+                            and true_moa_terminal_notification is None
+                        ):
+                            _begin_true_moa_terminal_settlement(
+                                slot_status="cancelled",
+                                wave_status="cancelled",
+                                error_category="completion_stopped",
+                            )
+                        _interrupt_true_moa_agent_async(
+                            (
+                                "True MoA final executor deadline exceeded"
+                                if final_deadline_timed_out
+                                else "True MoA final stage stopped"
+                            ),
+                        )
+                        final_stage_done.wait(
+                            timeout=TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS,
+                        )
+
+                    if final_stage_done.is_set():
+                        final_stage_error = final_stage_box.get("error")
+                        final_stage_payload = final_stage_box.get("payload")
+                        if not isinstance(final_stage_payload, dict):
+                            final_stage_payload = {}
+                    else:
+                        # The daemon worker retains only its request-local
+                        # copied Context. The failed/cancelled controller fences
+                        # every later provider, tool-result and final commit.
+                        final_stage_payload = {}
+                else:
+                    final_stage_payload = _execute_final_stage()
+
+                # The worker may finish on the deadline edge before the parent
+                # polling loop observes expiry. Re-check on the hand-off side
+                # so a just-late payload cannot commit as completed.
+                _fence_expired_final_deadline()
+                if true_moa_ledger is None:
+                    initial_tool_choice = str(
+                        final_stage_payload.get("initial_tool_choice") or "",
+                    )
+                    preexecuted_evidence = final_stage_payload.get(
+                        "preexecuted_evidence",
+                    )
+                    if not isinstance(preexecuted_evidence, list):
+                        preexecuted_evidence = []
+                    result = final_stage_payload.get("result")
+                    result = (
+                        dict(result)
+                        if isinstance(result, dict)
+                        else {}
+                    )
+                    _append_mystand_preexecuted_evidence(
+                        result,
+                        preexecuted_evidence,
                     )
                     if fact_requirement is not None:
-                        result["_mystand_fact_requirement"] = fact_requirement
-                if initial_tool_choice:
-                    result["_mystand_required_evidence_groups"] = [
-                        sorted(group)
-                        for group in _required_mystand_evidence_groups(
-                            initial_tool_choice
+                        from xiaoban.trusted_runtime.completion_guard import (
+                            check_completion,
                         )
-                    ]
-                usage = {
-                    "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                    "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                    "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-                }
+
+                        guarded_fact = check_completion(
+                            result.get("final_response", ""),
+                            trusted_turn,
+                        )
+                        result["final_response"] = guarded_fact.text
+                        result["messages"] = []
+                    result["_mystand_request"] = mystand_request
+                    if mystand_request:
+                        result["_mystand_user_id"] = str(
+                            request_user_id or "",
+                        )
+                        result["_mystand_request_id"] = str(
+                            trusted_turn.request_id,
+                        )
+                        result["_mystand_message_id"] = str(
+                            request_message_id or "",
+                        )
+                        result["_trusted_turn"] = trusted_turn
+                        result["_mystand_evidence_required"] = bool(
+                            trusted_initial_tool_choice or fact_requirement
+                        )
+                        if fact_requirement is not None:
+                            result["_mystand_fact_requirement"] = (
+                                fact_requirement
+                            )
+                    if initial_tool_choice:
+                        result["_mystand_required_evidence_groups"] = [
+                            sorted(group)
+                            for group in _required_mystand_evidence_groups(
+                                initial_tool_choice
+                            )
+                        ]
+                    usage = {
+                        "input_tokens": (
+                            getattr(agent, "session_prompt_tokens", 0) or 0
+                        ),
+                        "output_tokens": (
+                            getattr(agent, "session_completion_tokens", 0)
+                            or 0
+                        ),
+                        "total_tokens": (
+                            getattr(agent, "session_total_tokens", 0) or 0
+                        ),
+                    }
+                    effective_session_id = getattr(
+                        agent,
+                        "session_id",
+                        session_id,
+                    )
+                    if (
+                        isinstance(effective_session_id, str)
+                        and effective_session_id
+                    ):
+                        result["session_id"] = effective_session_id
+                    if metadata_trace is not None:
+                        failed_result = bool(
+                            result.get("interrupted")
+                            or result.get("partial")
+                            or result.get("failed")
+                            or not result.get("completed", True)
+                        )
+                        metadata_trace.safe_emit(
+                            (
+                                "request_failed"
+                                if failed_result
+                                else "request_completed"
+                            ),
+                            status=(
+                                "failed"
+                                if failed_result
+                                else "completed"
+                            ),
+                            duration_ms=metadata_trace.elapsed_ms(),
+                            tool_count=tool_count,
+                        )
+                    return result, usage
+                result = final_stage_payload.get("result")
+                result = dict(result) if isinstance(result, dict) else {}
+                deferred_persistence_messages = (
+                    final_stage_payload.get("safe_persistence_messages")
+                    if isinstance(
+                        final_stage_payload.get(
+                            "safe_persistence_messages",
+                        ),
+                        list,
+                    )
+                    else []
+                )
+                deferred_persistence_history = (
+                    final_stage_payload.get("safe_persistence_history")
+                    if isinstance(
+                        final_stage_payload.get(
+                            "safe_persistence_history",
+                        ),
+                        list,
+                    )
+                    else []
+                )
+                guarded_turn_projection = final_stage_payload.get(
+                    "guarded_turn_projection",
+                )
                 request_stopped = bool(
-                    (agent_ref is not None and len(agent_ref) > 1 and agent_ref[1])
-                    or (
-                        true_moa_controller is not None
-                        and true_moa_controller.state == "cancelled"
+                    not final_deadline_timed_out
+                    and (
+                        (
+                            agent_ref is not None
+                            and len(agent_ref) > 1
+                            and agent_ref[1]
+                        )
+                        or (
+                            true_moa_controller is not None
+                            and true_moa_controller.state == "cancelled"
+                        )
                     )
                 )
-                if request_stopped:
-                    result = dict(result or {})
+                if final_deadline_timed_out:
+                    result.update({
+                        "final_response": "",
+                        "completed": False,
+                        "failed": True,
+                        "interrupted": False,
+                        "error": "true MoA final executor timed out",
+                    })
+                    result["messages"] = []
+                elif request_stopped or isinstance(
+                    final_stage_error,
+                    (CompletionStoppedError, KeyboardInterrupt),
+                ) or (
+                    isinstance(final_stage_error, asyncio.CancelledError)
+                ):
+                    true_moa_controller.cancel()
                     result.update({
                         "final_response": "",
                         "completed": False,
@@ -8987,12 +9546,86 @@ class APIServerAdapter(BasePlatformAdapter):
                         "interrupted": True,
                         "error": "completion stopped",
                     })
+                    result["messages"] = []
+                    request_stopped = True
+                elif isinstance(final_stage_error, BaseException):
+                    true_moa_controller.fail()
+                    result.update({
+                        "final_response": "",
+                        "completed": False,
+                        "failed": True,
+                        "interrupted": False,
+                        "error": "true MoA final executor failed",
+                    })
+                    result["messages"] = []
+                elif (
+                    result.get("_mystand_egress_finalized") is not True
+                    or not isinstance(
+                        result.get("_mystand_egress_output_digest"),
+                        str,
+                    )
+                    or not isinstance(guarded_turn_projection, dict)
+                    or not isinstance(
+                        guarded_turn_projection.get("state"),
+                        str,
+                    )
+                    or not isinstance(
+                        guarded_turn_projection.get("states"),
+                        list,
+                    )
+                    or not isinstance(
+                        guarded_turn_projection.get("terminal_reason"),
+                        str,
+                    )
+                ):
+                    true_moa_controller.fail()
+                    result.update({
+                        "final_response": "",
+                        "completed": False,
+                        "failed": True,
+                        "interrupted": False,
+                        "error": "true MoA final executor failed",
+                    })
+                    result["messages"] = []
+                else:
+                    # Hash-only verification; every potentially blocking guard
+                    # already ran inside the watchdog worker.
+                    _resolved_mystand_egress_text(
+                        result,
+                        user_message=user_message,
+                        conversation_history=conversation_history,
+                    )
+                _fence_expired_final_deadline()
+                if final_deadline_timed_out:
+                    result.update({
+                        "final_response": "",
+                        "completed": False,
+                        "failed": True,
+                        "interrupted": False,
+                        "error": "true MoA final executor timed out",
+                    })
+                    result["messages"] = []
+                result["_mystand_request"] = mystand_request
+                usage = {
+                    "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                    "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+                    "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                }
+                deferred_persistence_ready = False
                 if true_moa_ledger is not None:
                     result_interrupted = bool(result.get("interrupted"))
                     result_partial = bool(result.get("partial"))
                     result_failed = bool(result.get("failed"))
-                    result_completed = bool(result.get("completed", True))
-                    if request_stopped or result_interrupted:
+                    result_completed = bool(result.get("completed", False))
+                    if final_deadline_timed_out:
+                        final_status = "timed_out"
+                        final_error = "final_executor_timeout"
+                        wave_status = "failed"
+                    elif (
+                        true_moa_controller.state == "cancelled"
+                        or request_stopped
+                        or result_interrupted
+                    ):
                         true_moa_controller.cancel()
                         final_status = "cancelled"
                         final_error = "completion_stopped"
@@ -9006,38 +9639,133 @@ class APIServerAdapter(BasePlatformAdapter):
                             else "final_executor_failed"
                         )
                         wave_status = "failed"
-                    elif true_moa_controller.complete():
-                        final_status = "completed"
-                        final_error = None
-                        wave_status = "completed"
                     else:
-                        # A cancellation that wins the terminal-state lock
-                        # suppresses even a provider result that arrived at the
-                        # same time.
+                        _fence_expired_final_deadline()
+                        if (
+                            not final_deadline_timed_out
+                            and true_moa_controller.try_commit_final(
+                                true_moa_final_commit_key,
+                            )
+                        ):
+                            final_status = "completed"
+                            final_error = None
+                            wave_status = "completed"
+                            deferred_persistence_ready = True
+                        else:
+                            # The controller checks its reserved monotonic
+                            # deadline under the same lock as completion. If
+                            # the edge crossed between the parent-side check
+                            # and commit, settle it as timeout now.
+                            _fence_expired_final_deadline()
+                            if final_deadline_timed_out:
+                                result.update({
+                                    "final_response": "",
+                                    "completed": False,
+                                    "failed": True,
+                                    "interrupted": False,
+                                    "error": (
+                                        "true MoA final executor timed out"
+                                    ),
+                                })
+                                result["messages"] = []
+                                final_status = "timed_out"
+                                final_error = "final_executor_timeout"
+                                wave_status = "failed"
+                            elif true_moa_controller.state == "cancelled":
+                                # A cancellation that wins the terminal-state
+                                # lock suppresses even a provider result that
+                                # arrived at the same time.
+                                result.update({
+                                    "final_response": "",
+                                    "completed": False,
+                                    "failed": True,
+                                    "interrupted": True,
+                                    "error": "completion stopped",
+                                })
+                                final_status = "cancelled"
+                                final_error = "terminal_fence"
+                                wave_status = "cancelled"
+                            else:
+                                result.update({
+                                    "final_response": "",
+                                    "completed": False,
+                                    "failed": True,
+                                    "interrupted": False,
+                                    "error": (
+                                        "true MoA final executor failed"
+                                    ),
+                                })
+                                result["messages"] = []
+                                final_status = "failed"
+                                final_error = "terminal_fence"
+                                wave_status = "failed"
+                    _begin_true_moa_terminal_settlement(
+                        slot_status=final_status,
+                        wave_status=wave_status,
+                        error_category=final_error,
+                        timeout_final=final_deadline_timed_out,
+                    )
+                    settlement_confirmed = (
+                        _true_moa_terminal_settlement_confirmed()
+                    )
+                    if not settlement_confirmed:
+                        deferred_persistence_ready = False
+                        if true_moa_controller.state == "completed":
+                            true_moa_ledger.set_wave_status(
+                                "failed",
+                                notify=False,
+                            )
+                            true_moa_ledger.notify_change_async()
                         result.update({
                             "final_response": "",
+                            "messages": [],
                             "completed": False,
                             "failed": True,
-                            "interrupted": True,
-                            "error": "completion stopped",
+                            "interrupted": (
+                                true_moa_controller.state == "cancelled"
+                            ),
+                            "error": "true MoA final settlement failed",
                         })
-                        final_status = "cancelled"
-                        final_error = "terminal_fence"
-                        wave_status = "cancelled"
-                    true_moa_ledger.finish_slot(
-                        FINAL_EXECUTOR_SLOT,
-                        status=final_status,
-                        usage=true_moa_ledger.final_call_usage(),
-                        error_category=final_error,
-                        cost_usd=(
-                            getattr(agent, "session_estimated_cost_usd", None)
-                            if getattr(agent, "session_cost_status", "") != "unavailable"
-                            else None
-                        ),
-                        cost_status=getattr(agent, "session_cost_status", None),
-                        cost_source=getattr(agent, "session_cost_source", None),
-                    )
-                    true_moa_ledger.set_wave_status(wave_status)
+                    if deferred_persistence_ready and settlement_confirmed:
+                        # The isolated guard projection becomes authoritative
+                        # only after completion won and the terminal durable
+                        # ledger write was confirmed.
+                        trusted_turn.state = guarded_turn_projection["state"]
+                        trusted_turn.states = list(
+                            guarded_turn_projection["states"],
+                        )
+                        trusted_turn.terminal_reason = (
+                            guarded_turn_projection["terminal_reason"]
+                        )
+                        result["_trusted_turn"] = trusted_turn
+                        # Durable final-slot and wave callbacks must succeed
+                        # before any transcript or trajectory is written.
+                        # The completed outcome is sealed by the caller after
+                        # egress finalization; this ordering prevents a failed
+                        # ledger settlement from leaving private session state
+                        # behind without a deliverable result.
+                        from agent.turn_finalizer import (
+                            persist_deferred_true_moa_turn,
+                        )
+
+                        deferred_persistence_errors = (
+                            persist_deferred_true_moa_turn(
+                                agent,
+                                messages=deferred_persistence_messages,
+                                conversation_history=(
+                                    deferred_persistence_history
+                                ),
+                                user_message=user_message,
+                                completed=True,
+                            )
+                        )
+                        if deferred_persistence_errors:
+                            result.setdefault(
+                                "cleanup_errors",
+                                [],
+                            ).extend(deferred_persistence_errors)
+                    elif not deferred_persistence_ready:
+                        result.pop("_trusted_turn", None)
                     usage = _true_moa_usage_summary(true_moa_ledger)
                     result["_true_moa_usage"] = usage["true_moa"]
                 # Include the effective session ID in the result so callers
@@ -9092,29 +9820,47 @@ class APIServerAdapter(BasePlatformAdapter):
                         error_code="completion_stopped",
                     )
                 if true_moa_ledger is not None:
-                    true_moa_controller.cancel()
-                    true_moa_ledger.finish_slot(
-                        FINAL_EXECUTOR_SLOT,
-                        status="cancelled",
-                        usage=true_moa_ledger.final_call_usage(),
-                        error_category="completion_stopped",
+                    if true_moa_controller.state == "running":
+                        true_moa_controller.cancel()
+                    controller_state = true_moa_controller.state
+                    if controller_state == "cancelled":
+                        _begin_true_moa_terminal_settlement(
+                            slot_status="cancelled",
+                            wave_status="cancelled",
+                            error_category="completion_stopped",
+                        )
+                    else:
+                        _begin_true_moa_terminal_settlement(
+                            slot_status="failed",
+                            wave_status="failed",
+                            error_category="terminal_fence",
+                        )
+                    settlement_confirmed = (
+                        _true_moa_terminal_settlement_confirmed()
                     )
-                    true_moa_ledger.set_wave_status("cancelled")
                     usage = _true_moa_usage_summary(true_moa_ledger)
                     return (
                         {
                             "final_response": "",
+                            "messages": [],
                             "completed": False,
                             "failed": True,
-                            "interrupted": True,
-                            "error": "completion stopped",
+                            "interrupted": controller_state == "cancelled",
+                            "error": (
+                                "completion stopped"
+                                if settlement_confirmed
+                                and controller_state == "cancelled"
+                                else "true MoA final settlement failed"
+                                if not settlement_confirmed
+                                else "true MoA final executor failed"
+                            ),
                             "_mystand_request": True,
                             "_true_moa_usage": usage["true_moa"],
                         },
                         usage,
                     )
                 raise
-            except Exception:
+            except BaseException as exc:
                 if metadata_trace is not None:
                     metadata_trace.safe_emit(
                         "request_failed",
@@ -9124,21 +9870,67 @@ class APIServerAdapter(BasePlatformAdapter):
                         error_code="agent_run_failed",
                     )
                 if true_moa_ledger is not None:
-                    true_moa_controller.fail()
-                    true_moa_ledger.finish_slot(
-                        FINAL_EXECUTOR_SLOT,
-                        status="failed",
-                        usage=true_moa_ledger.final_call_usage(),
-                        error_category="final_executor_error",
+                    controller_state = true_moa_controller.state
+                    if controller_state == "running":
+                        if isinstance(
+                            exc,
+                            (KeyboardInterrupt, asyncio.CancelledError),
+                        ):
+                            true_moa_controller.cancel()
+                        else:
+                            true_moa_controller.fail()
+                        controller_state = true_moa_controller.state
+                    if controller_state == "completed":
+                        true_moa_ledger.set_wave_status(
+                            "failed",
+                            notify=False,
+                        )
+                        if true_moa_terminal_notification is None:
+                            _begin_true_moa_terminal_settlement(
+                                slot_status="completed",
+                                wave_status="failed",
+                                error_category=None,
+                            )
+                    elif controller_state == "cancelled":
+                        _begin_true_moa_terminal_settlement(
+                            slot_status="cancelled",
+                            wave_status="cancelled",
+                            error_category="completion_stopped",
+                        )
+                    elif final_deadline_timed_out:
+                        _begin_true_moa_terminal_settlement(
+                            slot_status="timed_out",
+                            wave_status="failed",
+                            error_category="final_executor_timeout",
+                            timeout_final=True,
+                        )
+                    else:
+                        _begin_true_moa_terminal_settlement(
+                            slot_status="failed",
+                            wave_status="failed",
+                            error_category="final_executor_error",
+                        )
+                    settlement_confirmed = (
+                        _true_moa_terminal_settlement_confirmed()
                     )
-                    true_moa_ledger.set_wave_status("failed")
                     usage = _true_moa_usage_summary(true_moa_ledger)
                     return (
                         {
                             "final_response": "",
+                            "messages": [],
                             "completed": False,
                             "failed": True,
-                            "error": "true MoA final executor failed",
+                            "interrupted": controller_state == "cancelled",
+                            "error": (
+                                "true MoA final settlement failed"
+                                if not settlement_confirmed
+                                or controller_state == "completed"
+                                else "completion stopped"
+                                if controller_state == "cancelled"
+                                else "true MoA final executor timed out"
+                                if final_deadline_timed_out
+                                else "true MoA final executor failed"
+                            ),
                             "_mystand_request": True,
                             "_true_moa_usage": usage["true_moa"],
                         },
