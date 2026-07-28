@@ -3002,6 +3002,8 @@ class _IdempotencyCache:
         self._inflight: Dict[tuple[str, str], "asyncio.Task[Any]"] = {}
         self._agent_refs: Dict[tuple[str, str], list] = {}
         self._stopped: Dict[str, float] = {}
+        self._usage_drains: set[str] = set()
+        self._usage_drains_lock = threading.Lock()
         self._ttl = ttl_seconds
         self._max = max_items
         self._durable = None
@@ -3529,6 +3531,33 @@ class _IdempotencyCache:
             return None
         return self._durable.get(key)
 
+    @staticmethod
+    def _has_running_usage_receipt(record: Any) -> bool:
+        usage = record.get("usage") if isinstance(record, dict) else None
+        return bool(
+            isinstance(usage, dict)
+            and any(
+                isinstance(call, dict) and call.get("status") == "running"
+                for call in (usage.get("calls") or ())
+            )
+        )
+
+    def has_active_usage_drain(self, key: str) -> bool:
+        with self._usage_drains_lock:
+            return key in self._usage_drains
+
+    def _sync_usage_drain_owner(self, key: str) -> None:
+        if self._durable is None:
+            return
+        has_running_receipt = self._has_running_usage_receipt(
+            self._durable.get(key),
+        )
+        with self._usage_drains_lock:
+            if has_running_receipt:
+                self._usage_drains.add(key)
+            else:
+                self._usage_drains.discard(key)
+
     def terminalize_orphaned_stopped_usage(
         self,
         key: str,
@@ -3537,6 +3566,9 @@ class _IdempotencyCache:
 
         if self._durable is None:
             return None
+        with self._usage_drains_lock:
+            if key in self._usage_drains:
+                return self._durable.get(key)
         if any(
             existing_key == key and not task.done()
             for (existing_key, _), task in self._inflight.items()
@@ -3589,12 +3621,34 @@ class _IdempotencyCache:
             if state == "failed"
             else "running"
         )
-        self._durable.save_usage(
-            key,
-            fingerprint,
-            ledger,
-            state=durable_state,
+        incoming_has_running_receipt = self._has_running_usage_receipt(
+            {"usage": ledger},
         )
+        with self._usage_drains_lock:
+            was_active = key in self._usage_drains
+            if incoming_has_running_receipt:
+                # Register before SQLite exposes the running receipt.  A
+                # concurrent recovery request can therefore never observe a
+                # durable running call without its same-process owner.
+                self._usage_drains.add(key)
+        try:
+            self._durable.save_usage(
+                key,
+                fingerprint,
+                ledger,
+                state=durable_state,
+            )
+        except BaseException:
+            with self._usage_drains_lock:
+                if was_active:
+                    self._usage_drains.add(key)
+                else:
+                    self._usage_drains.discard(key)
+            raise
+        # Provider workers outlive the outer asyncio request after a stop.
+        # The durable merge is authoritative here: a stale callback cannot
+        # re-register ownership after a newer terminal receipt has landed.
+        self._sync_usage_drain_owner(key)
 
 
 _idem_cache = _IdempotencyCache(
@@ -5939,6 +5993,24 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=404,
             )
         if str(record.get("state") or "") == "stopped":
+            if (
+                _idem_cache.has_active_usage_drain(scoped_key)
+                and _idem_cache._has_running_usage_receipt(record)
+            ):
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "status": "stopped_draining",
+                        "final": False,
+                        "usage": record.get("usage"),
+                        "terminalState": "stopped",
+                        "outcomeStatus": str(
+                            record.get("outcomeState") or "none"
+                        ),
+                        "settlementBlocked": True,
+                    },
+                    status=202,
+                )
             # A replacement process has no provider worker that can finish a
             # pre-restart usage drain.  Atomically close only those orphaned
             # running receipts before projecting recovery; exact late usage
@@ -8598,6 +8670,7 @@ class APIServerAdapter(BasePlatformAdapter):
             if true_moa_snapshot is not None:
                 from xiaoban.trusted_runtime.true_moa import (
                     FINAL_EXECUTOR_SLOT,
+                    TRUE_MOA_ADVISOR_USAGE_DRAIN_TIMEOUT_SECONDS,
                     TRUE_MOA_FINAL_CALL_LIMIT,
                     TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS,
                     TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS,
@@ -8813,6 +8886,9 @@ class APIServerAdapter(BasePlatformAdapter):
                         strict_caller=strict_advisor_call,
                         cancel_controller=true_moa_controller,
                         usage_ledger=true_moa_ledger,
+                        usage_drain_timeout_seconds=(
+                            TRUE_MOA_ADVISOR_USAGE_DRAIN_TIMEOUT_SECONDS
+                        ),
                     )
                 except TrueMoAExecutionError as exc:
                     true_moa_ledger = exc.ledger

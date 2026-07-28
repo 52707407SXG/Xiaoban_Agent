@@ -661,6 +661,99 @@ def test_running_cancel_returns_bounded_then_drains_exact_usage_receipts():
     assert private_text not in json.dumps(final, ensure_ascii=False)
 
 
+def test_running_cancel_uses_a_longer_bounded_usage_receipt_window():
+    controller = TrueMoACancelController()
+    both_started = threading.Event()
+    release_responses = threading.Event()
+    late_usage_persisted = threading.Event()
+    started_ids: set[str] = set()
+    lock = threading.Lock()
+    outcome: list[object] = []
+
+    def _persist(payload):
+        calls = payload.get("calls") or []
+        if (
+            len(calls) == 2
+            and all(
+                call.get("status") == "completed"
+                and call.get("usageStatus") == "reported"
+                for call in calls
+            )
+        ):
+            late_usage_persisted.set()
+
+    ledger = TrueMoAUsageLedger(_snapshot(), on_change=_persist)
+
+    def strict_caller(*, slot, dispatch_callback, **_kwargs):
+        dispatch_callback()
+        with lock:
+            started_ids.add(slot.slot_id)
+            if len(started_ids) == 2:
+                both_started.set()
+        assert release_responses.wait(2)
+        return StrictAdvisorResult(
+            content=f"PRIVATE_DRAINED_TEXT:{slot.slot_id}",
+            usage={
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "total_tokens": 14,
+                "cached_input_tokens": 0,
+            },
+        )
+
+    def run_wave():
+        try:
+            outcome.append(
+                run_true_moa_advisors(
+                    _snapshot(),
+                    current_question="逻辑停止后给真实用量回执更长的有界窗口",
+                    conversation_history=[],
+                    strict_caller=strict_caller,
+                    cancel_controller=controller,
+                    usage_ledger=ledger,
+                    timeout_seconds=0.1,
+                    usage_drain_timeout_seconds=0.6,
+                )
+            )
+        except Exception as exc:
+            outcome.append(exc)
+
+    thread = threading.Thread(target=run_wave, daemon=True)
+    thread.start()
+    assert both_started.wait(1)
+    controller.cancel()
+    thread.join(1)
+
+    assert not thread.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], TrueMoAExecutionError)
+    assert outcome[0].category == "cancelled"
+    assert all(
+        call["status"] == "running"
+        for call in ledger.to_dict()["calls"]
+    )
+
+    # The normal advisor deadline has elapsed, but the separate receipt drain
+    # window still owns both already-dispatched calls.
+    assert not release_responses.wait(0.2)
+    assert all(
+        call["status"] == "running"
+        for call in ledger.to_dict()["calls"]
+    )
+
+    release_responses.set()
+    assert late_usage_persisted.wait(1)
+    final = ledger.to_dict()
+    assert all(
+        call["status"] == "completed"
+        and call["usageStatus"] == "reported"
+        and call["totalTokens"] == 14
+        and call["errorCategory"] == "completed_after_stop"
+        for call in final["calls"]
+    )
+    assert "PRIVATE_DRAINED_TEXT" not in json.dumps(final, ensure_ascii=False)
+
+
 def test_running_cancel_watchdog_terminalizes_unresponsive_actual_calls():
     controller = TrueMoACancelController()
     both_started = threading.Event()

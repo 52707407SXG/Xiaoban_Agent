@@ -1532,6 +1532,171 @@ async def test_stop_before_create_is_scope_bound_and_stops_without_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_same_process_stopped_usage_drain_is_not_terminalized_as_orphan(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    raw_key = f"same-process-stop-drain-{uuid.uuid4().hex}"
+    headers = _mystand_headers(raw_key, epoch="45")
+    scoped_key = adapter._scoped_idempotency_key(headers, raw_key)
+    fingerprint = hashlib.sha256(raw_key.encode()).hexdigest()
+    cache = api_server._IdempotencyCache(
+        max_items=8,
+        ttl_seconds=30,
+        durable_path=str(tmp_path / "same-process-stop-drain.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    ledger = TrueMoAUsageLedger(snapshot, wave_id="d" * 32)
+    running_calls = {}
+    for slot in (KIMI_ADVISOR_SLOT, DEEPSEEK_ADVISOR_SLOT):
+        ledger.start_slot(slot)
+        running_calls[slot] = ledger.start_advisor_call(slot)
+    compute_started = asyncio.Event()
+    release_outer_request = asyncio.Event()
+
+    async def _compute():
+        cache.persist_usage(scoped_key, fingerprint, ledger.to_dict())
+        compute_started.set()
+        await release_outer_request.wait()
+        ledger.set_wave_status("cancelled", notify=False)
+        ledger.terminate_unfinished(
+            status="cancelled",
+            error_category="cancelled",
+            preserve_running_calls=True,
+            notify=False,
+        )
+        pending_usage = ledger.to_dict()
+        cache.persist_usage(scoped_key, fingerprint, pending_usage)
+        return (
+            {
+                "final_response": "",
+                "messages": [],
+                "completed": False,
+                "failed": True,
+                "interrupted": True,
+                "_true_moa_usage": pending_usage,
+            },
+            {"true_moa": pending_usage},
+        )
+
+    outer_task = asyncio.create_task(
+        cache.get_or_set(
+            scoped_key,
+            fingerprint,
+            _compute,
+            agent_ref=[None, False, None],
+            durable=True,
+        )
+    )
+    await compute_started.wait()
+    assert cache.stop(scoped_key, durable=True) is True
+    release_outer_request.set()
+    await outer_task
+    await asyncio.sleep(0)
+
+    # This reproduces the real failure window: the outer asyncio request owner
+    # is already gone, but the same process still owns both provider workers
+    # and must retain their exact usage receipts.
+    assert not cache._inflight
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+    async with TestClient(TestServer(app)) as client:
+        pending_response = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        pending_payload = await pending_response.json()
+        assert pending_response.status == 202
+        assert pending_payload["status"] == "stopped_draining"
+        assert pending_payload["final"] is False
+        assert pending_payload["terminalState"] == "stopped"
+        assert pending_payload["settlementBlocked"] is True
+        assert all(
+            call["status"] == "running"
+            for call in pending_payload["usage"]["calls"]
+        )
+
+        def _finish_receipt(slot, index):
+            usage = {
+                "input_tokens": 10 + index,
+                "output_tokens": 2 + index,
+                "total_tokens": 12 + (index * 2),
+                "cached_input_tokens": 0,
+            }
+            ledger.finish_advisor_call(
+                running_calls[slot],
+                status="completed",
+                usage=usage,
+                error_category="completed_after_stop",
+                notify=False,
+            )
+            ledger.finish_slot(
+                slot,
+                status="cancelled",
+                usage=usage,
+                error_category="late_result_after_terminal",
+                notify=False,
+            )
+
+        _finish_receipt(KIMI_ADVISOR_SLOT, 1)
+        cache.persist_usage(scoped_key, fingerprint, ledger.to_dict())
+        partial_response = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        partial_payload = await partial_response.json()
+        assert partial_response.status == 202
+        assert partial_payload["final"] is False
+        partial_calls = {
+            call["slotId"]: call
+            for call in partial_payload["usage"]["calls"]
+        }
+        assert (
+            partial_calls[KIMI_ADVISOR_SLOT.slot_id]["usageStatus"]
+            == "reported"
+        )
+        assert (
+            partial_calls[DEEPSEEK_ADVISOR_SLOT.slot_id]["status"]
+            == "running"
+        )
+
+        _finish_receipt(DEEPSEEK_ADVISOR_SLOT, 2)
+        cache.persist_usage(scoped_key, fingerprint, ledger.to_dict())
+
+        settled_response = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        settled_payload = await settled_response.json()
+        assert settled_response.status == 200
+        assert settled_payload["status"] == "cancelled"
+        assert settled_payload["settlementBlocked"] is False
+        assert all(
+            call["status"] == "completed"
+            and call["usageStatus"] == "reported"
+            for call in settled_payload["usage"]["calls"]
+        )
+
+    cache._durable.close()
+
+
+@pytest.mark.asyncio
 async def test_create_restart_stop_fences_late_completion_and_keeps_usage(
     monkeypatch,
     tmp_path,

@@ -38,6 +38,7 @@ TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS = 4_096
 TRUE_MOA_FINAL_TIMEOUT_SECONDS = 120.0
 TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS = 5.0
 TRUE_MOA_ADVISOR_SHUTDOWN_GRACE_SECONDS = 0.2
+TRUE_MOA_ADVISOR_USAGE_DRAIN_TIMEOUT_SECONDS = 300.0
 
 TRUE_MOA_FINAL_SYNTHESIS_POLICY = (
     "[MY STAND TRUE MOA - TRUSTED FINAL SYNTHESIS POLICY]\n"
@@ -1083,6 +1084,7 @@ def run_true_moa_advisors(
     cancel_controller: TrueMoACancelController | None = None,
     usage_ledger: TrueMoAUsageLedger | None = None,
     timeout_seconds: float = DEFAULT_ADVISOR_TIMEOUT_SECONDS,
+    usage_drain_timeout_seconds: float | None = None,
     output_max_chars: int = DEFAULT_ADVISOR_OUTPUT_MAX_CHARS,
 ) -> TrueMoAAdvisorBundle:
     """Run exactly one parallel, tool-less call for each fixed advisor slot."""
@@ -1103,6 +1105,15 @@ def run_true_moa_advisors(
         or timeout_seconds <= 0
     ):
         raise TrueMoAContractError("invalid_advisor_timeout")
+    if usage_drain_timeout_seconds is None:
+        usage_drain_timeout_seconds = float(timeout_seconds)
+    if (
+        not isinstance(usage_drain_timeout_seconds, (int, float))
+        or isinstance(usage_drain_timeout_seconds, bool)
+        or not math.isfinite(usage_drain_timeout_seconds)
+        or usage_drain_timeout_seconds < timeout_seconds
+    ):
+        raise TrueMoAContractError("invalid_advisor_usage_drain_timeout")
     if (
         not isinstance(output_max_chars, int)
         or isinstance(output_max_chars, bool)
@@ -1231,7 +1242,7 @@ def run_true_moa_advisors(
             # usage receipt may fill empty accounting fields but cannot reopen
             # the terminal call or publish provider text.
             advisor_call_watchdog = threading.Timer(
-                timeout_seconds,
+                usage_drain_timeout_seconds,
                 _expire_actual_call,
             )
             advisor_call_watchdog.daemon = True
@@ -2001,6 +2012,7 @@ __all__ = [
     "StrictAdvisorResult",
     "TRUE_MOA_ADVISOR_INPUT_MAX_BYTES",
     "TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS",
+    "TRUE_MOA_ADVISOR_USAGE_DRAIN_TIMEOUT_SECONDS",
     "TRUE_MOA_ADVISOR_SHUTDOWN_GRACE_SECONDS",
     "TRUE_MOA_ADVISOR_SLOTS",
     "TRUE_MOA_FINAL_CALL_LIMIT",
