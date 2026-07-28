@@ -9195,9 +9195,13 @@ class APIServerAdapter(BasePlatformAdapter):
                         try:
                             if true_moa_controller is not None:
                                 true_moa_controller.cancel()
-                            _interrupt_true_moa_agent_async(
-                                "Stop requested via My Stand delivery",
-                            )
+                                _interrupt_true_moa_agent_async(
+                                    "Stop requested via My Stand delivery",
+                                )
+                            else:
+                                agent.interrupt(
+                                    "Stop requested via My Stand delivery",
+                                )
                         finally:
                             raise CompletionStoppedError("request stopped before execution")
                 effective_task_id = session_id or str(uuid.uuid4())
@@ -9595,6 +9599,19 @@ class APIServerAdapter(BasePlatformAdapter):
                             ),
                             duration_ms=metadata_trace.elapsed_ms(),
                             tool_count=tool_count,
+                            **(
+                                {
+                                    "error_code": (
+                                        "completion_stopped"
+                                        if result.get("interrupted")
+                                        else "output_truncated"
+                                        if result.get("partial")
+                                        else "agent_error"
+                                    )
+                                }
+                                if failed_result
+                                else {}
+                            ),
                         )
                     return result, usage
                 result = final_stage_payload.get("result")
