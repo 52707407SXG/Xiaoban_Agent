@@ -145,6 +145,20 @@ class ProviderProfile:
         """
         return {}, {}
 
+    def supports_named_tool_choice(
+        self,
+        *,
+        model: str | None = None,
+        reasoning_config: dict | None = None,
+    ) -> bool:
+        """Whether this request may force a specific function by name.
+
+        Most OpenAI-compatible providers support named ``tool_choice``.
+        Providers whose capability changes by model or reasoning mode can
+        override this request-scoped hook without weakening tool exposure.
+        """
+        return True
+
     def get_max_tokens(self, model: str | None) -> int | None:
         """Return the default max_tokens cap for *model*.
 

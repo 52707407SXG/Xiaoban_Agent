@@ -443,6 +443,64 @@ class TestBuildApiKwargsKimiNoTemperatureOverride:
         } == {"web_search", "terminal"}
 
 
+class TestBuildApiKwargsDeepSeekToolChoice:
+    def test_v4_thinking_filters_once_without_named_choice(self, monkeypatch):
+        agent = _make_agent(
+            monkeypatch,
+            "deepseek",
+            base_url="https://api.deepseek.com/v1",
+            model="deepseek-v4-pro",
+        )
+        agent._ephemeral_tool_choice = "web_search"
+
+        first = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+        second = agent._build_api_kwargs([{"role": "user", "content": "again"}])
+
+        assert [item["function"]["name"] for item in first["tools"]] == [
+            "web_search"
+        ]
+        assert "tool_choice" not in first
+        assert {
+            item["function"]["name"] for item in second["tools"]
+        } == {"web_search", "terminal"}
+        assert "tool_choice" not in second
+        assert agent._ephemeral_tool_choice == ""
+
+    @pytest.mark.parametrize(
+        ("model", "reasoning_config"),
+        [
+            ("deepseek-v4-pro", {"enabled": False}),
+            ("deepseek-chat", None),
+            ("deepseek-v3-0324", {"enabled": True, "effort": "high"}),
+        ],
+    )
+    def test_non_thinking_keeps_named_choice(
+        self,
+        monkeypatch,
+        model,
+        reasoning_config,
+    ):
+        agent = _make_agent(
+            monkeypatch,
+            "deepseek",
+            base_url="https://api.deepseek.com/v1",
+            model=model,
+        )
+        agent.reasoning_config = reasoning_config
+        agent._ephemeral_tool_choice = "web_search"
+
+        kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+
+        assert kwargs["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "web_search"},
+        }
+        assert [item["function"]["name"] for item in kwargs["tools"]] == [
+            "web_search"
+        ]
+        assert agent._ephemeral_tool_choice == ""
+
+
 class TestBuildApiKwargsNousPortal:
     def test_includes_nous_product_tags(self, monkeypatch):
         from agent.portal_tags import nous_portal_tags

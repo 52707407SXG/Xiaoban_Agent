@@ -588,13 +588,34 @@ def interruptible_api_call(agent, api_kwargs: dict):
 
 
 
-def _apply_ephemeral_tool_choice(agent, api_kwargs: dict) -> dict:
-    """Force one named evidence tool on the next model call, then return to auto."""
+def _apply_ephemeral_tool_choice(
+    agent,
+    api_kwargs: dict,
+    *,
+    provider_profile=None,
+    model: str | None = None,
+    reasoning_config: dict | None = None,
+) -> dict:
+    """Require one evidence tool for one call using provider capabilities.
+
+    ``_tools_for_ephemeral_choice`` already narrows the request to the required
+    function.  Providers that reject named ``tool_choice`` can therefore keep
+    that single-tool constraint while omitting the unsupported wire field.
+    """
 
     tool_name = str(getattr(agent, "_ephemeral_tool_choice", "") or "").strip()
     if not tool_name or not api_kwargs.get("tools"):
         return api_kwargs
     agent._ephemeral_tool_choice = ""
+    if (
+        provider_profile is not None
+        and not provider_profile.supports_named_tool_choice(
+            model=model,
+            reasoning_config=reasoning_config,
+        )
+    ):
+        api_kwargs.pop("tool_choice", None)
+        return api_kwargs
     api_kwargs["tool_choice"] = {
         "type": "function",
         "function": {"name": tool_name},
@@ -832,7 +853,13 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             supports_reasoning=agent._supports_reasoning_extra_body(),
             qwen_session_metadata=_qwen_meta,
         )
-        return _apply_ephemeral_tool_choice(agent, api_kwargs)
+        return _apply_ephemeral_tool_choice(
+            agent,
+            api_kwargs,
+            provider_profile=_profile,
+            model=agent.model,
+            reasoning_config=agent.reasoning_config,
+        )
 
     # ── Legacy flag path ────────────────────────────────────────────
     # Reached only when get_provider_profile() returns None — i.e. a

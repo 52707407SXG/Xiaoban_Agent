@@ -143,6 +143,49 @@ class TestDeepSeekModelGating:
         assert top_level == {}
 
 
+class TestDeepSeekNamedToolChoice:
+    """Thinking tool calls work, but DeepSeek rejects named ``tool_choice``."""
+
+    @pytest.mark.parametrize(
+        "reasoning_config",
+        [
+            None,
+            {},
+            {"enabled": True},
+            {"enabled": True, "effort": "high"},
+        ],
+    )
+    def test_v4_thinking_does_not_support_named_choice(
+        self, deepseek_profile, reasoning_config
+    ):
+        assert (
+            deepseek_profile.supports_named_tool_choice(
+                model="deepseek-v4-pro",
+                reasoning_config=reasoning_config,
+            )
+            is False
+        )
+
+    def test_v4_disabled_supports_named_choice(self, deepseek_profile):
+        assert (
+            deepseek_profile.supports_named_tool_choice(
+                model="deepseek-v4-pro",
+                reasoning_config={"enabled": False},
+            )
+            is True
+        )
+
+    @pytest.mark.parametrize("model", ["deepseek-chat", "deepseek-v3-0324"])
+    def test_v3_supports_named_choice(self, deepseek_profile, model):
+        assert (
+            deepseek_profile.supports_named_tool_choice(
+                model=model,
+                reasoning_config={"enabled": True, "effort": "high"},
+            )
+            is True
+        )
+
+
 class TestDeepSeekFullKwargsIntegration:
     """End-to-end: the transport's full kwargs match DeepSeek's live wire format.
 

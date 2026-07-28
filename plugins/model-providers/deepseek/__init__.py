@@ -47,6 +47,20 @@ def _model_supports_thinking(model: str | None) -> bool:
 class DeepSeekProfile(ProviderProfile):
     """DeepSeek — extra_body.thinking + top-level reasoning_effort."""
 
+    def supports_named_tool_choice(
+        self,
+        *,
+        model: str | None = None,
+        reasoning_config: dict | None = None,
+    ) -> bool:
+        """DeepSeek V4+ thinking accepts tools but rejects named tool choice."""
+        if not _model_supports_thinking(model):
+            return True
+        return bool(
+            isinstance(reasoning_config, dict)
+            and reasoning_config.get("enabled") is False
+        )
+
     def build_api_kwargs_extras(
         self, *, reasoning_config: dict | None = None, model: str | None = None, **context
     ) -> tuple[dict[str, Any], dict[str, Any]]:
