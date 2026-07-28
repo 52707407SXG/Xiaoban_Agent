@@ -295,6 +295,11 @@ _MYSTAND_STREAM_ATTEMPT_RE = re.compile(r"[0-9]{1,9}")
 _MYSTAND_STREAM_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 _MYSTAND_FACT_REQUIREMENT_HEADER = "X-Xiaoban-Fact-Requirement"
 _MYSTAND_FACT_SIGNATURE_HEADER = "X-Xiaoban-Fact-Signature"
+_MYSTAND_COMPLETION_PROTOCOL_HEADER = "X-Xiaoban-Completion-Protocol"
+_MYSTAND_INVOCATION_FINGERPRINT_HEADER = (
+    "X-Xiaoban-Invocation-Fingerprint"
+)
+_MYSTAND_COMPLETION_PROTOCOL_V2 = "dynamic-evidence-v2"
 _MYSTAND_FACT_SIGNATURE_DOMAIN = b"mystand-fact-requirement-v1\0"
 _MYSTAND_FACT_INDEX_MAX_SCAN_BYTES = 60_000_000
 _MYSTAND_FACT_INDEX_MAX_RESULT_BYTES = 8_000_000
@@ -841,6 +846,39 @@ def _mystand_fact_expected_binding(
         or not binding["session_id"]
     ):
         raise ValueError("fact requirement binding is invalid")
+    return binding
+
+
+def _mystand_completion_expected_binding(
+    headers: Any,
+    *,
+    session_id: str,
+) -> Dict[str, Any]:
+    """Bind dynamic completion to authenticated durable delivery identity."""
+    binding = _mystand_fact_expected_binding(
+        headers,
+        session_id=session_id,
+    )
+    if binding["attempt"] < 1:
+        raise ValueError("completion attempt is invalid")
+    delivery_attempt = _fact_header_value(
+        headers,
+        "X-Xiaoban-Delivery-Attempt",
+    )
+    if (
+        not _MYSTAND_STREAM_ATTEMPT_RE.fullmatch(delivery_attempt)
+        or int(delivery_attempt) != binding["attempt"]
+    ):
+        raise ValueError("completion delivery attempt is invalid")
+    invocation_fingerprint = _fact_header_value(
+        headers,
+        _MYSTAND_INVOCATION_FINGERPRINT_HEADER,
+    ).lower()
+    if not _MYSTAND_STREAM_FINGERPRINT_RE.fullmatch(
+        invocation_fingerprint
+    ):
+        raise ValueError("completion invocation fingerprint is invalid")
+    binding["invocation_fingerprint"] = invocation_fingerprint
     return binding
 
 
@@ -1564,19 +1602,18 @@ def _should_buffer_stream_deltas(
     system_prompt: Any = None,
     conversation_history: Optional[List[Dict[str, Any]]] = None,
     fact_requirement: Optional[Dict[str, Any]] = None,
+    completion_protocol: str = "",
 ) -> bool:
-    """只缓冲当前回合确实要求外部证据的流。
-
-    My Stand 渠道本身不等于业务执行。普通聊天直接流式输出；只有后端
-    可信意图要求资源证据，或 URL/图片读取要求证据时，才在最终核验前
-    缓冲模型文本。
-    """
+    """Buffer signed or dynamic My Stand text until CompletionGuard."""
     mystand_evidence_required = bool(
         mystand_request
-        and _resolve_mystand_initial_tool_choice(
-            user_message,
-            system_prompt,
-            fact_requirement=fact_requirement,
+        and (
+            completion_protocol == _MYSTAND_COMPLETION_PROTOCOL_V2
+            or _resolve_mystand_initial_tool_choice(
+                user_message,
+                system_prompt,
+                fact_requirement=fact_requirement,
+            )
         )
     )
     mystand_write_required = bool(
@@ -1922,6 +1959,15 @@ def _guard_evidence_backed_response(
             result["_mystand_trusted_verification"] = dict(
                 completion.verification
             )
+        elif (
+            result.get("_mystand_completion_protocol")
+            == _MYSTAND_COMPLETION_PROTOCOL_V2
+        ):
+            # The v2 request header grants a capability; it does not turn
+            # ordinary chat, web/file reads, writes, or unrelated trusted
+            # actions into evidence-bound completion outcomes.
+            result.pop("_mystand_completion_protocol", None)
+            result.pop("_mystand_completion_binding", None)
         final_text = completion.text
 
     url_required = _latest_turn_requires_url_evidence(user_message)
@@ -2015,11 +2061,11 @@ def _resolved_mystand_egress_text(
     )
 
 
-def _install_signed_fact_persistence_guard(
+def _install_mystand_completion_persistence_guard(
     agent: Any,
     trusted_turn: Any,
 ) -> None:
-    """Persist only the terminal CompletionGuard projection for a fact turn."""
+    """Persist only the terminal CompletionGuard projection for a bound turn."""
     original_persist = getattr(agent, "_persist_session", None)
     if not callable(original_persist):
         return
@@ -2069,6 +2115,12 @@ def _install_signed_fact_persistence_guard(
         original_persist(safe_messages, conversation_history)
 
     agent._persist_session = _guarded_persist
+
+
+# Compatibility surface for existing signed-fact tests/importers.
+_install_signed_fact_persistence_guard = (
+    _install_mystand_completion_persistence_guard
+)
 
 
 def _normalize_timezone_name(value: Any, default: str = DEFAULT_USER_TIMEZONE) -> str:
@@ -4363,10 +4415,55 @@ class APIServerAdapter(
         history = _trim_chat_history_for_context(history)
 
         fact_requirement: Optional[Dict[str, Any]] = None
+        completion_protocol = _fact_header_value(
+            request.headers,
+            _MYSTAND_COMPLETION_PROTOCOL_HEADER,
+        )
+        completion_invocation_fingerprint = _fact_header_value(
+            request.headers,
+            _MYSTAND_INVOCATION_FINGERPRINT_HEADER,
+        )
+        completion_binding: Dict[str, Any] = {}
         fact_header_present = bool(
             _fact_header_value(request.headers, _MYSTAND_FACT_REQUIREMENT_HEADER)
             or _fact_header_value(request.headers, _MYSTAND_FACT_SIGNATURE_HEADER)
         )
+        if completion_protocol:
+            if (
+                completion_protocol != _MYSTAND_COMPLETION_PROTOCOL_V2
+                or not mystand_request
+                or fact_header_present
+            ):
+                return web.json_response(
+                    _openai_error(
+                        "Invalid My Stand completion protocol",
+                        code="invalid_completion_protocol",
+                    ),
+                    status=400,
+                )
+            try:
+                completion_binding = (
+                    _mystand_completion_expected_binding(
+                        request.headers,
+                        session_id=session_id,
+                    )
+                )
+            except ValueError:
+                return web.json_response(
+                    _openai_error(
+                        "Invalid My Stand completion binding",
+                        code="invalid_completion_binding",
+                    ),
+                    status=400,
+                )
+        elif completion_invocation_fingerprint:
+            return web.json_response(
+                _openai_error(
+                    "Invalid My Stand completion protocol",
+                    code="invalid_completion_protocol",
+                ),
+                status=400,
+            )
         if fact_header_present:
             if not mystand_request:
                 return web.json_response(
@@ -4514,6 +4611,7 @@ class APIServerAdapter(
                     system_prompt=system_prompt,
                     conversation_history=history,
                     fact_requirement=fact_requirement,
+                    completion_protocol=completion_protocol,
                 )
             )
 
@@ -4644,6 +4742,8 @@ class APIServerAdapter(
                             else self._session_events_requested(request)
                         ),
                         fact_requirement=fact_requirement,
+                        completion_protocol=completion_protocol,
+                        completion_binding=completion_binding,
                         true_moa_snapshot=true_moa_snapshot,
                         true_moa_usage_callback=(
                             (
@@ -4766,6 +4866,8 @@ class APIServerAdapter(
                     ),
                     agent_ref=agent_ref,
                     fact_requirement=fact_requirement,
+                    completion_protocol=completion_protocol,
+                    completion_binding=completion_binding,
                     true_moa_snapshot=true_moa_snapshot,
                     true_moa_usage_callback=true_moa_usage_callback,
                 )
@@ -5202,6 +5304,7 @@ class APIServerAdapter(
                 and not run_terminal_failure
             ):
                 fact_verification = result.get("_mystand_trusted_verification")
+                verification_emitted = False
                 if isinstance(fact_verification, dict):
                     await response.write(
                         (
@@ -5209,7 +5312,7 @@ class APIServerAdapter(
                             f"data: {json.dumps(fact_verification, ensure_ascii=False)}\n\n"
                         ).encode()
                     )
-                    fact_verification = None
+                    verification_emitted = True
                 trusted_turn = result.get("_trusted_turn")
                 verified_evidence = [
                     item
@@ -5219,7 +5322,15 @@ class APIServerAdapter(
                 ]
                 request_id = str(getattr(trusted_turn, "request_id", "") or "")
                 if (
-                    not isinstance(result.get("_mystand_fact_requirement"), dict)
+                    not verification_emitted
+                    and result.get("_mystand_completion_protocol")
+                    != _MYSTAND_COMPLETION_PROTOCOL_V2
+                    and getattr(trusted_turn, "completion_protocol", "")
+                    != _MYSTAND_COMPLETION_PROTOCOL_V2
+                    and not isinstance(
+                        result.get("_mystand_fact_requirement"),
+                        dict,
+                    )
                     and result.get("_mystand_completion_allowed") is True
                     and trusted_turn is not None
                     and verified_evidence
@@ -6989,6 +7100,7 @@ class APIServerAdapter(
             "X-Xiaoban-MoA-Preset-Id",
             "X-Xiaoban-MoA-Preset-Revision",
             "X-Xiaoban-Attempt",
+            "X-Xiaoban-Delivery-Attempt",
             "X-Xiaoban-Email-Allowed",
             "X-Xiaoban-Async-Delivery",
             "X-Xiaoban-Session-Events",
@@ -6998,6 +7110,8 @@ class APIServerAdapter(
             "X-User-Locale",
             _MYSTAND_FACT_REQUIREMENT_HEADER,
             _MYSTAND_FACT_SIGNATURE_HEADER,
+            _MYSTAND_COMPLETION_PROTOCOL_HEADER,
+            _MYSTAND_INVOCATION_FINGERPRINT_HEADER,
         )
         mystand_request = cls._header_present(headers, "X-Xiaoban-Toolset-Policy")
         if mystand_request:
@@ -7086,6 +7200,38 @@ class APIServerAdapter(
                 getattr(snapshot, "preset_revision", "") or ""
             ),
         }
+        completion_protocol = cls._header_value(
+            headers,
+            _MYSTAND_COMPLETION_PROTOCOL_HEADER,
+        )
+        invocation_fingerprint = cls._header_value(
+            headers,
+            _MYSTAND_INVOCATION_FINGERPRINT_HEADER,
+        ).lower()
+        if completion_protocol or invocation_fingerprint:
+            delivery_attempt = cls._header_value(
+                headers,
+                "X-Xiaoban-Delivery-Attempt",
+            )
+            if (
+                completion_protocol != _MYSTAND_COMPLETION_PROTOCOL_V2
+                or not _MYSTAND_STREAM_FINGERPRINT_RE.fullmatch(
+                    invocation_fingerprint
+                )
+                or not _MYSTAND_STREAM_ATTEMPT_RE.fullmatch(
+                    delivery_attempt
+                )
+                or int(delivery_attempt) != attempt
+            ):
+                raise InvalidToolsetPolicy(
+                    "Invalid true MoA outcome binding"
+                )
+            binding.update(
+                {
+                    "completionProtocol": completion_protocol,
+                    "invocationFingerprint": invocation_fingerprint,
+                }
+            )
         try:
             return project_true_moa_outcome_binding(binding)
         except ValueError as exc:

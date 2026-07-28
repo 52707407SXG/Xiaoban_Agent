@@ -46,6 +46,8 @@ class TrueMoARunRequest:
     request_headers: Any
     async_delivery: bool
     fact_requirement: Optional[Dict[str, Any]]
+    completion_protocol: str
+    completion_binding: Dict[str, Any]
     true_moa_snapshot: Any
     true_moa_usage_callback: Any
     request_user_id: str
@@ -179,6 +181,8 @@ class TrueMoARunWorkflow(
                         or request.fact_requirement
                     ),
                     fact_requirement=request.fact_requirement,
+                    completion_protocol=request.completion_protocol,
+                    completion_binding=request.completion_binding,
                 )
                 trusted_turn_token = activate_turn(trusted_turn)
         except Exception:

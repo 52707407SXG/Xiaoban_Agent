@@ -87,6 +87,14 @@ _OUTCOME_BINDING_FIELDS = {
     "presetId",
     "presetRevision",
 }
+_OUTCOME_DYNAMIC_BINDING_FIELDS = _OUTCOME_BINDING_FIELDS | {
+    "completionProtocol",
+    "invocationFingerprint",
+}
+_DYNAMIC_COMPLETION_PROTOCOL = "dynamic-evidence-v2"
+_DYNAMIC_VERIFICATION_SCHEMA = (
+    "mystand.xiaoban-completion-verification.v2"
+)
 
 
 def _durable_max_rows() -> int:
@@ -256,8 +264,13 @@ def _validated_outcome_ttl(value: int | None) -> int:
 def project_true_moa_outcome_binding(
     value: Mapping[str, Any],
 ) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or set(value) != _OUTCOME_BINDING_FIELDS:
+    field_names = frozenset(value) if isinstance(value, Mapping) else frozenset()
+    if field_names not in {
+        frozenset(_OUTCOME_BINDING_FIELDS),
+        frozenset(_OUTCOME_DYNAMIC_BINDING_FIELDS),
+    }:
         raise ValueError("invalid true MoA outcome binding")
+    dynamic_binding = field_names == frozenset(_OUTCOME_DYNAMIC_BINDING_FIELDS)
     projected = {
         "schema": str(value.get("schema") or ""),
         "siteId": str(value.get("siteId") or ""),
@@ -275,6 +288,13 @@ def project_true_moa_outcome_binding(
         "presetId": str(value.get("presetId") or ""),
         "presetRevision": str(value.get("presetRevision") or ""),
     }
+    if dynamic_binding:
+        projected["completionProtocol"] = str(
+            value.get("completionProtocol") or ""
+        )
+        projected["invocationFingerprint"] = str(
+            value.get("invocationFingerprint") or ""
+        ).lower()
     if (
         projected["schema"] != TRUE_MOA_OUTCOME_BINDING_SCHEMA
         or not re.fullmatch(
@@ -299,6 +319,17 @@ def project_true_moa_outcome_binding(
         or not _MODE_EPOCH.fullmatch(projected["modeEpoch"])
         or projected["presetId"] != "mystand-true-moa-v1"
         or projected["presetRevision"] != "2026-07-27.1"
+        or (
+            dynamic_binding
+            and (
+                projected["completionProtocol"]
+                != _DYNAMIC_COMPLETION_PROTOCOL
+                or projected["attempt"] < 1
+                or not _OUTCOME_DIGEST.fullmatch(
+                    projected["invocationFingerprint"]
+                )
+            )
+        )
     ):
         raise ValueError("invalid true MoA outcome binding")
     return projected
@@ -321,6 +352,106 @@ def _project_trusted_verification(
         projected = json.loads(encoded.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("invalid true MoA trusted verification") from exc
+    if (
+        isinstance(projected, dict)
+        and projected.get("schema") == _DYNAMIC_VERIFICATION_SCHEMA
+    ):
+        expected_fields = {
+            "schema",
+            "completion_kind",
+            "binding_verified",
+            "semantic_verified",
+            "delivery_id",
+            "request_id",
+            "attempt",
+            "message_id",
+            "request_fingerprint",
+            "invocation_fingerprint",
+            "datascope_fingerprint",
+            "action_count",
+            "evidence_count",
+            "output_digest",
+            "decision",
+            "verified_at",
+            "index_count",
+            "index_has_more",
+            "index_receipt_digest",
+            "index_resource_refs_digest",
+            "record_refs",
+            "record_refs_digest",
+            "evidence_digest",
+        }
+        record_refs = projected.get("record_refs")
+        if (
+            set(projected) != expected_fields
+            or projected.get("completion_kind") != "evidence-bound"
+            or projected.get("binding_verified") is not True
+            or projected.get("semantic_verified") is not False
+            or isinstance(projected.get("action_count"), bool)
+            or projected.get("action_count") != 2
+            or isinstance(projected.get("evidence_count"), bool)
+            or projected.get("evidence_count") != 1
+            or isinstance(projected.get("attempt"), bool)
+            or not isinstance(projected.get("attempt"), int)
+            or projected.get("decision") != "projected_evidence"
+            or projected.get("index_has_more") is not False
+            or isinstance(projected.get("index_count"), bool)
+            or not isinstance(projected.get("index_count"), int)
+            or projected["index_count"] < 1
+            or not isinstance(record_refs, list)
+            or not record_refs
+            or len(record_refs) > projected["index_count"]
+            or record_refs != sorted(set(record_refs))
+            or any(
+                not isinstance(ref, str)
+                or not ref
+                or len(ref) > 240
+                or re.search(r"[\r\n\x00]", ref)
+                for ref in record_refs
+            )
+            or any(
+                not _OUTCOME_DIGEST.fullmatch(
+                    str(projected.get(name) or "")
+                )
+                for name in (
+                    "request_fingerprint",
+                    "invocation_fingerprint",
+                    "output_digest",
+                    "index_receipt_digest",
+                    "index_resource_refs_digest",
+                    "record_refs_digest",
+                    "evidence_digest",
+                )
+            )
+            or projected.get("output_digest") != output_digest
+            or projected.get("record_refs_digest")
+            != hashlib.sha256(
+                _canonical_json_bytes(record_refs)
+            ).hexdigest()
+            or not isinstance(projected.get("verified_at"), str)
+            or not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+                r"(?:\.\d+)?Z",
+                projected["verified_at"],
+            )
+            or not isinstance(binding, Mapping)
+            or binding.get("completionProtocol")
+            != _DYNAMIC_COMPLETION_PROTOCOL
+            or projected.get("delivery_id") != binding.get("deliveryId")
+            or projected.get("request_id") != binding.get("deliveryId")
+            or projected.get("message_id") != binding.get("messageId")
+            or projected.get("attempt") != binding.get("attempt")
+            or projected.get("request_fingerprint")
+            != binding.get("requestFingerprint")
+            or projected.get("invocation_fingerprint")
+            != binding.get("invocationFingerprint")
+            or projected.get("datascope_fingerprint")
+            != binding.get("datascopeFingerprint")
+        ):
+            raise TrueMoAOutcomeBindingError(
+                "true MoA dynamic verification binding mismatch"
+            )
+        return projected
     if (
         not isinstance(projected, dict)
         or projected.get("schema")
@@ -360,6 +491,8 @@ def project_true_moa_completed_outcome(
     }
     if value.get("trustedVerification") is not None:
         expected.add("trustedVerification")
+    if "completionProtocol" in value:
+        expected.add("completionProtocol")
     if set(value) != expected:
         raise ValueError("invalid true MoA completed outcome")
     final_response = value.get("finalResponse")
@@ -368,6 +501,7 @@ def project_true_moa_completed_outcome(
     final_bytes = final_response.encode("utf-8")
     output_digest = str(value.get("outputDigest") or "").lower()
     fact_guard_required = value.get("factGuardRequired")
+    completion_protocol = str(value.get("completionProtocol") or "")
     projected_binding = (
         project_true_moa_outcome_binding(binding)
         if binding is not None
@@ -381,6 +515,10 @@ def project_true_moa_completed_outcome(
         or not _OUTCOME_DIGEST.fullmatch(output_digest)
         or output_digest != hashlib.sha256(final_bytes).hexdigest()
         or not isinstance(fact_guard_required, bool)
+        or (
+            "completionProtocol" in value
+            and completion_protocol != _DYNAMIC_COMPLETION_PROTOCOL
+        )
     ):
         raise ValueError("invalid true MoA completed outcome")
     verification = _project_trusted_verification(
@@ -390,6 +528,21 @@ def project_true_moa_completed_outcome(
     )
     if fact_guard_required and verification is None:
         raise ValueError("true MoA fact outcome lacks trusted verification")
+    if completion_protocol:
+        if (
+            fact_guard_required
+            or verification is None
+            or verification.get("schema") != _DYNAMIC_VERIFICATION_SCHEMA
+            or projected_binding is None
+            or projected_binding.get("completionProtocol")
+            != _DYNAMIC_COMPLETION_PROTOCOL
+        ):
+            raise ValueError("invalid true MoA dynamic completion outcome")
+    elif (
+        verification is not None
+        and verification.get("schema") == _DYNAMIC_VERIFICATION_SCHEMA
+    ):
+        raise ValueError("dynamic verification lacks completion protocol")
     projected: dict[str, Any] = {
         "schema": TRUE_MOA_COMPLETED_OUTCOME_SCHEMA,
         "completed": True,
@@ -397,6 +550,8 @@ def project_true_moa_completed_outcome(
         "outputDigest": output_digest,
         "factGuardRequired": fact_guard_required,
     }
+    if completion_protocol:
+        projected["completionProtocol"] = completion_protocol
     if verification is not None:
         projected["trustedVerification"] = verification
     if len(_canonical_json_bytes(projected)) > TRUE_MOA_OUTCOME_MAX_PLAINTEXT_BYTES:

@@ -383,6 +383,13 @@ class TrueMoAHttpHandlersMixin:
             verification = recovered_outcome.get("trustedVerification")
             if isinstance(verification, dict):
                 public_outcome["trustedVerification"] = verification
+            if (
+                recovered_outcome.get("completionProtocol")
+                == "dynamic-evidence-v2"
+            ):
+                public_outcome["completionProtocol"] = (
+                    "dynamic-evidence-v2"
+                )
             response_payload["outcome"] = public_outcome
             response_payload["outcomeId"] = recovered_outcome["outcomeId"]
             response_payload["retentionOverdue"] = bool(

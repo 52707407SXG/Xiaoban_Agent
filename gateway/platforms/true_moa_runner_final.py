@@ -14,7 +14,7 @@ from gateway.platforms.api_server import (
     _build_guarded_fact_persistence_transcript,
     _build_mystand_preexecuted_prompt,
     _finalize_mystand_egress_result,
-    _install_signed_fact_persistence_guard,
+    _install_mystand_completion_persistence_guard,
     _required_mystand_evidence_groups,
     _resolved_mystand_egress_text,
     _tool_result_looks_successful,
@@ -100,7 +100,12 @@ class TrueMoARunnerFinalMixin:
             # only writes prose and cannot branch into another business tool.
             self.agent.tools = []
             self.agent.valid_tool_names = set()
-            _install_signed_fact_persistence_guard(
+            _install_mystand_completion_persistence_guard(
+                self.agent,
+                trusted_turn,
+            )
+        elif request.completion_protocol:
+            _install_mystand_completion_persistence_guard(
                 self.agent,
                 trusted_turn,
             )
@@ -157,6 +162,13 @@ class TrueMoARunnerFinalMixin:
             if request.fact_requirement is not None:
                 result["_mystand_fact_requirement"] = (
                     request.fact_requirement
+                )
+            if request.completion_protocol:
+                result["_mystand_completion_protocol"] = (
+                    request.completion_protocol
+                )
+                result["_mystand_completion_binding"] = dict(
+                    request.completion_binding
                 )
         if initial_tool_choice:
             result["_mystand_required_evidence_groups"] = [
@@ -387,6 +399,13 @@ class TrueMoARunnerFinalMixin:
             if request.fact_requirement is not None:
                 result["_mystand_fact_requirement"] = (
                     request.fact_requirement
+                )
+            if request.completion_protocol:
+                result["_mystand_completion_protocol"] = (
+                    request.completion_protocol
+                )
+                result["_mystand_completion_binding"] = dict(
+                    request.completion_binding
                 )
         if initial_tool_choice:
             result["_mystand_required_evidence_groups"] = [

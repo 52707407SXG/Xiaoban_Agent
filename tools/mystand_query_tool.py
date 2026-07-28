@@ -356,6 +356,76 @@ def _post_internal(payload: dict, session: dict) -> str:
         "Accept": "application/json",
         "X-Xiaoban-User-Id": safe_user_id,
     }
+    try:
+        from xiaoban.trusted_runtime.turns import current_turn
+        from xiaoban.trusted_runtime.types import (
+            MYSTAND_COMPLETION_BINDING_FIELDS,
+            MYSTAND_COMPLETION_PROTOCOL_V2,
+        )
+
+        turn = current_turn()
+    except Exception:
+        turn = None
+    if turn is not None and turn.completion_protocol:
+        binding = (
+            dict(turn.completion_binding)
+            if isinstance(turn.completion_binding, dict)
+            else {}
+        )
+        attempt = binding.get("attempt")
+        if (
+            turn.completion_protocol != MYSTAND_COMPLETION_PROTOCOL_V2
+            or set(binding) != MYSTAND_COMPLETION_BINDING_FIELDS
+            or binding.get("user_id") != safe_user_id
+            or binding.get("session_id") != session.get("session_id")
+            or binding.get("delivery_id") != turn.request_id
+            or binding.get("message_id") != turn.message_id
+            or binding.get("message_id") != session.get("message_id")
+            or isinstance(attempt, bool)
+            or not isinstance(attempt, int)
+            or attempt < 1
+            or not re.fullmatch(
+                r"xbd_[0-9a-f]{40}",
+                str(binding.get("delivery_id") or ""),
+            )
+            or not re.fullmatch(
+                r"[a-f0-9]{64}",
+                str(binding.get("request_fingerprint") or ""),
+            )
+            or not re.fullmatch(
+                r"[a-f0-9]{64}",
+                str(binding.get("invocation_fingerprint") or ""),
+            )
+            or not re.fullmatch(
+                r"[a-f0-9]{16}",
+                str(binding.get("datascope_fingerprint") or ""),
+            )
+        ):
+            return _error(
+                "本轮事实查询没有通过可信完成绑定。",
+                code="trusted_completion_binding_required",
+                status=409,
+            )
+        headers.update(
+            {
+                "X-Xiaoban-Completion-Protocol": (
+                    MYSTAND_COMPLETION_PROTOCOL_V2
+                ),
+                "X-Xiaoban-Delivery-Id": binding["delivery_id"],
+                "X-Xiaoban-Delivery-Attempt": str(attempt),
+                "X-Xiaoban-Attempt": str(attempt),
+                "X-Xiaoban-Message-Id": binding["message_id"],
+                "X-Xiaoban-Request-Fingerprint": (
+                    binding["request_fingerprint"]
+                ),
+                "X-Xiaoban-Invocation-Fingerprint": (
+                    binding["invocation_fingerprint"]
+                ),
+                "X-Xiaoban-Datascope-Fingerprint": (
+                    binding["datascope_fingerprint"]
+                ),
+            }
+        )
     for header_name, session_key in (
         ("X-Xiaoban-Message-Id", "message_id"),
         ("X-Xiaoban-Session-Id", "session_id"),

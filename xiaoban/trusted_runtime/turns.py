@@ -19,6 +19,7 @@ import contextvars
 import copy
 import hashlib
 import json
+import re
 import uuid
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
@@ -29,6 +30,8 @@ from xiaoban.trusted_runtime.types import (
     ActionOutputContract,
     EvidenceEnvelope,
     IndexReceipt,
+    MYSTAND_COMPLETION_BINDING_FIELDS,
+    MYSTAND_COMPLETION_PROTOCOL_V2,
     PreActionDecision,
     TrustedIdentity,
     WorkTurn,
@@ -327,6 +330,8 @@ def begin_turn(
     message_id: str = "",
     evidence_required: bool = False,
     fact_requirement: Optional[Mapping[str, Any]] = None,
+    completion_protocol: str = "",
+    completion_binding: Optional[Mapping[str, Any]] = None,
 ) -> WorkTurn:
     """服务端开回合：稳定 request/message ID + 服务端解析身份。"""
     turn_id = hashlib.sha256(
@@ -339,6 +344,40 @@ def begin_turn(
         if isinstance(fact_requirement, Mapping)
         else None
     )
+    protocol = str(completion_protocol or "")
+    bound_completion = (
+        copy.deepcopy(dict(completion_binding))
+        if isinstance(completion_binding, Mapping)
+        else {}
+    )
+    if protocol:
+        if (
+            protocol != MYSTAND_COMPLETION_PROTOCOL_V2
+            or bound_requirement is not None
+            or set(bound_completion) != MYSTAND_COMPLETION_BINDING_FIELDS
+            or identity is None
+            or bound_completion.get("user_id") != identity.account_id
+            or bound_completion.get("datascope_fingerprint")
+            != identity.datascope_fingerprint
+            or bound_completion.get("delivery_id") != request_id
+            or bound_completion.get("message_id") != message_id
+            or not isinstance(bound_completion.get("session_id"), str)
+            or not bound_completion["session_id"]
+            or isinstance(bound_completion.get("attempt"), bool)
+            or not isinstance(bound_completion.get("attempt"), int)
+            or bound_completion["attempt"] < 1
+            or not re.fullmatch(
+                r"[a-f0-9]{64}",
+                str(bound_completion.get("request_fingerprint") or ""),
+            )
+            or not re.fullmatch(
+                r"[a-f0-9]{64}",
+                str(bound_completion.get("invocation_fingerprint") or ""),
+            )
+        ):
+            raise ValueError("invalid My Stand completion binding")
+    elif bound_completion:
+        raise ValueError("completion binding requires a protocol")
     turn = WorkTurn(
         turn_id=turn_id,
         request_id=request_id,
@@ -351,6 +390,8 @@ def begin_turn(
             evidence_required=bool(evidence_required or fact_requirement),
         ),
         index_receipt=None,
+        completion_protocol=protocol,
+        completion_binding=bound_completion,
         fact_requirement=bound_requirement,
         fact_requirement_digest=(
             _canonical_digest(bound_requirement)

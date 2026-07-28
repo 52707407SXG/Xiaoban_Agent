@@ -16,6 +16,14 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any, List, Mapping, Optional, Sequence
 
+from xiaoban.trusted_runtime.dynamic_completion import (
+    NO_EVIDENCE_MESSAGE,
+    check_dynamic_completion,
+    dynamic_result_turn_binding_valid,
+    evidence_receipt_digest as _evidence_receipt_digest,
+    project_dynamic_answer,
+    validate_dynamic_result_protocol,
+)
 from xiaoban.trusted_runtime.turns import (
     build_work_turn,
     result_has_write_actions,
@@ -37,9 +45,6 @@ from xiaoban.trusted_runtime.types import (
 )
 
 # 用户可见安全文案：自然、简短，不含内部 ID、规则名或技术栈。
-NO_EVIDENCE_MESSAGE = (
-    "这轮我没有真正查到站内资料，所以不能给出具体的资料内容、数值或状态。"
-)
 INCOMPLETE_COLLECTION_MESSAGE = (
     "这轮没有取得完整且可验证的站内证据，不能给出这项业务事实。"
 )
@@ -75,36 +80,6 @@ def _canonical_digest(value: Any) -> str:
 
 def _blocked_collection(reason: str) -> CompletionDecision:
     return CompletionDecision(False, INCOMPLETE_COLLECTION_MESSAGE, reason)
-
-
-def _evidence_receipt_digest(items: Sequence[Any]) -> str:
-    return _canonical_digest(
-        [
-            {
-                "evidence_id": item.evidence_id,
-                "turn_id": item.turn_id,
-                "call_id": item.call_id,
-                "action_id": item.action_id,
-                "datascope_fingerprint": item.datascope_fingerprint,
-                "status": item.status,
-                "allowed_facts": item.allowed_facts,
-                "record_refs": item.record_refs,
-                "input_digest": item.input_digest,
-                "output_digest": item.output_digest,
-                "requirement_digest": item.requirement_digest,
-                "coverage_digest": item.coverage_digest,
-                "verification_status": item.verification_status,
-            }
-            for item in sorted(
-                items,
-                key=lambda item: (
-                    str(item.call_id),
-                    str(item.action_id),
-                    str(item.evidence_id),
-                ),
-            )
-        ]
-    )
 
 
 def _receipt_coverage(
@@ -775,6 +750,10 @@ def project_answer(turn: WorkTurn) -> str:
     索引只负责资源发现（记录在 IndexReceipt），公开业务事实只从
     业务读取动作的 content 字段投影。
     """
+    dynamic_projected = project_dynamic_answer(turn)
+    if dynamic_projected is not None:
+        return dynamic_projected
+
     parts: List[str] = []
     for item in turn.evidence:
         try:
@@ -827,6 +806,12 @@ def check_completion(final_text: str, turn: WorkTurn) -> CompletionDecision:
     """对最终公开回答做确定性检查；阻断时给出安全文案与结构化原因。"""
     try:
         text = str(final_text or "")
+        dynamic_decision = check_dynamic_completion(
+            turn,
+            failure_message=_failure_message(turn),
+        )
+        if dynamic_decision is not None:
+            return dynamic_decision
         if turn.interaction_kind == INTERACTION_CHAT:
             return CompletionDecision(True, text, "allowed_chat")
 
@@ -841,8 +826,16 @@ def check_completion(final_text: str, turn: WorkTurn) -> CompletionDecision:
             # 模型文本里的新增实体/关系/状态不会进入公开回答。
             projected = project_answer(turn)
             if projected:
-                return CompletionDecision(True, projected, "projected_evidence")
-            return CompletionDecision(False, NO_EVIDENCE_MESSAGE, "blocked_no_evidence")
+                return CompletionDecision(
+                    True,
+                    projected,
+                    "projected_evidence",
+                )
+            return CompletionDecision(
+                False,
+                NO_EVIDENCE_MESSAGE,
+                "blocked_no_evidence",
+            )
 
         if not turn.action_calls:
             reason = "blocked_no_action_call"
@@ -899,6 +892,12 @@ def check_mystand_final_answer(
     if not isinstance(result, Mapping) or result.get("_mystand_request") is not True:
         return CompletionDecision(True, str(final_text or ""), "not_mystand")
     signed_fact_requirement = result.get("_mystand_fact_requirement")
+    dynamic_completion, protocol_rejection = validate_dynamic_result_protocol(
+        result,
+        signed_fact_requirement,
+    )
+    if protocol_rejection is not None:
+        return protocol_rejection
     if (
         isinstance(signed_fact_requirement, Mapping)
         and not isinstance(result.get("_trusted_turn"), WorkTurn)
@@ -907,6 +906,15 @@ def check_mystand_final_answer(
             False,
             INCOMPLETE_COLLECTION_MESSAGE,
             "blocked_fact_missing_trusted_turn",
+        )
+    if dynamic_completion and not isinstance(
+        result.get("_trusted_turn"),
+        WorkTurn,
+    ):
+        return CompletionDecision(
+            False,
+            NO_EVIDENCE_MESSAGE,
+            "blocked_completion_missing_trusted_turn",
         )
     if result_has_write_actions(result):
         if isinstance(signed_fact_requirement, Mapping):
@@ -929,6 +937,15 @@ def check_mystand_final_answer(
     )
     turn = result.get("_trusted_turn")
     if isinstance(turn, WorkTurn):
+        if dynamic_completion and not dynamic_result_turn_binding_valid(
+            result,
+            turn,
+        ):
+            return CompletionDecision(
+                False,
+                NO_EVIDENCE_MESSAGE,
+                "blocked_completion_binding_rebind",
+            )
         if isinstance(signed_fact_requirement, Mapping) and (
             not turn.fact_requirement_digest
             or turn.fact_requirement_digest

@@ -63,6 +63,23 @@ TURN_STATES = (
 INTERACTION_CHAT = "CHAT"
 INTERACTION_WORK = "WORK"
 
+MYSTAND_COMPLETION_PROTOCOL_V2 = "dynamic-evidence-v2"
+MYSTAND_COMPLETION_VERIFICATION_SCHEMA_V2 = (
+    "mystand.xiaoban-completion-verification.v2"
+)
+MYSTAND_COMPLETION_BINDING_FIELDS = frozenset(
+    {
+        "user_id",
+        "session_id",
+        "delivery_id",
+        "attempt",
+        "message_id",
+        "request_fingerprint",
+        "invocation_fingerprint",
+        "datascope_fingerprint",
+    }
+)
+
 
 @dataclass(frozen=True)
 class CommandEnvelope:
@@ -246,6 +263,8 @@ class WorkTurn:
     identity: Optional[TrustedIdentity]
     interaction_kind: str
     index_receipt: Optional[IndexReceipt]
+    completion_protocol: str = ""
+    completion_binding: Dict[str, Any] = field(default_factory=dict)
     fact_requirement: Optional[Dict[str, Any]] = None
     fact_requirement_digest: str = ""
     collection_evidence: Optional[Dict[str, Any]] = None

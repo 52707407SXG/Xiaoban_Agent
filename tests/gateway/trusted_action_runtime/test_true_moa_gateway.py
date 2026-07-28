@@ -2637,6 +2637,51 @@ async def _run_gateway_case(case, **kwargs):
     )
 
 
+@pytest.mark.asyncio
+async def test_dynamic_v2_true_moa_no_tool_chat_keeps_legacy_outcome(
+    monkeypatch,
+):
+    from gateway.platforms.api_server import (
+        _mystand_completion_expected_binding,
+    )
+    from gateway.platforms.true_moa_idempotency import _IdempotencyCache
+
+    case = _gateway_case(monkeypatch)
+    _adapter_instance, headers, _snapshot, _agent = case
+    delivery_id = "xbd_" + ("9" * 40)
+    headers.update(
+        {
+            "Idempotency-Key": delivery_id,
+            "X-Xiaoban-Delivery-Id": delivery_id,
+            "X-Xiaoban-Attempt": "1",
+            "X-Xiaoban-Delivery-Attempt": "1",
+            "X-Xiaoban-Completion-Protocol": "dynamic-evidence-v2",
+            "X-Xiaoban-Invocation-Fingerprint": "8" * 64,
+        }
+    )
+    completion_binding = _mystand_completion_expected_binding(
+        headers,
+        session_id="gateway-test-session",
+    )
+
+    result, usage = await _run_gateway_case(
+        case,
+        user_message="只聊一句，不查资料",
+        session_id="gateway-test-session",
+        completion_protocol="dynamic-evidence-v2",
+        completion_binding=completion_binding,
+    )
+
+    assert result["completed"] is True
+    assert result["final_response"] == "fake final synthesis"
+    assert usage["true_moa"]["status"] == "completed"
+    assert "_mystand_completion_protocol" not in result
+    assert "_mystand_trusted_verification" not in result
+    payload = _IdempotencyCache._completed_outcome_payload(result)
+    assert "completionProtocol" not in payload
+    assert "trustedVerification" not in payload
+
+
 def _final_slot(usage: dict) -> dict:
     return {
         item["slotId"]: item for item in usage["true_moa"]["slots"]
