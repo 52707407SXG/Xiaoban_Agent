@@ -29,6 +29,15 @@ from agent.display import (
     _detect_tool_failure,
 )
 from agent.tool_guardrails import ToolGuardrailDecision
+from agent.true_moa_tool_fence import (
+    begin_strict_tool_handler as _begin_strict_tool_handler,
+    claim_strict_tool_dispatch as _claim_strict_tool_dispatch,
+    claim_strict_tool_execute as _claim_strict_tool_execute,
+    claim_strict_tool_result as _claim_strict_tool_result,
+    strict_extension_hook_kwargs as _strict_extension_hook_kwargs,
+    strict_tool_mode as _strict_tool_mode,
+    strict_tool_terminal_stopped as _strict_tool_terminal_stopped,
+)
 from agent.tool_dispatch_helpers import (
     _is_destructive_command,
     _is_multimodal_tool_result,
@@ -109,7 +118,7 @@ def _emit_terminal_post_tool_call(
     error_message: str | None = None,
     middleware_trace: Optional[list[dict[str, Any]]] = None,
 ) -> None:
-    if getattr(agent, "_strict_no_automatic_paid_retry", False):
+    if _strict_tool_mode(agent):
         return
     try:
         from model_tools import _emit_post_tool_call_hook
@@ -140,82 +149,6 @@ def _cancelled_tool_result(reason: str = "user interrupt") -> str:
         },
         ensure_ascii=False,
     )
-
-
-def _claim_strict_tool_dispatch(agent, tool_call_id: str) -> bool:
-    """Atomically fence a true-MoA tool handler against terminal stop.
-
-    Normal turns never enter this gate.  Strict unit tests that construct an
-    agent without the request controller retain the historical boolean
-    interrupt check, while real true-MoA requests use the controller lock that
-    is shared with provider dispatch and ``/stop``.
-    """
-
-    if not getattr(agent, "_strict_no_automatic_paid_retry", False):
-        return True
-    if getattr(agent, "_interrupt_requested", False):
-        return False
-    controller = getattr(agent, "_true_moa_cancel_controller", None)
-    if controller is None:
-        return True
-    return controller.try_begin_dispatch(f"final-tool:{tool_call_id}")
-
-
-def _claim_strict_tool_handler(agent, tool_call_id: str) -> bool:
-    """Linearize the actual handler start after preflight work.
-
-    The earlier admission gate protects guardrails, trusted PreAction and
-    checkpoints.  This second gate closes the smaller window between those
-    checks and the first externally observable start callback/real handler.
-    Once this gate wins, the handler is treated as dispatched; a later stop is
-    settled at the result-commit gate instead of pretending it never ran.
-    """
-
-    if not getattr(agent, "_strict_no_automatic_paid_retry", False):
-        return True
-    if getattr(agent, "_interrupt_requested", False):
-        return False
-    controller = getattr(agent, "_true_moa_cancel_controller", None)
-    if controller is None:
-        return True
-    return controller.try_begin_dispatch(
-        f"final-tool-handler:{tool_call_id}"
-    )
-
-
-def _claim_strict_tool_execute(agent, tool_call_id: str) -> bool:
-    """Final one-shot fence immediately before the real tool handler."""
-
-    if not getattr(agent, "_strict_no_automatic_paid_retry", False):
-        return True
-    if getattr(agent, "_interrupt_requested", False):
-        return False
-    controller = getattr(agent, "_true_moa_cancel_controller", None)
-    if controller is None:
-        return True
-    return controller.try_begin_dispatch(
-        f"final-tool-execute:{tool_call_id}"
-    )
-
-
-def _claim_strict_tool_result(agent, tool_call_id: str) -> bool:
-    """Atomically commit one real tool result against terminal stop."""
-
-    if not getattr(agent, "_strict_no_automatic_paid_retry", False):
-        return True
-    controller = getattr(agent, "_true_moa_cancel_controller", None)
-    if controller is None:
-        return not getattr(agent, "_interrupt_requested", False)
-    return controller.try_begin_dispatch(f"final-tool-result:{tool_call_id}")
-
-
-def _strict_tool_terminal_stopped(agent) -> bool:
-    if not getattr(agent, "_strict_no_automatic_paid_retry", False):
-        return False
-    if getattr(agent, "_interrupt_requested", False):
-        return True
-    controller = getattr(agent, "_true_moa_cancel_controller", None)
-    return bool(controller is not None and controller.is_set)
 
 
 def _emit_cancelled_terminal_post_tool_call(
@@ -304,7 +237,7 @@ def _apply_tool_request_middleware_for_agent(
     effective_task_id: str,
     tool_call_id: str,
 ) -> tuple[dict, list[dict[str, Any]]]:
-    if getattr(agent, "_strict_no_automatic_paid_retry", False):
+    if _strict_tool_mode(agent):
         return function_args, []
     try:
         from xiaoban_cli.middleware import apply_tool_request_middleware
@@ -334,7 +267,7 @@ def _run_agent_tool_execution_middleware(
     tool_call_id: str,
     execute,
 ) -> tuple[Any, dict]:
-    if getattr(agent, "_strict_no_automatic_paid_retry", False):
+    if _strict_tool_mode(agent):
         return execute(function_args), function_args
     observed_args = function_args
 
@@ -480,9 +413,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         else:
             block_message = None
             try:
-                if not getattr(
-                    agent, "_strict_no_automatic_paid_retry", False
-                ):
+                if not _strict_tool_mode(agent):
                     from xiaoban_cli.plugins import get_pre_tool_call_block_message
                     block_message = get_pre_tool_call_block_message(
                         function_name,
@@ -608,7 +539,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     for tc, name, args, middleware_trace, block_result, blocked_by_guardrail in parsed_calls:
         if block_result is not None:
             continue
-        if getattr(agent, "_strict_no_automatic_paid_retry", False):
+        if _strict_tool_mode(agent):
             # Strict turns emit start callbacks only after the worker wins the
             # handler-start gate immediately beside the real dispatch.
             continue
@@ -622,7 +553,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     for tc, name, args, middleware_trace, block_result, blocked_by_guardrail in parsed_calls:
         if block_result is not None:
             continue
-        if getattr(agent, "_strict_no_automatic_paid_retry", False):
+        if _strict_tool_mode(agent):
             continue
         if agent.tool_start_callback:
             try:
@@ -652,7 +583,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     # Touch activity only when a handler really passed every gate.
     if (
         runnable_calls
-        and not getattr(agent, "_strict_no_automatic_paid_retry", False)
+        and not _strict_tool_mode(agent)
     ):
         agent._current_tool = tool_names_str
         agent._touch_activity(
@@ -690,9 +621,12 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         # submit site below (GHSA-qg5c-hvr5-hjgr, #13617).
         start = time.time()
         try:
-            if not _claim_strict_tool_handler(
+            if not _begin_strict_tool_handler(
                 agent,
                 getattr(tool_call, "id", "") or "",
+                function_name,
+                function_args,
+                build_preview=_build_tool_preview,
             ):
                 result = _cancelled_tool_result("terminal fence")
                 with terminal_fenced_lock:
@@ -709,36 +643,6 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     middleware_trace,
                 )
                 return
-            if getattr(agent, "_strict_no_automatic_paid_retry", False):
-                agent._current_tool = function_name
-                agent._touch_activity(f"executing tool: {function_name}")
-                if agent.tool_progress_callback:
-                    try:
-                        preview = _build_tool_preview(
-                            function_name,
-                            function_args,
-                        )
-                        agent.tool_progress_callback(
-                            "tool.started",
-                            function_name,
-                            preview,
-                            function_args,
-                        )
-                    except Exception as cb_err:
-                        logging.debug(
-                            f"Tool progress callback error: {cb_err}"
-                        )
-                if agent.tool_start_callback:
-                    try:
-                        agent.tool_start_callback(
-                            tool_call.id,
-                            function_name,
-                            function_args,
-                        )
-                    except Exception as cb_err:
-                        logging.debug(
-                            f"Tool start callback error: {cb_err}"
-                        )
             if not _claim_strict_tool_execute(
                 agent,
                 getattr(tool_call, "id", "") or "",
@@ -846,7 +750,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     spinner = None
     if (
         runnable_calls
-        and not getattr(agent, "_strict_no_automatic_paid_retry", False)
+        and not _strict_tool_mode(agent)
         and agent._should_emit_quiet_tool_messages()
         and agent._should_start_quiet_spinner()
     ):
@@ -1158,7 +1062,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         elif _ts_scope_block is not None:
             _block_msg = _ts_scope_block
             _block_error_type = "tool_scope_block"
-        elif not getattr(agent, "_strict_no_automatic_paid_retry", False):
+        elif not _strict_tool_mode(agent):
             try:
                 from xiaoban_cli.plugins import get_pre_tool_call_block_message
                 _block_msg = get_pre_tool_call_block_message(
@@ -1198,9 +1102,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             or _guardrail_block_decision is not None
             or _trusted_block_result is not None
         )
-        _strict_tool_turn = bool(
-            getattr(agent, "_strict_no_automatic_paid_retry", False)
-        )
+        _strict_tool_turn = _strict_tool_mode(agent)
 
         if _execution_blocked:
             # Tool blocked by plugin or guardrail policy — skip counters,
@@ -1285,49 +1187,17 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 pass  # never block tool execution
 
         _handler_dispatched = not _execution_blocked
-        if _handler_dispatched and _strict_tool_turn:
-            _handler_dispatched = _claim_strict_tool_handler(
+        if _handler_dispatched:
+            _handler_dispatched = _begin_strict_tool_handler(
                 agent,
                 getattr(tool_call, "id", "") or "",
+                function_name,
+                function_args,
+                build_preview=_build_tool_preview,
             )
             if not _handler_dispatched:
                 _terminal_dispatch_denied = True
                 _execution_blocked = True
-            else:
-                agent._current_tool = function_name
-                agent._touch_activity(f"executing tool: {function_name}")
-                try:
-                    from tools.environments.base import set_activity_callback
-                    set_activity_callback(agent._touch_activity)
-                except Exception:
-                    pass
-                if agent.tool_progress_callback:
-                    try:
-                        preview = _build_tool_preview(
-                            function_name,
-                            function_args,
-                        )
-                        agent.tool_progress_callback(
-                            "tool.started",
-                            function_name,
-                            preview,
-                            function_args,
-                        )
-                    except Exception as cb_err:
-                        logging.debug(
-                            f"Tool progress callback error: {cb_err}"
-                        )
-                if agent.tool_start_callback:
-                    try:
-                        agent.tool_start_callback(
-                            tool_call.id,
-                            function_name,
-                            function_args,
-                        )
-                    except Exception as cb_err:
-                        logging.debug(
-                            f"Tool start callback error: {cb_err}"
-                        )
 
         if (
             _handler_dispatched
@@ -1640,15 +1510,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                     disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                     tool_request_middleware_trace=list(middleware_trace),
-                    **(
-                        {"skip_extension_hooks": True}
-                        if getattr(
-                            agent,
-                            "_strict_no_automatic_paid_retry",
-                            False,
-                        )
-                        else {}
-                    ),
+                    **_strict_extension_hook_kwargs(agent),
                 )
                 _spinner_result = function_result
             except KeyboardInterrupt:
@@ -1691,15 +1553,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                     disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                     tool_request_middleware_trace=list(middleware_trace),
-                    **(
-                        {"skip_extension_hooks": True}
-                        if getattr(
-                            agent,
-                            "_strict_no_automatic_paid_retry",
-                            False,
-                        )
-                        else {}
-                    ),
+                    **_strict_extension_hook_kwargs(agent),
                 )
             except KeyboardInterrupt:
                 _emit_cancelled_terminal_post_tool_call(

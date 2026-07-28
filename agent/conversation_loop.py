@@ -57,6 +57,19 @@ from agent.process_bootstrap import _install_safe_stdio
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.retry_utils import jittered_backoff
 from agent.trajectory import has_incomplete_scratchpad
+from agent.true_moa_conversation_policy import (
+    claim_public_result as _claim_true_moa_public_result,
+    claim_response_consumption as _claim_true_moa_response_consumption,
+    emit_post_api_request as _emit_post_api_request,
+    execute_llm_request as _execute_llm_request,
+    initialize_session_side_effects as _initialize_session_side_effects,
+    prepare_llm_request as _prepare_llm_request,
+    strict_failure_result as _strict_failure_result,
+    strict_mode as _strict_true_moa_mode,
+)
+from agent.true_moa_terminal_accounting import (
+    record_strict_terminal_usage as _record_strict_terminal_usage,
+)
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from xiaoban_constants import PARTIAL_STREAM_STUB_ID
 from xiaoban_logging import set_session_context
@@ -69,92 +82,6 @@ logger = logging.getLogger(__name__)
 # cancelled while waiting on the provider. Surfaces (ACP, TUI) match on this
 # to treat it as cancellation metadata rather than assistant prose.
 INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model response ("
-
-
-def _record_strict_terminal_usage(agent: Any, response: Any) -> None:
-    """Keep usage for a strict no-retry response that exits before normal accounting."""
-
-    raw_usage = getattr(response, "usage", None)
-    if raw_usage is None:
-        return
-    canonical = normalize_usage(
-        raw_usage,
-        provider=agent.provider,
-        api_mode=agent.api_mode,
-    )
-    agent.session_prompt_tokens += canonical.prompt_tokens
-    agent.session_completion_tokens += canonical.output_tokens
-    agent.session_total_tokens += canonical.total_tokens
-    agent.session_input_tokens += canonical.input_tokens
-    agent.session_output_tokens += canonical.output_tokens
-    agent.session_cache_read_tokens += canonical.cache_read_tokens
-    agent.session_cache_write_tokens += canonical.cache_write_tokens
-    agent.session_reasoning_tokens += canonical.reasoning_tokens
-    agent.session_api_calls += 1
-    cost_result = estimate_usage_cost(
-        agent.model,
-        canonical,
-        provider=agent.provider,
-        base_url=agent.base_url,
-        api_key=getattr(agent, "api_key", ""),
-    )
-    if cost_result.amount_usd is not None:
-        agent.session_estimated_cost_usd += float(cost_result.amount_usd)
-    agent.session_cost_status = cost_result.status
-    agent.session_cost_source = cost_result.source
-
-
-def _finish_true_moa_final_call(
-    agent: Any,
-    call_id: str | None,
-    *,
-    status: str,
-    response: Any = None,
-    error_category: str | None = None,
-) -> None:
-    """Commit one paid final-executor request to the true-MoA call ledger."""
-
-    if not call_id:
-        return
-    ledger = getattr(agent, "_true_moa_usage_ledger", None)
-    if ledger is None:
-        return
-    raw_usage = getattr(response, "usage", None)
-    usage = None
-    cost_usd = None
-    cost_status = None
-    cost_source = None
-    if raw_usage is not None:
-        canonical = normalize_usage(
-            raw_usage,
-            provider=agent.provider,
-            api_mode=agent.api_mode,
-        )
-        cost_result = estimate_usage_cost(
-            agent.model,
-            canonical,
-            provider=agent.provider,
-            base_url=agent.base_url,
-            api_key=getattr(agent, "api_key", ""),
-        )
-        # Preserve the raw provider usage object for the true-MoA ledger so its
-        # cache split is derived only from trusted provider counters.  The
-        # ledger projects numeric fields only; no raw usage object is persisted.
-        usage = raw_usage
-        cost_usd = cost_result.amount_usd
-        cost_status = cost_result.status
-        cost_source = cost_result.source
-    ledger.finish_final_call(
-        call_id,
-        status=status,
-        usage=usage,
-        error_category=error_category,
-        cost_usd=cost_usd,
-        cost_status=cost_status,
-        cost_source=cost_source,
-        notify=False,
-    )
-    ledger.notify_change_async()
 
 
 def _image_error_max_dimension(error: Exception) -> Optional[int]:
@@ -418,35 +345,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     # prompt) — build from scratch.
     agent._cached_system_prompt = agent._build_system_prompt(system_message)
 
-    # The fixed true-MoA path has three routes and at most ten paid calls
-    # (two advisors plus eight final-executor iterations).
-    # Session hooks are intentionally absent there because a plugin may perform
-    # arbitrary external/model work outside that ledger.
-    if not getattr(agent, "_strict_no_automatic_paid_retry", False):
-        try:
-            from xiaoban_cli.plugins import invoke_hook as _invoke_hook
-            _invoke_hook(
-                "on_session_start",
-                session_id=agent.session_id,
-                model=agent.model,
-                platform=getattr(agent, "platform", None) or "",
-            )
-        except Exception as exc:
-            logger.warning("on_session_start hook failed: %s", exc)
-
-    # Cold-start credits seed (L3) — fallback for the first-turn path. The TUI/
-    # desktop build seeds at session OPEN (see seed_credits_at_session_start in
-    # tui_gateway), so this call is usually a no-op there (idempotent: skips when
-    # _credits_state already exists). For the plain CLI / any path that didn't seed
-    # at build, it primes credits state from /api/oauth/account (or a fixture) on the
-    # first turn so depletion / usage-band warnings fire. Fail-open inside the helper.
-    if not getattr(agent, "_strict_no_automatic_paid_retry", False):
-        try:
-            from agent.credits_tracker import seed_credits_at_session_start
-
-            seed_credits_at_session_start(agent)
-        except Exception:
-            logger.debug("cold-start credits seed failed (fail-open)", exc_info=True)
+    _initialize_session_side_effects(agent, logger)
 
     # Persist the system prompt snapshot in SQLite.  Failure here used
     # to log at DEBUG, which silently broke prefix-cache reuse on the
@@ -1098,35 +997,19 @@ def run_conversation(
                     _sanitize_structure_non_ascii(api_kwargs)
                 if agent.api_mode == "codex_responses":
                     api_kwargs = agent._get_transport().preflight_kwargs(api_kwargs, allow_stream=False)
-                _strict_paid_call = bool(
-                    getattr(agent, "_strict_no_automatic_paid_retry", False)
+                (
+                    api_kwargs,
+                    _original_api_kwargs,
+                    _llm_middleware_trace,
+                    _strict_paid_call,
+                ) = _prepare_llm_request(
+                    agent,
+                    api_kwargs,
+                    task_id=effective_task_id,
+                    turn_id=turn_id,
+                    api_request_id=api_request_id,
+                    api_call_count=api_call_count,
                 )
-                if _strict_paid_call:
-                    _original_api_kwargs = dict(api_kwargs)
-                    _llm_middleware_trace = []
-                else:
-                    try:
-                        from xiaoban_cli.middleware import apply_llm_request_middleware
-
-                        _llm_request_mw = apply_llm_request_middleware(
-                            api_kwargs,
-                            task_id=effective_task_id,
-                            turn_id=turn_id,
-                            api_request_id=api_request_id,
-                            session_id=agent.session_id or "",
-                            platform=agent.platform or "",
-                            model=agent.model,
-                            provider=agent.provider,
-                            base_url=agent.base_url,
-                            api_mode=agent.api_mode,
-                            api_call_count=api_call_count,
-                        )
-                        api_kwargs = _llm_request_mw.payload
-                        _original_api_kwargs = _llm_request_mw.original_payload
-                        _llm_middleware_trace = _llm_request_mw.trace
-                    except Exception:
-                        _original_api_kwargs = dict(api_kwargs)
-                        _llm_middleware_trace = []
 
                 try:
                     from xiaoban_cli.plugins import (
@@ -1241,125 +1124,18 @@ def run_conversation(
                         )
                     return agent._interruptible_api_call(next_api_kwargs)
 
-                if _strict_paid_call:
-                    _true_moa_ledger = getattr(
-                        agent,
-                        "_true_moa_usage_ledger",
-                        None,
-                    )
-                    if _true_moa_ledger is not None:
-                        from xiaoban.trusted_runtime.true_moa import (
-                            TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS,
-                            enforce_true_moa_dispatch_budget,
-                        )
-
-                        enforce_true_moa_dispatch_budget(
-                            role="final_executor",
-                            payload=api_kwargs,
-                        )
-                    _terminal_controller = getattr(
-                        agent,
-                        "_true_moa_cancel_controller",
-                        None,
-                    )
-                    if (
-                        _terminal_controller is not None
-                        and not _terminal_controller.try_begin_dispatch(
-                            f"final-llm-reservation:{api_request_id}"
-                        )
-                    ):
-                        raise InterruptedError(
-                            "True MoA cancelled before final provider dispatch"
-                        )
-                    _true_moa_call_id = (
-                        _true_moa_ledger.start_final_call(
-                            api_request_id,
-                            notify=False,
-                        )
-                        if _true_moa_ledger is not None
-                        else None
-                    )
-                    try:
-                        if (
-                            _true_moa_ledger is not None
-                            and not _true_moa_ledger.confirm_change(
-                                TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS,
-                            )
-                        ):
-                            if _terminal_controller is not None:
-                                _terminal_controller.fail()
-                            raise RuntimeError(
-                                "true MoA durable final-call reservation failed"
-                            )
-                        if (
-                            _terminal_controller is not None
-                            and not _terminal_controller.try_begin_dispatch(
-                                f"final-llm:{api_request_id}"
-                            )
-                        ):
-                            raise InterruptedError(
-                                "True MoA cancelled before final provider dispatch"
-                            )
-                        response = _perform_api_call(api_kwargs)
-                    except BaseException as exc:
-                        _cancelled = bool(
-                            agent._interrupt_requested
-                            or (
-                                _terminal_controller is not None
-                                and _terminal_controller.state == "cancelled"
-                            )
-                        )
-                        _finish_true_moa_final_call(
-                            agent,
-                            _true_moa_call_id,
-                            status="cancelled" if _cancelled else "failed",
-                            response=exc,
-                            error_category=(
-                                "completion_stopped"
-                                if _cancelled
-                                else "provider_call_failed"
-                            ),
-                        )
-                        raise
-                    _finish_true_moa_final_call(
-                        agent,
-                        _true_moa_call_id,
-                        status="completed",
-                        response=response,
-                    )
-                    if (
-                        agent._interrupt_requested
-                        or (
-                            _terminal_controller is not None
-                            and _terminal_controller.state != "running"
-                        )
-                    ):
-                        # The paid request happened, so keep its accounting;
-                        # the terminal fence forbids every business byte from
-                        # reaching normalization, callbacks, tools or history.
-                        _record_strict_terminal_usage(agent, response)
-                        raise InterruptedError(
-                            "True MoA cancelled before response consumption"
-                        )
-                else:
-                    from xiaoban_cli.middleware import run_llm_execution_middleware
-
-                    response = run_llm_execution_middleware(
-                        api_kwargs,
-                        _perform_api_call,
-                        original_request=_original_api_kwargs,
-                        task_id=effective_task_id,
-                        turn_id=turn_id,
-                        api_request_id=api_request_id,
-                        session_id=agent.session_id or "",
-                        platform=agent.platform or "",
-                        model=agent.model,
-                        provider=agent.provider,
-                        base_url=agent.base_url,
-                        api_mode=agent.api_mode,
-                        api_call_count=api_call_count,
-                        middleware_trace=list(_llm_middleware_trace),
-                    )
+                response = _execute_llm_request(
+                    agent,
+                    api_kwargs,
+                    _perform_api_call,
+                    strict=_strict_paid_call,
+                    original_request=_original_api_kwargs,
+                    middleware_trace=_llm_middleware_trace,
+                    task_id=effective_task_id,
+                    turn_id=turn_id,
+                    api_request_id=api_request_id,
+                    api_call_count=api_call_count,
+                )
                 
                 api_duration = time.time() - api_start_time
                 
@@ -1483,18 +1259,18 @@ def run_conversation(
                     if agent.thinking_callback:
                         agent.thinking_callback("")
 
-                    if getattr(agent, "_strict_no_automatic_paid_retry", False):
+                    if _strict_true_moa_mode(agent):
                         _record_strict_terminal_usage(agent, response)
-                        agent._persist_session(messages, conversation_history)
-                        return {
-                            "messages": messages,
-                            "completed": False,
-                            "api_calls": api_call_count,
-                            "error": (
+                        return _strict_failure_result(
+                            agent,
+                            messages,
+                            conversation_history,
+                            api_call_count=api_call_count,
+                            error=(
                                 "Invalid API response; automatic retry is disabled"
                             ),
-                            "failed": True,
-                        }
+                            include_final_response=False,
+                        )
                     
                     # Invalid response — could be rate limiting, provider timeout,
                     # upstream server error, or malformed response.
@@ -1759,7 +1535,7 @@ def run_conversation(
                         f"{_CONTENT_POLICY_RECOVERY_HINT}"
                     )
 
-                    if getattr(agent, "_strict_no_automatic_paid_retry", False):
+                    if _strict_true_moa_mode(agent):
                         _record_strict_terminal_usage(agent, response)
                     agent._cleanup_task_resources(effective_task_id)
                     agent._persist_session(messages, conversation_history)
@@ -1771,19 +1547,17 @@ def run_conversation(
                     )
 
                 if finish_reason == "length":
-                    if getattr(agent, "_strict_no_automatic_paid_retry", False):
+                    if _strict_true_moa_mode(agent):
                         _record_strict_terminal_usage(agent, response)
-                        agent._cleanup_task_resources(effective_task_id)
-                        agent._persist_session(messages, conversation_history)
-                        return {
-                            "final_response": None,
-                            "messages": messages,
-                            "api_calls": api_call_count,
-                            "completed": False,
-                            "partial": True,
-                            "failed": True,
-                            "error": "Response truncated; automatic retry is disabled",
-                        }
+                        return _strict_failure_result(
+                            agent,
+                            messages,
+                            conversation_history,
+                            api_call_count=api_call_count,
+                            error="Response truncated; automatic retry is disabled",
+                            partial=True,
+                            cleanup_task_id=effective_task_id,
+                        )
                     if getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID:
                         agent._vprint(
                             f"{agent.log_prefix}⚠️  Stream interrupted by network error "
@@ -2213,16 +1987,14 @@ def run_conversation(
                 if agent.thinking_callback:
                     agent.thinking_callback("")
 
-                if getattr(agent, "_strict_no_automatic_paid_retry", False):
-                    agent._persist_session(messages, conversation_history)
-                    return {
-                        "final_response": None,
-                        "messages": messages,
-                        "api_calls": api_call_count,
-                        "completed": False,
-                        "failed": True,
-                        "error": "Provider call failed; automatic retry is disabled",
-                    }
+                if _strict_true_moa_mode(agent):
+                    return _strict_failure_result(
+                        agent,
+                        messages,
+                        conversation_history,
+                        api_call_count=api_call_count,
+                        error="Provider call failed; automatic retry is disabled",
+                    )
 
                 # -----------------------------------------------------------
                 # UnicodeEncodeError recovery.  Two common causes:
@@ -3884,75 +3656,31 @@ def run_conversation(
                 else:
                     assistant_message.content = str(raw)
 
-            if _strict_paid_call:
-                _terminal_controller = getattr(
-                    agent,
-                    "_true_moa_cancel_controller",
-                    None,
+            if not _claim_true_moa_response_consumption(
+                agent,
+                api_request_id,
+            ):
+                interrupted = True
+                failed = True
+                final_response = None
+                _turn_exit_reason = (
+                    "strict_terminal_fence_before_response_output"
                 )
-                _response_consumption_allowed = not agent._interrupt_requested
-                if (
-                    _response_consumption_allowed
-                    and _terminal_controller is not None
-                ):
-                    _response_consumption_allowed = (
-                        _terminal_controller.try_begin_dispatch(
-                            f"response-consume:{api_request_id}"
-                        )
-                    )
-                if not _response_consumption_allowed:
-                    if _terminal_controller is not None:
-                        _terminal_controller.cancel()
-                    interrupted = True
-                    failed = True
-                    final_response = None
-                    _turn_exit_reason = (
-                        "strict_terminal_fence_before_response_output"
-                    )
-                    break
+                break
 
-            if not getattr(agent, "_strict_no_automatic_paid_retry", False):
-                try:
-                    from xiaoban_cli.plugins import (
-                        has_hook,
-                        invoke_hook as _invoke_hook,
-                    )
-                    if has_hook("post_api_request"):
-                        _assistant_tool_calls = (
-                            getattr(assistant_message, "tool_calls", None) or []
-                        )
-                        _assistant_text = assistant_message.content or ""
-                        _api_ended_at = api_start_time + api_duration
-                        _invoke_hook(
-                            "post_api_request",
-                            task_id=effective_task_id,
-                            turn_id=turn_id,
-                            api_request_id=api_request_id,
-                            session_id=agent.session_id or "",
-                            platform=agent.platform or "",
-                            model=agent.model,
-                            provider=agent.provider,
-                            base_url=agent.base_url,
-                            api_mode=agent.api_mode,
-                            api_call_count=api_call_count,
-                            api_duration=api_duration,
-                            started_at=api_start_time,
-                            ended_at=_api_ended_at,
-                            finish_reason=finish_reason,
-                            message_count=len(api_messages),
-                            response_model=getattr(response, "model", None),
-                            response=agent._api_response_payload_for_hook(
-                                response,
-                                assistant_message,
-                                finish_reason=finish_reason,
-                            ),
-                            usage=agent._usage_summary_for_api_request_hook(response),
-                            assistant_message=assistant_message,
-                            assistant_content_chars=len(_assistant_text),
-                            assistant_tool_call_count=len(_assistant_tool_calls),
-                        )
-                except Exception:
-                    pass
+            _emit_post_api_request(
+                agent,
+                assistant_message,
+                response,
+                finish_reason=finish_reason,
+                api_start_time=api_start_time,
+                api_duration=api_duration,
+                api_messages=api_messages,
+                task_id=effective_task_id,
+                turn_id=turn_id,
+                api_request_id=api_request_id,
+                api_call_count=api_call_count,
+            )
 
             # Handle assistant response
             if (
@@ -4094,7 +3822,7 @@ def run_conversation(
                 
                 # Validate tool call names - detect model hallucinations
                 # Repair mismatched tool names before validating
-                if not getattr(agent, "_strict_no_automatic_paid_retry", False):
+                if not _strict_true_moa_mode(agent):
                     for tc in assistant_message.tool_calls:
                         if tc.function.name not in agent.valid_tool_names:
                             repaired = agent._repair_tool_call(tc.function.name)
@@ -4106,17 +3834,15 @@ def run_conversation(
                     if tc.function.name not in agent.valid_tool_names
                 ]
                 if invalid_tool_calls:
-                    if getattr(agent, "_strict_no_automatic_paid_retry", False):
-                        agent._persist_session(messages, conversation_history)
-                        return {
-                            "final_response": None,
-                            "messages": messages,
-                            "api_calls": api_call_count,
-                            "completed": False,
-                            "partial": True,
-                            "failed": True,
-                            "error": "Model generated an invalid tool call",
-                        }
+                    if _strict_true_moa_mode(agent):
+                        return _strict_failure_result(
+                            agent,
+                            messages,
+                            conversation_history,
+                            api_call_count=api_call_count,
+                            error="Model generated an invalid tool call",
+                            partial=True,
+                        )
                     # Track retries for invalid tool calls
                     agent._invalid_tool_retries += 1
 
@@ -4200,17 +3926,15 @@ def run_conversation(
                         invalid_json_args.append((tc.function.name, str(e)))
                 
                 if invalid_json_args:
-                    if getattr(agent, "_strict_no_automatic_paid_retry", False):
-                        agent._persist_session(messages, conversation_history)
-                        return {
-                            "final_response": None,
-                            "messages": messages,
-                            "api_calls": api_call_count,
-                            "completed": False,
-                            "partial": True,
-                            "failed": True,
-                            "error": "Model generated invalid tool arguments",
-                        }
+                    if _strict_true_moa_mode(agent):
+                        return _strict_failure_result(
+                            agent,
+                            messages,
+                            conversation_history,
+                            api_call_count=api_call_count,
+                            error="Model generated invalid tool arguments",
+                            partial=True,
+                        )
                     # Check if the invalid JSON is due to truncation rather
                     # than a model formatting mistake.  Routers sometimes
                     # rewrite finish_reason from "length" to "tool_calls",
@@ -4368,45 +4092,18 @@ def run_conversation(
                     decision = agent._tool_guardrail_halt_decision
                     _turn_exit_reason = "guardrail_halt"
                     final_response = agent._toolguard_controlled_halt_response(decision)
-                    if _strict_paid_call:
-                        _terminal_controller = getattr(
-                            agent,
-                            "_true_moa_cancel_controller",
-                            None,
+                    if not _claim_true_moa_public_result(
+                        agent,
+                        api_request_id,
+                        kind="guardrail",
+                    ):
+                        final_response = None
+                        interrupted = True
+                        failed = True
+                        _turn_exit_reason = (
+                            "strict_terminal_fence_before_guardrail_commit"
                         )
-                        _guardrail_commit_allowed = (
-                            not agent._interrupt_requested
-                        )
-                        if (
-                            _guardrail_commit_allowed
-                            and _terminal_controller is not None
-                        ):
-                            if getattr(
-                                agent,
-                                "_defer_true_moa_final_commit",
-                                False,
-                            ):
-                                _guardrail_commit_allowed = (
-                                    _terminal_controller.try_begin_dispatch(
-                                        f"guardrail-response-stage:{api_request_id}"
-                                    )
-                                )
-                            else:
-                                _guardrail_commit_allowed = (
-                                    _terminal_controller.try_commit_final(
-                                        f"guardrail-response:{api_request_id}"
-                                    )
-                                )
-                        if not _guardrail_commit_allowed:
-                            if _terminal_controller is not None:
-                                _terminal_controller.cancel()
-                            final_response = None
-                            interrupted = True
-                            failed = True
-                            _turn_exit_reason = (
-                                "strict_terminal_fence_before_guardrail_commit"
-                            )
-                            break
+                        break
                     agent._emit_status(
                         f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}"
                     )
@@ -4563,17 +4260,18 @@ def run_conversation(
                         agent._response_was_previewed = True
                         break
 
-                    if getattr(agent, "_strict_no_automatic_paid_retry", False):
-                        agent._drop_trailing_empty_response_scaffolding(messages)
-                        agent._persist_session(messages, conversation_history)
-                        return {
-                            "final_response": None,
-                            "messages": messages,
-                            "api_calls": api_call_count,
-                            "completed": False,
-                            "failed": True,
-                            "error": "Model returned no visible content; automatic retry is disabled",
-                        }
+                    if _strict_true_moa_mode(agent):
+                        return _strict_failure_result(
+                            agent,
+                            messages,
+                            conversation_history,
+                            api_call_count=api_call_count,
+                            error=(
+                                "Model returned no visible content; "
+                                "automatic retry is disabled"
+                            ),
+                            drop_scaffolding=True,
+                        )
 
                     # ── Post-tool-call empty response nudge ───────────
                     # The model returned empty after executing tool calls.
@@ -4843,38 +4541,16 @@ def run_conversation(
                 ):
                     messages.pop()
 
-                if _strict_paid_call:
-                    _terminal_controller = getattr(
-                        agent,
-                        "_true_moa_cancel_controller",
-                        None,
-                    )
-                    _final_commit_allowed = not agent._interrupt_requested
-                    if _final_commit_allowed and _terminal_controller is not None:
-                        if getattr(
-                            agent,
-                            "_defer_true_moa_final_commit",
-                            False,
-                        ):
-                            _final_commit_allowed = (
-                                _terminal_controller.try_begin_dispatch(
-                                    f"final-response-stage:{api_request_id}"
-                                )
-                            )
-                        else:
-                            _final_commit_allowed = (
-                                _terminal_controller.try_commit_final(
-                                    f"final-response:{api_request_id}"
-                                )
-                            )
-                    if not _final_commit_allowed:
-                        if _terminal_controller is not None:
-                            _terminal_controller.cancel()
-                        final_response = None
-                        interrupted = True
-                        failed = True
-                        _turn_exit_reason = "strict_terminal_fence_before_final_commit"
-                        break
+                if not _claim_true_moa_public_result(
+                    agent,
+                    api_request_id,
+                    kind="final",
+                ):
+                    final_response = None
+                    interrupted = True
+                    failed = True
+                    _turn_exit_reason = "strict_terminal_fence_before_final_commit"
+                    break
 
                 messages.append(final_msg)
                 
