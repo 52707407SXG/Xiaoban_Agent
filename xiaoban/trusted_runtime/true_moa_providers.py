@@ -4,11 +4,12 @@ This module is imported lazily only for an authenticated ``mode=moa`` request.
 Each invocation creates one fresh SDK client, disables SDK retries, exposes no
 tools, and closes the client in the worker thread that owns the request.
 Cancellation fences output and downstream work immediately.  An already
-dispatched non-streaming request is allowed to return its trusted usage receipt:
-closing the local socket cannot prove upstream cancellation and would destroy
-the only exact billing evidence.  Provider output is returned only to
-:mod:`true_moa` for bounded sanitization; it is never logged or emitted
-directly.
+dispatched request is allowed to return its trusted usage receipt: closing the
+local socket cannot prove upstream cancellation and would destroy the only
+exact billing evidence.  The Kimi advisor uses the SDK streaming helper only
+to keep a long generation alive until its terminal usage receipt; intermediate
+text is never consumed or emitted.  Provider output is returned only to
+:mod:`true_moa` for bounded sanitization; it is never logged or emitted directly.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from __future__ import annotations
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
+from agent.usage_pricing import normalize_usage as normalize_provider_usage
 from xiaoban.trusted_runtime.true_moa import (
     DEEPSEEK_ADVISOR_SLOT,
     KIMI_ADVISOR_SLOT,
@@ -93,6 +95,7 @@ def _trusted_usage_receipt(
         "cached_prompt_tokens",
         "cache_read_input_tokens",
         "cache_read_tokens",
+        "cache_creation_input_tokens",
     ):
         present, value = _member(usage, field)
         if present and value is not None:
@@ -108,6 +111,51 @@ def _trusted_usage_receipt(
         if cached_present and cached_tokens is not None:
             receipt[details_field] = {"cached_tokens": cached_tokens}
     return receipt
+
+
+def _canonical_kimi_usage_receipt(usage: Any) -> dict[str, Any]:
+    """Map Anthropic token buckets to the total-prompt ledger contract.
+
+    Anthropic-compatible responses report uncached input, cache reads, and
+    cache writes as separate buckets.  The true-MoA ledger's ``inputTokens``
+    is the total prompt count, while ``cachedInputTokens`` is the cache-read
+    subset.  Reuse the Agent's established provider normalizer so a full cache
+    hit (for example input=0, cache_read=212) stays an exact receipt.
+    """
+
+    receipt = _trusted_usage_receipt(
+        usage,
+        input_field="input_tokens",
+        output_field="output_tokens",
+    )
+    required = ("input_tokens", "output_tokens")
+    optional = ("cache_read_input_tokens", "cache_creation_input_tokens")
+    if any(
+        field not in receipt
+        or isinstance(receipt[field], bool)
+        or not isinstance(receipt[field], int)
+        or receipt[field] < 0
+        for field in required
+    ) or any(
+        isinstance(receipt.get(field), bool)
+        or not isinstance(receipt.get(field), int)
+        or receipt[field] < 0
+        for field in optional
+        if field in receipt
+    ):
+        return receipt
+
+    canonical = normalize_provider_usage(
+        usage,
+        provider="kimi-coding",
+        api_mode="anthropic_messages",
+    )
+    return {
+        "input_tokens": canonical.prompt_tokens,
+        "output_tokens": canonical.output_tokens,
+        "total_tokens": canonical.total_tokens,
+        "cache_read_input_tokens": canonical.cache_read_tokens,
+    }
 
 
 def strict_advisor_call(
@@ -183,13 +231,10 @@ def _call_kimi(
         dispatch_callback()
         if not cancel_controller.try_begin_dispatch(cancel_key):
             raise StrictAdvisorCancelled("advisor_cancelled_before_dispatch")
-        response = client.messages.create(**request_kwargs)
+        with client.messages.stream(**request_kwargs) as stream:
+            response = stream.get_final_message()
         usage = getattr(response, "usage", None)
-        reported_usage = _trusted_usage_receipt(
-            usage,
-            input_field="input_tokens",
-            output_field="output_tokens",
-        )
+        reported_usage = _canonical_kimi_usage_receipt(usage)
         if cancel_controller.is_set:
             raise StrictAdvisorCancelled(
                 "advisor_cancelled_after_response",

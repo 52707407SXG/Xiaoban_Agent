@@ -101,20 +101,40 @@ def test_deepseek_advisor_is_one_fixed_toolless_no_retry_call(monkeypatch):
 
 
 def test_kimi_advisor_is_one_fixed_toolless_no_retry_call(monkeypatch):
-    captured = {"create_calls": 0, "dispatches": 0}
+    captured = {
+        "create_calls": 0,
+        "stream_calls": 0,
+        "dispatches": 0,
+    }
 
-    class _Messages:
-        def create(self, **kwargs):
-            captured["create_calls"] += 1
-            captured["request"] = kwargs
+    class _Stream:
+        def __enter__(self):
+            captured["stream_entered"] = True
+            return self
+
+        def get_final_message(self):
             return SimpleNamespace(
                 content=[SimpleNamespace(type="text", text="Kimi 独立建议")],
                 usage=SimpleNamespace(
-                    input_tokens=13,
-                    output_tokens=5,
-                    cache_read_input_tokens=0,
+                    input_tokens=0,
+                    output_tokens=1996,
+                    cache_read_input_tokens=212,
+                    cache_creation_input_tokens=0,
                 ),
             )
+
+        def __exit__(self, *_args):
+            captured["stream_closed"] = True
+
+    class _Messages:
+        def create(self, **_kwargs):
+            captured["create_calls"] += 1
+            raise AssertionError("Kimi advisor must use the streaming helper")
+
+        def stream(self, **kwargs):
+            captured["stream_calls"] += 1
+            captured["request"] = kwargs
+            return _Stream()
 
     class _Client:
         def __init__(self):
@@ -166,15 +186,120 @@ def test_kimi_advisor_is_one_fixed_toolless_no_retry_call(monkeypatch):
         captured["request"]["max_tokens"]
         == TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS
     )
-    assert captured["create_calls"] == 1
+    assert captured["create_calls"] == 0
+    assert captured["stream_calls"] == 1
     assert captured["dispatches"] == 1
     assert result.content == "Kimi 独立建议"
     assert result.usage == {
-        "input_tokens": 13,
-        "output_tokens": 5,
-        "cache_read_input_tokens": 0,
+        "input_tokens": 212,
+        "output_tokens": 1996,
+        "total_tokens": 2208,
+        "cache_read_input_tokens": 212,
     }
+    assert captured["stream_entered"] is True
+    assert captured["stream_closed"] is True
     assert captured["closed"] is True
+
+
+def test_kimi_stop_drains_final_usage_without_reading_late_text(monkeypatch):
+    stream_started = threading.Event()
+    release_response = threading.Event()
+    controller = TrueMoACancelController()
+    outcome = []
+    captured = {
+        "dispatches": 0,
+        "content_reads": 0,
+        "stream_closed": 0,
+        "client_closed": 0,
+    }
+
+    class _Response:
+        usage = SimpleNamespace(
+            input_tokens=17,
+            output_tokens=6,
+            cache_read_input_tokens=2,
+            cache_creation_input_tokens=3,
+        )
+
+        @property
+        def content(self):
+            captured["content_reads"] += 1
+            raise AssertionError("late Kimi text must not be read after stop")
+
+    class _Stream:
+        def __enter__(self):
+            return self
+
+        def get_final_message(self):
+            stream_started.set()
+            assert release_response.wait(1)
+            return _Response()
+
+        def __exit__(self, *_args):
+            captured["stream_closed"] += 1
+
+    class _Messages:
+        def stream(self, **_kwargs):
+            return _Stream()
+
+    class _Client:
+        def __init__(self):
+            self.messages = _Messages()
+
+        def close(self):
+            captured["client_closed"] += 1
+
+    monkeypatch.setattr(
+        providers,
+        "_fixed_credentials",
+        lambda *_args, **_kwargs: {
+            "api_key": "fake-kimi-key",
+            "base_url": "https://api.kimi.com/coding",
+        },
+    )
+    monkeypatch.setattr(
+        "agent.anthropic_adapter.build_anthropic_client",
+        lambda *_args, **_kwargs: _Client(),
+    )
+
+    def _call():
+        try:
+            providers.strict_advisor_call(
+                slot=KIMI_ADVISOR_SLOT,
+                messages=_messages(),
+                tools=(),
+                timeout_seconds=1,
+                cancel_controller=controller,
+                dispatch_callback=lambda: captured.__setitem__(
+                    "dispatches",
+                    captured["dispatches"] + 1,
+                ),
+            )
+        except BaseException as exc:
+            outcome.append(exc)
+
+    worker = threading.Thread(target=_call, daemon=True)
+    worker.start()
+    assert stream_started.wait(1)
+    controller.cancel()
+    release_response.set()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], providers.StrictAdvisorCancelled)
+    assert outcome[0].usage == {
+        "input_tokens": 22,
+        "output_tokens": 6,
+        "total_tokens": 28,
+        "cache_read_input_tokens": 2,
+    }
+    assert captured == {
+        "dispatches": 1,
+        "content_reads": 0,
+        "stream_closed": 1,
+        "client_closed": 1,
+    }
 
 
 @pytest.mark.parametrize(
