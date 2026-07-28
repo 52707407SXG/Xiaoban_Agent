@@ -660,16 +660,28 @@ def _merge_fill_once(current: Any, incoming: Any, *, field: str) -> Any:
 def _merge_receipt(
     current: Mapping[str, Any],
     incoming: Mapping[str, Any],
+    *,
+    allow_stopped_late_accounting: bool = False,
 ) -> dict[str, Any]:
     for field in ("slotId", "callId", "provider", "model", "role"):
         if current.get(field) != incoming.get(field):
             raise ValueError("conflicting true MoA durable receipt identity")
     merged = dict(current)
-    merged["status"] = _merge_status(
-        str(current.get("status") or ""),
-        str(incoming.get("status") or ""),
-        ranks=_RECEIPT_STATUS_RANK,
-        terminals=_RECEIPT_TERMINAL_STATES,
+    current_status = str(current.get("status") or "")
+    incoming_status = str(incoming.get("status") or "")
+    merged["status"] = (
+        current_status
+        if (
+            allow_stopped_late_accounting
+            and current_status in {"cancelled", "timed_out"}
+            and incoming_status in _RECEIPT_TERMINAL_STATES
+        )
+        else _merge_status(
+            current_status,
+            incoming_status,
+            ranks=_RECEIPT_STATUS_RANK,
+            terminals=_RECEIPT_TERMINAL_STATES,
+        )
     )
     for field in (
         "startedAtMs",
@@ -714,6 +726,8 @@ def _merge_receipt(
 def _merge_usage(
     current: Mapping[str, Any] | None,
     incoming: Mapping[str, Any],
+    *,
+    allow_stopped_late_accounting: bool = False,
 ) -> dict[str, Any]:
     if current is None:
         return project_true_moa_usage(incoming)
@@ -730,14 +744,26 @@ def _merge_usage(
         if current_projected[field] != incoming_projected[field]:
             raise ValueError("conflicting true MoA durable ledger identity")
     merged = dict(current_projected)
-    merged["status"] = _merge_status(
-        current_projected["status"],
-        incoming_projected["status"],
-        ranks=_LEDGER_STATUS_RANK,
-        terminals=_LEDGER_TERMINAL_STATES,
+    merged["status"] = (
+        current_projected["status"]
+        if (
+            allow_stopped_late_accounting
+            and current_projected["status"] == "cancelled"
+            and incoming_projected["status"] in _LEDGER_TERMINAL_STATES
+        )
+        else _merge_status(
+            current_projected["status"],
+            incoming_projected["status"],
+            ranks=_LEDGER_STATUS_RANK,
+            terminals=_LEDGER_TERMINAL_STATES,
+        )
     )
     merged["slots"] = [
-        _merge_receipt(current_item, incoming_item)
+        _merge_receipt(
+            current_item,
+            incoming_item,
+            allow_stopped_late_accounting=allow_stopped_late_accounting,
+        )
         for current_item, incoming_item in zip(
             current_projected["slots"],
             incoming_projected["slots"],
@@ -760,7 +786,13 @@ def _merge_usage(
     )
     merged_calls = {
         call_id: (
-            _merge_receipt(current_calls[call_id], incoming_calls[call_id])
+            _merge_receipt(
+                current_calls[call_id],
+                incoming_calls[call_id],
+                allow_stopped_late_accounting=(
+                    allow_stopped_late_accounting
+                ),
+            )
             if call_id in current_calls and call_id in incoming_calls
             else dict(current_calls.get(call_id) or incoming_calls[call_id])
         )
@@ -1203,7 +1235,13 @@ class TrueMoADurableStore:
                 if row["usage_json"]
                 else None
             )
-            projected = _merge_usage(existing_usage, projected)
+            projected = _merge_usage(
+                existing_usage,
+                projected,
+                allow_stopped_late_accounting=(
+                    str(row["state"] or "") == "stopped"
+                ),
+            )
             encoded = json.dumps(
                 projected,
                 ensure_ascii=True,
@@ -1273,12 +1311,6 @@ class TrueMoADurableStore:
                 raise RuntimeError(
                     "true MoA durable execution binding conflict"
                 )
-            existing_usage = (
-                project_true_moa_usage(json.loads(row["usage_json"]))
-                if row["usage_json"]
-                else None
-            )
-            merged_usage = _merge_usage(existing_usage, projected_usage)
             merged_state = _merge_status(
                 str(row["state"] or ""),
                 "completed",
@@ -1292,6 +1324,12 @@ class TrueMoADurableStore:
                 raise TrueMoAOutcomeBindingError(
                     "true MoA terminal fence rejected completed outcome"
                 )
+            existing_usage = (
+                project_true_moa_usage(json.loads(row["usage_json"]))
+                if row["usage_json"]
+                else None
+            )
+            merged_usage = _merge_usage(existing_usage, projected_usage)
             existing_outcome_state = str(row["outcome_state"] or "none")
             if existing_outcome_state == "sealed":
                 existing_outcome, existing_receipt = self._decrypt_outcome_row(
@@ -1631,6 +1669,69 @@ class TrueMoADurableStore:
             connection.commit()
         self._harden_files()
         return accepted
+
+    def terminalize_stopped_running_calls(self, key: str) -> bool:
+        """Fence orphaned running receipts after a stopped-process restart.
+
+        A live process owns its in-memory usage drain.  After restart no such
+        worker exists, so leaving a durable call as ``running`` would strand
+        My Stand in ``stop_requested`` forever.  This transition deliberately
+        leaves token, cost, end-time, and error fields empty: a later exact
+        provider receipt may still fill them monotonically, while missing
+        usage remains settlement-blocked instead of guessed or released.
+        """
+
+        storage_key = _storage_key(key)
+        timestamp = int(time.time() * 1000)
+        changed = False
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT state, usage_json
+                FROM true_moa_idempotency
+                WHERE storage_key = ? AND kind = 'execution'
+                """,
+                (storage_key,),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["state"] or "") != "stopped"
+                or not row["usage_json"]
+            ):
+                connection.commit()
+                return False
+            usage = project_true_moa_usage(
+                json.loads(row["usage_json"])
+            )
+            for slot in usage["slots"]:
+                if slot["status"] == "running":
+                    slot["status"] = "cancelled"
+                    changed = True
+            for call in usage["calls"]:
+                if call["status"] == "running":
+                    call["status"] = "timed_out"
+                    changed = True
+            if changed:
+                usage["status"] = "cancelled"
+                encoded = json.dumps(
+                    project_true_moa_usage(usage),
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                connection.execute(
+                    """
+                    UPDATE true_moa_idempotency
+                    SET usage_json = ?, updated_at_ms = ?
+                    WHERE storage_key = ? AND state = 'stopped'
+                    """,
+                    (encoded, timestamp, storage_key),
+                )
+            connection.commit()
+        if changed:
+            self._harden_files()
+        return changed
 
 
 __all__ = [

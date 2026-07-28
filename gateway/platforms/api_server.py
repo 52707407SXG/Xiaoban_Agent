@@ -2950,8 +2950,20 @@ def _stopped_chat_completion_response(response: Any) -> Any:
         calls = ledger.get("calls")
         if isinstance(calls, list):
             for call in calls:
-                if not isinstance(call, dict) or call.get("status") != "running":
+                if (
+                    not isinstance(call, dict)
+                    or call.get("status") != "running"
+                    or (
+                        call.get("role") != "final_executor"
+                        and call.get("slotId") != "final-deepseek-v4-pro"
+                    )
+                ):
                     continue
+                # Advisor calls keep running only for their exact usage drain.
+                # The final transport still uses Agent interruption, so its
+                # stop projection must become terminal instead of leaving My
+                # Stand in stop_requested forever.  A late exact usage receipt
+                # may still fill the empty accounting fields.
                 call["status"] = "cancelled"
                 call["errorCategory"] = "terminal_fence_after_stop"
         stopped_usage["true_moa"] = ledger
@@ -3515,6 +3527,22 @@ class _IdempotencyCache:
     def durable_record(self, key: str) -> Optional[Dict[str, Any]]:
         if self._durable is None:
             return None
+        return self._durable.get(key)
+
+    def terminalize_orphaned_stopped_usage(
+        self,
+        key: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Close durable running receipts only when this process has no owner."""
+
+        if self._durable is None:
+            return None
+        if any(
+            existing_key == key and not task.done()
+            for (existing_key, _), task in self._inflight.items()
+        ):
+            return self._durable.get(key)
+        self._durable.terminalize_stopped_running_calls(key)
         return self._durable.get(key)
 
     def recover_outcome(
@@ -5909,6 +5937,15 @@ class APIServerAdapter(BasePlatformAdapter):
                     code="completion_ledger_not_found",
                 ),
                 status=404,
+            )
+        if str(record.get("state") or "") == "stopped":
+            # A replacement process has no provider worker that can finish a
+            # pre-restart usage drain.  Atomically close only those orphaned
+            # running receipts before projecting recovery; exact late usage
+            # may still merge, but no call can remain running forever.
+            record = (
+                _idem_cache.terminalize_orphaned_stopped_usage(scoped_key)
+                or record
             )
         state = str(record.get("state") or "")
         usage = record.get("usage")

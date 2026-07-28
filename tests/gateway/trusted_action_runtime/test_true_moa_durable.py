@@ -270,6 +270,71 @@ def test_store_merges_late_snapshots_without_usage_or_state_regression(
     store.close()
 
 
+def test_stopped_orphan_fence_accepts_late_failed_usage_without_reopening(
+    tmp_path: Path,
+):
+    store = TrueMoADurableStore(str(tmp_path / "stopped-orphan.sqlite"))
+    key = "scoped-stopped-orphan"
+    fingerprint = _fingerprint("stopped-orphan")
+    assert store.claim(key, fingerprint, kind="execution") == "missing"
+
+    ledger = _running_ledger(wave_id="b" * 32)
+    ledger.start_slot(KIMI_ADVISOR_SLOT)
+    call_id = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    store.save_usage(
+        key,
+        fingerprint,
+        ledger.to_dict(),
+        state="running",
+    )
+    assert store.mark_stopped(key) is True
+    assert store.terminalize_stopped_running_calls(key) is True
+
+    fenced = store.get(key)
+    assert fenced is not None
+    assert fenced["state"] == "stopped"
+    assert fenced["usage"]["status"] == "cancelled"
+    assert fenced["usage"]["calls"][0]["status"] == "timed_out"
+    assert fenced["usage"]["calls"][0]["usageStatus"] == "unavailable"
+
+    late_usage = {
+        "input_tokens": 9,
+        "output_tokens": 2,
+        "total_tokens": 11,
+        "cached_input_tokens": 1,
+    }
+    ledger.finish_advisor_call(
+        call_id,
+        status="failed",
+        usage=late_usage,
+        error_category="late_malformed_result_after_terminal",
+    )
+    ledger.finish_slot(
+        KIMI_ADVISOR_SLOT,
+        status="cancelled",
+        usage=late_usage,
+        error_category="late_malformed_result_after_terminal",
+    )
+    ledger.set_wave_status("cancelled")
+    store.save_usage(
+        key,
+        fingerprint,
+        ledger.to_dict(),
+        state="stopped",
+    )
+
+    recovered = store.get(key)
+    assert recovered is not None
+    call = recovered["usage"]["calls"][0]
+    assert recovered["state"] == "stopped"
+    assert recovered["usage"]["status"] == "cancelled"
+    assert call["status"] == "timed_out"
+    assert call["usageStatus"] == "reported"
+    assert call["totalTokens"] == 11
+    assert call["errorCategory"] == "late_malformed_result_after_terminal"
+    store.close()
+
+
 def test_mark_stopped_accepts_restart_state_but_not_finished_terminals(
     tmp_path: Path,
 ):

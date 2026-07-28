@@ -209,17 +209,18 @@ def test_fixed_preset_rejects_endpoint_drift(monkeypatch, provider, base_url):
         )
 
 
-def test_running_cancel_invokes_socket_abort_before_caller_exits(monkeypatch):
+def test_running_cancel_fences_output_but_waits_for_usage_receipt(monkeypatch):
     request_started = threading.Event()
-    socket_aborted = threading.Event()
+    release_response = threading.Event()
     controller = TrueMoACancelController()
     outcome = []
     dispatches = []
+    closed = []
 
     class _Completions:
         def create(self, **_kwargs):
             request_started.set()
-            assert socket_aborted.wait(1)
+            assert release_response.wait(1)
             return SimpleNamespace(
                 choices=[
                     SimpleNamespace(
@@ -239,7 +240,7 @@ def test_running_cancel_invokes_socket_abort_before_caller_exits(monkeypatch):
             self.chat = SimpleNamespace(completions=_Completions())
 
         def close(self):
-            pass
+            closed.append(True)
 
     monkeypatch.setattr(
         providers,
@@ -250,10 +251,6 @@ def test_running_cancel_invokes_socket_abort_before_caller_exits(monkeypatch):
         },
     )
     monkeypatch.setattr("openai.OpenAI", _Client)
-    monkeypatch.setattr(
-        "agent.agent_runtime_helpers.force_close_tcp_sockets",
-        lambda _client: (socket_aborted.set() or 1),
-    )
 
     def _call():
         try:
@@ -272,10 +269,14 @@ def test_running_cancel_invokes_socket_abort_before_caller_exits(monkeypatch):
     thread.start()
     assert request_started.wait(1)
     controller.cancel()
+    thread.join(0.05)
+    assert thread.is_alive(), (
+        "an already-dispatched request must retain its exact usage receipt"
+    )
+    release_response.set()
     thread.join(1)
 
     assert not thread.is_alive()
-    assert socket_aborted.is_set()
     assert len(outcome) == 1
     assert dispatches == ["deepseek"]
     assert isinstance(outcome[0], providers.StrictAdvisorCancelled)
@@ -285,6 +286,7 @@ def test_running_cancel_invokes_socket_abort_before_caller_exits(monkeypatch):
         "total_tokens": 2,
         "prompt_tokens_details": {"cached_tokens": 1},
     }
+    assert closed == [True]
 
 
 def test_cancel_winning_atomic_dispatch_gate_means_zero_provider_calls(

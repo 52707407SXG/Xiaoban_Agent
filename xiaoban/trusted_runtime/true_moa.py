@@ -369,6 +369,7 @@ class TrueMoAUsageLedger:
         *,
         status: str,
         error_category: str,
+        preserve_running_calls: bool = False,
         notify: bool = True,
     ) -> None:
         ended_at_ms = _now_ms()
@@ -380,11 +381,22 @@ class TrueMoAUsageLedger:
                     receipt.status = status
                     receipt.error_category = error_category
                     receipt.ended_at_ms = ended_at_ms
-            for receipt in self._advisor_calls.values():
-                if receipt.status == "running":
-                    receipt.status = status
+                elif (
+                    receipt.status == "cancelled"
+                    and error_category.startswith("cascade_after_")
+                ):
+                    # A peer may observe the controller callback and mark
+                    # itself cancelled before the coordinator writes the
+                    # canonical wave-failure cause.  The coordinator cause
+                    # wins so the durable ledger is independent of thread
+                    # scheduling.
                     receipt.error_category = error_category
-                    receipt.ended_at_ms = ended_at_ms
+            if not preserve_running_calls:
+                for receipt in self._advisor_calls.values():
+                    if receipt.status == "running":
+                        receipt.status = status
+                        receipt.error_category = error_category
+                        receipt.ended_at_ms = ended_at_ms
         if notify:
             self._notify_change()
 
@@ -425,7 +437,7 @@ class TrueMoAUsageLedger:
         cost_status: str | None = None,
         cost_source: str | None = None,
         notify: bool = True,
-    ) -> None:
+    ) -> bool:
         """Fill one dispatched advisor call without rewriting its terminal fence."""
 
         (
@@ -435,6 +447,7 @@ class TrueMoAUsageLedger:
             cached_input_tokens,
             usage_status,
         ) = _normalize_usage(usage)
+        terminal_transitioned = False
         with self._lock:
             receipt = next(
                 (
@@ -450,6 +463,7 @@ class TrueMoAUsageLedger:
                 receipt.status = status
                 receipt.error_category = error_category
                 receipt.ended_at_ms = ended_at_ms or _now_ms()
+                terminal_transitioned = True
             elif receipt.ended_at_ms is None:
                 receipt.ended_at_ms = ended_at_ms or _now_ms()
             _fill_usage_once(
@@ -468,6 +482,7 @@ class TrueMoAUsageLedger:
                 receipt.cost_source = _safe_category(cost_source)
         if notify:
             self._notify_change()
+        return terminal_transitioned
 
     def start_final_call(
         self,
@@ -1133,6 +1148,7 @@ def run_true_moa_advisors(
         raise TrueMoAExecutionError("durable_settlement_failed", ledger)
     started_monotonic: dict[str, float] = {}
     started_lock = threading.Lock()
+    watchdog_timeout = threading.Event()
     futures: dict[Future[str], TrueMoASlot] = {}
 
     def _run_slot(slot: TrueMoASlot) -> str:
@@ -1164,15 +1180,62 @@ def run_true_moa_advisors(
             raise _SlotTerminal("cancelled")
         strict_result: StrictAdvisorResult | None = None
         advisor_call_id: str | None = None
+        advisor_call_watchdog: threading.Timer | None = None
 
         def _record_dispatch() -> None:
-            nonlocal advisor_call_id
+            nonlocal advisor_call_id, advisor_call_watchdog
             if advisor_call_id is not None:
                 raise RuntimeError("advisor provider call already dispatched")
             advisor_call_id = ledger.start_advisor_call(slot, notify=False)
             if not _confirm_control_snapshot():
                 controller.fail()
                 raise RuntimeError("true MoA durable call reservation failed")
+
+            def _expire_actual_call() -> None:
+                if advisor_call_id is None:
+                    return
+                terminal_state = controller.state
+                error_category = (
+                    "provider_timeout_after_stop"
+                    if terminal_state == "cancelled"
+                    else (
+                        "provider_timeout_after_terminal_failure"
+                        if terminal_state == "failed"
+                        else "provider_timeout"
+                    )
+                )
+                deadline_won = ledger.finish_advisor_call(
+                    advisor_call_id,
+                    status="timed_out",
+                    error_category=error_category,
+                    notify=False,
+                )
+                if deadline_won and terminal_state == "running":
+                    # The durable call receipt is the deadline race lock.  If
+                    # the timer wins it before a provider completion, fence the
+                    # whole advisor wave so a late result can never seed final
+                    # synthesis or another paid call.
+                    watchdog_timeout.set()
+                    ledger.finish_slot(
+                        slot,
+                        status="timed_out",
+                        error_category="advisor_timeout",
+                        notify=False,
+                    )
+                    controller.fail()
+                ledger.notify_change_async()
+
+            # The SDK timeout is the normal boundary, but a transport can
+            # ignore it.  This independent durable watchdog prevents a stopped
+            # delivery from remaining `stop_requested` forever.  A later exact
+            # usage receipt may fill empty accounting fields but cannot reopen
+            # the terminal call or publish provider text.
+            advisor_call_watchdog = threading.Timer(
+                timeout_seconds,
+                _expire_actual_call,
+            )
+            advisor_call_watchdog.daemon = True
+            advisor_call_watchdog.start()
 
         def _finish_actual_call(
             *,
@@ -1182,10 +1245,12 @@ def run_true_moa_advisors(
             cost_usd: float | None = None,
             cost_status: str | None = None,
             cost_source: str | None = None,
-        ) -> None:
+        ) -> bool:
             if advisor_call_id is None:
-                return
-            ledger.finish_advisor_call(
+                return False
+            if advisor_call_watchdog is not None:
+                advisor_call_watchdog.cancel()
+            return ledger.finish_advisor_call(
                 advisor_call_id,
                 status=status,
                 usage=usage,
@@ -1217,10 +1282,15 @@ def run_true_moa_advisors(
                 raise _MalformedAdvisorResult("advisor_returned_tool_calls")
             cleaned = _sanitize_advisor_output(strict_result.content, output_max_chars)
             if controller.is_set:
+                stopped_by_user = controller.state == "cancelled"
                 _finish_actual_call(
-                    status="cancelled",
+                    status="completed",
                     usage=strict_result.usage,
-                    error_category="late_result_after_terminal",
+                    error_category=(
+                        "completed_after_stop"
+                        if stopped_by_user
+                        else "completed_after_terminal_failure"
+                    ),
                     cost_usd=strict_result.cost_usd,
                     cost_status=strict_result.cost_status,
                     cost_source=strict_result.cost_source,
@@ -1236,13 +1306,42 @@ def run_true_moa_advisors(
                     notify=False,
                 )
                 raise _SlotTerminal("cancelled")
-            _finish_actual_call(
+            actual_call_completed = _finish_actual_call(
                 status="completed",
                 usage=strict_result.usage,
                 cost_usd=strict_result.cost_usd,
                 cost_status=strict_result.cost_status,
                 cost_source=strict_result.cost_source,
             )
+            if not actual_call_completed:
+                if not controller.is_set:
+                    watchdog_timeout.set()
+                    controller.fail()
+                terminal_state = controller.state
+                category = (
+                    "cancelled"
+                    if terminal_state == "cancelled"
+                    else (
+                        "advisor_timeout"
+                        if watchdog_timeout.is_set()
+                        else "advisor_failed"
+                    )
+                )
+                ledger.finish_slot(
+                    slot,
+                    status=(
+                        "cancelled"
+                        if terminal_state == "cancelled"
+                        else "timed_out"
+                    ),
+                    usage=strict_result.usage,
+                    error_category="late_result_after_terminal",
+                    cost_usd=strict_result.cost_usd,
+                    cost_status=strict_result.cost_status,
+                    cost_source=strict_result.cost_source,
+                    notify=False,
+                )
+                raise _SlotTerminal(category)
             ledger.finish_slot(
                 slot,
                 status="completed",
@@ -1256,7 +1355,7 @@ def run_true_moa_advisors(
         except _MalformedAdvisorResult as exc:
             if controller.is_set:
                 _finish_actual_call(
-                    status="cancelled",
+                    status="failed",
                     usage=strict_result.usage if strict_result is not None else None,
                     error_category="late_malformed_result_after_terminal",
                     cost_usd=(
@@ -1325,10 +1424,28 @@ def run_true_moa_advisors(
             late_cost_status = getattr(exc, "cost_status", None)
             late_cost_source = getattr(exc, "cost_source", None)
             if controller.is_set:
+                stopped_by_user = controller.state == "cancelled"
+                actual_status = (
+                    "completed"
+                    if late_usage is not None
+                    else "timed_out"
+                )
                 _finish_actual_call(
-                    status="cancelled",
+                    status=actual_status,
                     usage=late_usage,
-                    error_category="provider_cancelled_after_terminal",
+                    error_category=(
+                        (
+                            "completed_after_stop"
+                            if stopped_by_user
+                            else "completed_after_terminal_failure"
+                        )
+                        if late_usage is not None
+                        else (
+                            "provider_timeout_after_stop"
+                            if stopped_by_user
+                            else "provider_timeout_after_terminal_failure"
+                        )
+                    ),
                     cost_usd=late_cost_usd,
                     cost_status=late_cost_status,
                     cost_source=late_cost_source,
@@ -1366,7 +1483,7 @@ def run_true_moa_advisors(
         except Exception:
             if controller.is_set:
                 _finish_actual_call(
-                    status="cancelled",
+                    status="failed",
                     error_category="provider_error_after_terminal",
                 )
                 ledger.finish_slot(
@@ -1428,13 +1545,25 @@ def run_true_moa_advisors(
         while pending:
             if controller.is_set:
                 terminal_category = (
-                    "cancelled" if controller.state == "cancelled" else "advisor_failed"
+                    "cancelled"
+                    if controller.state == "cancelled"
+                    else (
+                        "advisor_timeout"
+                        if watchdog_timeout.is_set()
+                        else "advisor_failed"
+                    )
                 )
                 break
             done, _ = wait(pending, timeout=0.01, return_when=FIRST_COMPLETED)
             if controller.is_set:
                 terminal_category = (
-                    "cancelled" if controller.state == "cancelled" else "advisor_failed"
+                    "cancelled"
+                    if controller.state == "cancelled"
+                    else (
+                        "advisor_timeout"
+                        if watchdog_timeout.is_set()
+                        else "advisor_failed"
+                    )
                 )
                 break
             for future in done:
@@ -1487,6 +1616,7 @@ def run_true_moa_advisors(
                     if status == "cancelled"
                     else f"cascade_after_{terminal_category}"
                 ),
+                preserve_running_calls=status == "cancelled",
                 notify=False,
             )
             if not _confirm_control_snapshot():
@@ -1516,6 +1646,7 @@ def run_true_moa_advisors(
             ledger.terminate_unfinished(
                 status=status,
                 error_category="terminal_fence",
+                preserve_running_calls=status == "cancelled",
                 notify=False,
             )
             category = (
@@ -1543,10 +1674,11 @@ def run_true_moa_advisors(
             ledger=ledger,
         )
     finally:
-        # Provider socket aborts are best effort.  Keep a short, fixed grace for
-        # responsive transports, but never let an unresponsive SDK call defeat
-        # the advisor deadline.  Daemon workers may later fill missing usage;
-        # the terminal slot/wave fences reject their text and status rewrites.
+        # A stop fences slots, output, final execution, and tools immediately.
+        # Already-dispatched non-streaming calls keep running only to return an
+        # exact provider usage receipt.  Keep a short grace for fast receipts,
+        # but never let an unresponsive SDK call defeat the terminal fence;
+        # daemon workers may fill accounting later without reviving text.
         for future in pending:
             future.cancel()
         if pending:

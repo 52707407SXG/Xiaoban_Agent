@@ -1352,6 +1352,22 @@ async def test_stop_tombstone_wins_completion_commit_without_text_leak():
                 "costUsd": 0.02,
             },
         ],
+        "calls": [
+            {
+                "callId": "advisor-running",
+                "slotId": KIMI_ADVISOR_SLOT.slot_id,
+                "role": "advisor",
+                "status": "running",
+                "usageStatus": "unavailable",
+            },
+            {
+                "callId": "final-running",
+                "slotId": FINAL_EXECUTOR_SLOT.slot_id,
+                "role": "final_executor",
+                "status": "running",
+                "usageStatus": "unavailable",
+            },
+        ],
     }
 
     async def _compute():
@@ -1394,6 +1410,16 @@ async def test_stop_tombstone_wins_completion_commit_without_text_leak():
     assert final_slot["status"] == "cancelled"
     assert final_slot["errorCategory"] == "terminal_fence_after_stop"
     assert final_slot["costUsd"] == 0.02
+    calls = {
+        item["callId"]: item
+        for item in usage["true_moa"]["calls"]
+    }
+    assert calls["advisor-running"]["status"] == "running"
+    assert calls["final-running"]["status"] == "cancelled"
+    assert (
+        calls["final-running"]["errorCategory"]
+        == "terminal_fence_after_stop"
+    )
     await asyncio.sleep(0)
     state, cached = cache.result_state(key)
     assert state == "stopped"
@@ -1692,7 +1718,15 @@ async def test_create_restart_stop_fences_late_completion_and_keeps_usage(
         assert pending_payload["terminalState"] == "stopped"
         assert pending_payload["settlementBlocked"] is True
         assert pending_payload["outcomeStatus"] == "none"
-        assert pending_payload["usage"]["calls"][-1]["status"] == "running"
+        assert all(
+            call["status"] != "running"
+            for call in pending_payload["usage"]["calls"]
+        )
+        assert pending_payload["usage"]["calls"][-1]["status"] == "timed_out"
+        assert (
+            pending_payload["usage"]["calls"][-1]["usageStatus"]
+            == "unavailable"
+        )
         assert pending_payload["usage"]["calls"][0]["totalTokens"] == 6
 
         release_late_completion.set()
@@ -1704,7 +1738,13 @@ async def test_create_restart_stop_fences_late_completion_and_keeps_usage(
 
         stopped_record = restarted.durable_record(scoped_key)
         assert stopped_record["state"] == "stopped"
-        assert stopped_record["usage"] == completed_usage
+        assert stopped_record["usage"]["status"] == "cancelled"
+        assert stopped_record["usage"]["calls"][-1]["status"] == "timed_out"
+        assert stopped_record["usage"]["calls"][-1]["totalTokens"] == 18
+        assert (
+            stopped_record["usage"]["calls"][-1]["usageStatus"]
+            == "reported"
+        )
         assert stopped_record["outcomeState"] == "none"
 
         recovered = await client.post(
@@ -1718,7 +1758,11 @@ async def test_create_restart_stop_fences_late_completion_and_keeps_usage(
         assert recovered_payload["terminalState"] == "stopped"
         assert recovered_payload["settlementBlocked"] is False
         assert recovered_payload["outcomeStatus"] == "none"
-        assert recovered_payload["usage"] == completed_usage
+        assert recovered_payload["usage"]["status"] == "cancelled"
+        assert (
+            recovered_payload["usage"]["calls"][-1]["status"]
+            == "timed_out"
+        )
         assert recovered_payload["usage"]["calls"][-1]["totalTokens"] == 18
         assert recovered_payload["usage"]["calls"][-1]["costUsd"] == 0.05
         assert "outcome" not in recovered_payload

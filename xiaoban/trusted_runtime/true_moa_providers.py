@@ -3,8 +3,12 @@
 This module is imported lazily only for an authenticated ``mode=moa`` request.
 Each invocation creates one fresh SDK client, disables SDK retries, exposes no
 tools, and closes the client in the worker thread that owns the request.
-Provider output is returned only to :mod:`true_moa` for bounded sanitization;
-it is never logged or emitted directly.
+Cancellation fences output and downstream work immediately.  An already
+dispatched non-streaming request is allowed to return its trusted usage receipt:
+closing the local socket cannot prove upstream cancellation and would destroy
+the only exact billing evidence.  Provider output is returned only to
+:mod:`true_moa` for bounded sanitization; it is never logged or emitted
+directly.
 """
 
 from __future__ import annotations
@@ -173,10 +177,6 @@ def _call_kimi(
         max_retries=0,
     )
     cancel_key = f"advisor:{KIMI_ADVISOR_SLOT.slot_id}"
-    cancel_controller.register_cancel_callback(
-        cancel_key,
-        lambda: _abort_client_sockets(client),
-    )
     try:
         if not cancel_controller.try_begin_dispatch(f"{cancel_key}:reservation"):
             raise StrictAdvisorCancelled("advisor_cancelled_before_dispatch")
@@ -215,7 +215,6 @@ def _call_kimi(
             cost_source="provider_usage_only",
         )
     finally:
-        cancel_controller.unregister_cancel_callback(cancel_key)
         _close_client(client)
 
 
@@ -258,10 +257,6 @@ def _call_deepseek(
         max_retries=0,
     )
     cancel_key = f"advisor:{DEEPSEEK_ADVISOR_SLOT.slot_id}"
-    cancel_controller.register_cancel_callback(
-        cancel_key,
-        lambda: _abort_client_sockets(client),
-    )
     try:
         if not cancel_controller.try_begin_dispatch(f"{cancel_key}:reservation"):
             raise StrictAdvisorCancelled("advisor_cancelled_before_dispatch")
@@ -295,7 +290,6 @@ def _call_deepseek(
             cost_source="provider_usage_only",
         )
     finally:
-        cancel_controller.unregister_cancel_callback(cancel_key)
         _close_client(client)
 
 
@@ -336,17 +330,6 @@ def _anthropic_messages(
             {"role": "user", "content": "Review the adjacent context below."},
         )
     return rendered
-
-
-def _abort_client_sockets(client: Any) -> None:
-    """Unblock in-flight I/O without closing descriptors cross-thread."""
-
-    try:
-        from agent.agent_runtime_helpers import force_close_tcp_sockets
-
-        force_close_tcp_sockets(client)
-    except Exception:
-        pass
 
 
 def _close_client(client: Any) -> None:

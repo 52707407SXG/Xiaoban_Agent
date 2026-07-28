@@ -336,6 +336,10 @@ def test_any_advisor_failure_closes_peer_and_waits_for_all_dispatched_calls():
         receipts[DEEPSEEK_ADVISOR_SLOT.slot_id]["errorCategory"]
         == "cascade_after_provider_error"
     )
+    assert "completed_after_stop" not in json.dumps(
+        caught.value.ledger.to_dict(),
+        ensure_ascii=False,
+    )
 
 
 def test_timeout_invokes_transport_close_callbacks_and_waits_for_exit():
@@ -556,6 +560,299 @@ def test_running_cancel_closes_both_calls_and_late_results_cannot_escape():
     assert kimi_receipt["totalTokens"] == 11
     assert kimi_receipt["cachedInputTokens"] == 0
     assert kimi_receipt["costUsd"] == 0.04
+
+
+def test_running_cancel_returns_bounded_then_drains_exact_usage_receipts():
+    controller = TrueMoACancelController()
+    both_started = threading.Event()
+    release_responses = threading.Event()
+    late_usage_persisted = threading.Event()
+    started_ids: set[str] = set()
+    lock = threading.Lock()
+    outcome: list[object] = []
+    private_text = "PRIVATE_ADVISOR_TEXT_AFTER_STOP"
+
+    def _persist(payload):
+        calls = payload.get("calls") or []
+        if (
+            len(calls) == 2
+            and all(
+                call.get("status") == "completed"
+                and call.get("usageStatus") == "reported"
+                for call in calls
+            )
+        ):
+            late_usage_persisted.set()
+
+    ledger = TrueMoAUsageLedger(_snapshot(), on_change=_persist)
+
+    def strict_caller(*, slot, dispatch_callback, **_kwargs):
+        dispatch_callback()
+        with lock:
+            started_ids.add(slot.slot_id)
+            if len(started_ids) == 2:
+                both_started.set()
+        assert release_responses.wait(2)
+        return StrictAdvisorResult(
+            content=f"{private_text}:{slot.slot_id}",
+            usage={
+                "input_tokens": 9,
+                "output_tokens": 2,
+                "total_tokens": 11,
+                "cached_input_tokens": 1,
+            },
+        )
+
+    def run_wave():
+        try:
+            outcome.append(
+                run_true_moa_advisors(
+                    _snapshot(),
+                    current_question="停止后只排空计量回执",
+                    conversation_history=[],
+                    strict_caller=strict_caller,
+                    cancel_controller=controller,
+                    usage_ledger=ledger,
+                    timeout_seconds=2,
+                )
+            )
+        except Exception as exc:
+            outcome.append(exc)
+
+    thread = threading.Thread(target=run_wave, daemon=True)
+    thread.start()
+    assert both_started.wait(1)
+    controller.cancel()
+    thread.join(1)
+
+    assert not thread.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], TrueMoAExecutionError)
+    assert outcome[0].category == "cancelled"
+    pending = ledger.to_dict()
+    assert pending["status"] == "cancelled"
+    assert all(
+        slot["status"] == "cancelled"
+        for slot in pending["slots"]
+        if slot["role"] == "advisor"
+    )
+    assert len(pending["calls"]) == 2
+    assert all(call["status"] == "running" for call in pending["calls"])
+    assert private_text not in json.dumps(pending, ensure_ascii=False)
+
+    release_responses.set()
+    assert late_usage_persisted.wait(1)
+    final = ledger.to_dict()
+    assert final["status"] == "cancelled"
+    assert all(
+        call["status"] == "completed"
+        and call["usageStatus"] == "reported"
+        and call["totalTokens"] == 11
+        and call["errorCategory"] == "completed_after_stop"
+        for call in final["calls"]
+    )
+    assert all(
+        slot["status"] == "cancelled"
+        and slot["usageStatus"] == "reported"
+        and slot["totalTokens"] == 11
+        for slot in final["slots"]
+        if slot["role"] == "advisor"
+    )
+    assert private_text not in json.dumps(final, ensure_ascii=False)
+
+
+def test_running_cancel_watchdog_terminalizes_unresponsive_actual_calls():
+    controller = TrueMoACancelController()
+    both_started = threading.Event()
+    release_responses = threading.Event()
+    watchdog_persisted = threading.Event()
+    late_usage_persisted = threading.Event()
+    started_ids: set[str] = set()
+    lock = threading.Lock()
+    outcome: list[object] = []
+    private_text = "PRIVATE_UNRESPONSIVE_TEXT_AFTER_STOP"
+
+    def _persist(payload):
+        calls = payload.get("calls") or []
+        if (
+            len(calls) == 2
+            and all(
+                call.get("status") == "timed_out"
+                and call.get("usageStatus") == "unavailable"
+                for call in calls
+            )
+        ):
+            watchdog_persisted.set()
+        if (
+            len(calls) == 2
+            and all(
+                call.get("status") == "timed_out"
+                and call.get("usageStatus") == "reported"
+                for call in calls
+            )
+        ):
+            late_usage_persisted.set()
+
+    ledger = TrueMoAUsageLedger(_snapshot(), on_change=_persist)
+
+    def strict_caller(*, slot, dispatch_callback, **_kwargs):
+        dispatch_callback()
+        with lock:
+            started_ids.add(slot.slot_id)
+            if len(started_ids) == 2:
+                both_started.set()
+        assert release_responses.wait(2)
+        return StrictAdvisorResult(
+            content=f"{private_text}:{slot.slot_id}",
+            usage={
+                "input_tokens": 12,
+                "output_tokens": 3,
+                "total_tokens": 15,
+                "cached_input_tokens": 0,
+            },
+        )
+
+    def run_wave():
+        try:
+            outcome.append(
+                run_true_moa_advisors(
+                    _snapshot(),
+                    current_question="停止后供应商不响应也必须结束等待",
+                    conversation_history=[],
+                    strict_caller=strict_caller,
+                    cancel_controller=controller,
+                    usage_ledger=ledger,
+                    timeout_seconds=0.4,
+                )
+            )
+        except Exception as exc:
+            outcome.append(exc)
+
+    thread = threading.Thread(target=run_wave, daemon=True)
+    thread.start()
+    assert both_started.wait(1)
+    controller.cancel()
+    thread.join(1)
+
+    assert not thread.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], TrueMoAExecutionError)
+    assert outcome[0].category == "cancelled"
+    pending = ledger.to_dict()
+    assert len(pending["calls"]) == 2
+    assert all(call["status"] == "running" for call in pending["calls"])
+
+    assert watchdog_persisted.wait(1)
+    timed_out = ledger.to_dict()
+    assert timed_out["status"] == "cancelled"
+    assert all(
+        call["status"] == "timed_out"
+        and call["usageStatus"] == "unavailable"
+        and call["errorCategory"] == "provider_timeout_after_stop"
+        for call in timed_out["calls"]
+    )
+    assert private_text not in json.dumps(timed_out, ensure_ascii=False)
+
+    release_responses.set()
+    assert late_usage_persisted.wait(1)
+    recovered = ledger.to_dict()
+    assert all(
+        call["status"] == "timed_out"
+        and call["usageStatus"] == "reported"
+        and call["totalTokens"] == 15
+        and call["errorCategory"] == "provider_timeout_after_stop"
+        for call in recovered["calls"]
+    )
+    assert all(
+        slot["status"] == "cancelled"
+        and slot["usageStatus"] == "reported"
+        and slot["totalTokens"] == 15
+        for slot in recovered["slots"]
+        if slot["role"] == "advisor"
+    )
+    assert private_text not in json.dumps(recovered, ensure_ascii=False)
+
+
+def test_actual_call_watchdog_wins_deadline_and_fences_advisor_bundle():
+    both_started = threading.Event()
+    release_responses = threading.Event()
+    watchdog_persisted = threading.Event()
+    late_usage_persisted = threading.Event()
+    started_ids: set[str] = set()
+    lock = threading.Lock()
+    outcome: list[object] = []
+    private_text = "PRIVATE_DEADLINE_EDGE_ADVISOR_TEXT"
+
+    def _persist(payload):
+        calls = payload.get("calls") or []
+        if (
+            len(calls) == 2
+            and all(call.get("status") == "timed_out" for call in calls)
+        ):
+            watchdog_persisted.set()
+        if (
+            len(calls) == 2
+            and all(call.get("usageStatus") == "reported" for call in calls)
+        ):
+            late_usage_persisted.set()
+
+    ledger = TrueMoAUsageLedger(_snapshot(), on_change=_persist)
+
+    def strict_caller(*, slot, dispatch_callback, **_kwargs):
+        dispatch_callback()
+        with lock:
+            started_ids.add(slot.slot_id)
+            if len(started_ids) == 2:
+                both_started.set()
+        assert release_responses.wait(2)
+        return StrictAdvisorResult(
+            content=f"{private_text}:{slot.slot_id}",
+            usage={
+                "input_tokens": 7,
+                "output_tokens": 2,
+                "total_tokens": 9,
+                "cached_input_tokens": 0,
+            },
+        )
+
+    def run_wave():
+        try:
+            outcome.append(
+                run_true_moa_advisors(
+                    _snapshot(),
+                    current_question="硬截止赢时不得进入综合阶段",
+                    conversation_history=[],
+                    strict_caller=strict_caller,
+                    usage_ledger=ledger,
+                    timeout_seconds=0.2,
+                )
+            )
+        except Exception as exc:
+            outcome.append(exc)
+
+    thread = threading.Thread(target=run_wave, daemon=True)
+    thread.start()
+    assert both_started.wait(1)
+    assert watchdog_persisted.wait(1)
+    release_responses.set()
+    thread.join(1)
+
+    assert not thread.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], TrueMoAExecutionError)
+    assert outcome[0].category == "advisor_timeout"
+    assert late_usage_persisted.wait(1)
+    final = ledger.to_dict()
+    assert final["status"] == "failed"
+    assert all(
+        call["status"] == "timed_out"
+        and call["usageStatus"] == "reported"
+        and call["totalTokens"] == 9
+        for call in final["calls"]
+    )
+    assert final["slots"][-1]["role"] == "final_executor"
+    assert final["slots"][-1]["status"] == "not_started"
+    assert private_text not in json.dumps(final, ensure_ascii=False)
 
 
 def test_usage_and_cost_are_fill_once_after_terminal_status():
@@ -1099,6 +1396,11 @@ def test_unresponsive_advisor_returns_bounded_and_late_text_stays_fenced(
     assert private_late_text not in json.dumps(
         caught.value.ledger.to_dict(),
         ensure_ascii=False,
+    )
+    assert all(
+        call.get("errorCategory") != "completed_after_stop"
+        for snapshot in durable_snapshots
+        for call in snapshot.get("calls", [])
     )
 
     release_provider.set()
