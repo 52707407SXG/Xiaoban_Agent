@@ -29,7 +29,21 @@ if (
 ):
     raise RuntimeError("invalid Xiaoban trusted runtime contract")
 
-TRUSTED_RUNTIME_CONTRACT: Mapping[str, Any] = MappingProxyType(
+
+def _freeze_contract(value: Any) -> Any:
+    if isinstance(value, dict):
+        return MappingProxyType(
+            {
+                str(key): _freeze_contract(item)
+                for key, item in value.items()
+            }
+        )
+    if isinstance(value, list):
+        return tuple(_freeze_contract(item) for item in value)
+    return value
+
+
+TRUSTED_RUNTIME_CONTRACT: Mapping[str, Any] = _freeze_contract(
     _CONTRACT_RAW
 )
 TRUSTED_RUNTIME_CONTRACT_REVISION = str(_CONTRACT_RAW["revision"])

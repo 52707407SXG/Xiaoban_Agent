@@ -42,6 +42,12 @@ def test_trusted_runtime_contract_protects_non_negotiable_invariants():
         TRUSTED_RUNTIME_CONTRACT["write"]["successRequiresVerified"]
         is True
     )
+    with pytest.raises(TypeError):
+        TRUSTED_RUNTIME_CONTRACT["compatibility"]["mode"] = "fallback"
+    with pytest.raises(TypeError):
+        TRUSTED_RUNTIME_CONTRACT["billing"]["trueMoa"]["slots"][0][
+            "provider"
+        ] = "untrusted-provider"
 
 
 @pytest.mark.parametrize(
