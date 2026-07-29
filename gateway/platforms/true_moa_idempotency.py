@@ -34,6 +34,7 @@ class _IdempotencyCache:
         self._agent_refs: Dict[tuple[str, str], list] = {}
         self._stopped: Dict[str, float] = {}
         self._usage_drains: set[str] = set()
+        self._closed_usage_drain_owners: Dict[str, float] = {}
         self._usage_drains_lock = threading.Lock()
         self._ttl = ttl_seconds
         self._max = max_items
@@ -78,18 +79,35 @@ class _IdempotencyCache:
     ) -> Any:
         usage_ledger = copy.deepcopy(record.get("usage"))
         if isinstance(usage_ledger, dict):
+            is_true_moa = (
+                usage_ledger.get("schema")
+                == "mystand.true-moa.usage.v1"
+            )
             if record.get("state") == "interrupted":
                 usage_ledger["status"] = "failed"
+                projection_timestamp = int(time.time() * 1000)
                 for collection_name in ("slots", "calls"):
                     collection = usage_ledger.get(collection_name)
                     if not isinstance(collection, list):
                         continue
                     for receipt in collection:
-                        if (
-                            isinstance(receipt, dict)
-                            and receipt.get("status") == "running"
-                        ):
+                        if not isinstance(receipt, dict):
+                            continue
+                        if receipt.get("status") == "reserved":
+                            receipt["status"] = "not_dispatched"
+                            receipt["endedAtMs"] = max(
+                                int(receipt.get("startedAtMs") or 0),
+                                projection_timestamp,
+                            )
+                            receipt["errorCategory"] = (
+                                "provider_dispatch_fence_closed"
+                            )
+                        elif receipt.get("status") == "running":
                             receipt["status"] = "failed"
+                            receipt["endedAtMs"] = max(
+                                int(receipt.get("startedAtMs") or 0),
+                                projection_timestamp,
+                            )
                             receipt["errorCategory"] = (
                                 "agent_restart_outcome_unknown"
                             )
@@ -109,7 +127,11 @@ class _IdempotencyCache:
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "total_tokens": total_tokens,
-                "true_moa": usage_ledger,
+                (
+                    "true_moa"
+                    if is_true_moa
+                    else "agent_calls"
+                ): usage_ledger,
             }
         else:
             usage = {
@@ -158,7 +180,14 @@ class _IdempotencyCache:
                 "interrupted": True,
                 "error": "durable completion replay has no public output",
                 **(
-                    {"_true_moa_usage": usage_ledger}
+                    {
+                        (
+                            "_true_moa_usage"
+                            if usage_ledger.get("schema")
+                            == "mystand.true-moa.usage.v1"
+                            else "_agent_call_usage"
+                        ): usage_ledger
+                    }
                     if isinstance(usage_ledger, dict)
                     else {}
                 ),
@@ -181,6 +210,19 @@ class _IdempotencyCache:
         while len(self._stopped) > self._max:
             oldest = min(self._stopped, key=self._stopped.get)
             self._stopped.pop(oldest, None)
+        with self._usage_drains_lock:
+            self._closed_usage_drain_owners = {
+                key: expires_at
+                for key, expires_at
+                in self._closed_usage_drain_owners.items()
+                if expires_at > now
+            }
+            while len(self._closed_usage_drain_owners) > self._max:
+                oldest = min(
+                    self._closed_usage_drain_owners,
+                    key=self._closed_usage_drain_owners.get,
+                )
+                self._closed_usage_drain_owners.pop(oldest, None)
 
     def lookup_state(
         self,
@@ -364,6 +406,20 @@ class _IdempotencyCache:
                             "idempotency key was reused with a different request"
                         )
                     durable_record = durable_store.get(key) or durable_record
+                if (
+                    durable_record.get("state")
+                    in {"interrupted", "stopped"}
+                    or (
+                        durable_record.get("state") == "failed"
+                        and self._has_running_usage_receipt(
+                            durable_record
+                        )
+                    )
+                ):
+                    durable_record = (
+                        self.terminalize_orphaned_usage(key)
+                        or durable_record
+                    )
                 outcome = None
                 if (
                     durable_record.get("state") == "completed"
@@ -396,6 +452,20 @@ class _IdempotencyCache:
             if durable_state != "missing":
                 durable_record = durable_store.get(key)
                 if durable_record is not None:
+                    if (
+                        durable_record.get("state")
+                        in {"interrupted", "stopped"}
+                        or (
+                            durable_record.get("state") == "failed"
+                            and self._has_running_usage_receipt(
+                                durable_record
+                            )
+                        )
+                    ):
+                        durable_record = (
+                            self.terminalize_orphaned_usage(key)
+                            or durable_record
+                        )
                     outcome = None
                     if (
                         durable_record.get("state") == "completed"
@@ -421,6 +491,9 @@ class _IdempotencyCache:
                         outcome=outcome,
                     )
         if task is None:
+            with self._usage_drains_lock:
+                self._closed_usage_drain_owners.pop(key, None)
+
             async def _compute_and_store():
                 if durable_store is not None:
                     durable_store.set_state(key, state="running")
@@ -443,17 +516,30 @@ class _IdempotencyCache:
                     )
                     if (
                         not isinstance(ledger, dict)
+                        and isinstance(raw_usage, dict)
+                    ):
+                        ledger = raw_usage.get("agent_calls")
+                    if (
+                        not isinstance(ledger, dict)
                         and isinstance(raw_result, dict)
                     ):
-                        ledger = raw_result.get("_true_moa_usage")
+                        ledger = (
+                            raw_result.get("_true_moa_usage")
+                            or raw_result.get("_agent_call_usage")
+                        )
                     if durable_store is not None:
                         if isinstance(ledger, dict):
                             ledger_status = str(
                                 ledger.get("status") or ""
                             )
+                            is_true_moa = (
+                                ledger.get("schema")
+                                == "mystand.true-moa.usage.v1"
+                            )
                             if (
                                 ledger_status == "completed"
                                 and key not in self._stopped
+                                and is_true_moa
                             ):
                                 if outcome_binding is None:
                                     raise RuntimeError(
@@ -483,6 +569,8 @@ class _IdempotencyCache:
                                         "stopped"
                                         if key in self._stopped
                                         or ledger_status == "cancelled"
+                                        else "completed"
+                                        if ledger_status == "completed"
                                         else "failed"
                                         if ledger_status == "failed"
                                         else "interrupted"
@@ -490,7 +578,7 @@ class _IdempotencyCache:
                                 )
                         else:
                             raise RuntimeError(
-                                "true MoA terminal usage ledger is required"
+                                "durable terminal usage ledger is required"
                             )
                     import time as _t
 
@@ -519,7 +607,14 @@ class _IdempotencyCache:
 
             def _clear_inflight(done_task: "asyncio.Task[Any]") -> None:
                 if self._inflight.get(inflight_key) is done_task:
+                    agent_ref = self._agent_refs.get(inflight_key)
                     self._inflight.pop(inflight_key, None)
+                    if self._local_usage_owner_finished(agent_ref):
+                        with self._usage_drains_lock:
+                            self._closed_usage_drain_owners[key] = (
+                                time.time() + self._ttl
+                            )
+                            self._usage_drains.discard(key)
                     self._agent_refs.pop(inflight_key, None)
 
             task.add_done_callback(_clear_inflight)
@@ -612,7 +707,8 @@ class _IdempotencyCache:
         return bool(
             isinstance(usage, dict)
             and any(
-                isinstance(call, dict) and call.get("status") == "running"
+                isinstance(call, dict)
+                and call.get("status") in {"reserved", "running"}
                 for call in (usage.get("calls") or ())
             )
         )
@@ -621,6 +717,59 @@ class _IdempotencyCache:
         with self._usage_drains_lock:
             return key in self._usage_drains
 
+    def has_active_execution(self, key: str) -> bool:
+        return any(
+            existing_key == key and not task.done()
+            for (existing_key, _), task in self._inflight.items()
+        )
+
+    @staticmethod
+    def _local_usage_owner_finished(agent_ref: Any) -> bool:
+        """Return true only when an attached local ledger has no live call."""
+
+        agent = (
+            agent_ref[0]
+            if isinstance(agent_ref, (list, tuple)) and agent_ref
+            else None
+        )
+        if agent is None:
+            return False
+        ledgers = []
+        seen_ids: set[int] = set()
+        for attribute in (
+            "_paid_call_usage_ledger",
+            "_true_moa_usage_ledger",
+        ):
+            ledger = getattr(agent, attribute, None)
+            if ledger is None or id(ledger) in seen_ids:
+                continue
+            seen_ids.add(id(ledger))
+            ledgers.append(ledger)
+        if not ledgers:
+            return False
+        for ledger in ledgers:
+            to_dict = getattr(ledger, "to_dict", None)
+            if not callable(to_dict):
+                return False
+            try:
+                snapshot = to_dict()
+            except BaseException:
+                return False
+            calls = (
+                snapshot.get("calls")
+                if isinstance(snapshot, dict)
+                else None
+            )
+            if not isinstance(calls, list):
+                return False
+            if any(
+                isinstance(call, dict)
+                and call.get("status") in {"reserved", "running"}
+                for call in calls
+            ):
+                return False
+        return True
+
     def _sync_usage_drain_owner(self, key: str) -> None:
         if self._durable is None:
             return
@@ -628,7 +777,9 @@ class _IdempotencyCache:
             self._durable.get(key),
         )
         with self._usage_drains_lock:
-            if has_running_receipt:
+            if key in self._closed_usage_drain_owners:
+                self._usage_drains.discard(key)
+            elif has_running_receipt:
                 self._usage_drains.add(key)
             else:
                 self._usage_drains.discard(key)
@@ -637,19 +788,24 @@ class _IdempotencyCache:
         self,
         key: str,
     ) -> Optional[Dict[str, Any]]:
-        """Close durable running receipts only when this process has no owner."""
+        """Compatibility wrapper for the general orphan recovery fence."""
+
+        return self.terminalize_orphaned_usage(key)
+
+    def terminalize_orphaned_usage(
+        self,
+        key: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Close durable active receipts only when this process has no owner."""
 
         if self._durable is None:
             return None
         with self._usage_drains_lock:
             if key in self._usage_drains:
                 return self._durable.get(key)
-        if any(
-            existing_key == key and not task.done()
-            for (existing_key, _), task in self._inflight.items()
-        ):
+        if self.has_active_execution(key):
             return self._durable.get(key)
-        self._durable.terminalize_stopped_running_calls(key)
+        self._durable.terminalize_orphaned_running_calls(key)
         return self._durable.get(key)
 
     def recover_outcome(
@@ -689,9 +845,14 @@ class _IdempotencyCache:
         if self._durable is None:
             raise RuntimeError("true MoA durable ledger is unavailable")
         state = str(ledger.get("status") or "running")
+        is_true_moa = (
+            ledger.get("schema") == "mystand.true-moa.usage.v1"
+        )
         durable_state = (
             "stopped"
             if state == "cancelled"
+            else "completed"
+            if state == "completed" and not is_true_moa
             else "failed"
             if state == "failed"
             else "running"
@@ -701,7 +862,8 @@ class _IdempotencyCache:
         )
         with self._usage_drains_lock:
             was_active = key in self._usage_drains
-            if incoming_has_running_receipt:
+            owner_is_closed = key in self._closed_usage_drain_owners
+            if incoming_has_running_receipt and not owner_is_closed:
                 # Register before SQLite exposes the running receipt.  A
                 # concurrent recovery request can therefore never observe a
                 # durable running call without its same-process owner.
@@ -715,7 +877,9 @@ class _IdempotencyCache:
             )
         except BaseException:
             with self._usage_drains_lock:
-                if was_active:
+                if key in self._closed_usage_drain_owners:
+                    self._usage_drains.discard(key)
+                elif was_active:
                     self._usage_drains.add(key)
                 else:
                     self._usage_drains.discard(key)

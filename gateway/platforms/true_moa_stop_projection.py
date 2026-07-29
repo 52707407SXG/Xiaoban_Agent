@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 import threading
+import time
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,7 @@ def _stopped_chat_completion_response(response: Any) -> Any:
     raw_result, raw_usage = response if is_pair else (response, {})
     result = raw_result if isinstance(raw_result, dict) else {}
     usage = raw_usage if isinstance(raw_usage, dict) else {}
+    fence_timestamp = int(time.time() * 1000)
 
     stopped_usage: Dict[str, Any] = {}
     for name in ("input_tokens", "output_tokens", "total_tokens"):
@@ -131,17 +133,32 @@ def _stopped_chat_completion_response(response: Any) -> Any:
                 ):
                     slot["status"] = "cancelled"
                     slot["errorCategory"] = "terminal_fence_after_stop"
+                    slot["endedAtMs"] = max(
+                        int(slot.get("startedAtMs") or 0),
+                        int(slot.get("endedAtMs") or fence_timestamp),
+                    )
         calls = ledger.get("calls")
         if isinstance(calls, list):
             for call in calls:
                 if (
                     not isinstance(call, dict)
-                    or call.get("status") != "running"
                     or (
                         call.get("role") != "final_executor"
                         and call.get("slotId") != "final-deepseek-v4-pro"
                     )
                 ):
+                    continue
+                if call.get("status") == "reserved":
+                    call["status"] = "not_dispatched"
+                    call["errorCategory"] = (
+                        "provider_dispatch_fence_closed"
+                    )
+                    call["endedAtMs"] = max(
+                        int(call.get("startedAtMs") or 0),
+                        fence_timestamp,
+                    )
+                    continue
+                if call.get("status") != "running":
                     continue
                 # Advisor calls keep running only for their exact usage drain.
                 # The final transport still uses Agent interruption, so its
@@ -150,7 +167,44 @@ def _stopped_chat_completion_response(response: Any) -> Any:
                 # may still fill the empty accounting fields.
                 call["status"] = "cancelled"
                 call["errorCategory"] = "terminal_fence_after_stop"
+                call["endedAtMs"] = max(
+                    int(call.get("startedAtMs") or 0),
+                    fence_timestamp,
+                )
         stopped_usage["true_moa"] = ledger
+
+    agent_call_source = usage.get("agent_calls")
+    if not isinstance(agent_call_source, dict):
+        agent_call_source = result.get("_agent_call_usage")
+    agent_calls = (
+        copy.deepcopy(agent_call_source)
+        if isinstance(agent_call_source, dict)
+        else None
+    )
+    if agent_calls is not None:
+        agent_calls["status"] = "cancelled"
+        calls = agent_calls.get("calls")
+        if isinstance(calls, list):
+            for call in calls:
+                if (
+                    not isinstance(call, dict)
+                ):
+                    continue
+                if call.get("status") == "reserved":
+                    call["status"] = "not_dispatched"
+                    call["errorCategory"] = (
+                        "provider_dispatch_fence_closed"
+                    )
+                elif call.get("status") == "running":
+                    call["status"] = "timed_out"
+                    call["errorCategory"] = "completion_stopped"
+                else:
+                    continue
+                call["endedAtMs"] = max(
+                    int(call.get("startedAtMs") or 0),
+                    fence_timestamp,
+                )
+        stopped_usage["agent_calls"] = agent_calls
 
     stopped_result: Dict[str, Any] = {
         "final_response": "",
@@ -165,4 +219,6 @@ def _stopped_chat_completion_response(response: Any) -> Any:
         stopped_result["session_id"] = session_id
     if ledger is not None:
         stopped_result["_true_moa_usage"] = ledger
+    if agent_calls is not None:
+        stopped_result["_agent_call_usage"] = agent_calls
     return (stopped_result, stopped_usage) if is_pair else stopped_result

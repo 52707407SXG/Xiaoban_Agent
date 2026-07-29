@@ -67,6 +67,9 @@ from gateway.platforms.base import (
     SendResult,
     is_network_accessible,
 )
+from gateway.platforms.mystand_delivery_identity import (
+    normal_durable_identity_error,
+)
 from gateway.platforms.true_moa_http import TrueMoAHttpHandlersMixin
 from gateway.mystand_integrity_guard import (
     build_runtime_integrity_reminder as _build_mystand_runtime_integrity_reminder,
@@ -4293,11 +4296,40 @@ class APIServerAdapter(
         )
         if true_moa_error is not None:
             return true_moa_error
-        if true_moa_snapshot is not None and not _idem_cache.durable_ready:
+        from xiaoban.trusted_runtime.paid_call_policy import (
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
+        )
+
+        normal_delivery_id = self._header_value(
+            request.headers,
+            "X-Xiaoban-Delivery-Id",
+        )
+        normal_policy_revision = self._header_value(
+            request.headers,
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
+        )
+        normal_durable_intent = bool(
+            mystand_request
+            and true_moa_snapshot is None
+            and (normal_delivery_id or normal_policy_revision)
+        )
+        durable_request = bool(
+            true_moa_snapshot is not None
+            or normal_durable_intent
+        )
+        if durable_request and not _idem_cache.durable_ready:
             return web.json_response(
                 _openai_error(
-                    "True MoA durable idempotency ledger is unavailable",
-                    code="true_moa_durable_ledger_unavailable",
+                    (
+                        "True MoA durable idempotency ledger is unavailable"
+                        if true_moa_snapshot is not None
+                        else "My Stand provider-call ledger is unavailable"
+                    ),
+                    code=(
+                        "true_moa_durable_ledger_unavailable"
+                        if true_moa_snapshot is not None
+                        else "mystand_durable_ledger_unavailable"
+                    ),
                 ),
                 status=503,
             )
@@ -4318,6 +4350,42 @@ class APIServerAdapter(
             )
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
+        if (
+            normal_durable_intent
+            and not stream
+            and not _MYSTAND_STREAM_DELIVERY_ID_RE.fullmatch(
+                normal_delivery_id
+            )
+        ):
+            return web.json_response(
+                _openai_error(
+                    "Durable My Stand completion requires a trusted delivery identity",
+                    code="mystand_delivery_identity_required",
+                ),
+                status=400,
+            )
+        if normal_durable_intent and not stream:
+            identity_error = normal_durable_identity_error(
+                idempotency_key=self._header_value(
+                    request.headers,
+                    "Idempotency-Key",
+                ),
+                delivery_id=normal_delivery_id,
+                attempt=self._header_value(
+                    request.headers,
+                    "X-Xiaoban-Attempt",
+                ),
+                delivery_attempt=self._header_value(
+                    request.headers,
+                    "X-Xiaoban-Delivery-Attempt",
+                ),
+            )
+            if identity_error is not None:
+                code, message = identity_error
+                return web.json_response(
+                    _openai_error(message, code=code),
+                    status=400,
+                )
 
         # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
         system_prompt = None
@@ -4568,7 +4636,7 @@ class APIServerAdapter(
                 if _idem_cache.lookup_state(
                     stream_scoped_key,
                     stream_idem_fp,
-                    durable=true_moa_snapshot is not None,
+                    durable=durable_request,
                 ) == "conflict":
                     return web.json_response(
                         _openai_error(
@@ -4580,7 +4648,7 @@ class APIServerAdapter(
                 if _idem_cache.claim(
                     stream_binding_key,
                     stream_idem_fp,
-                    durable=true_moa_snapshot is not None,
+                    durable=durable_request,
                 ) == "conflict":
                     return web.json_response(
                         _openai_error(
@@ -4723,7 +4791,13 @@ class APIServerAdapter(
 
             async def _stream_compute():
                 try:
-                    if stream_scoped_key and agent_ref[1]:
+                    if (
+                        stream_scoped_key
+                        and agent_ref[1]
+                        and (
+                            not normal_durable_intent
+                        )
+                    ):
                         raise CompletionStoppedError("request stopped before execution")
                     result, usage = await self._run_agent(
                         user_message=user_message,
@@ -4745,7 +4819,7 @@ class APIServerAdapter(
                         completion_protocol=completion_protocol,
                         completion_binding=completion_binding,
                         true_moa_snapshot=true_moa_snapshot,
-                        true_moa_usage_callback=(
+                        paid_call_usage_callback=(
                             (
                                 lambda ledger: _idem_cache.persist_usage(
                                     stream_scoped_key,
@@ -4753,7 +4827,7 @@ class APIServerAdapter(
                                     ledger,
                                 )
                             )
-                            if true_moa_snapshot is not None
+                            if durable_request
                             else None
                         ),
                     )
@@ -4791,7 +4865,7 @@ class APIServerAdapter(
                     stream_idem_fp,
                     _stream_compute,
                     agent_ref=agent_ref,
-                    durable=true_moa_snapshot is not None,
+                    durable=durable_request,
                     outcome_binding=stream_outcome_binding,
                 ))
             else:
@@ -4811,15 +4885,33 @@ class APIServerAdapter(
             )
 
         # Non-streaming: run the agent (with optional Idempotency-Key)
-        if true_moa_snapshot is not None and not request.headers.get("Idempotency-Key"):
+        header_idempotency_key = request.headers.get("Idempotency-Key")
+        normal_delivery_key = (
+            normal_delivery_id if normal_durable_intent else ""
+        )
+        if durable_request and not (
+            header_idempotency_key or normal_delivery_key
+        ):
             return web.json_response(
                 _openai_error(
-                    "True MoA requires an idempotency key",
-                    code="true_moa_idempotency_required",
+                    (
+                        "True MoA requires an idempotency key"
+                        if true_moa_snapshot is not None
+                        else "My Stand completion requires an idempotency key"
+                    ),
+                    code=(
+                        "true_moa_idempotency_required"
+                        if true_moa_snapshot is not None
+                        else "mystand_idempotency_required"
+                    ),
                 ),
                 status=400,
             )
-        idempotency_key = request.headers.get("Idempotency-Key")
+        idempotency_key = (
+            normal_delivery_key
+            if normal_durable_intent
+            else header_idempotency_key
+        )
         nonstream_outcome_binding = None
         if true_moa_snapshot is not None:
             try:
@@ -4837,10 +4929,15 @@ class APIServerAdapter(
                     status=400,
                 )
         agent_ref = [None, False, None]
-        true_moa_usage_callback = None
+        paid_call_usage_callback = None
 
         async def _compute_completion():
-            if agent_ref[1]:
+            if (
+                agent_ref[1]
+                and (
+                    not normal_durable_intent
+                )
+            ):
                 return (
                     {
                         "final_response": "",
@@ -4869,7 +4966,7 @@ class APIServerAdapter(
                     completion_protocol=completion_protocol,
                     completion_binding=completion_binding,
                     true_moa_snapshot=true_moa_snapshot,
-                    true_moa_usage_callback=true_moa_usage_callback,
+                    paid_call_usage_callback=paid_call_usage_callback,
                 )
                 if agent_ref[1]:
                     result = dict(result or {})
@@ -4912,8 +5009,8 @@ class APIServerAdapter(
             try:
                 scoped_key = self._scoped_idempotency_key(request.headers, idempotency_key)
                 fp = self._chat_idempotency_fingerprint(body, request.headers)
-                if true_moa_snapshot is not None:
-                    true_moa_usage_callback = (
+                if durable_request:
+                    paid_call_usage_callback = (
                         lambda ledger: _idem_cache.persist_usage(
                             scoped_key,
                             fp,
@@ -4923,7 +5020,7 @@ class APIServerAdapter(
                 state = _idem_cache.lookup_state(
                     scoped_key,
                     fp,
-                    durable=true_moa_snapshot is not None,
+                    durable=durable_request,
                 )
                 if state == "conflict":
                     raise IdempotencyConflictError("idempotency key conflict")
@@ -4936,7 +5033,7 @@ class APIServerAdapter(
                     fp,
                     _compute_completion,
                     agent_ref=agent_ref,
-                    durable=true_moa_snapshot is not None,
+                    durable=durable_request,
                     outcome_binding=nonstream_outcome_binding,
                 )
             except InvalidToolsetPolicy as e:
@@ -5014,6 +5111,10 @@ class APIServerAdapter(
             }
             if isinstance(usage.get("true_moa"), dict):
                 stopped_body["error"]["xiaoban"]["true_moa_usage"] = usage["true_moa"]
+            if isinstance(usage.get("agent_calls"), dict):
+                stopped_body["error"]["xiaoban"]["agent_call_usage"] = (
+                    usage["agent_calls"]
+                )
             return web.json_response(
                 stopped_body,
                 status=409,
@@ -5052,6 +5153,10 @@ class APIServerAdapter(
             }
             if isinstance(usage.get("true_moa"), dict):
                 err_body["error"]["xiaoban"]["true_moa_usage"] = usage["true_moa"]
+            if isinstance(usage.get("agent_calls"), dict):
+                err_body["error"]["xiaoban"]["agent_call_usage"] = (
+                    usage["agent_calls"]
+                )
             response_headers["X-Xiaoban-Completed"] = "false"
             response_headers["X-Xiaoban-Partial"] = "true" if is_partial else "false"
             return web.json_response(err_body, status=502, headers=response_headers)
@@ -5098,6 +5203,12 @@ class APIServerAdapter(
                 "partial": is_partial,
                 "failed": is_failed,
             })["true_moa_usage"] = usage["true_moa"]
+        if isinstance(usage.get("agent_calls"), dict):
+            response_data.setdefault("xiaoban", {
+                "completed": completed,
+                "partial": is_partial,
+                "failed": is_failed,
+            })["agent_call_usage"] = usage["agent_calls"]
         outcome_id = result.get("_true_moa_outcome_id")
         output_digest = result.get("_mystand_egress_output_digest")
         if (
@@ -5383,6 +5494,14 @@ class APIServerAdapter(
                     (
                         "event: xiaoban.moa.usage\n"
                         f"data: {json.dumps(true_moa_usage, ensure_ascii=False)}\n\n"
+                    ).encode()
+                )
+            agent_call_usage = usage.get("agent_calls")
+            if isinstance(agent_call_usage, dict):
+                await response.write(
+                    (
+                        "event: xiaoban.agent.usage\n"
+                        f"data: {json.dumps(agent_call_usage, ensure_ascii=False)}\n\n"
                     ).encode()
                 )
 
@@ -7087,6 +7206,10 @@ class APIServerAdapter(
     @classmethod
     def _chat_idempotency_fingerprint(cls, body: Dict[str, Any], headers: Any) -> str:
         """Bind cached output to every trusted header that can affect a run."""
+        from xiaoban.trusted_runtime.paid_call_policy import (
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
+        )
+
         names = (
             "X-Xiaoban-Site-Id",
             "X-Xiaoban-User-Id",
@@ -7099,7 +7222,9 @@ class APIServerAdapter(
             "X-Xiaoban-Mode-Epoch",
             "X-Xiaoban-MoA-Preset-Id",
             "X-Xiaoban-MoA-Preset-Revision",
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
             "X-Xiaoban-Attempt",
+            "X-Xiaoban-Delivery-Id",
             "X-Xiaoban-Delivery-Attempt",
             "X-Xiaoban-Email-Allowed",
             "X-Xiaoban-Async-Delivery",

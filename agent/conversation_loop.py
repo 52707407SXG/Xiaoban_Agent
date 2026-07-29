@@ -67,7 +67,7 @@ from agent.true_moa_conversation_policy import (
     strict_failure_result as _strict_failure_result,
     strict_mode as _strict_true_moa_mode,
 )
-from agent.true_moa_terminal_accounting import (
+from agent.paid_call_accounting import (
     record_strict_terminal_usage as _record_strict_terminal_usage,
 )
 from agent.usage_pricing import estimate_usage_cost, normalize_usage

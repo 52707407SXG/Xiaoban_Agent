@@ -28,6 +28,7 @@ from xiaoban.trusted_runtime.true_moa_contracts import (
     TRUE_MOA_FINAL_CALL_LIMIT,
     TRUE_MOA_FINAL_INPUT_MAX_BYTES,
     TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS,
+    TRUE_MOA_FINAL_PAID_CALL_POLICY,
     TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS,
     TRUE_MOA_FINAL_SYNTHESIS_POLICY,
     TRUE_MOA_FINAL_TIMEOUT_SECONDS,
@@ -47,6 +48,7 @@ from xiaoban.trusted_runtime.true_moa_contracts import (
     TrueMoASnapshot,
     build_minimal_advisor_messages,
     enforce_true_moa_dispatch_budget,
+    enforce_true_moa_final_route,
     validate_true_moa_headers,
 )
 from xiaoban.trusted_runtime.true_moa_execution import run_true_moa_advisors
@@ -80,6 +82,7 @@ __all__ = [
         "TrueMoAUsageLedger",
         "build_minimal_advisor_messages",
         "enforce_true_moa_dispatch_budget",
+        "enforce_true_moa_final_route",
         "run_true_moa_advisors",
         "validate_true_moa_headers",
     }

@@ -31,7 +31,9 @@ from xiaoban.trusted_runtime.true_moa_durable_shared import (
     project_true_moa_completed_outcome,
     project_true_moa_outcome_binding,
 )
-from xiaoban.trusted_runtime.true_moa_durable_usage import project_true_moa_usage
+from xiaoban.trusted_runtime.true_moa_durable_usage import (
+    project_durable_usage,
+)
 
 class _TrueMoADurableBase:
     """SQLite usage ledger with a separately-keyed sealed outcome envelope."""
@@ -340,7 +342,7 @@ class _TrueMoADurableBase:
             return None
         usage = None
         if row["usage_json"]:
-            usage = project_true_moa_usage(json.loads(row["usage_json"]))
+            usage = project_durable_usage(json.loads(row["usage_json"]))
         return {
             "fingerprint": row["fingerprint"],
             "kind": row["kind"],

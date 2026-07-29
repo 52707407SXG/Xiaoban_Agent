@@ -205,7 +205,7 @@ class TrueMoARunnerPreflightMixin:
         )
         self.true_moa_ledger = true_moa_runtime.TrueMoAUsageLedger(
             request.true_moa_snapshot,
-            on_change=request.true_moa_usage_callback,
+            on_change=request.paid_call_usage_callback,
         )
         controller = self.true_moa_controller
 
@@ -240,22 +240,10 @@ class TrueMoARunnerPreflightMixin:
                 skip_memory=request.mystand_request,
                 strict_no_automatic_paid_retry=True,
             )
-            from xiaoban_cli.model_normalize import (
-                normalize_model_for_provider,
+            true_moa_runtime.enforce_true_moa_final_route(
+                provider=getattr(self.agent, "provider", ""),
+                model=getattr(self.agent, "model", ""),
             )
-
-            final_provider = str(
-                getattr(self.agent, "provider", "") or ""
-            ).lower()
-            final_model = normalize_model_for_provider(
-                str(getattr(self.agent, "model", "") or ""),
-                "deepseek",
-            )
-            if (
-                final_provider != self.final_executor_slot.provider
-                or final_model != self.final_executor_slot.model
-            ):
-                raise RuntimeError("fixed true MoA final route mismatch")
         except Exception:
             controller.fail()
             self.begin_true_moa_terminal_settlement(
@@ -291,6 +279,7 @@ class TrueMoARunnerPreflightMixin:
         agent._disable_streaming = True
         agent._strict_no_automatic_paid_retry = True
         agent._true_moa_cancel_controller = controller
+        agent._true_moa_usage_ledger = self.true_moa_ledger
         agent._defer_true_moa_final_commit = True
         agent.compression_enabled = False
         agent.max_tokens = final_output_max_tokens
@@ -340,7 +329,6 @@ class TrueMoARunnerPreflightMixin:
                 usage,
             )
         self.true_moa_ledger = self.advisor_bundle.ledger
-        agent._true_moa_usage_ledger = self.true_moa_ledger
         agent.max_iterations = min(
             max(
                 1,

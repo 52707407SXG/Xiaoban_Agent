@@ -1,0 +1,188 @@
+"""Topology-neutral fixed policy for paid provider dispatches."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Any, Mapping
+
+from xiaoban_cli.model_normalize import normalize_model_for_provider
+
+
+@dataclass(frozen=True)
+class PaidCallBudget:
+    """Provider payload and physical-call ceilings for one paid role."""
+
+    policy_id: str
+    input_max_bytes: int
+    output_max_tokens: int
+    call_limit: int
+
+
+@dataclass(frozen=True)
+class FixedPaidCallPolicy(PaidCallBudget):
+    """One server-owned provider route plus its prepaid hard ceilings."""
+
+    provider: str
+    model: str
+    role: str
+
+
+class PaidCallPolicyError(RuntimeError):
+    """A fixed paid-call policy was violated before provider dispatch."""
+
+    def __init__(self, code: str):
+        self.code = str(code or "paid_call_policy_invalid")
+        super().__init__(self.code)
+
+
+SIGNED_MYSTAND_AGENT_POLICY = FixedPaidCallPolicy(
+    policy_id="mystand.signed-normal-paid-call.v1",
+    provider="deepseek",
+    model="deepseek-v4-pro",
+    role="agent",
+    input_max_bytes=131_072,
+    output_max_tokens=4_096,
+    call_limit=8,
+)
+SIGNED_MYSTAND_AGENT_POLICY_REVISION = "deepseek-v4-pro-20260729-v1"
+SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER = (
+    "X-Xiaoban-Agent-Billing-Policy-Revision"
+)
+SIGNED_MYSTAND_AGENT_POLICY_REGISTRY = MappingProxyType(
+    {
+        SIGNED_MYSTAND_AGENT_POLICY_REVISION: (
+            SIGNED_MYSTAND_AGENT_POLICY
+        ),
+    }
+)
+
+
+def resolve_signed_mystand_agent_policy(
+    observed: Any,
+) -> FixedPaidCallPolicy:
+    """Resolve one immutable revision without rewriting older policies."""
+
+    revision = str(observed or "").strip()
+    policy = SIGNED_MYSTAND_AGENT_POLICY_REGISTRY.get(revision)
+    if policy is None:
+        raise PaidCallPolicyError(
+            "signed_mystand_billing_policy_revision_mismatch"
+        )
+    return policy
+
+
+def enforce_signed_mystand_policy_revision(observed: Any) -> str:
+    """Bind the API reservation policy to this runtime's dispatch policy."""
+
+    revision = str(observed or "").strip()
+    resolve_signed_mystand_agent_policy(revision)
+    return revision
+
+
+def normalize_fixed_route(
+    policy: FixedPaidCallPolicy,
+    *,
+    provider: Any,
+    model: Any,
+) -> tuple[str, str]:
+    """Normalize an observed route against the policy's provider dialect."""
+
+    return (
+        str(provider or "").strip().lower(),
+        normalize_model_for_provider(
+            str(model or ""),
+            policy.provider,
+        ),
+    )
+
+
+def enforce_fixed_paid_call_route(
+    policy: FixedPaidCallPolicy,
+    *,
+    provider: Any,
+    model: Any,
+    error_code: str = "paid_call_fixed_route_mismatch",
+) -> tuple[str, str]:
+    """Fail closed when runtime configuration drifts from a paid route."""
+
+    normalized = normalize_fixed_route(
+        policy,
+        provider=provider,
+        model=model,
+    )
+    if normalized != (policy.provider, policy.model):
+        raise PaidCallPolicyError(error_code)
+    return normalized
+
+
+def enforce_paid_call_dispatch_budget(
+    policy: PaidCallBudget,
+    *,
+    payload: Any,
+    error_prefix: str = "paid_call_cost_cap",
+) -> int:
+    """Validate one serialized provider payload before physical dispatch."""
+
+    if not isinstance(payload, Mapping):
+        raise PaidCallPolicyError(f"{error_prefix}_input_payload_invalid")
+    output_limits: list[int] = []
+    for field in (
+        "max_tokens",
+        "max_completion_tokens",
+        "max_output_tokens",
+    ):
+        if field not in payload:
+            continue
+        value = payload.get(field)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value <= 0
+        ):
+            raise PaidCallPolicyError(
+                f"{error_prefix}_output_token_cap_invalid"
+            )
+        output_limits.append(value)
+    if (
+        not output_limits
+        or len(set(output_limits)) != 1
+        or output_limits[0] > policy.output_max_tokens
+    ):
+        raise PaidCallPolicyError(
+            f"{error_prefix}_output_token_cap_exceeded"
+        )
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise PaidCallPolicyError(
+            f"{error_prefix}_input_payload_invalid"
+        ) from exc
+    if len(encoded) > policy.input_max_bytes:
+        raise PaidCallPolicyError(
+            f"{error_prefix}_input_byte_cap_exceeded"
+        )
+    return len(encoded)
+
+
+__all__ = [
+    "FixedPaidCallPolicy",
+    "PaidCallBudget",
+    "PaidCallPolicyError",
+    "SIGNED_MYSTAND_AGENT_POLICY",
+    "SIGNED_MYSTAND_AGENT_POLICY_REVISION",
+    "SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER",
+    "SIGNED_MYSTAND_AGENT_POLICY_REGISTRY",
+    "enforce_fixed_paid_call_route",
+    "enforce_paid_call_dispatch_budget",
+    "enforce_signed_mystand_policy_revision",
+    "normalize_fixed_route",
+    "resolve_signed_mystand_agent_policy",
+]

@@ -121,8 +121,6 @@ def _post_internal(payload: dict, user_id: str) -> str:
 
 
 def mystand_resource_index_tool_handler(args, **_kwargs):
-    if str(args.get("operation") or "").strip() != "list_resources":
-        return _error("operation 不在允许范围内", code="invalid_resource_index_operation")
     platform = get_session_env("XIAOBAN_SESSION_PLATFORM", "").strip().lower()
     user_id = get_session_env("XIAOBAN_SESSION_USER_ID", "").strip()
     if platform != "api_server" or not user_id:

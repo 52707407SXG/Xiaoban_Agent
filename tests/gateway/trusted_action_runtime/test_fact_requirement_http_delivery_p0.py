@@ -41,12 +41,42 @@ from xiaoban.trusted_runtime.fact_contract import (
     canonical_digest,
     normalized_fact_query_text,
 )
+from xiaoban.trusted_runtime.paid_call_policy import (
+    SIGNED_MYSTAND_AGENT_POLICY_REVISION,
+    SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
+)
 from xiaoban.trusted_runtime.turns import begin_action, finish_action
 
 
 MODEL_WRONG_TEXT = "模型伪造：2026年业绩排名第4的是合成经纪人甲。"
 SERVER_TEXT = "2026年业绩排名第4的是合成经纪人丁。"
-USAGE = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+USAGE = {
+    "input_tokens": 1,
+    "output_tokens": 1,
+    "total_tokens": 2,
+    "agent_calls": {
+        "schema": "mystand.agent-call-usage.v1",
+        "executionId": "a" * 32,
+        "status": "completed",
+        "calls": [
+            {
+                "callId": f"{'a' * 32}:call:000001",
+                "ordinal": 1,
+                "provider": "fake-provider",
+                "model": "fake-model",
+                "role": "agent",
+                "startedAtMs": 1,
+                "endedAtMs": 2,
+                "status": "completed",
+                "inputTokens": 1,
+                "outputTokens": 1,
+                "totalTokens": 2,
+                "cachedInputTokens": 0,
+                "usageStatus": "reported",
+            }
+        ],
+    },
+}
 
 
 @pytest.fixture(autouse=True)
@@ -145,7 +175,11 @@ def _headers(requirement: dict) -> dict[str, str]:
         "X-Xiaoban-Message-Id": MESSAGE_ID,
         "X-Xiaoban-Delivery-Id": DELIVERY_ID,
         "X-Xiaoban-Attempt": "1",
+        "X-Xiaoban-Delivery-Attempt": "1",
         "X-Xiaoban-Request-Fingerprint": REQUEST_FINGERPRINT,
+        SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER: (
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION
+        ),
         **_signed_headers(requirement),
     }
 
@@ -446,6 +480,9 @@ async def test_signed_rank_full_http_chain_runs_real_handlers_and_guard(
     )
     persisted = []
     fake_agent = MagicMock()
+    fake_agent.provider = "deepseek"
+    fake_agent.model = "deepseek-v4-pro"
+    fake_agent.max_iterations = 8
     fake_agent.valid_tool_names = {
         "mystand_resource_index",
         "mystand_query",
@@ -615,6 +652,9 @@ async def test_signed_generic_full_http_chain_uses_only_trusted_query_text(
         blocked_authorization,
     )
     fake_agent = MagicMock()
+    fake_agent.provider = "deepseek"
+    fake_agent.model = "deepseek-v4-pro"
+    fake_agent.max_iterations = 8
     fake_agent.valid_tool_names = {
         "mystand_resource_index",
         "mystand_query",

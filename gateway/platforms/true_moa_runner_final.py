@@ -465,7 +465,11 @@ class TrueMoARunnerFinalMixin:
                     else {}
                 ),
             )
-        return result, usage
+        from gateway.platforms.agent_call_accounting import (
+            finalize_normal_call_usage,
+        )
+
+        return finalize_normal_call_usage(self, result, usage)
 
     def settle_true_moa_result(
         self,

@@ -41,12 +41,17 @@ _LEDGER_STATUS_RANK = {
     "advisors_completed": 2,
 }
 _LEDGER_TERMINAL_STATES = {"completed", "failed", "cancelled"}
-_RECEIPT_STATUS_RANK = {"not_started": 0, "running": 1}
+_RECEIPT_STATUS_RANK = {
+    "not_started": 0,
+    "reserved": 1,
+    "running": 2,
+}
 _RECEIPT_TERMINAL_STATES = {
     "completed",
     "failed",
     "cancelled",
     "timed_out",
+    "not_dispatched",
 }
 _DURABLE_STATE_RANK = {"claimed": 0, "running": 1}
 _DURABLE_TERMINAL_STATES = {

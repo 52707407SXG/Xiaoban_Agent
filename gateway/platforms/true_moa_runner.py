@@ -59,7 +59,7 @@ class TrueMoARunnerMixin:
         completion_protocol: str = "",
         completion_binding: Optional[Dict[str, Any]] = None,
         true_moa_snapshot: Any = None,
-        true_moa_usage_callback=None,
+        paid_call_usage_callback=None,
     ) -> tuple:
         """Create an Agent and run one thread-isolated conversation."""
 
@@ -86,10 +86,11 @@ class TrueMoARunnerMixin:
             request_headers,
             "X-Xiaoban-Message-Id",
         )
-        request_delivery_id = self._header_value(
+        raw_request_delivery_id = self._header_value(
             request_headers,
             "X-Xiaoban-Delivery-Id",
         )
+        request_delivery_id = raw_request_delivery_id
         if not _MYSTAND_STREAM_DELIVERY_ID_RE.fullmatch(
             request_delivery_id
         ):
@@ -98,6 +99,22 @@ class TrueMoARunnerMixin:
             self._toolsets_for_request_headers(request_headers)
         )
         mystand_request = enabled_toolsets_override is not None
+        from xiaoban.trusted_runtime.paid_call_policy import (
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
+        )
+
+        billing_policy_revision = self._header_value(
+            request_headers,
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
+        )
+        durable_paid_call = bool(
+            mystand_request
+            and true_moa_snapshot is None
+            and (
+                raw_request_delivery_id
+                or billing_policy_revision
+            )
+        )
         memory_identity = (
             self._mystand_memory_identity(request_headers)
             if mystand_request
@@ -224,12 +241,13 @@ class TrueMoARunnerMixin:
             completion_protocol=completion_protocol,
             completion_binding=completion_binding or {},
             true_moa_snapshot=true_moa_snapshot,
-            true_moa_usage_callback=true_moa_usage_callback,
+            paid_call_usage_callback=paid_call_usage_callback,
             request_user_id=request_user_id,
             request_message_id=request_message_id,
             request_delivery_id=request_delivery_id,
             enabled_toolsets_override=enabled_toolsets_override,
             mystand_request=mystand_request,
+            durable_paid_call=durable_paid_call,
             memory_identity=memory_identity,
             metadata_trace=metadata_trace,
             trace_state=trace_state,

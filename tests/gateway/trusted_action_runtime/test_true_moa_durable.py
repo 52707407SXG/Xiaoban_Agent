@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -76,6 +77,7 @@ def _finish_advisor(
 ) -> None:
     ledger.start_slot(slot)
     call_id = ledger.start_advisor_call(slot)
+    ledger.mark_dispatched(call_id)
     ledger.finish_advisor_call(
         call_id,
         status="completed",
@@ -130,6 +132,7 @@ def _completed_ledger(
     )
     ledger.start_slot(FINAL_EXECUTOR_SLOT)
     call_id = ledger.start_final_call(f"final-{wave_id[:8]}")
+    ledger.mark_dispatched(call_id)
     final_usage = {
         "input_tokens": 11,
         "output_tokens": 4,
@@ -211,6 +214,35 @@ def _completed_outcome(
     return outcome
 
 
+def test_terminal_true_moa_ledger_rejects_appended_provider_call(
+    tmp_path: Path,
+):
+    wave_id = "9" * 32
+    current = _completed_ledger(wave_id=wave_id)
+    incoming = copy.deepcopy(current)
+    appended = copy.deepcopy(incoming["calls"][-1])
+    appended["callId"] = (
+        f"{wave_id}:final-deepseek-v4-pro:000002"
+    )
+    appended["startedAtMs"] += 1
+    appended["endedAtMs"] += 1
+    incoming["calls"].append(appended)
+
+    store = TrueMoADurableStore(str(tmp_path / "immutable.sqlite"))
+    key = "terminal-call-set"
+    fingerprint = _fingerprint("terminal-call-set")
+    assert store.claim(key, fingerprint, kind="execution") == "missing"
+    store.save_usage(key, fingerprint, current, state="completed")
+    with pytest.raises(ValueError, match="call set is immutable"):
+        store.save_usage(
+            key,
+            fingerprint,
+            incoming,
+            state="completed",
+        )
+    store.close()
+
+
 def test_store_merges_late_snapshots_without_usage_or_state_regression(
     tmp_path: Path,
 ):
@@ -222,6 +254,7 @@ def test_store_merges_late_snapshots_without_usage_or_state_regression(
     ledger = _running_ledger()
     ledger.start_slot(KIMI_ADVISOR_SLOT)
     kimi_call_id = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    ledger.mark_dispatched(kimi_call_id)
     old_snapshot = ledger.to_dict()
     ledger.finish_advisor_call(
         kimi_call_id,
@@ -281,6 +314,7 @@ def test_stopped_orphan_fence_accepts_late_failed_usage_without_reopening(
     ledger = _running_ledger(wave_id="b" * 32)
     ledger.start_slot(KIMI_ADVISOR_SLOT)
     call_id = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    ledger.mark_dispatched(call_id)
     store.save_usage(
         key,
         fingerprint,
@@ -331,7 +365,7 @@ def test_stopped_orphan_fence_accepts_late_failed_usage_without_reopening(
     assert call["status"] == "timed_out"
     assert call["usageStatus"] == "reported"
     assert call["totalTokens"] == 11
-    assert call["errorCategory"] == "late_malformed_result_after_terminal"
+    assert call["errorCategory"] == "agent_restart_outcome_unknown"
     store.close()
 
 
@@ -439,6 +473,7 @@ def test_store_fill_once_upgrades_unknown_cache_split_without_regression(
     ledger = _running_ledger(wave_id="1" * 32)
     ledger.start_slot(DEEPSEEK_ADVISOR_SLOT)
     call_id = ledger.start_advisor_call(DEEPSEEK_ADVISOR_SLOT)
+    ledger.mark_dispatched(call_id)
     base_usage = {
         "prompt_tokens": 11,
         "completion_tokens": 3,
@@ -524,6 +559,7 @@ def test_interrupted_delivery_accepts_late_terminal_usage_callback(
     ledger = _running_ledger(wave_id="2" * 32)
     ledger.start_slot(DEEPSEEK_ADVISOR_SLOT)
     call_id = ledger.start_advisor_call(DEEPSEEK_ADVISOR_SLOT)
+    ledger.mark_dispatched(call_id)
     cache.persist_usage(key, fingerprint, ledger.to_dict())
 
     # The SSE asyncio wrapper can be interrupted while the provider thread
@@ -756,8 +792,15 @@ async def test_restart_replay_preserves_calls_and_never_recomputes(
     deepseek_call = usage["true_moa"]["calls"][1]
     assert kimi_call["totalTokens"] == 7
     assert kimi_call["status"] == "completed"
-    assert deepseek_call["status"] == "failed"
-    assert deepseek_call["errorCategory"] == "agent_restart_outcome_unknown"
+    assert deepseek_call["status"] == "not_dispatched"
+    assert (
+        deepseek_call["errorCategory"]
+        == "provider_dispatch_fence_closed"
+    )
+    assert deepseek_call["endedAtMs"] is not None
+    recovered = cache.durable_record(key)
+    assert recovered["state"] == "failed"
+    assert recovered["usage"] == usage["true_moa"]
 
     with pytest.raises(IdempotencyConflictError):
         await cache.get_or_set(
@@ -1316,6 +1359,7 @@ def test_first_outcome_encryption_binds_transactionally_merged_usage(
     ledger = _running_ledger(wave_id="c" * 32)
     ledger.start_slot(KIMI_ADVISOR_SLOT)
     kimi_call = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    ledger.mark_dispatched(kimi_call)
     provisional = ledger.to_dict()
     kimi_usage = {
         "input_tokens": 5,
@@ -1341,6 +1385,7 @@ def test_first_outcome_encryption_binds_transactionally_merged_usage(
     )
     ledger.start_slot(FINAL_EXECUTOR_SLOT)
     final_call = ledger.start_final_call("merged-aad-final")
+    ledger.mark_dispatched(final_call)
     final_usage = {
         "input_tokens": 11,
         "output_tokens": 4,
@@ -1449,6 +1494,7 @@ def test_durable_projection_accepts_ten_total_calls_and_rejects_ninth_final():
     }
     for index in range(TRUE_MOA_DURABLE_MAX_FINAL_CALLS):
         call_id = ledger.start_final_call(f"bounded-{index}")
+        ledger.mark_dispatched(call_id)
         ledger.finish_final_call(
             call_id,
             status="completed",

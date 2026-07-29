@@ -43,11 +43,19 @@ class TrueMoAHttpHandlersMixin:
         )
         if true_moa_error is not None:
             return true_moa_error
-        if true_moa_snapshot is not None and not _idem_cache.durable_ready:
+        if not _idem_cache.durable_ready:
             return web.json_response(
                 _openai_error(
-                    "True MoA durable idempotency ledger is unavailable",
-                    code="true_moa_durable_ledger_unavailable",
+                    (
+                        "True MoA durable idempotency ledger is unavailable"
+                        if true_moa_snapshot is not None
+                        else "My Stand provider-call ledger is unavailable"
+                    ),
+                    code=(
+                        "true_moa_durable_ledger_unavailable"
+                        if true_moa_snapshot is not None
+                        else "mystand_durable_ledger_unavailable"
+                    ),
                 ),
                 status=503,
             )
@@ -64,7 +72,7 @@ class TrueMoAHttpHandlersMixin:
             return web.json_response(_openai_error(str(exc), code="invalid_idempotency_key"), status=400)
         if not _idem_cache.stop(
             scoped_key,
-            durable=true_moa_snapshot is not None,
+            durable=True,
         ):
             return web.json_response(
                 _openai_error("No active completion for this delivery", code="completion_not_running"),
@@ -110,14 +118,6 @@ class TrueMoAHttpHandlersMixin:
         )
         if true_moa_error is not None:
             return true_moa_error
-        if true_moa_snapshot is None:
-            return web.json_response(
-                _openai_error(
-                    "True MoA mode snapshot is required",
-                    code="true_moa_snapshot_required",
-                ),
-                status=400,
-            )
         if not _idem_cache.durable_ready:
             return web.json_response(
                 _openai_error(
@@ -149,12 +149,24 @@ class TrueMoAHttpHandlersMixin:
                 ),
                 status=400,
             )
+        if action == "ack" and true_moa_snapshot is None:
+            return web.json_response(
+                _openai_error(
+                    "ACK is available only for true MoA outcomes",
+                    code="true_moa_snapshot_required",
+                ),
+                status=400,
+            )
         try:
             scoped_key = self._scoped_idempotency_key(request.headers, raw_key)
-            outcome_binding = self._true_moa_outcome_binding(
-                request.headers,
-                snapshot=true_moa_snapshot,
-                delivery_id=raw_key,
+            outcome_binding = (
+                self._true_moa_outcome_binding(
+                    request.headers,
+                    snapshot=true_moa_snapshot,
+                    delivery_id=raw_key,
+                )
+                if true_moa_snapshot is not None
+                else None
             )
         except InvalidToolsetPolicy as exc:
             return web.json_response(
@@ -173,7 +185,8 @@ class TrueMoAHttpHandlersMixin:
                 ),
                 status=404,
             )
-        if str(record.get("state") or "") == "stopped":
+        record_state = str(record.get("state") or "")
+        if record_state == "stopped":
             if (
                 _idem_cache.has_active_usage_drain(scoped_key)
                 and _idem_cache._has_running_usage_receipt(record)
@@ -200,8 +213,61 @@ class TrueMoAHttpHandlersMixin:
                 _idem_cache.terminalize_orphaned_stopped_usage(scoped_key)
                 or record
             )
+        elif record_state == "interrupted":
+            record = (
+                _idem_cache.terminalize_orphaned_usage(scoped_key)
+                or record
+            )
+            if (
+                str(record.get("state") or "") == "interrupted"
+                and (
+                    _idem_cache.has_active_execution(scoped_key)
+                    or _idem_cache._has_running_usage_receipt(record)
+                )
+            ):
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "status": "interrupted_draining",
+                        "final": False,
+                        "usage": record.get("usage"),
+                        "terminalState": "interrupted",
+                        "outcomeStatus": str(
+                            record.get("outcomeState") or "none"
+                        ),
+                        "settlementBlocked": True,
+                    },
+                    status=202,
+                )
+        elif (
+            record_state == "failed"
+            and _idem_cache._has_running_usage_receipt(record)
+        ):
+            record = (
+                _idem_cache.terminalize_orphaned_usage(scoped_key)
+                or record
+            )
+            if _idem_cache._has_running_usage_receipt(record):
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "status": "failed_draining",
+                        "final": False,
+                        "usage": record.get("usage"),
+                        "terminalState": "failed",
+                        "outcomeStatus": str(
+                            record.get("outcomeState") or "none"
+                        ),
+                        "settlementBlocked": True,
+                    },
+                    status=202,
+                )
         state = str(record.get("state") or "")
         usage = record.get("usage")
+        is_true_moa = bool(
+            isinstance(usage, dict)
+            and usage.get("schema") == "mystand.true-moa.usage.v1"
+        )
         # A process can die after the completed-ledger callback is durably
         # persisted but before save_completed_outcome atomically seals the
         # user-visible result.  The durable execution state intentionally
@@ -243,7 +309,8 @@ class TrueMoAHttpHandlersMixin:
             or call.get("status") == "running"
             or (
                 call.get("startedAtMs") is not None
-                and call.get("status") != "not_started"
+                and call.get("status")
+                not in {"not_started", "not_dispatched"}
                 and (
                     call.get("usageStatus") != "reported"
                     or not all(
@@ -328,7 +395,8 @@ class TrueMoAHttpHandlersMixin:
             except TrueMoAOutcomeUnavailableError:
                 outcome_unavailable = True
         expects_outcome = bool(
-            state != "stopped"
+            is_true_moa
+            and state != "stopped"
             and (
                 state == "completed"
                 or usage.get("status") == "completed"

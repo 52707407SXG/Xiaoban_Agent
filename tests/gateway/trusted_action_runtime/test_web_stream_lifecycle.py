@@ -25,8 +25,38 @@ from gateway.platforms.api_server import (
     cors_middleware,
     security_headers_middleware,
 )
+from xiaoban.trusted_runtime.paid_call_policy import (
+    SIGNED_MYSTAND_AGENT_POLICY_REVISION,
+    SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
+)
 
-_USAGE = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+_USAGE = {
+    "input_tokens": 1,
+    "output_tokens": 1,
+    "total_tokens": 2,
+    "agent_calls": {
+        "schema": "mystand.agent-call-usage.v1",
+        "executionId": "b" * 32,
+        "status": "completed",
+        "calls": [
+            {
+                "callId": f"{'b' * 32}:call:000001",
+                "ordinal": 1,
+                "provider": "deepseek",
+                "model": "deepseek-v4-pro",
+                "role": "agent",
+                "startedAtMs": 1,
+                "endedAtMs": 2,
+                "status": "completed",
+                "inputTokens": 1,
+                "outputTokens": 1,
+                "totalTokens": 2,
+                "cachedInputTokens": 0,
+                "usageStatus": "reported",
+            }
+        ],
+    },
+}
 
 # 脱敏虚构 delivery 身份：每个用例独立的 delivery-id，避免共享 _idem_cache 串扰。
 DELIVERY_R1 = "xbd_" + "01" * 20
@@ -80,6 +110,9 @@ def _mystand_stream_headers(
         "X-Xiaoban-Delivery-Id": delivery_id,
         "X-Xiaoban-Attempt": attempt,
         "X-Xiaoban-Request-Fingerprint": fingerprint,
+        SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER: (
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION
+        ),
     }
 
 
@@ -89,6 +122,9 @@ def _stream_body(message: str) -> dict:
 
 def _mock_agent(final_response: str) -> MagicMock:
     agent = MagicMock()
+    agent.provider = "deepseek"
+    agent.model = "deepseek-v4-pro"
+    agent.max_iterations = 8
     agent.run_conversation.return_value = {"final_response": final_response, "messages": []}
     agent.session_prompt_tokens = 1
     agent.session_completion_tokens = 1

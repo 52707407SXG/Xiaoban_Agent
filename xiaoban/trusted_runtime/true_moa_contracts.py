@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import html
-import json
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
@@ -17,6 +16,14 @@ import uuid
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Sequence
+
+from xiaoban.trusted_runtime.paid_call_policy import (
+    FixedPaidCallPolicy,
+    PaidCallBudget,
+    PaidCallPolicyError,
+    enforce_fixed_paid_call_route,
+    enforce_paid_call_dispatch_budget,
+)
 
 
 TRUE_MOA_MODE = "moa"
@@ -91,6 +98,21 @@ FINAL_EXECUTOR_SLOT = TrueMoASlot(
 )
 TRUE_MOA_ADVISOR_SLOTS = (KIMI_ADVISOR_SLOT, DEEPSEEK_ADVISOR_SLOT)
 TRUE_MOA_ALL_SLOTS = (*TRUE_MOA_ADVISOR_SLOTS, FINAL_EXECUTOR_SLOT)
+_TRUE_MOA_ADVISOR_PAID_CALL_BUDGET = PaidCallBudget(
+    policy_id="mystand.true-moa.advisor-paid-call.v1",
+    input_max_bytes=TRUE_MOA_ADVISOR_INPUT_MAX_BYTES,
+    output_max_tokens=TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS,
+    call_limit=len(TRUE_MOA_ADVISOR_SLOTS),
+)
+TRUE_MOA_FINAL_PAID_CALL_POLICY = FixedPaidCallPolicy(
+    policy_id="mystand.true-moa.final-paid-call.v1",
+    provider=FINAL_EXECUTOR_SLOT.provider,
+    model=FINAL_EXECUTOR_SLOT.model,
+    role=FINAL_EXECUTOR_SLOT.role,
+    input_max_bytes=TRUE_MOA_FINAL_INPUT_MAX_BYTES,
+    output_max_tokens=TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS,
+    call_limit=TRUE_MOA_FINAL_CALL_LIMIT,
+)
 
 
 class TrueMoAContractError(ValueError):
@@ -128,58 +150,37 @@ def enforce_true_moa_dispatch_budget(
 
     normalized_role = str(role or "").strip().lower()
     if normalized_role == "advisor":
-        input_max_bytes = TRUE_MOA_ADVISOR_INPUT_MAX_BYTES
-        output_max_tokens = TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS
+        policy = _TRUE_MOA_ADVISOR_PAID_CALL_BUDGET
     elif normalized_role == "final_executor":
-        input_max_bytes = TRUE_MOA_FINAL_INPUT_MAX_BYTES
-        output_max_tokens = TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
+        policy = TRUE_MOA_FINAL_PAID_CALL_POLICY
     else:
         raise TrueMoACostCapError("true_moa_cost_cap_role_invalid")
-    if not isinstance(payload, Mapping):
-        raise TrueMoACostCapError("true_moa_input_payload_invalid")
-    output_limits: list[int] = []
-    for field in (
-        "max_tokens",
-        "max_completion_tokens",
-        "max_output_tokens",
-    ):
-        if field not in payload:
-            continue
-        value = payload.get(field)
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or value <= 0
-        ):
-            raise TrueMoACostCapError(
-                "true_moa_output_token_cap_invalid"
-            )
-        output_limits.append(value)
-    if (
-        not output_limits
-        or len(set(output_limits)) != 1
-        or output_limits[0] > output_max_tokens
-    ):
-        raise TrueMoACostCapError(
-            "true_moa_output_token_cap_exceeded"
-        )
     try:
-        encoded = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    except (TypeError, ValueError, UnicodeError) as exc:
-        raise TrueMoACostCapError(
-            "true_moa_input_payload_invalid"
-        ) from exc
-    if len(encoded) > input_max_bytes:
-        raise TrueMoACostCapError(
-            "true_moa_input_byte_cap_exceeded"
+        return enforce_paid_call_dispatch_budget(
+            policy,
+            payload=payload,
+            error_prefix="true_moa",
         )
-    return len(encoded)
+    except PaidCallPolicyError as exc:
+        raise TrueMoACostCapError(exc.code) from exc
+
+
+def enforce_true_moa_final_route(
+    *,
+    provider: Any,
+    model: Any,
+) -> tuple[str, str]:
+    """Adapt the fixed final topology slot to the shared route guard."""
+
+    try:
+        return enforce_fixed_paid_call_route(
+            TRUE_MOA_FINAL_PAID_CALL_POLICY,
+            provider=provider,
+            model=model,
+            error_code="true_moa_final_fixed_route_mismatch",
+        )
+    except PaidCallPolicyError as exc:
+        raise RuntimeError("fixed true MoA final route mismatch") from exc
 
 
 @dataclass(frozen=True)

@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any, Callable
+
+from xiaoban.trusted_runtime.agent_call_usage import CallReceipt
+from xiaoban.trusted_runtime.agent_call_usage_codec import (
+    fill_usage_once as _fill_usage_once,
+    normalize_usage as _normalize_usage,
+    safe_category as _safe_category,
+)
 
 from xiaoban.trusted_runtime.true_moa_contracts import (
     FINAL_EXECUTOR_SLOT,
@@ -20,22 +25,28 @@ from xiaoban.trusted_runtime.true_moa_contracts import (
     TrueMoASnapshot,
 )
 
-@dataclass
-class _SlotReceipt:
-    slot: TrueMoASlot
-    call_id: str
-    status: str
-    started_at_ms: int | None = None
-    ended_at_ms: int | None = None
-    input_tokens: int | None = None
-    output_tokens: int | None = None
-    total_tokens: int | None = None
-    cached_input_tokens: int | None = None
-    usage_status: str = "unavailable"
-    cost_usd: float | None = None
-    cost_status: str | None = None
-    cost_source: str | None = None
-    error_category: str | None = None
+class _SlotReceipt(CallReceipt):
+    """True-MoA topology metadata around the shared provider receipt core."""
+
+    def __init__(
+        self,
+        *,
+        slot: TrueMoASlot,
+        call_id: str,
+        status: str,
+        ordinal: int = 0,
+        started_at_ms: int | None = None,
+    ):
+        super().__init__(
+            call_id=call_id,
+            ordinal=ordinal,
+            provider=slot.provider,
+            model=slot.model,
+            role=slot.role,
+            status=status,
+            started_at_ms=started_at_ms,
+        )
+        self.slot = slot
 
 
 class TrueMoADurableNotification:
@@ -188,7 +199,13 @@ class TrueMoAUsageLedger:
                     receipt.error_category = error_category
             if not preserve_running_calls:
                 for receipt in self._advisor_calls.values():
-                    if receipt.status == "running":
+                    if receipt.status == "reserved":
+                        receipt.status = "not_dispatched"
+                        receipt.error_category = (
+                            "provider_dispatch_fence_closed"
+                        )
+                        receipt.ended_at_ms = ended_at_ms
+                    elif receipt.status == "running":
                         receipt.status = status
                         receipt.error_category = error_category
                         receipt.ended_at_ms = ended_at_ms
@@ -202,7 +219,7 @@ class TrueMoAUsageLedger:
         started_at_ms: int | None = None,
         notify: bool = True,
     ) -> str:
-        """Record one advisor call only at the provider dispatch boundary."""
+        """Reserve one advisor call before its physical dispatch boundary."""
 
         if slot not in TRUE_MOA_ADVISOR_SLOTS:
             raise RuntimeError(f"invalid true MoA advisor slot: {slot.slot_id}")
@@ -213,12 +230,72 @@ class TrueMoAUsageLedger:
             self._advisor_calls[slot.slot_id] = _SlotReceipt(
                 slot=slot,
                 call_id=call_id,
-                status="running",
+                status="reserved",
+                ordinal=len(self._advisor_calls) + 1,
                 started_at_ms=started_at_ms or _now_ms(),
             )
         if notify:
             self._notify_change()
         return call_id
+
+    def mark_dispatched(
+        self,
+        call_id: str,
+        *,
+        notify: bool = True,
+    ) -> None:
+        """Commit one advisor/final reservation at the provider boundary."""
+
+        with self._lock:
+            receipt = self._provider_call_locked(call_id)
+            if receipt.status == "not_dispatched":
+                raise RuntimeError("true MoA provider call was not dispatched")
+            if receipt.status != "reserved":
+                raise RuntimeError("true MoA provider call is not reserved")
+            receipt.status = "running"
+        if notify:
+            self._notify_change()
+
+    def finish_not_dispatched(
+        self,
+        call_id: str,
+        *,
+        ended_at_ms: int | None = None,
+        notify: bool = True,
+    ) -> None:
+        """Prove one reservation lost its final provider dispatch fence."""
+
+        with self._lock:
+            receipt = self._provider_call_locked(call_id)
+            if receipt.status == "not_dispatched":
+                return
+            if receipt.status != "reserved":
+                raise RuntimeError(
+                    "true MoA provider call is not a reserved dispatch"
+                )
+            receipt.status = "not_dispatched"
+            receipt.error_category = "provider_dispatch_fence_closed"
+            receipt.ended_at_ms = ended_at_ms or _now_ms()
+        if notify:
+            self._notify_change()
+
+    def _provider_call_locked(self, call_id: str) -> _SlotReceipt:
+        clean_call_id = str(call_id or "")
+        receipt = next(
+            (
+                item
+                for item in self._advisor_calls.values()
+                if item.call_id == clean_call_id
+            ),
+            None,
+        )
+        if receipt is None:
+            receipt = self._final_calls.get(clean_call_id)
+        if receipt is None:
+            raise RuntimeError(
+                f"unknown true MoA provider call: {clean_call_id}"
+            )
+        return receipt
 
     def finish_advisor_call(
         self,
@@ -254,6 +331,14 @@ class TrueMoAUsageLedger:
             )
             if receipt is None:
                 raise RuntimeError(f"unknown advisor provider call: {call_id}")
+            if receipt.status == "not_dispatched":
+                raise RuntimeError(
+                    "true MoA advisor call was not dispatched"
+                )
+            if receipt.status == "reserved":
+                raise RuntimeError(
+                    "true MoA advisor call is only reserved"
+                )
             if receipt.status == "running":
                 receipt.status = status
                 receipt.error_category = error_category
@@ -288,24 +373,24 @@ class TrueMoAUsageLedger:
     ) -> str:
         """Open one independently billable final-executor provider call."""
 
-        safe_request_id = _safe_category(request_id)
-        call_id = (
-            f"{self.wave_id}:{FINAL_EXECUTOR_SLOT.slot_id}:{safe_request_id}"
-        )
         with self._lock:
             final_slot = self._receipts[FINAL_EXECUTOR_SLOT.slot_id]
             if final_slot.status == "timed_out":
                 raise RuntimeError(
                     "true MoA final execution already timed out"
                 )
-            if call_id in self._final_calls:
-                raise RuntimeError(f"final provider call already started: {call_id}")
             if len(self._final_calls) >= TRUE_MOA_FINAL_CALL_LIMIT:
                 raise RuntimeError("true MoA final provider call limit exceeded")
+            ordinal = len(self._final_calls) + 1
+            call_id = (
+                f"{self.wave_id}:{FINAL_EXECUTOR_SLOT.slot_id}:"
+                f"{ordinal:06d}"
+            )
             self._final_calls[call_id] = _SlotReceipt(
                 slot=FINAL_EXECUTOR_SLOT,
                 call_id=call_id,
-                status="running",
+                status="reserved",
+                ordinal=ordinal,
                 started_at_ms=started_at_ms or _now_ms(),
             )
         if notify:
@@ -338,6 +423,12 @@ class TrueMoAUsageLedger:
             receipt = self._final_calls.get(str(call_id or ""))
             if receipt is None:
                 raise RuntimeError(f"unknown final provider call: {call_id}")
+            if receipt.status == "not_dispatched":
+                raise RuntimeError(
+                    "true MoA final call was not dispatched"
+                )
+            if receipt.status == "reserved":
+                raise RuntimeError("true MoA final call is only reserved")
             if receipt.status == "running":
                 receipt.status = status
                 receipt.error_category = error_category
@@ -368,7 +459,11 @@ class TrueMoAUsageLedger:
         final_slot = self._receipts[FINAL_EXECUTOR_SLOT.slot_id]
         if final_slot.status in {"not_started", "running"}:
             return
-        receipts = list(self._final_calls.values())
+        receipts = [
+            receipt
+            for receipt in self._final_calls.values()
+            if receipt.status != "not_dispatched"
+        ]
         if not receipts:
             return
 
@@ -410,7 +505,11 @@ class TrueMoAUsageLedger:
         """Aggregate only counters actually reported by every final call."""
 
         with self._lock:
-            receipts = list(self._final_calls.values())
+            receipts = [
+                receipt
+                for receipt in self._final_calls.values()
+                if receipt.status != "not_dispatched"
+            ]
             if not receipts:
                 return None
             usage: dict[str, int] = {}
@@ -451,7 +550,13 @@ class TrueMoAUsageLedger:
                 final_receipt.error_category = safe_error
                 final_receipt.ended_at_ms = ended_at_ms
             for receipt in self._final_calls.values():
-                if receipt.status == "running":
+                if receipt.status == "reserved":
+                    receipt.status = "not_dispatched"
+                    receipt.error_category = (
+                        "provider_dispatch_fence_closed"
+                    )
+                    receipt.ended_at_ms = ended_at_ms
+                elif receipt.status == "running":
                     receipt.status = "timed_out"
                     receipt.error_category = safe_error
                     receipt.ended_at_ms = ended_at_ms
@@ -606,159 +711,6 @@ class TrueMoAUsageLedger:
                 "slots": slots,
                 "calls": calls,
             }
-
-
-def _fill_usage_once(
-    receipt: _SlotReceipt,
-    *,
-    input_tokens: int | None,
-    output_tokens: int | None,
-    total_tokens: int | None,
-    cached_input_tokens: int | None,
-    usage_status: str,
-) -> None:
-    if usage_status == "unavailable":
-        return
-    for field, value in (
-        ("input_tokens", input_tokens),
-        ("output_tokens", output_tokens),
-        ("total_tokens", total_tokens),
-        ("cached_input_tokens", cached_input_tokens),
-    ):
-        if value is not None and getattr(receipt, field) is None:
-            setattr(receipt, field, value)
-    if usage_status == "reported" and all(
-        isinstance(getattr(receipt, field), int)
-        and not isinstance(getattr(receipt, field), bool)
-        for field in (
-            "input_tokens",
-            "output_tokens",
-            "total_tokens",
-            "cached_input_tokens",
-        )
-    ):
-        receipt.usage_status = "reported"
-    elif receipt.usage_status != "reported":
-        receipt.usage_status = "partial"
-
-
-def _normalize_usage(
-    usage: Any,
-) -> tuple[int | None, int | None, int | None, int | None, str]:
-    if usage is None:
-        return None, None, None, None, "unavailable"
-
-    def _member(source: Any, name: str) -> tuple[bool, Any]:
-        if isinstance(source, Mapping):
-            return (name in source, source.get(name))
-        if hasattr(source, name):
-            return (True, getattr(source, name, None))
-        return (False, None)
-
-    def _nonnegative_int(raw: Any) -> int | None:
-        if isinstance(raw, bool):
-            return None
-        if isinstance(raw, int):
-            return raw if raw >= 0 else None
-        if isinstance(raw, str) and re.fullmatch(r"(?:0|[1-9][0-9]*)", raw):
-            return int(raw)
-        return None
-
-    def _value(*names: str) -> int | None:
-        for name in names:
-            present, raw = _member(usage, name)
-            if not present or raw is None:
-                continue
-            value = _nonnegative_int(raw)
-            if value is not None:
-                return value
-        return None
-
-    def _cached_value() -> int | None:
-        values: list[int] = []
-        invalid = False
-        for name in (
-            "cached_input_tokens",
-            "cachedInputTokens",
-            "prompt_cache_hit_tokens",
-            "cached_prompt_tokens",
-            "cache_read_input_tokens",
-            "cache_read_tokens",
-        ):
-            present, raw = _member(usage, name)
-            if not present or raw is None:
-                continue
-            value = _nonnegative_int(raw)
-            if value is None:
-                invalid = True
-                continue
-            values.append(value)
-        for details_name in (
-            "prompt_tokens_details",
-            "input_tokens_details",
-        ):
-            present, details = _member(usage, details_name)
-            if not present or details is None:
-                continue
-            cached_present, raw = _member(details, "cached_tokens")
-            if not cached_present or raw is None:
-                continue
-            value = _nonnegative_int(raw)
-            if value is None:
-                invalid = True
-                continue
-            values.append(value)
-        if invalid or not values or len(set(values)) != 1:
-            return None
-        return values[0]
-
-    input_tokens = _value("input_tokens", "prompt_tokens")
-    output_tokens = _value("output_tokens", "completion_tokens")
-    total_tokens = _value("total_tokens")
-    if total_tokens is None and input_tokens is not None and output_tokens is not None:
-        total_tokens = input_tokens + output_tokens
-    if (
-        input_tokens is not None
-        and output_tokens is not None
-        and total_tokens is not None
-        and total_tokens != input_tokens + output_tokens
-    ):
-        total_tokens = None
-    if input_tokens is None and output_tokens is None and total_tokens is None:
-        return None, None, None, None, "unavailable"
-    cached_input_tokens = _cached_value()
-    if (
-        cached_input_tokens is not None
-        and input_tokens is not None
-        and cached_input_tokens > input_tokens
-    ):
-        cached_input_tokens = None
-    status = (
-        "reported"
-        if all(
-            value is not None
-            for value in (
-                input_tokens,
-                output_tokens,
-                total_tokens,
-                cached_input_tokens,
-            )
-        )
-        else "partial"
-    )
-    return (
-        input_tokens,
-        output_tokens,
-        total_tokens,
-        cached_input_tokens,
-        status,
-    )
-
-
-def _safe_category(value: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9_.:-]", "_", str(value or ""))[:80]
-    return cleaned or "unknown"
-
 
 def _now_ms() -> int:
     return int(time.time() * 1000)

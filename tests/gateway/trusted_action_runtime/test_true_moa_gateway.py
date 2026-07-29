@@ -30,6 +30,11 @@ import pytest
 
 from gateway.config import PlatformConfig
 from gateway.platforms.api_server import APIServerAdapter
+from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
+from xiaoban.trusted_runtime.paid_call_policy import (
+    SIGNED_MYSTAND_AGENT_POLICY_REVISION,
+    SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
+)
 from xiaoban.trusted_runtime.true_moa import (
     DEEPSEEK_ADVISOR_SLOT,
     FINAL_EXECUTOR_SLOT,
@@ -137,6 +142,7 @@ class _FakeFinalAgent:
             call_id = ledger.start_final_call(
                 f"fake-final-{len(self.run_calls)}",
             )
+            ledger.mark_dispatched(call_id)
             ledger.finish_final_call(
                 call_id,
                 status="completed",
@@ -187,6 +193,7 @@ def _completed_usage(
     ):
         ledger.start_slot(slot)
         advisor_call_id = ledger.start_advisor_call(slot)
+        ledger.mark_dispatched(advisor_call_id)
         slot_usage = {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
@@ -205,6 +212,7 @@ def _completed_usage(
         )
     ledger.start_slot(FINAL_EXECUTOR_SLOT)
     final_call_id = ledger.start_final_call(f"fake-final-{wave_id[:8]}")
+    ledger.mark_dispatched(final_call_id)
     final_usage = {
         "input_tokens": 5,
         "output_tokens": 2,
@@ -223,6 +231,31 @@ def _completed_usage(
     )
     ledger.set_wave_status("completed")
     return ledger.to_dict()
+
+
+def _failed_advisor_timeout_ledger(
+    snapshot,
+    *,
+    wave_id: str,
+) -> tuple[TrueMoAUsageLedger, str]:
+    ledger = TrueMoAUsageLedger(snapshot, wave_id=wave_id)
+    ledger.set_wave_status("running")
+    ledger.start_slot(KIMI_ADVISOR_SLOT)
+    call_id = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    ledger.mark_dispatched(call_id)
+    ledger.finish_slot(
+        KIMI_ADVISOR_SLOT,
+        status="timed_out",
+        error_category="advisor_timeout",
+    )
+    ledger.set_wave_status("failed")
+    ledger.terminate_unfinished(
+        status="cancelled",
+        error_category="cascade_after_advisor_timeout",
+        preserve_running_calls=True,
+    )
+    assert ledger.to_dict()["calls"][0]["status"] == "running"
+    return ledger, call_id
 
 
 def _sealed_mystand_result(payload: dict) -> dict:
@@ -980,6 +1013,424 @@ async def test_completed_sse_buffers_until_sealed_and_emits_outcome_receipt(
 
 
 @pytest.mark.asyncio
+async def test_normal_signed_sse_has_distinct_usage_recovery_and_no_redispatch(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    delivery_id = "xbd_" + ("8" * 40)
+    headers = _mystand_headers("normal-stream")
+    headers.pop("Idempotency-Key")
+    headers.pop(MODE_EPOCH_HEADER)
+    headers.pop(MOA_PRESET_ID_HEADER)
+    headers.pop(MOA_PRESET_REVISION_HEADER)
+    headers[REASONING_MODE_HEADER] = "normal"
+    headers[SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER] = (
+        SIGNED_MYSTAND_AGENT_POLICY_REVISION
+    )
+    headers["X-Xiaoban-Delivery-Id"] = delivery_id
+    headers["X-Xiaoban-Delivery-Attempt"] = headers[
+        "X-Xiaoban-Attempt"
+    ]
+    ledger = AgentCallUsageLedger(
+        provider="fake-provider",
+        model="fake-model",
+        execution_id="8" * 32,
+    )
+    call_id = ledger.start_call()
+    ledger.mark_dispatched(call_id)
+    ledger.finish_call(
+        call_id,
+        status="completed",
+        usage={
+            "input_tokens": 9,
+            "output_tokens": 3,
+            "total_tokens": 12,
+            "cached_input_tokens": 0,
+        },
+    )
+    ledger.set_status("completed")
+    completed_usage = ledger.to_dict()
+    dispatches = 0
+
+    async def _fake_run_agent(**_kwargs):
+        nonlocal dispatches
+        dispatches += 1
+        return (
+            {
+                "final_response": "normal durable answer",
+                "completed": True,
+                "failed": False,
+                "messages": [],
+                "_mystand_request": True,
+                "_agent_call_usage": completed_usage,
+            },
+            {
+                "input_tokens": 9,
+                "output_tokens": 3,
+                "total_tokens": 12,
+                "agent_calls": completed_usage,
+            },
+        )
+
+    monkeypatch.setattr(adapter, "_run_agent", _fake_run_agent)
+    cache = api_server._IdempotencyCache(
+        durable_path=str(tmp_path / "normal-sse.sqlite"),
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions",
+        adapter._handle_chat_completions,
+    )
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": "xiaoban-agent",
+                "stream": True,
+                "messages": [
+                    {"role": "user", "content": "normal signed completion"}
+                ],
+            },
+        )
+        wire = await response.text()
+        assert response.status == 200
+        assert "event: xiaoban.agent.usage" in wire
+        assert "event: xiaoban.moa.usage" not in wire
+
+        recovered = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": delivery_id},
+        )
+        recovered_payload = await recovered.json()
+        assert recovered.status == 200
+        assert recovered_payload["usage"] == completed_usage
+        assert recovered_payload["settlementBlocked"] is False
+
+        replay = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": "xiaoban-agent",
+                "stream": True,
+                "messages": [
+                    {"role": "user", "content": "normal signed completion"}
+                ],
+            },
+        )
+        await replay.text()
+        assert dispatches == 1
+    cache._durable.close()
+
+
+@pytest.mark.parametrize("revision", [None, "stale-policy"])
+@pytest.mark.asyncio
+async def test_normal_signed_http_rejects_unbound_billing_policy_before_agent(
+    monkeypatch,
+    revision,
+):
+    adapter = _adapter()
+    create_calls = 0
+    headers = _mystand_headers(f"normal-policy-{revision or 'missing'}")
+    headers.pop(MODE_EPOCH_HEADER)
+    headers.pop(MOA_PRESET_ID_HEADER)
+    headers.pop(MOA_PRESET_REVISION_HEADER)
+    headers[REASONING_MODE_HEADER] = "normal"
+    delivery_id = "xbd_" + ("6" * 40)
+    headers["Idempotency-Key"] = delivery_id
+    headers["X-Xiaoban-Delivery-Id"] = delivery_id
+    headers["X-Xiaoban-Delivery-Attempt"] = headers[
+        "X-Xiaoban-Attempt"
+    ]
+    if revision is not None:
+        headers[SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER] = revision
+
+    def create_agent(**_kwargs):
+        nonlocal create_calls
+        create_calls += 1
+        raise AssertionError("Agent construction crossed policy gate")
+
+    monkeypatch.setattr(adapter, "_create_agent", create_agent)
+    async with TestClient(TestServer(_app(adapter))) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": "xiaoban-agent",
+                "stream": False,
+                "messages": [
+                    {"role": "user", "content": "normal signed completion"}
+                ],
+            },
+        )
+        payload = await response.json()
+
+    assert response.status == 502
+    assert create_calls == 0
+    assert payload["error"]["code"] == "agent_incomplete"
+    assert "true_moa_usage" not in payload["error"]["xiaoban"]
+    usage = payload["error"]["xiaoban"]["agent_call_usage"]
+    assert usage["schema"] == "mystand.agent-call-usage.v1"
+    assert usage["status"] == "failed"
+    assert usage["calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_normal_durable_http_requires_stable_delivery_before_agent(
+    monkeypatch,
+):
+    adapter = _adapter()
+    create_calls = 0
+    headers = _mystand_headers("normal-policy-missing-delivery")
+    headers.pop(MODE_EPOCH_HEADER)
+    headers.pop(MOA_PRESET_ID_HEADER)
+    headers.pop(MOA_PRESET_REVISION_HEADER)
+    headers[REASONING_MODE_HEADER] = "normal"
+    headers[SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER] = (
+        SIGNED_MYSTAND_AGENT_POLICY_REVISION
+    )
+
+    def create_agent(**_kwargs):
+        nonlocal create_calls
+        create_calls += 1
+        raise AssertionError("Agent construction crossed delivery gate")
+
+    monkeypatch.setattr(adapter, "_create_agent", create_agent)
+    async with TestClient(TestServer(_app(adapter))) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": "xiaoban-agent",
+                "stream": False,
+                "messages": [
+                    {"role": "user", "content": "durable completion"}
+                ],
+            },
+        )
+        payload = await response.json()
+
+    assert response.status == 400
+    assert create_calls == 0
+    assert payload["error"]["code"] == (
+        "mystand_delivery_identity_required"
+    )
+
+
+def test_normal_delivery_id_is_bound_into_idempotency_fingerprint():
+    delivery_id = "xbd_" + ("4" * 40)
+    headers = _mystand_headers("normal-delivery-fingerprint")
+    headers.pop(MODE_EPOCH_HEADER)
+    headers.pop(MOA_PRESET_ID_HEADER)
+    headers.pop(MOA_PRESET_REVISION_HEADER)
+    headers[REASONING_MODE_HEADER] = "normal"
+    headers[SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER] = (
+        SIGNED_MYSTAND_AGENT_POLICY_REVISION
+    )
+    headers["Idempotency-Key"] = delivery_id
+    headers["X-Xiaoban-Delivery-Id"] = delivery_id
+    headers["X-Xiaoban-Delivery-Attempt"] = headers[
+        "X-Xiaoban-Attempt"
+    ]
+    body = {
+        "model": "xiaoban-agent",
+        "stream": False,
+        "messages": [
+            {"role": "user", "content": "normal signed completion"}
+        ],
+    }
+
+    baseline = APIServerAdapter._chat_idempotency_fingerprint(body, headers)
+    changed = APIServerAdapter._chat_idempotency_fingerprint(
+        body,
+        {
+            **headers,
+            "X-Xiaoban-Delivery-Id": "xbd_" + ("5" * 40),
+        },
+    )
+
+    assert changed != baseline
+
+
+@pytest.mark.parametrize(
+    ("identity_drift", "expected_code"),
+    [
+        ("idempotency_key", "mystand_idempotency_identity_conflict"),
+        ("delivery_attempt", "mystand_delivery_attempt_conflict"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_normal_nonstream_rejects_conflicting_durable_identity_before_agent(
+    monkeypatch,
+    tmp_path,
+    identity_drift,
+    expected_code,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    delivery_id = "xbd_" + ("3" * 40)
+    headers = _mystand_headers(f"normal-identity-{identity_drift}")
+    headers.pop(MODE_EPOCH_HEADER)
+    headers.pop(MOA_PRESET_ID_HEADER)
+    headers.pop(MOA_PRESET_REVISION_HEADER)
+    headers[REASONING_MODE_HEADER] = "normal"
+    headers[SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER] = (
+        SIGNED_MYSTAND_AGENT_POLICY_REVISION
+    )
+    headers["Idempotency-Key"] = delivery_id
+    headers["X-Xiaoban-Delivery-Id"] = delivery_id
+    headers["X-Xiaoban-Delivery-Attempt"] = headers[
+        "X-Xiaoban-Attempt"
+    ]
+    if identity_drift == "idempotency_key":
+        headers["Idempotency-Key"] = "xbd_" + ("2" * 40)
+    else:
+        headers["X-Xiaoban-Delivery-Attempt"] = "2"
+    dispatches = 0
+
+    async def _fake_run_agent(**_kwargs):
+        nonlocal dispatches
+        dispatches += 1
+        raise AssertionError("Agent crossed durable identity gate")
+
+    monkeypatch.setattr(adapter, "_run_agent", _fake_run_agent)
+    cache = api_server._IdempotencyCache(
+        durable_path=str(tmp_path / f"{identity_drift}.sqlite"),
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    async with TestClient(TestServer(_app(adapter))) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": "xiaoban-agent",
+                "stream": False,
+                "messages": [
+                    {"role": "user", "content": "normal signed completion"}
+                ],
+            },
+        )
+        payload = await response.json()
+    cache._durable.close()
+
+    assert response.status == 400
+    assert payload["error"]["code"] == expected_code
+    assert dispatches == 0
+
+
+@pytest.mark.asyncio
+async def test_normal_nonstream_delivery_drift_cannot_replay_prior_outcome(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    first_delivery_id = "xbd_" + ("7" * 40)
+    headers = _mystand_headers("normal-delivery-replay")
+    headers.pop(MODE_EPOCH_HEADER)
+    headers.pop(MOA_PRESET_ID_HEADER)
+    headers.pop(MOA_PRESET_REVISION_HEADER)
+    headers[REASONING_MODE_HEADER] = "normal"
+    headers[SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER] = (
+        SIGNED_MYSTAND_AGENT_POLICY_REVISION
+    )
+    headers["Idempotency-Key"] = first_delivery_id
+    headers["X-Xiaoban-Delivery-Id"] = first_delivery_id
+    headers["X-Xiaoban-Delivery-Attempt"] = headers[
+        "X-Xiaoban-Attempt"
+    ]
+    ledger = AgentCallUsageLedger(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        execution_id="7" * 32,
+    )
+    call_id = ledger.start_call()
+    ledger.mark_dispatched(call_id)
+    ledger.finish_call(
+        call_id,
+        status="completed",
+        usage={
+            "input_tokens": 5,
+            "output_tokens": 2,
+            "total_tokens": 7,
+            "cached_input_tokens": 0,
+        },
+    )
+    ledger.set_status("completed")
+    completed_usage = ledger.to_dict()
+    dispatches = 0
+
+    async def _fake_run_agent(**_kwargs):
+        nonlocal dispatches
+        dispatches += 1
+        return (
+            {
+                "final_response": f"answer-for:{first_delivery_id}",
+                "completed": True,
+                "failed": False,
+                "messages": [],
+                "_mystand_request": True,
+                "_agent_call_usage": completed_usage,
+            },
+            {
+                "input_tokens": 5,
+                "output_tokens": 2,
+                "total_tokens": 7,
+                "agent_calls": completed_usage,
+            },
+        )
+
+    monkeypatch.setattr(adapter, "_run_agent", _fake_run_agent)
+    cache = api_server._IdempotencyCache(
+        durable_path=str(tmp_path / "normal-delivery-replay.sqlite"),
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    body = {
+        "model": "xiaoban-agent",
+        "stream": False,
+        "messages": [
+            {"role": "user", "content": "normal signed completion"}
+        ],
+    }
+    async with TestClient(TestServer(_app(adapter))) as client:
+        initial = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json=body,
+        )
+        initial_payload = await initial.json()
+        drifted = await client.post(
+            "/v1/chat/completions",
+            headers={
+                **headers,
+                "X-Xiaoban-Delivery-Id": "xbd_" + ("8" * 40),
+            },
+            json=body,
+        )
+        drifted_payload = await drifted.json()
+    cache._durable.close()
+
+    assert initial.status == 200
+    assert first_delivery_id in initial_payload["choices"][0]["message"]["content"]
+    assert drifted.status == 400
+    assert drifted_payload["error"]["code"] == (
+        "mystand_idempotency_identity_conflict"
+    )
+    assert dispatches == 1
+
+
+@pytest.mark.asyncio
 async def test_gateway_runs_two_fake_advisors_and_one_fake_final_with_one_ledger(
     monkeypatch,
 ):
@@ -1180,7 +1631,7 @@ async def test_advisor_failure_closes_gateway_before_final_or_tools(
 
 
 @pytest.mark.asyncio
-async def test_normal_gateway_uses_only_final_agent_and_has_no_moa_usage(
+async def test_normal_signed_legacy_direct_uses_old_path_without_paid_ledger(
     monkeypatch,
 ):
     from xiaoban.trusted_runtime import true_moa_providers
@@ -1199,11 +1650,13 @@ async def test_normal_gateway_uses_only_final_agent_and_has_no_moa_usage(
         _provider_must_not_run,
     )
     final_agent = _FakeFinalAgent()
-    monkeypatch.setattr(
-        adapter,
-        "_create_agent",
-        lambda **_kwargs: final_agent,
-    )
+    create_kwargs: dict[str, object] = {}
+
+    def create_agent(**kwargs):
+        create_kwargs.update(kwargs)
+        return final_agent
+
+    monkeypatch.setattr(adapter, "_create_agent", create_agent)
 
     result, usage = await adapter._run_agent(
         user_message="normal request",
@@ -1216,13 +1669,53 @@ async def test_normal_gateway_uses_only_final_agent_and_has_no_moa_usage(
     assert result["final_response"] == "fake final synthesis"
     assert len(final_agent.run_calls) == 1
     assert advisor_calls == 0
-    assert usage == {
-        "input_tokens": 17,
-        "output_tokens": 7,
-        "total_tokens": 24,
-    }
+    assert usage["input_tokens"] == 17
+    assert usage["output_tokens"] == 7
+    assert usage["total_tokens"] == 24
+    assert create_kwargs["strict_no_automatic_paid_retry"] is False
     assert "_true_moa_usage" not in result
+    assert "_agent_call_usage" not in result
+    assert "agent_calls" not in usage
     assert "true_moa" not in usage
+
+
+@pytest.mark.asyncio
+async def test_normal_signed_legacy_http_needs_no_durable_headers(
+    monkeypatch,
+):
+    adapter = _adapter()
+    final_agent = _FakeFinalAgent()
+    create_kwargs: dict[str, object] = {}
+    headers = _mystand_headers("normal-legacy-http")
+    headers.pop("Idempotency-Key")
+    headers.pop(MODE_EPOCH_HEADER)
+    headers.pop(MOA_PRESET_ID_HEADER)
+    headers.pop(MOA_PRESET_REVISION_HEADER)
+    headers[REASONING_MODE_HEADER] = "normal"
+
+    def create_agent(**kwargs):
+        create_kwargs.update(kwargs)
+        return final_agent
+
+    monkeypatch.setattr(adapter, "_create_agent", create_agent)
+    async with TestClient(TestServer(_app(adapter))) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": "xiaoban-agent",
+                "stream": False,
+                "messages": [
+                    {"role": "user", "content": "legacy normal completion"}
+                ],
+            },
+        )
+        payload = await response.json()
+
+    assert response.status == 200
+    assert len(final_agent.run_calls) == 1
+    assert create_kwargs["strict_no_automatic_paid_retry"] is False
+    assert "agent_call_usage" not in payload.get("xiaoban", {})
 
 
 def test_preexecuted_stop_after_index_never_dispatches_authorization(
@@ -1560,6 +2053,7 @@ async def test_same_process_stopped_usage_drain_is_not_terminalized_as_orphan(
     for slot in (KIMI_ADVISOR_SLOT, DEEPSEEK_ADVISOR_SLOT):
         ledger.start_slot(slot)
         running_calls[slot] = ledger.start_advisor_call(slot)
+        ledger.mark_dispatched(running_calls[slot])
     compute_started = asyncio.Event()
     release_outer_request = asyncio.Event()
 
@@ -1697,6 +2191,740 @@ async def test_same_process_stopped_usage_drain_is_not_terminalized_as_orphan(
 
 
 @pytest.mark.asyncio
+async def test_same_process_interrupted_usage_drain_is_not_recovered_as_orphan(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    raw_key = f"same-process-interrupted-{uuid.uuid4().hex}"
+    headers = _mystand_headers(raw_key, epoch="61")
+    scoped_key = adapter._scoped_idempotency_key(headers, raw_key)
+    fingerprint = hashlib.sha256(raw_key.encode()).hexdigest()
+    cache = api_server._IdempotencyCache(
+        durable_path=str(tmp_path / "same-process-interrupted.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    assert cache._durable.claim(
+        scoped_key,
+        fingerprint,
+        kind="execution",
+    ) == "missing"
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    ledger = TrueMoAUsageLedger(snapshot, wave_id="5" * 32)
+    ledger.set_wave_status("running")
+    ledger.start_slot(KIMI_ADVISOR_SLOT)
+    call_id = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    ledger.mark_dispatched(call_id)
+    cache.persist_usage(scoped_key, fingerprint, ledger.to_dict())
+    cache._durable.set_state(scoped_key, state="interrupted")
+    assert cache.has_active_usage_drain(scoped_key) is True
+
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        payload = await response.json()
+
+    assert response.status == 202
+    assert payload["status"] == "interrupted_draining"
+    assert payload["final"] is False
+    assert payload["settlementBlocked"] is True
+    record = cache.durable_record(scoped_key)
+    assert record["state"] == "interrupted"
+    assert record["usage"]["calls"][0]["status"] == "running"
+    assert record["usage"]["calls"][0]["endedAtMs"] is None
+    cache._durable.close()
+
+
+@pytest.mark.asyncio
+async def test_same_process_interrupted_zero_call_inflight_stays_nonterminal(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    raw_key = f"same-process-zero-call-{uuid.uuid4().hex}"
+    headers = _mystand_headers(raw_key, epoch="64")
+    scoped_key = adapter._scoped_idempotency_key(headers, raw_key)
+    fingerprint = hashlib.sha256(raw_key.encode()).hexdigest()
+    cache = api_server._IdempotencyCache(
+        durable_path=str(tmp_path / "same-process-zero-call.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    ledger = TrueMoAUsageLedger(snapshot, wave_id="8" * 32)
+    ledger.set_wave_status("running")
+    compute_started = asyncio.Event()
+    release_compute = asyncio.Event()
+
+    async def compute():
+        cache.persist_usage(
+            scoped_key,
+            fingerprint,
+            ledger.to_dict(),
+        )
+        compute_started.set()
+        await release_compute.wait()
+        return (
+            {
+                "final_response": "",
+                "messages": [],
+                "completed": False,
+                "failed": True,
+                "_true_moa_usage": ledger.to_dict(),
+            },
+            {"true_moa": ledger.to_dict()},
+        )
+
+    outer = asyncio.create_task(
+        cache.get_or_set(
+            scoped_key,
+            fingerprint,
+            compute,
+            durable=True,
+        )
+    )
+    await compute_started.wait()
+    cache._durable.set_state(scoped_key, state="interrupted")
+    assert cache.has_active_usage_drain(scoped_key) is False
+
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        payload = await response.json()
+
+    assert response.status == 202
+    assert payload["status"] == "interrupted_draining"
+    assert payload["final"] is False
+    assert payload["settlementBlocked"] is True
+    record = cache.durable_record(scoped_key)
+    assert record["state"] == "interrupted"
+    assert record["usage"]["status"] == "running"
+    assert record["usage"]["calls"] == []
+
+    release_compute.set()
+    await outer
+    cache._durable.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_failed_advisor_timeout_terminalizes_orphaned_call(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    raw_key = f"restart-failed-drain-{uuid.uuid4().hex}"
+    headers = _mystand_headers(raw_key, epoch="65")
+    scoped_key = adapter._scoped_idempotency_key(headers, raw_key)
+    fingerprint = hashlib.sha256(raw_key.encode()).hexdigest()
+    path = tmp_path / "restart-failed-drain.sqlite"
+    original = api_server._IdempotencyCache(
+        durable_path=str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    assert original._durable.claim(
+        scoped_key,
+        fingerprint,
+        kind="execution",
+    ) == "missing"
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    ledger, call_id = _failed_advisor_timeout_ledger(
+        snapshot,
+        wave_id="9" * 32,
+    )
+    original._durable.save_usage(
+        scoped_key,
+        fingerprint,
+        ledger.to_dict(),
+        state="failed",
+    )
+    original._durable.close()
+
+    restarted = api_server._IdempotencyCache(
+        durable_path=str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    before_recovery = restarted.durable_record(scoped_key)
+    assert before_recovery["state"] == "failed"
+    assert before_recovery["usage"]["status"] == "failed"
+    assert before_recovery["usage"]["calls"][0]["status"] == "running"
+    monkeypatch.setattr(api_server, "_idem_cache", restarted)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        payload = await response.json()
+        repeated = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        repeated_payload = await repeated.json()
+
+    assert response.status == 200
+    assert repeated.status == 200
+    assert repeated_payload == payload
+    assert payload["final"] is True
+    assert payload["terminalState"] == "failed"
+    assert payload["usage"]["status"] == "failed"
+    assert payload["settlementBlocked"] is True
+    call = payload["usage"]["calls"][0]
+    assert call["status"] == "timed_out"
+    assert call["usageStatus"] == "unavailable"
+    assert call["endedAtMs"] is not None
+    assert (
+        call["errorCategory"]
+        == "agent_restart_outcome_unknown"
+    )
+    assert all(
+        call[field] is None
+        for field in (
+            "inputTokens",
+            "outputTokens",
+            "totalTokens",
+            "cachedInputTokens",
+        )
+    )
+    assert "outcome" not in payload
+    assert "finalResponse" not in json.dumps(payload)
+    fenced_ended_at = call["endedAtMs"]
+
+    late_usage = {
+        "input_tokens": 12,
+        "output_tokens": 4,
+        "total_tokens": 16,
+        "cached_input_tokens": 2,
+    }
+    ledger.finish_advisor_call(
+        call_id,
+        status="completed",
+        usage=late_usage,
+        error_category="late_provider_result",
+        cost_usd=0.007,
+        cost_status="reported",
+        cost_source="fake-provider",
+    )
+    ledger.finish_slot(
+        KIMI_ADVISOR_SLOT,
+        status="timed_out",
+        usage=late_usage,
+        error_category="advisor_timeout",
+        cost_usd=0.007,
+        cost_status="reported",
+        cost_source="fake-provider",
+    )
+    restarted.persist_usage(
+        scoped_key,
+        fingerprint,
+        ledger.to_dict(),
+    )
+    late_record = restarted.durable_record(scoped_key)
+    late_call = late_record["usage"]["calls"][0]
+    assert late_record["state"] == "failed"
+    assert late_call["status"] == "timed_out"
+    assert late_call["endedAtMs"] == fenced_ended_at
+    assert (
+        late_call["errorCategory"]
+        == "agent_restart_outcome_unknown"
+    )
+    assert late_call["usageStatus"] == "reported"
+    assert late_call["inputTokens"] == 12
+    assert late_call["outputTokens"] == 4
+    assert late_call["totalTokens"] == 16
+    assert late_call["cachedInputTokens"] == 2
+    assert late_call["costUsd"] == 0.007
+    restarted._durable.close()
+
+
+@pytest.mark.asyncio
+async def test_same_process_failed_usage_drain_is_not_recovered_as_orphan(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    raw_key = f"same-process-failed-drain-{uuid.uuid4().hex}"
+    headers = _mystand_headers(raw_key, epoch="66")
+    scoped_key = adapter._scoped_idempotency_key(headers, raw_key)
+    fingerprint = hashlib.sha256(raw_key.encode()).hexdigest()
+    cache = api_server._IdempotencyCache(
+        durable_path=str(tmp_path / "same-process-failed-drain.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    assert cache._durable.claim(
+        scoped_key,
+        fingerprint,
+        kind="execution",
+    ) == "missing"
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    ledger, _call_id = _failed_advisor_timeout_ledger(
+        snapshot,
+        wave_id="a" * 32,
+    )
+    cache.persist_usage(scoped_key, fingerprint, ledger.to_dict())
+    assert cache.has_active_usage_drain(scoped_key) is True
+    assert cache.durable_record(scoped_key)["state"] == "failed"
+
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        payload = await response.json()
+
+    assert response.status == 202
+    assert payload["status"] == "failed_draining"
+    assert payload["final"] is False
+    assert payload["settlementBlocked"] is True
+    record = cache.durable_record(scoped_key)
+    assert record["state"] == "failed"
+    assert record["usage"]["status"] == "failed"
+    assert record["usage"]["calls"][0]["status"] == "running"
+    assert record["usage"]["calls"][0]["endedAtMs"] is None
+    cache._durable.close()
+
+
+@pytest.mark.parametrize("topology", ["normal", "true_moa"])
+@pytest.mark.parametrize("dispatched", [False, True])
+@pytest.mark.asyncio
+async def test_restart_usage_recovery_terminalizes_orphan_without_stop(
+    monkeypatch,
+    tmp_path,
+    topology,
+    dispatched,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    raw_key = (
+        f"restart-orphan-{topology}-{int(dispatched)}-"
+        f"{uuid.uuid4().hex}"
+    )
+    headers = _mystand_headers(raw_key, epoch="62")
+    if topology == "normal":
+        headers.pop(MODE_EPOCH_HEADER)
+        headers.pop(MOA_PRESET_ID_HEADER)
+        headers.pop(MOA_PRESET_REVISION_HEADER)
+        headers[REASONING_MODE_HEADER] = "normal"
+        headers[SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER] = (
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION
+        )
+    scoped_key = adapter._scoped_idempotency_key(headers, raw_key)
+    fingerprint = hashlib.sha256(raw_key.encode()).hexdigest()
+    path = tmp_path / f"restart-orphan-{topology}-{dispatched}.sqlite"
+    original = api_server._IdempotencyCache(
+        durable_path=str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    assert original._durable.claim(
+        scoped_key,
+        fingerprint,
+        kind="execution",
+    ) == "missing"
+
+    if topology == "normal":
+        ledger = AgentCallUsageLedger(
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            execution_id="6" * 32,
+        )
+        call_id = ledger.start_call()
+    else:
+        snapshot = validate_true_moa_headers(
+            headers,
+            mystand_request=True,
+            api_authenticated=True,
+        )
+        ledger = TrueMoAUsageLedger(snapshot, wave_id="6" * 32)
+        ledger.set_wave_status("running")
+        ledger.start_slot(KIMI_ADVISOR_SLOT)
+        call_id = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    if dispatched:
+        ledger.mark_dispatched(call_id)
+    original._durable.save_usage(
+        scoped_key,
+        fingerprint,
+        ledger.to_dict(),
+        state="running",
+    )
+    original._durable.close()
+
+    restarted = api_server._IdempotencyCache(
+        durable_path=str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    before_recovery = restarted.durable_record(scoped_key)
+    assert before_recovery["state"] == "interrupted"
+    assert before_recovery["usage"]["calls"][0]["status"] == (
+        "running" if dispatched else "reserved"
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", restarted)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        payload = await response.json()
+        repeated = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        repeated_payload = await repeated.json()
+
+    assert response.status == 200
+    assert repeated.status == 200
+    assert repeated_payload == payload
+    assert payload["final"] is True
+    assert payload["terminalState"] == "failed"
+    assert payload["usage"]["status"] == "failed"
+    assert payload["settlementBlocked"] is dispatched
+    call = payload["usage"]["calls"][0]
+    assert call["status"] == (
+        "timed_out" if dispatched else "not_dispatched"
+    )
+    assert call["usageStatus"] == "unavailable"
+    assert call["endedAtMs"] is not None
+    assert call["errorCategory"] == (
+        "agent_restart_outcome_unknown"
+        if dispatched
+        else "provider_dispatch_fence_closed"
+    )
+    assert all(
+        call[field] is None
+        for field in (
+            "inputTokens",
+            "outputTokens",
+            "totalTokens",
+            "cachedInputTokens",
+        )
+    )
+    assert "costUsd" not in call
+    if topology == "true_moa":
+        slot = payload["usage"]["slots"][0]
+        assert slot["status"] == "failed"
+        assert slot["endedAtMs"] is not None
+        assert (
+            slot["errorCategory"]
+            == "agent_restart_outcome_unknown"
+        )
+    durable = restarted.durable_record(scoped_key)
+    assert durable["state"] == "failed"
+    assert durable["usage"] == payload["usage"]
+    fenced_usage = durable["usage"]
+    fenced_call = fenced_usage["calls"][0]
+    fenced_ended_at = fenced_call["endedAtMs"]
+
+    if not dispatched:
+        ledger.mark_dispatched(call_id)
+    late_usage = {
+        "input_tokens": 9,
+        "output_tokens": 3,
+        "total_tokens": 12,
+        "cached_input_tokens": 1,
+    }
+    if topology == "normal":
+        ledger.finish_call(
+            call_id,
+            status="completed",
+            usage=late_usage,
+            error_category="late_provider_result",
+            cost_usd=0.006,
+            cost_status="reported",
+            cost_source="fake-provider",
+        )
+    else:
+        ledger.finish_advisor_call(
+            call_id,
+            status="completed",
+            usage=late_usage,
+            error_category="late_provider_result",
+            cost_usd=0.006,
+            cost_status="reported",
+            cost_source="fake-provider",
+        )
+        ledger.finish_slot(
+            KIMI_ADVISOR_SLOT,
+            status="completed",
+            usage=late_usage,
+            error_category="late_provider_result",
+            cost_usd=0.006,
+            cost_status="reported",
+            cost_source="fake-provider",
+        )
+
+    if not dispatched:
+        with pytest.raises(ValueError):
+            restarted.persist_usage(
+                scoped_key,
+                fingerprint,
+                ledger.to_dict(),
+            )
+        assert restarted.durable_record(scoped_key)["usage"] == fenced_usage
+    else:
+        restarted.persist_usage(
+            scoped_key,
+            fingerprint,
+            ledger.to_dict(),
+        )
+        late_record = restarted.durable_record(scoped_key)
+        assert late_record["state"] == "failed"
+        late_call = late_record["usage"]["calls"][0]
+        assert late_call["status"] == "timed_out"
+        assert late_call["endedAtMs"] == fenced_ended_at
+        assert (
+            late_call["errorCategory"]
+            == "agent_restart_outcome_unknown"
+        )
+        assert late_call["usageStatus"] == "reported"
+        assert late_call["inputTokens"] == 9
+        assert late_call["outputTokens"] == 3
+        assert late_call["totalTokens"] == 12
+        assert late_call["cachedInputTokens"] == 1
+        assert late_call["costUsd"] == 0.006
+        assert late_call["costStatus"] == "reported"
+        assert late_call["costSource"] == "fake-provider"
+        if topology == "true_moa":
+            late_slot = late_record["usage"]["slots"][0]
+            assert late_slot["status"] == "failed"
+            assert (
+                late_slot["errorCategory"]
+                == "agent_restart_outcome_unknown"
+            )
+            assert late_slot["usageStatus"] == "reported"
+    restarted._durable.close()
+
+
+@pytest.mark.parametrize("topology", ["normal", "true_moa"])
+@pytest.mark.parametrize("phase", ["before_first_call", "between_calls"])
+@pytest.mark.asyncio
+async def test_restart_usage_recovery_fails_nonterminal_ledger_without_active_call(
+    monkeypatch,
+    tmp_path,
+    topology,
+    phase,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    raw_key = (
+        f"restart-inactive-gap-{topology}-{phase}-"
+        f"{uuid.uuid4().hex}"
+    )
+    headers = _mystand_headers(raw_key, epoch="63")
+    if topology == "normal":
+        headers.pop(MODE_EPOCH_HEADER)
+        headers.pop(MOA_PRESET_ID_HEADER)
+        headers.pop(MOA_PRESET_REVISION_HEADER)
+        headers[REASONING_MODE_HEADER] = "normal"
+        headers[SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER] = (
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION
+        )
+    scoped_key = adapter._scoped_idempotency_key(headers, raw_key)
+    fingerprint = hashlib.sha256(raw_key.encode()).hexdigest()
+    path = tmp_path / f"inactive-gap-{topology}-{phase}.sqlite"
+    original = api_server._IdempotencyCache(
+        durable_path=str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    assert original._durable.claim(
+        scoped_key,
+        fingerprint,
+        kind="execution",
+    ) == "missing"
+
+    if topology == "normal":
+        ledger = AgentCallUsageLedger(
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            execution_id="7" * 32,
+        )
+        if phase == "between_calls":
+            call_id = ledger.start_call()
+            ledger.mark_dispatched(call_id)
+            ledger.finish_call(
+                call_id,
+                status="completed",
+                usage={
+                    "input_tokens": 8,
+                    "output_tokens": 3,
+                    "total_tokens": 11,
+                    "cached_input_tokens": 1,
+                },
+                cost_usd=0.004,
+                cost_status="reported",
+                cost_source="fake-provider",
+            )
+    else:
+        snapshot = validate_true_moa_headers(
+            headers,
+            mystand_request=True,
+            api_authenticated=True,
+        )
+        ledger = TrueMoAUsageLedger(snapshot, wave_id="7" * 32)
+        ledger.set_wave_status("running")
+        if phase == "between_calls":
+            for index, slot in enumerate(
+                (KIMI_ADVISOR_SLOT, DEEPSEEK_ADVISOR_SLOT),
+                start=1,
+            ):
+                usage = {
+                    "input_tokens": 8 + index,
+                    "output_tokens": 2 + index,
+                    "total_tokens": 10 + (2 * index),
+                    "cached_input_tokens": 1,
+                }
+                ledger.start_slot(slot)
+                call_id = ledger.start_advisor_call(slot)
+                ledger.mark_dispatched(call_id)
+                ledger.finish_advisor_call(
+                    call_id,
+                    status="completed",
+                    usage=usage,
+                    cost_usd=0.004 * index,
+                    cost_status="reported",
+                    cost_source="fake-provider",
+                )
+                ledger.finish_slot(
+                    slot,
+                    status="completed",
+                    usage=usage,
+                    cost_usd=0.004 * index,
+                    cost_status="reported",
+                    cost_source="fake-provider",
+                )
+            ledger.set_wave_status("advisors_completed")
+    before_usage = ledger.to_dict()
+    expected_call_count = (
+        0
+        if phase == "before_first_call"
+        else 1
+        if topology == "normal"
+        else 2
+    )
+    assert len(before_usage["calls"]) == expected_call_count
+    assert all(
+        call["status"] == "completed"
+        and call["usageStatus"] == "reported"
+        for call in before_usage["calls"]
+    )
+    original._durable.save_usage(
+        scoped_key,
+        fingerprint,
+        before_usage,
+        state="running",
+    )
+    original._durable.close()
+
+    restarted = api_server._IdempotencyCache(
+        durable_path=str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    before_recovery = restarted.durable_record(scoped_key)
+    assert before_recovery["state"] == "interrupted"
+    assert before_recovery["usage"] == before_usage
+    monkeypatch.setattr(api_server, "_idem_cache", restarted)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        payload = await response.json()
+        repeated = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        repeated_payload = await repeated.json()
+
+    assert response.status == 200
+    assert repeated.status == 200
+    assert repeated_payload == payload
+    assert payload["status"] == "failed"
+    assert payload["final"] is True
+    assert payload["terminalState"] == "failed"
+    assert payload["settlementBlocked"] is False
+    assert payload["usage"]["status"] == "failed"
+    assert payload["usage"]["calls"] == before_usage["calls"]
+    if topology == "true_moa":
+        assert payload["usage"]["slots"] == before_usage["slots"]
+    assert payload["outcomeStatus"] == "none"
+    assert "outcome" not in payload
+    assert "outcomeId" not in payload
+    assert "finalResponse" not in json.dumps(payload)
+    recovered = restarted.durable_record(scoped_key)
+    assert recovered["state"] == "failed"
+    assert recovered["usage"] == payload["usage"]
+    restarted._durable.close()
+
+
+@pytest.mark.asyncio
 async def test_create_restart_stop_fences_late_completion_and_keeps_usage(
     monkeypatch,
     tmp_path,
@@ -1734,6 +2962,7 @@ async def test_create_restart_stop_fences_late_completion_and_keeps_usage(
     ):
         ledger.start_slot(slot)
         call_id = ledger.start_advisor_call(slot)
+        ledger.mark_dispatched(call_id)
         call_usage = {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
@@ -1753,6 +2982,7 @@ async def test_create_restart_stop_fences_late_completion_and_keeps_usage(
     ledger.set_wave_status("advisors_completed")
     ledger.start_slot(FINAL_EXECUTOR_SLOT)
     final_call_id = ledger.start_final_call("restart-late-final")
+    ledger.mark_dispatched(final_call_id)
     dispatched_usage = ledger.to_dict()
 
     final_usage = {
@@ -1969,6 +3199,7 @@ async def test_stopped_completion_usage_endpoint_recovers_actual_receipt(
     ):
         usage_ledger.start_slot(slot)
         advisor_call_id = usage_ledger.start_advisor_call(slot)
+        usage_ledger.mark_dispatched(advisor_call_id)
         usage_ledger.finish_advisor_call(
             advisor_call_id,
             status="completed",
@@ -1991,6 +3222,7 @@ async def test_stopped_completion_usage_endpoint_recovers_actual_receipt(
         )
     usage_ledger.start_slot(FINAL_EXECUTOR_SLOT)
     final_call_id = usage_ledger.start_final_call("usage-recovery-call")
+    usage_ledger.mark_dispatched(final_call_id)
     usage_ledger.finish_final_call(
         final_call_id,
         status="completed",
@@ -2111,6 +3343,7 @@ async def test_usage_endpoint_blocks_unknown_cache_split(
     ):
         ledger.start_slot(slot)
         call_id = ledger.start_advisor_call(slot)
+        ledger.mark_dispatched(call_id)
         ledger.finish_advisor_call(call_id, status="completed", usage=usage)
         ledger.finish_slot(slot, status="completed", usage=usage)
     ledger.start_slot(FINAL_EXECUTOR_SLOT)
@@ -2121,6 +3354,7 @@ async def test_usage_endpoint_blocks_unknown_cache_split(
         "prompt_cache_hit_tokens": 2,
     }
     final_call_id = ledger.start_final_call("unknown-cache-final")
+    ledger.mark_dispatched(final_call_id)
     ledger.finish_final_call(
         final_call_id,
         status="completed",
@@ -2225,10 +3459,11 @@ async def test_usage_endpoint_surfaces_completed_callback_crash_gap(
     )
     usage = _completed_usage(snapshot, wave_id="c" * 32)
     fingerprint = "crash-gap-fingerprint"
+    path = tmp_path / "outcome-crash-gap.sqlite"
     cache = api_server._IdempotencyCache(
         max_items=8,
         ttl_seconds=30,
-        durable_path=str(tmp_path / "outcome-crash-gap.sqlite"),
+        durable_path=str(path),
         outcome_keys=_OUTCOME_KEYS,
     )
     assert cache._durable.claim(
@@ -2243,8 +3478,18 @@ async def test_usage_endpoint_surfaces_completed_callback_crash_gap(
     assert crash_record["state"] == "running"
     assert crash_record["usage"]["status"] == "completed"
     assert crash_record["outcomeState"] == "none"
+    cache._durable.close()
 
-    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    restarted = api_server._IdempotencyCache(
+        max_items=8,
+        ttl_seconds=30,
+        durable_path=str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    restarted_record = restarted.durable_record(scoped_key)
+    assert restarted_record["state"] == "interrupted"
+    assert restarted_record["usage"]["status"] == "completed"
+    monkeypatch.setattr(api_server, "_idem_cache", restarted)
     app = web.Application()
     app.router.add_post(
         "/v1/chat/completions/usage",
@@ -2264,14 +3509,15 @@ async def test_usage_endpoint_surfaces_completed_callback_crash_gap(
 
     assert response.status == 200
     assert payload["status"] == "settlement_blocked"
-    assert payload["terminalState"] == "running"
+    assert payload["terminalState"] == "interrupted"
     assert payload["final"] is True
     assert payload["usage"]["status"] == "completed"
     assert payload["outcomeStatus"] == "none"
     assert payload["settlementBlocked"] is True
     assert payload["errorCode"] == "true_moa_outcome_unavailable"
     assert "outcome" not in payload
-    cache._durable.close()
+    assert restarted.durable_record(scoped_key)["state"] == "interrupted"
+    restarted._durable.close()
 
 
 @pytest.mark.asyncio
@@ -2560,6 +3806,7 @@ class _BlockingFinalAgent(_FakeFinalAgent):
             )
         if self.behavior != "late_error":
             call_id = self._true_moa_usage_ledger.start_final_call("blocked")
+            self._true_moa_usage_ledger.mark_dispatched(call_id)
         self.provider_started.set()
         assert self.release_provider.wait(1)
         if self.behavior == "late_error":
@@ -2732,7 +3979,7 @@ async def test_terminal_persistence_failures_stay_fail_closed(
 
     result, usage = await _run_gateway_case(
         case,
-        true_moa_usage_callback=callback,
+        paid_call_usage_callback=callback,
     )
     assert final_agent.saved_trajectories == []
     assert final_agent.persisted_sessions == []
@@ -3149,7 +4396,7 @@ async def test_durable_callback_cannot_hold_final_watchdog(
     before = time.monotonic()
     result, usage = await _run_gateway_case(
         case,
-        true_moa_usage_callback=callback,
+        paid_call_usage_callback=callback,
     )
     assert time.monotonic() - before < 0.5
     assert started.is_set()
@@ -3228,7 +4475,7 @@ async def test_terminal_callback_failure_is_attempted_once(
 
     result, usage = await _run_gateway_case(
         case,
-        true_moa_usage_callback=callback,
+        paid_call_usage_callback=callback,
     )
     assert callback_count == 1
     _assert_closed(
@@ -3288,7 +4535,7 @@ async def test_early_terminal_callback_block_is_bounded(
     before = time.monotonic()
     result, usage = await _run_gateway_case(
         case,
-        true_moa_usage_callback=callback,
+        paid_call_usage_callback=callback,
     )
     assert time.monotonic() - before < 0.5
     assert started.is_set()

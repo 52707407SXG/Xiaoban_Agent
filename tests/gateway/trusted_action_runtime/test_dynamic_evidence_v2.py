@@ -32,6 +32,10 @@ from xiaoban.trusted_runtime.true_moa_durable import (
     TrueMoAOutcomeBindingError,
     project_true_moa_completed_outcome,
 )
+from xiaoban.trusted_runtime.paid_call_policy import (
+    SIGNED_MYSTAND_AGENT_POLICY_REVISION,
+    SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
+)
 
 
 PROTOCOL = "dynamic-evidence-v2"
@@ -116,7 +120,7 @@ def _record_index(turn, items: list[dict], *, has_more: bool = False) -> None:
     _record(
         turn,
         "mystand_resource_index",
-        {"operation": "list_resources"},
+        {},
         {
             "schema": "mystand.resource-index.complete.v1",
             "ok": True,
@@ -440,6 +444,10 @@ def _normal_request_headers() -> dict[str, str]:
         "X-Xiaoban-Toolset-Policy": "mystand-broker-basic",
         "X-Xiaoban-Memory-Mode": "disabled",
         "X-Xiaoban-Message-Id": MESSAGE_ID,
+        "X-Xiaoban-Delivery-Id": DELIVERY_ID,
+        SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER: (
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION
+        ),
     }
 
 
@@ -484,7 +492,7 @@ async def test_normal_dynamic_evidence_uses_strict_paid_call_fence(
 
 
 @pytest.mark.asyncio
-async def test_normal_chat_keeps_default_paid_call_retry_policy(
+async def test_normal_signed_chat_uses_one_dispatch_per_durable_receipt(
     monkeypatch,
 ):
     adapter = APIServerAdapter(
@@ -505,7 +513,7 @@ async def test_normal_chat_keeps_default_paid_call_retry_policy(
     )
 
     assert result["completed"] is True
-    assert create_kwargs.get("strict_no_automatic_paid_retry", False) is False
+    assert create_kwargs["strict_no_automatic_paid_retry"] is True
 
 
 def test_dynamic_index_followup_is_query_only_and_never_falls_back_to_auth():

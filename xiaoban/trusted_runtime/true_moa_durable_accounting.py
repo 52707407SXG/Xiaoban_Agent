@@ -18,7 +18,7 @@ from xiaoban.trusted_runtime.true_moa_durable_shared import (
 from xiaoban.trusted_runtime.true_moa_durable_usage import (
     _merge_status,
     _merge_usage,
-    project_true_moa_usage,
+    project_durable_usage,
 )
 
 
@@ -33,7 +33,7 @@ class _TrueMoAAccountingMixin:
     ) -> None:
         if state not in _VALID_STATES:
             raise ValueError("invalid true MoA durable state")
-        projected = project_true_moa_usage(usage)
+        projected = project_durable_usage(usage)
         storage_key = _storage_key(key)
         clean_fingerprint = _safe_text(fingerprint, required=True)
         timestamp = int(time.time() * 1000)
@@ -57,15 +57,29 @@ class _TrueMoAAccountingMixin:
                 connection.rollback()
                 raise RuntimeError("true MoA durable execution binding conflict")
             existing_usage = (
-                project_true_moa_usage(json.loads(row["usage_json"]))
+                project_durable_usage(json.loads(row["usage_json"]))
                 if row["usage_json"]
                 else None
+            )
+            allow_restart_late_accounting = bool(
+                str(row["state"] or "") == "failed"
+                and isinstance(existing_usage, Mapping)
+                and any(
+                    isinstance(call, Mapping)
+                    and call.get("status") == "timed_out"
+                    and call.get("errorCategory")
+                    == "agent_restart_outcome_unknown"
+                    for call in (existing_usage.get("calls") or ())
+                )
             )
             projected = _merge_usage(
                 existing_usage,
                 projected,
                 allow_stopped_late_accounting=(
                     str(row["state"] or "") == "stopped"
+                ),
+                allow_restart_late_accounting=(
+                    allow_restart_late_accounting
                 ),
             )
             encoded = json.dumps(
@@ -186,14 +200,33 @@ class _TrueMoAAccountingMixin:
         return accepted
 
     def terminalize_stopped_running_calls(self, key: str) -> bool:
-        """Fence orphaned running receipts after a stopped-process restart.
+        """Fence orphaned receipts after a durable stop."""
+
+        return self._terminalize_orphaned_running_calls(
+            key,
+            allowed_states={"stopped"},
+        )
+
+    def terminalize_orphaned_running_calls(self, key: str) -> bool:
+        """Fence orphaned receipts after either stop or process restart."""
+
+        return self._terminalize_orphaned_running_calls(
+            key,
+            allowed_states={"stopped", "interrupted", "failed"},
+        )
+
+    def _terminalize_orphaned_running_calls(
+        self,
+        key: str,
+        *,
+        allowed_states: set[str],
+    ) -> bool:
+        """Atomically close active receipts whose process owner is gone.
 
         A live process owns its in-memory usage drain.  After restart no such
         worker exists, so leaving a durable call as ``running`` would strand
-        My Stand in ``stop_requested`` forever.  This transition deliberately
-        leaves token, cost, end-time, and error fields empty: a later exact
-        provider receipt may still fill them monotonically, while missing
-        usage remains settlement-blocked instead of guessed or released.
+        My Stand forever.  This transition deliberately leaves token and cost
+        fields empty.  The caller must prove there is no live process owner.
         """
 
         storage_key = _storage_key(key)
@@ -209,28 +242,73 @@ class _TrueMoAAccountingMixin:
                 """,
                 (storage_key,),
             ).fetchone()
+            current_state = (
+                str(row["state"] or "")
+                if row is not None
+                else ""
+            )
             if (
                 row is None
-                or str(row["state"] or "") != "stopped"
+                or current_state not in allowed_states
                 or not row["usage_json"]
             ):
                 connection.commit()
                 return False
-            usage = project_true_moa_usage(
+            stopped = current_state == "stopped"
+            terminal_state = "stopped" if stopped else "failed"
+            terminal_usage_status = "cancelled" if stopped else "failed"
+            terminal_slot_status = "cancelled" if stopped else "failed"
+            usage = project_durable_usage(
                 json.loads(row["usage_json"])
             )
-            for slot in usage["slots"]:
+            if (
+                not stopped
+                and usage.get("status") == "completed"
+            ):
+                connection.commit()
+                return False
+            for slot in usage.get("slots", []):
                 if slot["status"] == "running":
-                    slot["status"] = "cancelled"
+                    slot["status"] = terminal_slot_status
+                    slot["endedAtMs"] = max(
+                        int(slot.get("startedAtMs") or 0),
+                        timestamp,
+                    )
+                    slot["errorCategory"] = (
+                        "agent_restart_outcome_unknown"
+                    )
                     changed = True
             for call in usage["calls"]:
-                if call["status"] == "running":
-                    call["status"] = "timed_out"
+                if call["status"] == "reserved":
+                    call["status"] = "not_dispatched"
+                    call["endedAtMs"] = max(
+                        int(call.get("startedAtMs") or 0),
+                        timestamp,
+                    )
+                    call["errorCategory"] = (
+                        "provider_dispatch_fence_closed"
+                    )
                     changed = True
+                elif call["status"] == "running":
+                    call["status"] = "timed_out"
+                    call["endedAtMs"] = max(
+                        int(call.get("startedAtMs") or 0),
+                        timestamp,
+                    )
+                    call["errorCategory"] = (
+                        "agent_restart_outcome_unknown"
+                    )
+                    changed = True
+            if (
+                not stopped
+                and usage.get("status")
+                not in {"completed", "failed", "cancelled"}
+            ):
+                changed = True
             if changed:
-                usage["status"] = "cancelled"
+                usage["status"] = terminal_usage_status
                 encoded = json.dumps(
-                    project_true_moa_usage(usage),
+                    project_durable_usage(usage),
                     ensure_ascii=True,
                     sort_keys=True,
                     separators=(",", ":"),
@@ -238,10 +316,16 @@ class _TrueMoAAccountingMixin:
                 connection.execute(
                     """
                     UPDATE true_moa_idempotency
-                    SET usage_json = ?, updated_at_ms = ?
-                    WHERE storage_key = ? AND state = 'stopped'
+                    SET state = ?, usage_json = ?, updated_at_ms = ?
+                    WHERE storage_key = ? AND state = ?
                     """,
-                    (encoded, timestamp, storage_key),
+                    (
+                        terminal_state,
+                        encoded,
+                        timestamp,
+                        storage_key,
+                        current_state,
+                    ),
                 )
             connection.commit()
         if changed:

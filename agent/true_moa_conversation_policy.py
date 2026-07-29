@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from agent.true_moa_terminal_accounting import (
-    finish_true_moa_final_call,
+from agent.paid_call_accounting import (
+    finish_paid_provider_call,
     record_strict_terminal_usage,
 )
 
@@ -87,103 +87,179 @@ def execute_llm_request(
 ) -> Any:
     """Run one provider request through either the strict fence or middleware."""
 
-    if not strict:
-        from xiaoban_cli.middleware import run_llm_execution_middleware
-
-        return run_llm_execution_middleware(
-            api_kwargs,
-            perform_api_call,
-            original_request=original_request,
-            task_id=task_id,
-            turn_id=turn_id,
-            api_request_id=api_request_id,
-            session_id=agent.session_id or "",
-            platform=agent.platform or "",
-            model=agent.model,
-            provider=agent.provider,
-            base_url=agent.base_url,
-            api_mode=agent.api_mode,
-            api_call_count=api_call_count,
-            middleware_trace=list(middleware_trace),
+    true_moa_ledger = getattr(agent, "_true_moa_usage_ledger", None)
+    ledger = (
+        getattr(agent, "_paid_call_usage_ledger", None)
+        or true_moa_ledger
+    )
+    normal_policy = None
+    if ledger is not None and true_moa_ledger is None:
+        from xiaoban.trusted_runtime.paid_call_policy import (
+            resolve_signed_mystand_agent_policy,
         )
 
-    ledger = getattr(agent, "_true_moa_usage_ledger", None)
-    if ledger is not None:
-        from xiaoban.trusted_runtime.true_moa import (
-            TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS,
-            enforce_true_moa_dispatch_budget,
-        )
-
-        enforce_true_moa_dispatch_budget(
-            role="final_executor",
-            payload=api_kwargs,
+        normal_policy = resolve_signed_mystand_agent_policy(
+            getattr(agent, "_paid_call_policy_revision", "")
         )
     controller = getattr(agent, "_true_moa_cancel_controller", None)
-    if controller is not None and not controller.try_begin_dispatch(
-        f"final-llm-reservation:{api_request_id}"
-    ):
-        raise InterruptedError(
-            "True MoA cancelled before final provider dispatch"
-        )
-    call_id = (
-        ledger.start_final_call(api_request_id, notify=False)
-        if ledger is not None
-        else None
-    )
-    try:
-        if ledger is not None and not ledger.confirm_change(
-            TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS,
-        ):
-            if controller is not None:
-                controller.fail()
-            raise RuntimeError(
-                "true MoA durable final-call reservation failed"
+    if controller is None:
+        controller = getattr(agent, "_paid_call_cancel_controller", None)
+
+    def accounted_provider_call(next_api_kwargs: dict[str, Any]) -> Any:
+        if true_moa_ledger is not None:
+            from xiaoban.trusted_runtime.true_moa import (
+                enforce_true_moa_dispatch_budget,
+                enforce_true_moa_final_route,
+            )
+
+            enforce_true_moa_final_route(
+                provider=getattr(agent, "provider", ""),
+                model=next_api_kwargs.get("model"),
+            )
+            enforce_true_moa_dispatch_budget(
+                role="final_executor",
+                payload=next_api_kwargs,
+            )
+        elif normal_policy is not None:
+            from xiaoban.trusted_runtime.paid_call_policy import (
+                enforce_fixed_paid_call_route,
+                enforce_paid_call_dispatch_budget,
+                enforce_signed_mystand_policy_revision,
+            )
+
+            enforce_signed_mystand_policy_revision(
+                getattr(agent, "_paid_call_policy_revision", "")
+            )
+            enforce_fixed_paid_call_route(
+                normal_policy,
+                provider=getattr(agent, "provider", ""),
+                model=next_api_kwargs.get("model"),
+                error_code="signed_mystand_fixed_route_mismatch",
+            )
+            enforce_paid_call_dispatch_budget(
+                normal_policy,
+                payload=next_api_kwargs,
+                error_prefix="signed_mystand_paid_call",
             )
         if controller is not None and not controller.try_begin_dispatch(
-            f"final-llm:{api_request_id}"
+            f"final-llm-reservation:{api_request_id}"
         ):
             raise InterruptedError(
                 "True MoA cancelled before final provider dispatch"
             )
-        response = perform_api_call(api_kwargs)
-    except BaseException as exc:
-        cancelled = bool(
+        if ledger is None:
+            call_id = None
+        elif true_moa_ledger is not None:
+            call_id = ledger.start_final_call(
+                api_request_id,
+                notify=False,
+            )
+        else:
+            call_id = ledger.start_call(
+                provider=str(agent.provider or ""),
+                model=str(agent.model or ""),
+                role=normal_policy.role,
+                notify=False,
+            )
+        if ledger is not None and not ledger.confirm_change():
+            if controller is not None:
+                controller.fail()
+            # The durable owner may still have only the reserved snapshot.
+            # Never invent a physical dispatch or a zero-call terminal here.
+            raise RuntimeError("provider call durable reservation failed")
+        if controller is not None and not controller.try_begin_dispatch(
+            f"final-llm:{api_request_id}"
+        ):
+            if ledger is not None:
+                ledger.finish_not_dispatched(call_id, notify=False)
+                if not ledger.confirm_change():
+                    raise RuntimeError(
+                        "provider call not-dispatched confirmation failed"
+                    )
+            raise InterruptedError(
+                "True MoA cancelled before final provider dispatch"
+            )
+        if ledger is not None:
+            ledger.mark_dispatched(call_id, notify=False)
+            if not ledger.confirm_change():
+                if controller is not None:
+                    controller.fail()
+                finish_paid_provider_call(
+                    agent,
+                    ledger,
+                    call_id,
+                    status="failed",
+                    error_category=(
+                        "durable_dispatch_confirmation_failed"
+                    ),
+                )
+                raise RuntimeError(
+                    "provider call durable dispatch marker failed"
+                )
+        try:
+            response = perform_api_call(next_api_kwargs)
+        except BaseException as exc:
+            cancelled = bool(
+                agent._interrupt_requested
+                or (
+                    controller is not None
+                    and controller.state == "cancelled"
+                )
+            )
+            finish_paid_provider_call(
+                agent,
+                ledger,
+                call_id,
+                status="cancelled" if cancelled else "failed",
+                response=exc,
+                error_category=(
+                    "completion_stopped"
+                    if cancelled
+                    else "provider_call_failed"
+                ),
+            )
+            raise
+        finish_paid_provider_call(
+            agent,
+            ledger,
+            call_id,
+            status="completed",
+            response=response,
+        )
+        if strict and (
             agent._interrupt_requested
             or (
                 controller is not None
-                and controller.state == "cancelled"
+                and controller.state != "running"
             )
-        )
-        finish_true_moa_final_call(
-            agent,
-            call_id,
-            status="cancelled" if cancelled else "failed",
-            response=exc,
-            error_category=(
-                "completion_stopped"
-                if cancelled
-                else "provider_call_failed"
-            ),
-        )
-        raise
-    finish_true_moa_final_call(
-        agent,
-        call_id,
-        status="completed",
-        response=response,
+        ):
+            record_strict_terminal_usage(agent, response)
+            raise InterruptedError(
+                "True MoA cancelled before response consumption"
+            )
+        return response
+
+    if strict:
+        return accounted_provider_call(api_kwargs)
+
+    from xiaoban_cli.middleware import run_llm_execution_middleware
+
+    return run_llm_execution_middleware(
+        api_kwargs,
+        accounted_provider_call,
+        original_request=original_request,
+        task_id=task_id,
+        turn_id=turn_id,
+        api_request_id=api_request_id,
+        session_id=agent.session_id or "",
+        platform=agent.platform or "",
+        model=agent.model,
+        provider=agent.provider,
+        base_url=agent.base_url,
+        api_mode=agent.api_mode,
+        api_call_count=api_call_count,
+        middleware_trace=list(middleware_trace),
     )
-    if (
-        agent._interrupt_requested
-        or (
-            controller is not None
-            and controller.state != "running"
-        )
-    ):
-        record_strict_terminal_usage(agent, response)
-        raise InterruptedError(
-            "True MoA cancelled before response consumption"
-        )
-    return response
 
 
 def strict_failure_result(

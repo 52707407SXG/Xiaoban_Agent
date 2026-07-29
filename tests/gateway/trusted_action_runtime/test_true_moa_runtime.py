@@ -482,6 +482,46 @@ def test_cancel_before_start_dispatches_zero_advisors():
     assert caught.value.category == "cancelled"
 
 
+def test_cancel_after_advisor_reservation_records_not_dispatched_calls():
+    controller = TrueMoACancelController()
+    both_reserved = threading.Barrier(2, timeout=1)
+    provider_calls = 0
+
+    def strict_caller(
+        *,
+        reservation_callback,
+        dispatch_callback,
+        **_kwargs,
+    ):
+        reservation_callback()
+        both_reserved.wait()
+        controller.cancel()
+        assert callable(dispatch_callback)
+        error = TimeoutError("cancelled at physical dispatch fence")
+        error.before_dispatch = True
+        raise error
+
+    with pytest.raises(TrueMoAExecutionError) as caught:
+        run_true_moa_advisors(
+            _snapshot(),
+            current_question="预留后停止",
+            conversation_history=[],
+            strict_caller=strict_caller,
+            cancel_controller=controller,
+            timeout_seconds=1,
+        )
+
+    calls = caught.value.ledger.to_dict()["calls"]
+    assert provider_calls == 0
+    assert len(calls) == 2
+    assert all(call["status"] == "not_dispatched" for call in calls)
+    assert all(
+        call["errorCategory"] == "provider_dispatch_fence_closed"
+        for call in calls
+    )
+    assert all(call["usageStatus"] == "unavailable" for call in calls)
+
+
 def test_running_cancel_closes_both_calls_and_late_results_cannot_escape():
     controller = TrueMoACancelController()
     both_started = threading.Event()
@@ -1034,6 +1074,7 @@ def test_cache_split_requires_a_trusted_nonnegative_integer(
     ledger = TrueMoAUsageLedger(_snapshot())
     ledger.start_slot(DEEPSEEK_ADVISOR_SLOT)
     call_id = ledger.start_advisor_call(DEEPSEEK_ADVISOR_SLOT)
+    ledger.mark_dispatched(call_id)
     usage = {
         "prompt_tokens": 11,
         "completion_tokens": 3,
@@ -1231,6 +1272,7 @@ def test_final_timeout_fence_preserves_late_usage_without_rewriting_status():
     ledger = TrueMoAUsageLedger(_snapshot())
     ledger.start_slot(FINAL_EXECUTOR_SLOT)
     call_id = ledger.start_final_call("deadline-race")
+    ledger.mark_dispatched(call_id)
 
     ledger.timeout_final_execution()
     with pytest.raises(
@@ -1270,6 +1312,24 @@ def test_final_timeout_fence_preserves_late_usage_without_rewriting_status():
     assert final_call["status"] == "timed_out"
     assert final_call["errorCategory"] == "final_executor_timeout"
     assert final_call["cachedInputTokens"] == 2
+
+
+def test_true_moa_final_call_uses_reserved_dispatch_marker_and_zero_call_fence():
+    ledger = TrueMoAUsageLedger(_snapshot())
+    ledger.start_slot(FINAL_EXECUTOR_SLOT)
+
+    dispatched_call = ledger.start_final_call("dispatched-final")
+    assert ledger.to_dict()["calls"][0]["status"] == "reserved"
+    ledger.mark_dispatched(dispatched_call)
+    assert ledger.to_dict()["calls"][0]["status"] == "running"
+
+    fenced_call = ledger.start_final_call("fenced-final")
+    ledger.finish_not_dispatched(fenced_call)
+    fenced = ledger.to_dict()["calls"][1]
+    assert fenced["status"] == "not_dispatched"
+    assert fenced["usageStatus"] == "unavailable"
+    assert fenced["errorCategory"] == "provider_dispatch_fence_closed"
+    assert fenced["endedAtMs"] is not None
 
 
 def test_reserved_final_commit_is_owned_by_gateway_thread():

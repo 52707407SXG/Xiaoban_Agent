@@ -224,6 +224,23 @@ def _make_transport_error(error_type="ReadTimeout"):
 
 class TestTryRecoverPrimaryTransport:
 
+    def test_strict_paid_call_skips_transport_recovery(self):
+        agent = _make_agent(provider="custom")
+        agent._strict_no_automatic_paid_retry = True
+        error = _make_transport_error("ReadTimeout")
+
+        with patch.object(agent, "_close_openai_client") as mock_close, \
+             patch.object(agent, "_create_openai_client") as mock_create, \
+             patch("time.sleep") as mock_sleep:
+            result = agent._try_recover_primary_transport(
+                error, retry_count=3, max_retries=3,
+            )
+
+        assert result is False
+        mock_close.assert_not_called()
+        mock_create.assert_not_called()
+        mock_sleep.assert_not_called()
+
     def test_recovers_on_read_timeout(self):
         agent = _make_agent(provider="custom")
         error = _make_transport_error("ReadTimeout")

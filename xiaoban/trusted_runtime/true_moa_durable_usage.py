@@ -5,6 +5,12 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping
 
+from xiaoban.trusted_runtime.agent_call_usage_codec import (
+    AGENT_CALL_USAGE_SCHEMA,
+    enforce_terminal_call_set_immutable,
+    merge_agent_call_usage,
+    project_agent_call_usage,
+)
 from xiaoban.trusted_runtime.true_moa_durable_shared import (
     TRUE_MOA_DURABLE_MAX_CALLS,
     TRUE_MOA_DURABLE_MAX_FINAL_CALLS,
@@ -99,6 +105,28 @@ def _project_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
         and projected["endedAtMs"] < projected["startedAtMs"]
     ):
         raise ValueError("invalid true MoA durable receipt timestamps")
+    if (
+        projected["status"] in {"not_started", "reserved", "running"}
+        and projected["endedAtMs"] is not None
+    ):
+        raise ValueError("active true MoA receipt has end time")
+    if (
+        projected["status"] in _RECEIPT_TERMINAL_STATES
+        and projected["endedAtMs"] is None
+    ):
+        raise ValueError("terminal true MoA receipt has no end time")
+    if projected["status"] == "not_dispatched" and (
+        projected["endedAtMs"] is None
+        or projected["usageStatus"] != "unavailable"
+        or any(item is not None for item in token_values)
+        or projected.get("errorCategory")
+        != "provider_dispatch_fence_closed"
+        or any(
+            projected.get(field) is not None
+            for field in ("costUsd", "costStatus", "costSource")
+        )
+    ):
+        raise ValueError("invalid not-dispatched true MoA receipt")
     return projected
 
 
@@ -218,6 +246,14 @@ def project_true_moa_usage(value: Mapping[str, Any]) -> dict[str, Any]:
     return projected
 
 
+def project_durable_usage(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Dispatch only the two supported plaintext-free usage schemas."""
+
+    if isinstance(value, Mapping) and value.get("schema") == AGENT_CALL_USAGE_SCHEMA:
+        return project_agent_call_usage(value)
+    return project_true_moa_usage(value)
+
+
 def _merge_status(
     current: str,
     incoming: str,
@@ -260,6 +296,7 @@ def _merge_receipt(
     incoming: Mapping[str, Any],
     *,
     allow_stopped_late_accounting: bool = False,
+    allow_restart_late_accounting: bool = False,
 ) -> dict[str, Any]:
     for field in ("slotId", "callId", "provider", "model", "role"):
         if current.get(field) != incoming.get(field):
@@ -267,20 +304,70 @@ def _merge_receipt(
     merged = dict(current)
     current_status = str(current.get("status") or "")
     incoming_status = str(incoming.get("status") or "")
-    merged["status"] = (
-        current_status
-        if (
+    trusted_restart_fence = bool(
+        allow_restart_late_accounting
+        and current_status in {"failed", "timed_out"}
+        and current.get("errorCategory")
+        == "agent_restart_outcome_unknown"
+    )
+    trusted_late_accounting = bool(
+        (
             allow_stopped_late_accounting
             and current_status in {"cancelled", "timed_out"}
-            and incoming_status in _RECEIPT_TERMINAL_STATES
         )
-        else _merge_status(
-            current_status,
-            incoming_status,
-            ranks=_RECEIPT_STATUS_RANK,
-            terminals=_RECEIPT_TERMINAL_STATES,
-        )
+        or trusted_restart_fence
     )
+    if current_status == incoming_status:
+        merged["status"] = current_status
+    elif (
+        current_status == "not_started"
+        and incoming_status in _RECEIPT_STATUS_RANK
+    ):
+        merged["status"] = incoming_status
+    elif (
+        current_status == "not_started"
+        and incoming_status in _RECEIPT_TERMINAL_STATES
+    ):
+        merged["status"] = incoming_status
+    elif (
+        incoming_status == "not_started"
+        and current_status in _RECEIPT_STATUS_RANK
+    ):
+        merged["status"] = current_status
+    elif (
+        incoming_status == "not_started"
+        and current_status in _RECEIPT_TERMINAL_STATES
+    ):
+        merged["status"] = current_status
+    elif current_status == "reserved" and incoming_status in {
+        "running",
+        "not_dispatched",
+    }:
+        merged["status"] = incoming_status
+    elif current_status == "running" and incoming_status == "reserved":
+        merged["status"] = current_status
+    elif current_status == "running" and incoming_status in (
+        _RECEIPT_TERMINAL_STATES - {"not_dispatched"}
+    ):
+        merged["status"] = incoming_status
+    elif (
+        current_status in _RECEIPT_TERMINAL_STATES
+        and incoming_status in _RECEIPT_STATUS_RANK
+        and not (
+            current_status == "not_dispatched"
+            and incoming_status == "running"
+        )
+    ):
+        merged["status"] = current_status
+    elif (
+        trusted_late_accounting
+        and incoming_status in (
+            _RECEIPT_TERMINAL_STATES - {"not_dispatched"}
+        )
+    ):
+        merged["status"] = current_status
+    else:
+        raise ValueError("conflicting terminal true MoA durable state")
     for field in (
         "startedAtMs",
         "endedAtMs",
@@ -293,11 +380,18 @@ def _merge_receipt(
         "costStatus",
         "costSource",
     ):
-        value = _merge_fill_once(
-            current.get(field),
-            incoming.get(field),
-            field=field,
-        )
+        if (
+            trusted_late_accounting
+            and field in {"endedAtMs", "errorCategory"}
+            and current.get(field) is not None
+        ):
+            value = current.get(field)
+        else:
+            value = _merge_fill_once(
+                current.get(field),
+                incoming.get(field),
+                field=field,
+            )
         if value is not None:
             merged[field] = value
     merged["usageStatus"] = _merge_status(
@@ -326,7 +420,27 @@ def _merge_usage(
     incoming: Mapping[str, Any],
     *,
     allow_stopped_late_accounting: bool = False,
+    allow_restart_late_accounting: bool = False,
 ) -> dict[str, Any]:
+    if (
+        isinstance(incoming, Mapping)
+        and incoming.get("schema") == AGENT_CALL_USAGE_SCHEMA
+    ):
+        if (
+            current is not None
+            and current.get("schema") != AGENT_CALL_USAGE_SCHEMA
+        ):
+            raise ValueError("conflicting durable usage schema")
+        return merge_agent_call_usage(
+            current,
+            incoming,
+            allow_stopped_late_accounting=(
+                allow_stopped_late_accounting
+            ),
+            allow_restart_late_accounting=(
+                allow_restart_late_accounting
+            ),
+        )
     if current is None:
         return project_true_moa_usage(incoming)
     current_projected = project_true_moa_usage(current)
@@ -349,6 +463,11 @@ def _merge_usage(
             and current_projected["status"] == "cancelled"
             and incoming_projected["status"] in _LEDGER_TERMINAL_STATES
         )
+        or (
+            allow_restart_late_accounting
+            and current_projected["status"] == "failed"
+            and incoming_projected["status"] in _LEDGER_TERMINAL_STATES
+        )
         else _merge_status(
             current_projected["status"],
             incoming_projected["status"],
@@ -361,6 +480,9 @@ def _merge_usage(
             current_item,
             incoming_item,
             allow_stopped_late_accounting=allow_stopped_late_accounting,
+            allow_restart_late_accounting=(
+                allow_restart_late_accounting
+            ),
         )
         for current_item, incoming_item in zip(
             current_projected["slots"],
@@ -374,6 +496,11 @@ def _merge_usage(
     incoming_calls = {
         item["callId"]: item for item in incoming_projected["calls"]
     }
+    enforce_terminal_call_set_immutable(
+        current_status=current_projected["status"],
+        current_calls=current_projected["calls"],
+        incoming_calls=incoming_projected["calls"],
+    )
     insertion_order = [
         item["callId"] for item in current_projected["calls"]
     ]
@@ -389,6 +516,9 @@ def _merge_usage(
                 incoming_calls[call_id],
                 allow_stopped_late_accounting=(
                     allow_stopped_late_accounting
+                ),
+                allow_restart_late_accounting=(
+                    allow_restart_late_accounting
                 ),
             )
             if call_id in current_calls and call_id in incoming_calls

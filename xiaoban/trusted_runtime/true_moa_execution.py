@@ -152,14 +152,37 @@ def run_true_moa_advisors(
         advisor_call_id: str | None = None
         advisor_call_watchdog: threading.Timer | None = None
 
-        def _record_dispatch() -> None:
+        def _reserve_dispatch() -> None:
             nonlocal advisor_call_id, advisor_call_watchdog
             if advisor_call_id is not None:
-                raise RuntimeError("advisor provider call already dispatched")
+                raise RuntimeError("advisor provider call already reserved")
             advisor_call_id = ledger.start_advisor_call(slot, notify=False)
             if not _confirm_control_snapshot():
                 controller.fail()
                 raise RuntimeError("true MoA durable call reservation failed")
+
+        def _record_dispatch() -> None:
+            nonlocal advisor_call_watchdog
+            # Deterministic test callers historically signalled only the
+            # physical boundary. Keep that adapter path safe while the real
+            # provider uses the explicit reserve callback first.
+            if advisor_call_id is None:
+                _reserve_dispatch()
+            ledger.mark_dispatched(advisor_call_id, notify=False)
+            if not _confirm_control_snapshot():
+                controller.fail()
+                ledger.finish_advisor_call(
+                    advisor_call_id,
+                    status="failed",
+                    error_category=(
+                        "durable_dispatch_confirmation_failed"
+                    ),
+                    notify=False,
+                )
+                ledger.notify_change_async()
+                raise RuntimeError(
+                    "true MoA durable dispatch marker failed"
+                )
 
             def _expire_actual_call() -> None:
                 if advisor_call_id is None:
@@ -243,6 +266,7 @@ def run_true_moa_advisors(
                 tools=(),
                 timeout_seconds=timeout_seconds,
                 cancel_controller=controller,
+                reservation_callback=_reserve_dispatch,
                 dispatch_callback=_record_dispatch,
             )
             strict_result = _coerce_strict_result(result)
@@ -393,6 +417,27 @@ def run_true_moa_advisors(
             late_cost_usd = getattr(exc, "cost_usd", None)
             late_cost_status = getattr(exc, "cost_status", None)
             late_cost_source = getattr(exc, "cost_source", None)
+            if (
+                bool(getattr(exc, "before_dispatch", False))
+                and advisor_call_id is not None
+            ):
+                ledger.finish_not_dispatched(
+                    advisor_call_id,
+                    notify=False,
+                )
+                durable_not_dispatched = _confirm_control_snapshot()
+                ledger.finish_slot(
+                    slot,
+                    status="cancelled",
+                    error_category="cancelled_before_dispatch",
+                    notify=False,
+                )
+                if not durable_not_dispatched:
+                    controller.fail()
+                    raise _SlotTerminal(
+                        "durable_settlement_failed"
+                    ) from None
+                raise _SlotTerminal("cancelled") from None
             if controller.is_set:
                 stopped_by_user = controller.state == "cancelled"
                 actual_status = (

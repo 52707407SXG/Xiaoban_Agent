@@ -810,6 +810,8 @@ def try_recover_primary_transport(
     already manage connection pools and retries server-side — if our
     retries through them are exhausted, one more rebuilt client won't help.
     """
+    if getattr(agent, "_strict_no_automatic_paid_retry", False):
+        return False
     if agent._fallback_activated:
         return False
 

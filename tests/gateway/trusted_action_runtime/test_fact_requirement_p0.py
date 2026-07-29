@@ -38,6 +38,10 @@ from gateway.platforms.api_server import (
     security_headers_middleware,
 )
 from xiaoban.trusted_runtime.completion_guard import check_completion
+from xiaoban.trusted_runtime.paid_call_policy import (
+    SIGNED_MYSTAND_AGENT_POLICY_REVISION,
+    SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
+)
 from xiaoban.trusted_runtime.turns import begin_turn
 from xiaoban.trusted_runtime.types import (
     ActionCall,
@@ -152,6 +156,9 @@ def _headers_with_requirement(
         "X-Xiaoban-Delivery-Id": str(bound["delivery_id"]),
         "X-Xiaoban-Attempt": str(bound["attempt"]),
         "X-Xiaoban-Request-Fingerprint": str(bound["request_fingerprint"]),
+        SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER: (
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION
+        ),
     }
     if requirement is not None:
         encoded, signature = _encode_and_sign_requirement(requirement)
@@ -193,6 +200,9 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
 def _streaming_agent(create_kwargs: Mapping, answer: str) -> MagicMock:
     callback = create_kwargs.get("stream_delta_callback")
     agent = MagicMock()
+    agent.provider = "deepseek"
+    agent.model = "deepseek-v4-pro"
+    agent.max_iterations = 8
     agent.valid_tool_names = []
     agent.session_prompt_tokens = 1
     agent.session_completion_tokens = 1

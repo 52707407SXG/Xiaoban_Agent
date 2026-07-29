@@ -55,12 +55,14 @@ class StrictAdvisorCancelled(TimeoutError):
         self,
         message: str,
         *,
+        before_dispatch: bool = False,
         usage: Any = None,
         cost_usd: float | None = None,
         cost_status: str | None = None,
         cost_source: str | None = None,
     ):
         super().__init__(message)
+        self.before_dispatch = bool(before_dispatch)
         self.usage = usage
         self.cost_usd = cost_usd
         self.cost_status = cost_status
@@ -165,13 +167,16 @@ def strict_advisor_call(
     tools: tuple[Any, ...],
     timeout_seconds: float,
     cancel_controller: TrueMoACancelController,
+    reservation_callback: Callable[[], None],
     dispatch_callback: Callable[[], None],
 ) -> StrictAdvisorResult:
     """Make exactly one fixed, tool-less provider request for ``slot``."""
 
     if tools:
         raise StrictAdvisorProviderError("advisor_tools_must_be_empty")
-    if not callable(dispatch_callback):
+    if not callable(reservation_callback) or not callable(
+        dispatch_callback
+    ):
         raise StrictAdvisorProviderError("advisor_dispatch_callback_required")
     if cancel_controller.is_set:
         raise StrictAdvisorCancelled("advisor_cancelled_before_client")
@@ -181,6 +186,7 @@ def strict_advisor_call(
             frozen_messages,
             timeout_seconds=timeout_seconds,
             cancel_controller=cancel_controller,
+            reservation_callback=reservation_callback,
             dispatch_callback=dispatch_callback,
         )
     if slot == DEEPSEEK_ADVISOR_SLOT:
@@ -188,6 +194,7 @@ def strict_advisor_call(
             frozen_messages,
             timeout_seconds=timeout_seconds,
             cancel_controller=cancel_controller,
+            reservation_callback=reservation_callback,
             dispatch_callback=dispatch_callback,
         )
     raise StrictAdvisorProviderError("advisor_slot_not_in_fixed_preset")
@@ -198,6 +205,7 @@ def _call_kimi(
     *,
     timeout_seconds: float,
     cancel_controller: TrueMoACancelController,
+    reservation_callback: Callable[[], None],
     dispatch_callback: Callable[[], None],
 ) -> StrictAdvisorResult:
     request_kwargs = {
@@ -228,9 +236,13 @@ def _call_kimi(
     try:
         if not cancel_controller.try_begin_dispatch(f"{cancel_key}:reservation"):
             raise StrictAdvisorCancelled("advisor_cancelled_before_dispatch")
-        dispatch_callback()
+        reservation_callback()
         if not cancel_controller.try_begin_dispatch(cancel_key):
-            raise StrictAdvisorCancelled("advisor_cancelled_before_dispatch")
+            raise StrictAdvisorCancelled(
+                "advisor_cancelled_before_dispatch",
+                before_dispatch=True,
+            )
+        dispatch_callback()
         with client.messages.stream(**request_kwargs) as stream:
             response = stream.get_final_message()
         usage = getattr(response, "usage", None)
@@ -268,6 +280,7 @@ def _call_deepseek(
     *,
     timeout_seconds: float,
     cancel_controller: TrueMoACancelController,
+    reservation_callback: Callable[[], None],
     dispatch_callback: Callable[[], None],
 ) -> StrictAdvisorResult:
     request_kwargs = {
@@ -305,9 +318,13 @@ def _call_deepseek(
     try:
         if not cancel_controller.try_begin_dispatch(f"{cancel_key}:reservation"):
             raise StrictAdvisorCancelled("advisor_cancelled_before_dispatch")
-        dispatch_callback()
+        reservation_callback()
         if not cancel_controller.try_begin_dispatch(cancel_key):
-            raise StrictAdvisorCancelled("advisor_cancelled_before_dispatch")
+            raise StrictAdvisorCancelled(
+                "advisor_cancelled_before_dispatch",
+                before_dispatch=True,
+            )
+        dispatch_callback()
         response = client.chat.completions.create(**request_kwargs)
         usage = getattr(response, "usage", None)
         reported_usage = _trusted_usage_receipt(

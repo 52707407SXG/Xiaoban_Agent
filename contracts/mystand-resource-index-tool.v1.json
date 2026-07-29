@@ -8,10 +8,6 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "properties": {
-        "operation": {
-          "const": "list_resources",
-          "type": "string"
-        },
         "module_id": {
           "maxLength": 80,
           "type": "string"
@@ -35,7 +31,6 @@
           "type": "integer"
         }
       },
-      "required": ["operation"],
       "additionalProperties": false
     }
   },

@@ -78,6 +78,7 @@ def test_deepseek_advisor_is_one_fixed_toolless_no_retry_call(monkeypatch):
         tools=(),
         timeout_seconds=9,
         cancel_controller=TrueMoACancelController(),
+        reservation_callback=lambda: None,
         dispatch_callback=lambda: captured.__setitem__(
             "dispatches",
             captured["dispatches"] + 1,
@@ -172,6 +173,7 @@ def test_kimi_advisor_is_one_fixed_toolless_no_retry_call(monkeypatch):
         tools=(),
         timeout_seconds=8,
         cancel_controller=TrueMoACancelController(),
+        reservation_callback=lambda: None,
         dispatch_callback=lambda: captured.__setitem__(
             "dispatches",
             captured["dispatches"] + 1,
@@ -270,6 +272,7 @@ def test_kimi_stop_drains_final_usage_without_reading_late_text(monkeypatch):
                 tools=(),
                 timeout_seconds=1,
                 cancel_controller=controller,
+                reservation_callback=lambda: None,
                 dispatch_callback=lambda: captured.__setitem__(
                     "dispatches",
                     captured["dispatches"] + 1,
@@ -385,6 +388,7 @@ def test_running_cancel_fences_output_but_waits_for_usage_receipt(monkeypatch):
                 tools=(),
                 timeout_seconds=1,
                 cancel_controller=controller,
+                reservation_callback=lambda: None,
                 dispatch_callback=lambda: dispatches.append("deepseek"),
             )
         except Exception as exc:
@@ -465,6 +469,7 @@ def test_cancel_winning_atomic_dispatch_gate_means_zero_provider_calls(
             tools=(),
             timeout_seconds=1,
             cancel_controller=controller,
+            reservation_callback=lambda: None,
             dispatch_callback=_record_dispatch,
         )
 
@@ -515,7 +520,8 @@ def test_cancel_during_durable_reservation_never_reaches_provider(
                 tools=(),
                 timeout_seconds=1,
                 cancel_controller=controller,
-                dispatch_callback=_reserve,
+                reservation_callback=_reserve,
+                dispatch_callback=lambda: None,
             )
         except BaseException as exc:
             outcome.append(exc)
@@ -531,6 +537,7 @@ def test_cancel_during_durable_reservation_never_reaches_provider(
     assert create_calls == []
     assert len(outcome) == 1
     assert isinstance(outcome[0], providers.StrictAdvisorCancelled)
+    assert outcome[0].before_dispatch is True
 
 
 @pytest.mark.parametrize(
@@ -565,6 +572,7 @@ def test_advisor_input_cap_rejects_before_credentials_or_dispatch(
             tools=(),
             timeout_seconds=1,
             cancel_controller=TrueMoACancelController(),
+            reservation_callback=lambda: None,
             dispatch_callback=lambda: dispatches.append("dispatched"),
         )
 

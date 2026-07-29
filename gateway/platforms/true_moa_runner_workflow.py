@@ -49,12 +49,13 @@ class TrueMoARunRequest:
     completion_protocol: str
     completion_binding: Dict[str, Any]
     true_moa_snapshot: Any
-    true_moa_usage_callback: Any
+    paid_call_usage_callback: Any
     request_user_id: str
     request_message_id: str
     request_delivery_id: str
     enabled_toolsets_override: Any
     mystand_request: bool
+    durable_paid_call: bool
     memory_identity: Any
     metadata_trace: Any
     trace_state: TrueMoARunnerTraceState
@@ -73,6 +74,10 @@ class TrueMoARunWorkflow(
         self.run_system_prompt = request.effective_system_prompt
         self.true_moa_controller = None
         self.true_moa_ledger = None
+        self.agent_call_ledger = None
+        self.agent_call_policy_revision = ""
+        self.agent_call_policy = None
+        self.agent_call_terminal_settlement_confirmed = None
         self.true_moa_final_commit_key = ""
         self.true_moa_terminal_notification = None
         self.true_moa_terminal_settlement_deadline: float | None = None
@@ -86,10 +91,30 @@ class TrueMoARunWorkflow(
         self.final_timeout_seconds = 0.0
 
     def run(self) -> tuple:
-        terminal_result = self.prepare_run()
+        from gateway.platforms.agent_call_accounting import (
+            failed_normal_result,
+            initialize_normal_call_ledger,
+        )
+
+        terminal_result = initialize_normal_call_ledger(self)
         if terminal_result is not None:
             return terminal_result
-        return self.run_bound_agent()
+        try:
+            terminal_result = self.prepare_run()
+            if terminal_result is not None:
+                return terminal_result
+            return self.run_bound_agent()
+        except BaseException as exc:
+            if self.agent_call_ledger is not None:
+                return failed_normal_result(
+                    self,
+                    interrupted=isinstance(
+                        exc,
+                        (KeyboardInterrupt, asyncio.CancelledError),
+                    ),
+                    error="agent preflight failed",
+                )
+            raise
 
     def run_bound_agent(self) -> tuple:
         from gateway.session_context import clear_session_vars
@@ -248,6 +273,16 @@ class TrueMoARunWorkflow(
                     },
                     usage,
                 )
+            if self.agent_call_ledger is not None:
+                from gateway.platforms.agent_call_accounting import (
+                    failed_normal_result,
+                )
+
+                return failed_normal_result(
+                    self,
+                    interrupted=False,
+                    error="agent setup failed",
+                )
             raise
 
         try:
@@ -279,10 +314,11 @@ class TrueMoARunWorkflow(
                         request.request_user_id or None
                     ),
                     skip_memory=request.mystand_request,
+                    # Durable signed deliveries use one physical dispatch per
+                    # receipt and wait for the worker before terminal return.
+                    # Legacy signed direct calls retain their prior contract.
                     strict_no_automatic_paid_retry=(
-                        request.mystand_request
-                        and request.completion_protocol
-                        == "dynamic-evidence-v2"
+                        request.durable_paid_call
                     ),
                 )
             elif self.true_moa_ledger is not None:
@@ -299,21 +335,16 @@ class TrueMoARunWorkflow(
                     if isinstance(part, str) and part.strip()
                 )
             if self.true_moa_ledger is not None:
-                from xiaoban_cli.model_normalize import (
-                    normalize_model_for_provider,
+                from xiaoban.trusted_runtime.true_moa import (
+                    enforce_true_moa_final_route,
                 )
 
-                final_provider = str(
-                    getattr(self.agent, "provider", "") or ""
-                ).lower()
-                final_model = normalize_model_for_provider(
-                    str(getattr(self.agent, "model", "") or ""),
-                    "deepseek",
-                )
-                if (
-                    final_provider != self.final_executor_slot.provider
-                    or final_model != self.final_executor_slot.model
-                ):
+                try:
+                    enforce_true_moa_final_route(
+                        provider=getattr(self.agent, "provider", ""),
+                        model=getattr(self.agent, "model", ""),
+                    )
+                except RuntimeError:
                     self.true_moa_controller.fail()
                     self.begin_true_moa_terminal_settlement(
                         slot_status="failed",
@@ -351,6 +382,11 @@ class TrueMoARunWorkflow(
                 self.agent._strict_no_automatic_paid_retry = True
                 self.agent._defer_true_moa_final_commit = True
                 self.agent.compression_enabled = False
+            from gateway.platforms.agent_call_accounting import (
+                bind_paid_call_ledger,
+            )
+
+            bind_paid_call_ledger(self, self.agent)
             if request.agent_ref is not None:
                 request.agent_ref[0] = self.agent
                 if (
@@ -436,6 +472,16 @@ class TrueMoARunWorkflow(
                     },
                     usage,
                 )
+            if self.agent_call_ledger is not None:
+                from gateway.platforms.agent_call_accounting import (
+                    failed_normal_result,
+                )
+
+                return failed_normal_result(
+                    self,
+                    interrupted=True,
+                    error="completion stopped",
+                )
             raise
         except BaseException as exc:
             if request.metadata_trace is not None:
@@ -516,6 +562,19 @@ class TrueMoARunWorkflow(
                         "_true_moa_usage": usage["true_moa"],
                     },
                     usage,
+                )
+            if self.agent_call_ledger is not None:
+                from gateway.platforms.agent_call_accounting import (
+                    failed_normal_result,
+                )
+
+                return failed_normal_result(
+                    self,
+                    interrupted=isinstance(
+                        exc,
+                        (KeyboardInterrupt, asyncio.CancelledError),
+                    ),
+                    error="agent run failed",
                 )
             raise
         finally:
