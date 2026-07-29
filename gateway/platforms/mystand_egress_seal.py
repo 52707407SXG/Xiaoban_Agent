@@ -13,15 +13,17 @@ import hashlib
 from typing import Any
 
 
-class _MyStandEgressSeal:
-    __slots__ = ("_output_digest",)
+class _MyStandEgressSeal(str):
+    """Immutable process-local capability bound to one output digest."""
 
-    def __init__(self, output_digest: str) -> None:
-        object.__setattr__(self, "_output_digest", output_digest)
+    __slots__ = ()
+
+    def __new__(cls, output_digest: str) -> "_MyStandEgressSeal":
+        return str.__new__(cls, output_digest)
 
     @property
     def output_digest(self) -> str:
-        return self._output_digest
+        return str(self)
 
     def __copy__(self) -> "_MyStandEgressSeal":
         return self

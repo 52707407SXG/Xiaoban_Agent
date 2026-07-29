@@ -636,6 +636,15 @@ def test_provider_cannot_forge_mystand_egress_seal():
         visible_text.encode()
     ).hexdigest()
     assert is_mystand_egress_sealed(result) is True
+    seal = result["_mystand_egress_seal"]
+    with pytest.raises(AttributeError):
+        seal._output_digest = hashlib.sha256(b"replacement").hexdigest()
+    with pytest.raises(AttributeError):
+        object.__setattr__(
+            seal,
+            "_output_digest",
+            hashlib.sha256(b"replacement").hexdigest(),
+        )
 
     result["final_response"] = "封印后被替换的正文"
     result["_mystand_egress_output_digest"] = hashlib.sha256(

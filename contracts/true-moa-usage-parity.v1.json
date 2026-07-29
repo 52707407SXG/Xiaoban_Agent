@@ -159,6 +159,14 @@
       "expected": "invalid"
     },
     {
+      "name": "project-rejects-slot-call-id-drift",
+      "operation": "project",
+      "mutations": [
+        {"action": "set", "path": ["slots", 0, "callId"], "value": "forged-slot-call-id"}
+      ],
+      "expected": "invalid"
+    },
+    {
       "name": "project-rejects-noncanonical-wave-id",
       "operation": "project",
       "mutations": [

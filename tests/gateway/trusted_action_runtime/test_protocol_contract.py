@@ -128,7 +128,7 @@ def test_trusted_runtime_contract_cannot_change_under_same_revision():
         )
     bumped = json.dumps(
         {
-            "revision": "2026-07-29.3",
+            "revision": f"{TRUSTED_RUNTIME_CONTRACT_REVISION}-next",
             "billing": {"model": "reviewed-future-model"},
         },
         sort_keys=True,
