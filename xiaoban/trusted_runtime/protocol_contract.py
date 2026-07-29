@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -50,12 +51,55 @@ TRUSTED_RUNTIME_CONTRACT_REVISION = str(_CONTRACT_RAW["revision"])
 TRUSTED_RUNTIME_CONTRACT_DIGEST = hashlib.sha256(
     _CONTRACT_BYTES
 ).hexdigest()
+TRUSTED_RUNTIME_APPROVED_REVISION_ENV = (
+    "XIAOBAN_TRUSTED_RUNTIME_APPROVED_REVISION"
+)
+TRUSTED_RUNTIME_APPROVED_DIGEST_ENV = (
+    "XIAOBAN_TRUSTED_RUNTIME_APPROVED_DIGEST"
+)
+TRUSTED_RUNTIME_POLICY_REQUIRED_ENV = (
+    "XIAOBAN_TRUSTED_RUNTIME_POLICY_REQUIRED"
+)
 TRUSTED_RUNTIME_CONTRACT_REVISION_HEADER = str(
     _CONTRACT_RAW["transport"]["revisionHeader"]
 )
 TRUSTED_RUNTIME_CONTRACT_DIGEST_HEADER = str(
     _CONTRACT_RAW["transport"]["digestHeader"]
 )
+
+
+def validate_trusted_runtime_approved_policy(
+    env: Mapping[str, Any] | None = None,
+    *,
+    required: bool | None = None,
+) -> None:
+    """Bind repository code to the independently approved ops baseline."""
+
+    source = os.environ if env is None else env
+    approved_revision = str(
+        source.get(TRUSTED_RUNTIME_APPROVED_REVISION_ENV, "")
+    ).strip()
+    approved_digest = str(
+        source.get(TRUSTED_RUNTIME_APPROVED_DIGEST_ENV, "")
+    ).strip().lower()
+    policy_required = (
+        str(source.get(TRUSTED_RUNTIME_POLICY_REQUIRED_ENV, "")).strip()
+        == "1"
+        if required is None
+        else bool(required)
+    )
+    if not policy_required and not approved_revision and not approved_digest:
+        return
+    if (
+        approved_revision != TRUSTED_RUNTIME_CONTRACT_REVISION
+        or approved_digest != TRUSTED_RUNTIME_CONTRACT_DIGEST
+    ):
+        raise RuntimeError(
+            "Xiaoban trusted runtime does not match the approved ops policy"
+        )
+
+
+validate_trusted_runtime_approved_policy()
 
 _COMPLETION = _CONTRACT_RAW["completion"]
 MYSTAND_COMPLETION_PROTOCOL = str(_COMPLETION["protocol"])

@@ -159,6 +159,20 @@
       "expected": "invalid"
     },
     {
+      "name": "project-rejects-noncanonical-wave-id",
+      "operation": "project",
+      "mutations": [
+        {"action": "set", "path": ["waveId"], "value": "LEGACY_WAVE"},
+        {"action": "set", "path": ["slots", 0, "callId"], "value": "LEGACY_WAVE:advisor-kimi-k3"},
+        {"action": "set", "path": ["slots", 1, "callId"], "value": "LEGACY_WAVE:advisor-deepseek-v4-pro"},
+        {"action": "set", "path": ["slots", 2, "callId"], "value": "LEGACY_WAVE:final-deepseek-v4-pro"},
+        {"action": "set", "path": ["calls", 0, "callId"], "value": "LEGACY_WAVE:advisor-kimi-k3"},
+        {"action": "set", "path": ["calls", 1, "callId"], "value": "LEGACY_WAVE:advisor-deepseek-v4-pro"},
+        {"action": "set", "path": ["calls", 2, "callId"], "value": "LEGACY_WAVE:final-deepseek-v4-pro:000001"}
+      ],
+      "expected": "invalid"
+    },
+    {
       "name": "merge-identical",
       "operation": "merge",
       "mutations": [],
@@ -177,6 +191,26 @@
       "operation": "merge",
       "mutations": [
         {"action": "remove", "path": ["calls", 2]}
+      ],
+      "expected": "ok"
+    },
+    {
+      "name": "merge-keeps-terminal-slot-over-stale-not-started",
+      "operation": "merge",
+      "mutations": [
+        {"action": "set", "path": ["status"], "value": "running"},
+        {"action": "set", "path": ["slots", 0, "startedAtMs"], "value": null},
+        {"action": "set", "path": ["slots", 0, "endedAtMs"], "value": null},
+        {"action": "set", "path": ["slots", 0, "status"], "value": "not_started"},
+        {"action": "set", "path": ["slots", 0, "inputTokens"], "value": null},
+        {"action": "set", "path": ["slots", 0, "outputTokens"], "value": null},
+        {"action": "set", "path": ["slots", 0, "totalTokens"], "value": null},
+        {"action": "set", "path": ["slots", 0, "cachedInputTokens"], "value": null},
+        {"action": "set", "path": ["slots", 0, "usageStatus"], "value": "unavailable"},
+        {"action": "remove", "path": ["slots", 0, "costUsd"]},
+        {"action": "remove", "path": ["slots", 0, "costStatus"]},
+        {"action": "remove", "path": ["slots", 0, "costSource"]},
+        {"action": "remove", "path": ["calls", 0]}
       ],
       "expected": "ok"
     },

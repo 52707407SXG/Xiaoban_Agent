@@ -13,6 +13,9 @@ from gateway.platforms.api_server import (
     _finalize_mystand_egress_result,
     _mystand_completion_expected_binding,
 )
+from gateway.platforms.mystand_egress_seal import (
+    is_mystand_egress_sealed,
+)
 from gateway.platforms.true_moa_idempotency import _IdempotencyCache
 from gateway.platforms.true_moa_runner import _mystand_index_followup_tool
 from tools import mystand_query_tool
@@ -632,6 +635,13 @@ def test_provider_cannot_forge_mystand_egress_seal():
     assert result["_mystand_egress_output_digest"] == hashlib.sha256(
         visible_text.encode()
     ).hexdigest()
+    assert is_mystand_egress_sealed(result) is True
+
+    result["final_response"] = "封印后被替换的正文"
+    result["_mystand_egress_output_digest"] = hashlib.sha256(
+        result["final_response"].encode()
+    ).hexdigest()
+    assert is_mystand_egress_sealed(result) is False
 
 
 def test_durable_v2_outcome_requires_bound_receipt_and_chat_stays_legacy():

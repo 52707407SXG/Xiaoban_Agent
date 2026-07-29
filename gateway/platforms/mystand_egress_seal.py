@@ -14,7 +14,14 @@ from typing import Any
 
 
 class _MyStandEgressSeal:
-    __slots__ = ()
+    __slots__ = ("_output_digest",)
+
+    def __init__(self, output_digest: str) -> None:
+        object.__setattr__(self, "_output_digest", output_digest)
+
+    @property
+    def output_digest(self) -> str:
+        return self._output_digest
 
     def __copy__(self) -> "_MyStandEgressSeal":
         return self
@@ -23,7 +30,6 @@ class _MyStandEgressSeal:
         return self
 
 
-_MYSTAND_EGRESS_SEAL = _MyStandEgressSeal()
 _MYSTAND_EGRESS_SEAL_FIELD = "_mystand_egress_seal"
 
 
@@ -57,7 +63,10 @@ def seal_mystand_egress_projection(result: Any) -> None:
         != output_digest
     ):
         raise RuntimeError("My Stand finalized egress digest mismatch")
-    result[_MYSTAND_EGRESS_SEAL_FIELD] = _MYSTAND_EGRESS_SEAL
+    # Bind the verified digest inside the process-local capability.  Mutating
+    # both the text and provider-shaped digest metadata after sealing must not
+    # manufacture a second valid projection.
+    result[_MYSTAND_EGRESS_SEAL_FIELD] = _MyStandEgressSeal(output_digest)
 
 
 def is_mystand_egress_sealed(result: Any) -> bool:
@@ -66,14 +75,17 @@ def is_mystand_egress_sealed(result: Any) -> bool:
     if (
         not isinstance(result, dict)
         or result.get("_mystand_egress_finalized") is not True
-        or result.get(_MYSTAND_EGRESS_SEAL_FIELD) is not _MYSTAND_EGRESS_SEAL
     ):
+        return False
+    seal = result.get(_MYSTAND_EGRESS_SEAL_FIELD)
+    if not isinstance(seal, _MyStandEgressSeal):
         return False
     final_text = result.get("final_response")
     output_digest = result.get("_mystand_egress_output_digest")
     return bool(
         isinstance(final_text, str)
         and isinstance(output_digest, str)
+        and seal.output_digest == output_digest
         and hashlib.sha256(final_text.encode("utf-8")).hexdigest()
-        == output_digest
+        == seal.output_digest
     )

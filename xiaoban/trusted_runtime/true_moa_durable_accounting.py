@@ -251,7 +251,7 @@ class _TrueMoAAccountingMixin:
 
         return self._terminalize_orphaned_running_calls(
             key,
-            allowed_states={"stopped", "interrupted", "failed"},
+            allowed_states={"running", "stopped", "interrupted", "failed"},
             usage_drain_owner_id=usage_drain_owner_id,
             usage_drain_generation=usage_drain_generation,
         )

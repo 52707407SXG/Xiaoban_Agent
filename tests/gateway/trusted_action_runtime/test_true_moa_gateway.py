@@ -2517,6 +2517,114 @@ async def test_restart_failed_advisor_timeout_terminalizes_orphaned_call(
 
 
 @pytest.mark.asyncio
+async def test_restart_retries_running_usage_after_old_lease_expires(
+    monkeypatch,
+    tmp_path,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    raw_key = f"restart-live-lease-{uuid.uuid4().hex}"
+    headers = _mystand_headers(raw_key, epoch="67")
+    scoped_key = adapter._scoped_idempotency_key(headers, raw_key)
+    fingerprint = hashlib.sha256(raw_key.encode()).hexdigest()
+    path = tmp_path / "restart-live-lease.sqlite"
+    original = api_server._IdempotencyCache(
+        durable_path=str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    assert original._durable.claim(
+        scoped_key,
+        fingerprint,
+        kind="execution",
+    ) == "missing"
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    ledger = TrueMoAUsageLedger(snapshot, wave_id="b" * 32)
+    ledger.set_wave_status("running")
+    ledger.start_slot(KIMI_ADVISOR_SLOT)
+    call_id = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    ledger.mark_dispatched(call_id)
+    original.persist_usage(scoped_key, fingerprint, ledger.to_dict())
+    lease_before_restart = original._durable.usage_drain_lease(scoped_key)
+    assert lease_before_restart["leaseUntilMs"] > int(time.time() * 1000)
+
+    # Model a hard process death: its timer cannot heartbeat or release, while
+    # SQLite retains the still-live lease until the original expiry.
+    with original._usage_drains_lock:
+        timers = list(original._usage_drain_heartbeat_timers.values())
+        original._usage_drain_heartbeat_timers.clear()
+    for timer in timers:
+        timer.cancel()
+    original._durable.close()
+
+    restarted = api_server._IdempotencyCache(
+        durable_path=str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    before_recovery = restarted.durable_record(scoped_key)
+    assert before_recovery["state"] == "running"
+    assert before_recovery["usage"]["calls"][0]["status"] == "running"
+    monkeypatch.setattr(api_server, "_idem_cache", restarted)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions/usage",
+        adapter._handle_chat_completion_usage,
+    )
+
+    async with TestClient(TestServer(app)) as client:
+        waiting = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        waiting_payload = await waiting.json()
+        assert waiting.status == 202
+        assert waiting_payload["status"] == "running_draining"
+        assert waiting_payload["final"] is False
+
+        with restarted._durable._lock, restarted._durable._connect() as connection:
+            connection.execute(
+                """
+                UPDATE true_moa_usage_drain_leases
+                SET lease_until_ms = 0
+                """
+            )
+            connection.commit()
+
+        recovered = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        recovered_payload = await recovered.json()
+        repeated = await client.post(
+            "/v1/chat/completions/usage",
+            headers=headers,
+            json={"idempotency_key": raw_key},
+        )
+        repeated_payload = await repeated.json()
+
+    assert recovered.status == 200
+    assert repeated.status == 200
+    assert repeated_payload == recovered_payload
+    assert recovered_payload["final"] is True
+    assert recovered_payload["terminalState"] == "failed"
+    assert recovered_payload["settlementBlocked"] is True
+    call = recovered_payload["usage"]["calls"][0]
+    assert call["status"] == "timed_out"
+    assert call["usageStatus"] == "unavailable"
+    assert call["errorCategory"] == "agent_restart_outcome_unknown"
+    lease_after_recovery = restarted._durable.usage_drain_lease(scoped_key)
+    assert lease_after_recovery["generation"] == 2
+    assert lease_after_recovery["leaseUntilMs"] == 0
+    restarted._durable.close()
+
+
+@pytest.mark.asyncio
 async def test_same_process_failed_usage_drain_is_not_recovered_as_orphan(
     monkeypatch,
     tmp_path,

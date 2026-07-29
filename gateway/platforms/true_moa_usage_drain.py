@@ -226,7 +226,12 @@ class _TrueMoAUsageDrainMixin:
         self,
         key: str,
     ) -> Optional[Dict[str, Any]]:
-        """Close durable active receipts only when this process has no owner."""
+        """Close durable active receipts only after the owner fence is gone.
+
+        This is intentionally callable for a top-level ``running`` record:
+        after a hard restart the replacement process may first observe the old
+        lease as live, then take over on a later poll once it expires.
+        """
 
         if self._durable is None:
             return None

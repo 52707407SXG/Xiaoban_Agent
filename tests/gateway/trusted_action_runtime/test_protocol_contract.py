@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from scripts.check_xiaoban_trusted_runtime_contract import (
+    assert_unique_contract_revision,
+)
 from xiaoban.trusted_runtime.protocol_contract import (
     TRUSTED_RUNTIME_CONTRACT,
     TRUSTED_RUNTIME_CONTRACT_DIGEST,
@@ -11,6 +16,7 @@ from xiaoban.trusted_runtime.protocol_contract import (
     TRUSTED_RUNTIME_CONTRACT_REVISION,
     TRUSTED_RUNTIME_CONTRACT_REVISION_HEADER,
     TrustedRuntimeContractError,
+    validate_trusted_runtime_approved_policy,
     validate_trusted_runtime_contract_headers,
 )
 
@@ -75,3 +81,56 @@ def test_trusted_runtime_contract_rejects_missing_or_drifted_peer(mutate):
 
 def test_trusted_runtime_contract_accepts_exact_peer():
     validate_trusted_runtime_contract_headers(_valid_headers())
+
+
+def test_trusted_runtime_contract_requires_independent_approved_policy():
+    validate_trusted_runtime_approved_policy(
+        {
+            "XIAOBAN_TRUSTED_RUNTIME_APPROVED_REVISION":
+                TRUSTED_RUNTIME_CONTRACT_REVISION,
+            "XIAOBAN_TRUSTED_RUNTIME_APPROVED_DIGEST":
+                TRUSTED_RUNTIME_CONTRACT_DIGEST,
+        },
+        required=True,
+    )
+    with pytest.raises(RuntimeError, match="approved ops policy"):
+        validate_trusted_runtime_approved_policy({}, required=True)
+    with pytest.raises(RuntimeError, match="approved ops policy"):
+        validate_trusted_runtime_approved_policy(
+            {
+                "XIAOBAN_TRUSTED_RUNTIME_APPROVED_REVISION":
+                    TRUSTED_RUNTIME_CONTRACT_REVISION,
+                "XIAOBAN_TRUSTED_RUNTIME_APPROVED_DIGEST": "0" * 64,
+            },
+            required=True,
+        )
+
+
+def test_trusted_runtime_contract_cannot_change_under_same_revision():
+    current = json.dumps(
+        {
+            "revision": TRUSTED_RUNTIME_CONTRACT_REVISION,
+            "billing": {"model": "deepseek-v4-pro"},
+        },
+        sort_keys=True,
+    ).encode()
+    downgraded_same_revision = json.dumps(
+        {
+            "revision": TRUSTED_RUNTIME_CONTRACT_REVISION,
+            "billing": {"model": "weaker-fallback"},
+        },
+        sort_keys=True,
+    ).encode()
+    with pytest.raises(SystemExit, match="without a new revision"):
+        assert_unique_contract_revision(
+            downgraded_same_revision,
+            [current],
+        )
+    bumped = json.dumps(
+        {
+            "revision": "2026-07-29.3",
+            "billing": {"model": "reviewed-future-model"},
+        },
+        sort_keys=True,
+    ).encode()
+    assert_unique_contract_revision(bumped, [current])

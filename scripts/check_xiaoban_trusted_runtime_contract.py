@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 from pathlib import Path
+import subprocess
 import sys
 from typing import Any
 
@@ -33,6 +35,7 @@ from xiaoban.trusted_runtime.protocol_contract import (
     TRUSTED_RUNTIME_CONTRACT,
     TRUSTED_RUNTIME_CONTRACT_DIGEST,
     TRUSTED_RUNTIME_CONTRACT_PATH,
+    validate_trusted_runtime_approved_policy,
 )
 from xiaoban.trusted_runtime.true_moa_contracts import (
     TRUE_MOA_ADVISOR_INPUT_MAX_BYTES,
@@ -91,6 +94,65 @@ def _check_egress_seal_callers() -> None:
                 )
 
 
+def assert_unique_contract_revision(
+    current_bytes: bytes,
+    historical_blobs: list[bytes],
+) -> None:
+    """One revision may never identify two different contract byte streams."""
+
+    try:
+        current_revision = str(json.loads(current_bytes)["revision"])
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise SystemExit("invalid current trusted runtime contract") from exc
+    for shown in historical_blobs:
+        try:
+            historical_revision = str(
+                json.loads(shown)["revision"]
+            )
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise SystemExit(
+                "invalid trusted runtime contract in Git history"
+            ) from exc
+        if (
+            historical_revision == current_revision
+            and shown != current_bytes
+        ):
+            raise SystemExit(
+                "trusted runtime contract changed without a new revision"
+            )
+
+
+def _check_revision_history() -> None:
+    relative = TRUSTED_RUNTIME_CONTRACT_PATH.relative_to(REPO_ROOT)
+    history = subprocess.run(
+        [
+            "git",
+            "log",
+            "--all",
+            "--format=%H",
+            "--",
+            str(relative),
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    historical_blobs = [
+        subprocess.run(
+            ["git", "show", f"{commit}:{relative}"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+        ).stdout
+        for commit in history
+    ]
+    assert_unique_contract_revision(
+        TRUSTED_RUNTIME_CONTRACT_PATH.read_bytes(),
+        historical_blobs,
+    )
+
+
 def _peer_file(peer_root: Path, candidates: tuple[str, ...]) -> Path:
     for candidate in candidates:
         path = peer_root / candidate
@@ -104,6 +166,7 @@ def _peer_file(peer_root: Path, candidates: tuple[str, ...]) -> Path:
 
 def check_local() -> None:
     _check_egress_seal_callers()
+    _check_revision_history()
     contract = TRUSTED_RUNTIME_CONTRACT
     completion = contract["completion"]
     usage = contract["usage"]
@@ -241,8 +304,15 @@ def check_peer(peer_root: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--peer-root", type=Path)
+    parser.add_argument("--release", action="store_true")
     args = parser.parse_args()
     check_local()
+    if args.release:
+        if args.peer_root is None:
+            raise SystemExit(
+                "trusted runtime release check requires --peer-root"
+            )
+        validate_trusted_runtime_approved_policy(required=True)
     if args.peer_root is not None:
         check_peer(args.peer_root)
     print("ok Xiaoban trusted runtime contract")

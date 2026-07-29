@@ -221,6 +221,37 @@ class TrueMoAHttpHandlersMixin:
                 status=404,
             )
         record_state = str(record.get("state") or "")
+        if (
+            record_state == "running"
+            and _idem_cache._has_running_usage_receipt(record)
+        ):
+            # A replacement process can start while the dead owner's durable
+            # lease is still valid.  The first poll must wait for that fence,
+            # but every later poll retries the claim so expiry cannot strand a
+            # running receipt forever.
+            record = (
+                _idem_cache.terminalize_orphaned_usage(scoped_key)
+                or record
+            )
+            record_state = str(record.get("state") or "")
+            if (
+                record_state == "running"
+                and _idem_cache._has_running_usage_receipt(record)
+            ):
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "status": "running_draining",
+                        "final": False,
+                        "usage": record.get("usage"),
+                        "terminalState": "running",
+                        "outcomeStatus": str(
+                            record.get("outcomeState") or "none"
+                        ),
+                        "settlementBlocked": True,
+                    },
+                    status=202,
+                )
         if record_state == "stopped":
             if (
                 _idem_cache.has_active_usage_drain(scoped_key)
