@@ -7,7 +7,9 @@ import json
 
 import pytest
 
+from gateway.config import PlatformConfig
 from gateway.platforms.api_server import (
+    APIServerAdapter,
     _finalize_mystand_egress_result,
     _mystand_completion_expected_binding,
 )
@@ -408,6 +410,102 @@ def test_completion_attempt_must_be_positive_and_dual_headers_must_match():
             headers,
             session_id=SESSION_ID,
         )
+
+
+class _RetryFenceAgent:
+    provider = "deepseek"
+    model = "deepseek-v4-pro"
+    valid_tool_names: set[str] = set()
+    tools: list[object] = []
+    session_prompt_tokens = 2
+    session_completion_tokens = 1
+    session_total_tokens = 3
+    session_id = SESSION_ID
+
+    def __init__(self) -> None:
+        self.ephemeral_system_prompt = ""
+
+    def run_conversation(self, **_kwargs):
+        return {
+            "final_response": "普通回复",
+            "completed": True,
+            "failed": False,
+            "messages": [],
+        }
+
+
+def _normal_request_headers() -> dict[str, str]:
+    return {
+        "X-Xiaoban-User-Id": IDENTITY.account_id,
+        "X-Xiaoban-Toolset-Policy": "mystand-broker-basic",
+        "X-Xiaoban-Memory-Mode": "disabled",
+        "X-Xiaoban-Message-Id": MESSAGE_ID,
+    }
+
+
+@pytest.mark.asyncio
+async def test_normal_dynamic_evidence_uses_strict_paid_call_fence(
+    monkeypatch,
+):
+    adapter = APIServerAdapter(
+        PlatformConfig(enabled=True, extra={"key": "sk-test-only"}),
+    )
+    create_kwargs: dict[str, object] = {}
+    headers = _normal_request_headers()
+    headers.update(
+        {
+            "X-Xiaoban-Delivery-Id": DELIVERY_ID,
+            "X-Xiaoban-Attempt": "1",
+            "X-Xiaoban-Delivery-Attempt": "1",
+            "X-Xiaoban-Request-Fingerprint": REQUEST_FINGERPRINT,
+            "X-Xiaoban-Invocation-Fingerprint": INVOCATION_FINGERPRINT,
+        },
+    )
+
+    def _fake_create_agent(**kwargs):
+        create_kwargs.update(kwargs)
+        return _RetryFenceAgent()
+
+    monkeypatch.setattr(adapter, "_create_agent", _fake_create_agent)
+    result, _usage = await adapter._run_agent(
+        user_message="只聊一句，不查资料",
+        conversation_history=[],
+        session_id=SESSION_ID,
+        request_headers=headers,
+        completion_protocol=PROTOCOL,
+        completion_binding=_mystand_completion_expected_binding(
+            headers,
+            session_id=SESSION_ID,
+        ),
+    )
+
+    assert result["completed"] is True
+    assert create_kwargs["strict_no_automatic_paid_retry"] is True
+
+
+@pytest.mark.asyncio
+async def test_normal_chat_keeps_default_paid_call_retry_policy(
+    monkeypatch,
+):
+    adapter = APIServerAdapter(
+        PlatformConfig(enabled=True, extra={"key": "sk-test-only"}),
+    )
+    create_kwargs: dict[str, object] = {}
+
+    def _fake_create_agent(**kwargs):
+        create_kwargs.update(kwargs)
+        return _RetryFenceAgent()
+
+    monkeypatch.setattr(adapter, "_create_agent", _fake_create_agent)
+    result, _usage = await adapter._run_agent(
+        user_message="只聊一句，不查资料",
+        conversation_history=[],
+        session_id=SESSION_ID,
+        request_headers=_normal_request_headers(),
+    )
+
+    assert result["completed"] is True
+    assert create_kwargs.get("strict_no_automatic_paid_retry", False) is False
 
 
 def test_dynamic_index_followup_is_query_only_and_never_falls_back_to_auth():

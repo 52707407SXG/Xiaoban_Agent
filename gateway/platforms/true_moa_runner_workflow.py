@@ -279,6 +279,11 @@ class TrueMoARunWorkflow(
                         request.request_user_id or None
                     ),
                     skip_memory=request.mystand_request,
+                    strict_no_automatic_paid_retry=(
+                        request.mystand_request
+                        and request.completion_protocol
+                        == "dynamic-evidence-v2"
+                    ),
                 )
             elif self.true_moa_ledger is not None:
                 self.agent.ephemeral_system_prompt = "\n\n".join(
