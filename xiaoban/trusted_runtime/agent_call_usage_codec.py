@@ -6,10 +6,11 @@ import json
 import re
 from typing import Any, Mapping
 
-
-AGENT_CALL_USAGE_SCHEMA = "mystand.agent-call-usage.v1"
-AGENT_CALL_LIMIT = 8
-AGENT_CALL_USAGE_MAX_BYTES = 64 * 1024
+from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_AGENT_CALL_USAGE_SCHEMA as AGENT_CALL_USAGE_SCHEMA,
+    MYSTAND_NORMAL_CALL_LIMIT as AGENT_CALL_LIMIT,
+    MYSTAND_USAGE_MAX_BYTES as AGENT_CALL_USAGE_MAX_BYTES,
+)
 
 _EXECUTION_ID = re.compile(r"^[a-f0-9]{32}$")
 _SAFE_ROUTE = re.compile(r"^[A-Za-z0-9_.:/+-]{1,120}$")

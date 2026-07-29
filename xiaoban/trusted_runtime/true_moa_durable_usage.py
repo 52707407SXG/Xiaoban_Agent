@@ -11,6 +11,12 @@ from xiaoban.trusted_runtime.agent_call_usage_codec import (
     merge_agent_call_usage,
     project_agent_call_usage,
 )
+from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_TRUE_MOA_MODE,
+    MYSTAND_TRUE_MOA_PRESET_ID,
+    MYSTAND_TRUE_MOA_PRESET_REVISION,
+    MYSTAND_TRUE_MOA_USAGE_SCHEMA,
+)
 from xiaoban.trusted_runtime.true_moa_durable_shared import (
     TRUE_MOA_DURABLE_MAX_CALLS,
     TRUE_MOA_DURABLE_MAX_FINAL_CALLS,
@@ -24,25 +30,82 @@ from xiaoban.trusted_runtime.true_moa_durable_shared import (
     _RECEIPT_STATUS_RANK,
     _RECEIPT_TERMINAL_STATES,
     _WAVE_ID,
-    _safe_nonnegative_float,
-    _safe_nonnegative_int,
     _safe_text,
 )
 
+_TRUE_MOA_LEDGER_KEYS = {
+    "schema",
+    "waveId",
+    "mode",
+    "modeEpoch",
+    "presetId",
+    "presetRevision",
+    "status",
+    "slots",
+    "calls",
+}
+_TRUE_MOA_RECEIPT_KEYS = {
+    "slotId",
+    "callId",
+    "provider",
+    "model",
+    "role",
+    "startedAtMs",
+    "endedAtMs",
+    "status",
+    "inputTokens",
+    "outputTokens",
+    "totalTokens",
+    "cachedInputTokens",
+    "usageStatus",
+    "errorCategory",
+    "costUsd",
+    "costStatus",
+    "costSource",
+}
+
+
+def _usage_nonnegative_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("invalid true MoA durable integer")
+    return value
+
+
+def _usage_nonnegative_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or value < 0
+        or value != value
+        or value in {float("inf"), float("-inf")}
+    ):
+        raise ValueError("invalid true MoA durable number")
+    return float(value)
+
+
 def _project_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) - _TRUE_MOA_RECEIPT_KEYS
+    ):
+        raise ValueError("invalid true MoA durable receipt")
     projected = {
         "slotId": _safe_text(value.get("slotId"), required=True),
         "callId": _safe_text(value.get("callId"), required=True),
         "provider": _safe_text(value.get("provider"), required=True),
         "model": _safe_text(value.get("model"), required=True),
         "role": _safe_text(value.get("role"), required=True),
-        "startedAtMs": _safe_nonnegative_int(value.get("startedAtMs")),
-        "endedAtMs": _safe_nonnegative_int(value.get("endedAtMs")),
+        "startedAtMs": _usage_nonnegative_int(value.get("startedAtMs")),
+        "endedAtMs": _usage_nonnegative_int(value.get("endedAtMs")),
         "status": _safe_text(value.get("status"), required=True),
-        "inputTokens": _safe_nonnegative_int(value.get("inputTokens")),
-        "outputTokens": _safe_nonnegative_int(value.get("outputTokens")),
-        "totalTokens": _safe_nonnegative_int(value.get("totalTokens")),
-        "cachedInputTokens": _safe_nonnegative_int(
+        "inputTokens": _usage_nonnegative_int(value.get("inputTokens")),
+        "outputTokens": _usage_nonnegative_int(value.get("outputTokens")),
+        "totalTokens": _usage_nonnegative_int(value.get("totalTokens")),
+        "cachedInputTokens": _usage_nonnegative_int(
             value.get("cachedInputTokens")
         ),
         "usageStatus": _safe_text(value.get("usageStatus"), required=True),
@@ -51,7 +114,9 @@ def _project_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
         if value.get(name) is not None:
             projected[name] = _safe_text(value.get(name), required=True)
     if value.get("costUsd") is not None:
-        projected["costUsd"] = _safe_nonnegative_float(value.get("costUsd"))
+        projected["costUsd"] = _usage_nonnegative_float(
+            value.get("costUsd")
+        )
     fixed_route = _FIXED_SLOTS.get(projected["slotId"])
     if fixed_route is None or (
         projected["provider"],
@@ -83,10 +148,11 @@ def _project_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
         item is not None for item in token_values
     ):
         raise ValueError("reported true MoA usage is incomplete")
-    if projected["usageStatus"] == "partial" and all(
-        item is not None for item in token_values
+    if projected["usageStatus"] == "partial" and (
+        all(item is not None for item in token_values)
+        or all(item is None for item in token_values)
     ):
-        raise ValueError("partial true MoA usage is already complete")
+        raise ValueError("partial true MoA usage is invalid")
     if (
         all(item is not None for item in base_token_values)
         and projected["totalTokens"]
@@ -131,9 +197,12 @@ def _project_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def project_true_moa_usage(value: Mapping[str, Any]) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
+    if (
+        not isinstance(value, Mapping)
+        or set(value) - _TRUE_MOA_LEDGER_KEYS
+    ):
         raise ValueError("invalid true MoA durable usage ledger")
-    if value.get("schema") != "mystand.true-moa.usage.v1":
+    if value.get("schema") != MYSTAND_TRUE_MOA_USAGE_SCHEMA:
         raise ValueError("invalid true MoA durable usage schema")
     slots = value.get("slots")
     calls = value.get("calls")
@@ -145,7 +214,7 @@ def project_true_moa_usage(value: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise ValueError("invalid true MoA durable calls")
     projected = {
-        "schema": "mystand.true-moa.usage.v1",
+        "schema": MYSTAND_TRUE_MOA_USAGE_SCHEMA,
         "waveId": _safe_text(value.get("waveId"), required=True),
         "mode": _safe_text(value.get("mode"), required=True),
         "modeEpoch": _safe_text(value.get("modeEpoch"), required=True),
@@ -158,13 +227,16 @@ def project_true_moa_usage(value: Mapping[str, Any]) -> dict[str, Any]:
         "slots": [_project_receipt(item) for item in slots],
         "calls": [_project_receipt(item) for item in calls],
     }
-    if projected["mode"] != "moa":
+    if projected["mode"] != MYSTAND_TRUE_MOA_MODE:
         raise ValueError("invalid true MoA durable mode")
     if not _MODE_EPOCH.fullmatch(projected["modeEpoch"]):
         raise ValueError("invalid true MoA durable mode epoch")
-    if projected["presetId"] != "mystand-true-moa-v1":
+    if projected["presetId"] != MYSTAND_TRUE_MOA_PRESET_ID:
         raise ValueError("invalid true MoA durable preset")
-    if projected["presetRevision"] != "2026-07-27.1":
+    if (
+        projected["presetRevision"]
+        != MYSTAND_TRUE_MOA_PRESET_REVISION
+    ):
         raise ValueError("invalid true MoA durable preset revision")
     if not _WAVE_ID.fullmatch(projected["waveId"]):
         raise ValueError("invalid true MoA durable wave id")

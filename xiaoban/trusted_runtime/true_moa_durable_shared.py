@@ -10,14 +10,24 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
+from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_COMPLETED_OUTCOME_SCHEMA,
+    MYSTAND_COMPLETION_PROTOCOL,
+    MYSTAND_COMPLETION_VERIFICATION_SCHEMA,
+    MYSTAND_FACT_VERIFICATION_SCHEMA,
+    MYSTAND_OUTCOME_AAD_SCHEMA,
+    MYSTAND_OUTCOME_BINDING_SCHEMA,
+    MYSTAND_TRUE_MOA_PRESET_ID,
+    MYSTAND_TRUE_MOA_PRESET_REVISION,
+    MYSTAND_TRUE_MOA_SLOTS,
+)
+
 TRUE_MOA_DURABLE_USAGE_MAX_BYTES = 64 * 1024
 TRUE_MOA_DURABLE_MAX_ROWS = 100_000
 TRUE_MOA_DURABLE_MAX_CALLS = 10
 TRUE_MOA_DURABLE_MAX_FINAL_CALLS = 8
-TRUE_MOA_COMPLETED_OUTCOME_SCHEMA = (
-    "mystand.true-moa.completed-outcome.v1"
-)
-TRUE_MOA_OUTCOME_BINDING_SCHEMA = "mystand.true-moa.outcome-binding.v1"
+TRUE_MOA_COMPLETED_OUTCOME_SCHEMA = MYSTAND_COMPLETED_OUTCOME_SCHEMA
+TRUE_MOA_OUTCOME_BINDING_SCHEMA = MYSTAND_OUTCOME_BINDING_SCHEMA
 TRUE_MOA_OUTCOME_MAX_TEXT_BYTES = 64 * 1024
 TRUE_MOA_OUTCOME_MAX_VERIFICATION_BYTES = 16 * 1024
 TRUE_MOA_OUTCOME_MAX_PLAINTEXT_BYTES = 96 * 1024
@@ -61,17 +71,12 @@ _DURABLE_TERMINAL_STATES = {
     "interrupted",
 }
 _FIXED_SLOTS = {
-    "advisor-kimi-k3": ("kimi-coding", "k3", "advisor"),
-    "advisor-deepseek-v4-pro": (
-        "deepseek",
-        "deepseek-v4-pro",
-        "advisor",
-    ),
-    "final-deepseek-v4-pro": (
-        "deepseek",
-        "deepseek-v4-pro",
-        "final_executor",
-    ),
+    str(slot["slotId"]): (
+        str(slot["provider"]),
+        str(slot["model"]),
+        str(slot["role"]),
+    )
+    for slot in MYSTAND_TRUE_MOA_SLOTS
 }
 _FIXED_SLOT_ORDER = tuple(_FIXED_SLOTS)
 _FIXED_ADVISOR_ORDER = _FIXED_SLOT_ORDER[:2]
@@ -96,10 +101,8 @@ _OUTCOME_DYNAMIC_BINDING_FIELDS = _OUTCOME_BINDING_FIELDS | {
     "completionProtocol",
     "invocationFingerprint",
 }
-_DYNAMIC_COMPLETION_PROTOCOL = "dynamic-evidence-v2"
-_DYNAMIC_VERIFICATION_SCHEMA = (
-    "mystand.xiaoban-completion-verification.v2"
-)
+_DYNAMIC_COMPLETION_PROTOCOL = MYSTAND_COMPLETION_PROTOCOL
+_DYNAMIC_VERIFICATION_SCHEMA = MYSTAND_COMPLETION_VERIFICATION_SCHEMA
 
 
 def _durable_max_rows() -> int:
@@ -322,8 +325,9 @@ def project_true_moa_outcome_binding(
             projected["datascopeFingerprint"]
         )
         or not _MODE_EPOCH.fullmatch(projected["modeEpoch"])
-        or projected["presetId"] != "mystand-true-moa-v1"
-        or projected["presetRevision"] != "2026-07-27.1"
+        or projected["presetId"] != MYSTAND_TRUE_MOA_PRESET_ID
+        or projected["presetRevision"]
+        != MYSTAND_TRUE_MOA_PRESET_REVISION
         or (
             dynamic_binding
             and (
@@ -460,7 +464,7 @@ def _project_trusted_verification(
     if (
         not isinstance(projected, dict)
         or projected.get("schema")
-        != "mystand.xiaoban-fact-verification.v1"
+        != MYSTAND_FACT_VERIFICATION_SCHEMA
         or projected.get("verified") is not True
         or projected.get("output_digest") != output_digest
     ):
@@ -589,7 +593,7 @@ def _true_moa_outcome_aad(
     if not _OUTCOME_DIGEST.fullmatch(storage_key):
         raise ValueError("invalid true MoA outcome storage key")
     aad = {
-        "schema": "mystand.true-moa.outcome-aad.v1",
+        "schema": MYSTAND_OUTCOME_AAD_SCHEMA,
         "storageKey": storage_key,
         "durableFingerprint": _safe_text(fingerprint, required=True),
         "waveId": projected_usage["waveId"],

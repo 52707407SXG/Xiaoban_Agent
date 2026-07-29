@@ -20,6 +20,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_COMPLETION_PROTOCOL as MYSTAND_COMPLETION_PROTOCOL_V2,
+    MYSTAND_COMPLETION_VERIFICATION_SCHEMA
+    as MYSTAND_COMPLETION_VERIFICATION_SCHEMA_V2,
+)
+
 # ActionResult.status 全状态；失败、空、拒绝、歧义、未找到必须明确区分。
 ACTION_STATUSES = (
     "success",
@@ -63,10 +69,6 @@ TURN_STATES = (
 INTERACTION_CHAT = "CHAT"
 INTERACTION_WORK = "WORK"
 
-MYSTAND_COMPLETION_PROTOCOL_V2 = "dynamic-evidence-v2"
-MYSTAND_COMPLETION_VERIFICATION_SCHEMA_V2 = (
-    "mystand.xiaoban-completion-verification.v2"
-)
 MYSTAND_COMPLETION_BINDING_FIELDS = frozenset(
     {
         "user_id",

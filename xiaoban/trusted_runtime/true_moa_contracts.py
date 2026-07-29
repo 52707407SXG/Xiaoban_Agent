@@ -24,18 +24,25 @@ from xiaoban.trusted_runtime.paid_call_policy import (
     enforce_fixed_paid_call_route,
     enforce_paid_call_dispatch_budget,
 )
+from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_TRUE_MOA_ADVISOR_INPUT_MAX_BYTES
+    as TRUE_MOA_ADVISOR_INPUT_MAX_BYTES,
+    MYSTAND_TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS
+    as TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS,
+    MYSTAND_TRUE_MOA_FINAL_CALL_LIMIT as TRUE_MOA_FINAL_CALL_LIMIT,
+    MYSTAND_TRUE_MOA_FINAL_INPUT_MAX_BYTES
+    as TRUE_MOA_FINAL_INPUT_MAX_BYTES,
+    MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
+    as TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS,
+    MYSTAND_TRUE_MOA_MODE as TRUE_MOA_MODE,
+    MYSTAND_TRUE_MOA_PRESET_ID as TRUE_MOA_PRESET_ID,
+    MYSTAND_TRUE_MOA_PRESET_REVISION as TRUE_MOA_PRESET_REVISION,
+    MYSTAND_TRUE_MOA_SLOTS,
+    MYSTAND_TRUE_MOA_TOTAL_CALL_LIMIT as TRUE_MOA_TOTAL_CALL_LIMIT,
+    MYSTAND_TRUE_MOA_USAGE_SCHEMA as TRUE_MOA_USAGE_SCHEMA,
+)
 
 
-TRUE_MOA_MODE = "moa"
-TRUE_MOA_PRESET_ID = "mystand-true-moa-v1"
-TRUE_MOA_PRESET_REVISION = "2026-07-27.1"
-TRUE_MOA_USAGE_SCHEMA = "mystand.true-moa.usage.v1"
-TRUE_MOA_FINAL_CALL_LIMIT = 8
-TRUE_MOA_TOTAL_CALL_LIMIT = 10
-TRUE_MOA_ADVISOR_INPUT_MAX_BYTES = 65_536
-TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS = 4_096
-TRUE_MOA_FINAL_INPUT_MAX_BYTES = 131_072
-TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS = 4_096
 TRUE_MOA_FINAL_TIMEOUT_SECONDS = 120.0
 TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS = 5.0
 TRUE_MOA_ADVISOR_SHUTDOWN_GRACE_SECONDS = 0.2
@@ -78,24 +85,22 @@ class TrueMoASlot:
     role: str
 
 
-KIMI_ADVISOR_SLOT = TrueMoASlot(
-    slot_id="advisor-kimi-k3",
-    provider="kimi-coding",
-    model="k3",
-    role="advisor",
-)
-DEEPSEEK_ADVISOR_SLOT = TrueMoASlot(
-    slot_id="advisor-deepseek-v4-pro",
-    provider="deepseek",
-    model="deepseek-v4-pro",
-    role="advisor",
-)
-FINAL_EXECUTOR_SLOT = TrueMoASlot(
-    slot_id="final-deepseek-v4-pro",
-    provider="deepseek",
-    model="deepseek-v4-pro",
-    role="final_executor",
-)
+_TRUE_MOA_SLOT_BY_ID = {
+    str(slot["slotId"]): TrueMoASlot(
+        slot_id=str(slot["slotId"]),
+        provider=str(slot["provider"]),
+        model=str(slot["model"]),
+        role=str(slot["role"]),
+    )
+    for slot in MYSTAND_TRUE_MOA_SLOTS
+}
+KIMI_ADVISOR_SLOT = _TRUE_MOA_SLOT_BY_ID["advisor-kimi-k3"]
+DEEPSEEK_ADVISOR_SLOT = _TRUE_MOA_SLOT_BY_ID[
+    "advisor-deepseek-v4-pro"
+]
+FINAL_EXECUTOR_SLOT = _TRUE_MOA_SLOT_BY_ID[
+    "final-deepseek-v4-pro"
+]
 TRUE_MOA_ADVISOR_SLOTS = (KIMI_ADVISOR_SLOT, DEEPSEEK_ADVISOR_SLOT)
 TRUE_MOA_ALL_SLOTS = (*TRUE_MOA_ADVISOR_SLOTS, FINAL_EXECUTOR_SLOT)
 _TRUE_MOA_ADVISOR_PAID_CALL_BUDGET = PaidCallBudget(

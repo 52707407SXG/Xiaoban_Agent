@@ -4,11 +4,32 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Dict
 
+from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_COMPLETION_PROTOCOL,
+    MYSTAND_TRUE_MOA_USAGE_SCHEMA,
+    TrustedRuntimeContractError,
+    validate_trusted_runtime_contract_headers,
+)
+
 if TYPE_CHECKING:
     from aiohttp import web
 
 
 class TrueMoAHttpHandlersMixin:
+    @staticmethod
+    def _trusted_runtime_contract_error(request, *, web, error_response):
+        try:
+            validate_trusted_runtime_contract_headers(request.headers)
+        except TrustedRuntimeContractError:
+            return web.json_response(
+                error_response(
+                    "My Stand and Xiaoban trusted runtime contracts do not match",
+                    code=TrustedRuntimeContractError.code,
+                ),
+                status=409,
+            )
+        return None
+
     async def _handle_stop_idempotent_chat_completion(self, request: "web.Request") -> "web.Response":
         """Stop one trusted My Stand non-stream completion by delivery key."""
         from gateway.platforms.api_server import (
@@ -36,6 +57,13 @@ class TrueMoAHttpHandlersMixin:
                 ),
                 status=503,
             )
+        contract_error = self._trusted_runtime_contract_error(
+            request,
+            web=web,
+            error_response=_openai_error,
+        )
+        if contract_error is not None:
+            return contract_error
         true_moa_snapshot, true_moa_error = self._true_moa_snapshot_error(
             request.headers,
             mystand_request=True,
@@ -111,6 +139,13 @@ class TrueMoAHttpHandlersMixin:
                 ),
                 status=503,
             )
+        contract_error = self._trusted_runtime_contract_error(
+            request,
+            web=web,
+            error_response=_openai_error,
+        )
+        if contract_error is not None:
+            return contract_error
         true_moa_snapshot, true_moa_error = self._true_moa_snapshot_error(
             request.headers,
             mystand_request=True,
@@ -213,6 +248,21 @@ class TrueMoAHttpHandlersMixin:
                 _idem_cache.terminalize_orphaned_stopped_usage(scoped_key)
                 or record
             )
+            if _idem_cache._has_running_usage_receipt(record):
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "status": "stopped_draining",
+                        "final": False,
+                        "usage": record.get("usage"),
+                        "terminalState": "stopped",
+                        "outcomeStatus": str(
+                            record.get("outcomeState") or "none"
+                        ),
+                        "settlementBlocked": True,
+                    },
+                    status=202,
+                )
         elif record_state == "interrupted":
             record = (
                 _idem_cache.terminalize_orphaned_usage(scoped_key)
@@ -266,7 +316,7 @@ class TrueMoAHttpHandlersMixin:
         usage = record.get("usage")
         is_true_moa = bool(
             isinstance(usage, dict)
-            and usage.get("schema") == "mystand.true-moa.usage.v1"
+            and usage.get("schema") == MYSTAND_TRUE_MOA_USAGE_SCHEMA
         )
         # A process can die after the completed-ledger callback is durably
         # persisted but before save_completed_outcome atomically seals the
@@ -453,10 +503,10 @@ class TrueMoAHttpHandlersMixin:
                 public_outcome["trustedVerification"] = verification
             if (
                 recovered_outcome.get("completionProtocol")
-                == "dynamic-evidence-v2"
+                == MYSTAND_COMPLETION_PROTOCOL
             ):
                 public_outcome["completionProtocol"] = (
-                    "dynamic-evidence-v2"
+                    MYSTAND_COMPLETION_PROTOCOL
                 )
             response_payload["outcome"] = public_outcome
             response_payload["outcomeId"] = recovered_outcome["outcomeId"]

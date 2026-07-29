@@ -88,6 +88,14 @@ from xiaoban.trusted_runtime.fact_contract import (
     build_fact_query_plan as _mystand_fact_query_plan,
     normalized_fact_query_text as _normalized_mystand_fact_query_text,
 )
+from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_COMPLETION_PROTOCOL as _MYSTAND_COMPLETION_PROTOCOL_V2,
+    MYSTAND_FACT_QUERY_PLAN_SCHEMA,
+    MYSTAND_FACT_REQUIREMENT_BINDING_SCHEMA,
+    MYSTAND_FACT_REQUIREMENT_SCHEMA,
+    TrustedRuntimeContractError,
+    validate_trusted_runtime_contract_headers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -307,7 +315,6 @@ _MYSTAND_COMPLETION_PROTOCOL_HEADER = "X-Xiaoban-Completion-Protocol"
 _MYSTAND_INVOCATION_FINGERPRINT_HEADER = (
     "X-Xiaoban-Invocation-Fingerprint"
 )
-_MYSTAND_COMPLETION_PROTOCOL_V2 = "dynamic-evidence-v2"
 _MYSTAND_FACT_SIGNATURE_DOMAIN = b"mystand-fact-requirement-v1\0"
 _MYSTAND_FACT_INDEX_MAX_SCAN_BYTES = 60_000_000
 _MYSTAND_FACT_INDEX_MAX_RESULT_BYTES = 8_000_000
@@ -497,7 +504,7 @@ def _validate_mystand_fact_requirement_seed(
     ):
         raise ValueError("fact requirement seed schema is invalid")
     expected_seed_plan = {
-        "schema": "mystand.xiaoban-fact-query-plan.v1",
+        "schema": MYSTAND_FACT_QUERY_PLAN_SCHEMA,
         "queryKind": signed_plan.get("query_kind"),
         "moduleId": signed_plan.get("module_id"),
         **({"factKind": "single-resource"} if not collection else {}),
@@ -507,7 +514,7 @@ def _validate_mystand_fact_requirement_seed(
         "contextSource": seed_plan.get("contextSource"),
     }
     expected_seed = {
-        "schema": "mystand.xiaoban-trusted-fact-requirement-binding.v1",
+        "schema": MYSTAND_FACT_REQUIREMENT_BINDING_SCHEMA,
         "required": True,
         "planId": payload.get("plan_id"),
         "queryKind": payload.get("query_kind"),
@@ -627,7 +634,7 @@ def _parse_mystand_fact_requirement_header(
     }
     if set(payload) - allowed_fields or not required_fields.issubset(payload):
         raise ValueError("fact requirement payload schema is invalid")
-    if payload.get("schema") != "mystand.fact-requirement.v1":
+    if payload.get("schema") != MYSTAND_FACT_REQUIREMENT_SCHEMA:
         raise ValueError("fact requirement payload schema is invalid")
     if payload.get("source") != "mystand-server":
         raise ValueError("fact requirement source is invalid")
@@ -4274,6 +4281,17 @@ class APIServerAdapter(
                 ),
                 status=503,
             )
+        if mystand_request:
+            try:
+                validate_trusted_runtime_contract_headers(request.headers)
+            except TrustedRuntimeContractError:
+                return web.json_response(
+                    _openai_error(
+                        "My Stand and Xiaoban trusted runtime contracts do not match",
+                        code=TrustedRuntimeContractError.code,
+                    ),
+                    status=409,
+                )
         # Parse request body
         try:
             body = await request.json()

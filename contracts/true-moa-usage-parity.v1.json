@@ -1,0 +1,192 @@
+{
+  "contract": "mystand.true-moa-usage-parity.v1",
+  "base": {
+    "schema": "mystand.true-moa.usage.v1",
+    "waveId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "mode": "moa",
+    "modeEpoch": "1",
+    "presetId": "mystand-true-moa-v1",
+    "presetRevision": "2026-07-27.1",
+    "status": "completed",
+    "slots": [
+      {
+        "slotId": "advisor-kimi-k3",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-kimi-k3",
+        "provider": "kimi-coding",
+        "model": "k3",
+        "role": "advisor",
+        "startedAtMs": 100,
+        "endedAtMs": 110,
+        "status": "completed",
+        "inputTokens": 5,
+        "outputTokens": 2,
+        "totalTokens": 7,
+        "cachedInputTokens": 0,
+        "usageStatus": "reported",
+        "costUsd": 0.01,
+        "costStatus": "reported",
+        "costSource": "fake-provider"
+      },
+      {
+        "slotId": "advisor-deepseek-v4-pro",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-deepseek-v4-pro",
+        "provider": "deepseek",
+        "model": "deepseek-v4-pro",
+        "role": "advisor",
+        "startedAtMs": 120,
+        "endedAtMs": 130,
+        "status": "completed",
+        "inputTokens": 7,
+        "outputTokens": 3,
+        "totalTokens": 10,
+        "cachedInputTokens": 0,
+        "usageStatus": "reported",
+        "costUsd": 0.01,
+        "costStatus": "reported",
+        "costSource": "fake-provider"
+      },
+      {
+        "slotId": "final-deepseek-v4-pro",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:final-deepseek-v4-pro",
+        "provider": "deepseek",
+        "model": "deepseek-v4-pro",
+        "role": "final_executor",
+        "startedAtMs": 140,
+        "endedAtMs": 150,
+        "status": "completed",
+        "inputTokens": 11,
+        "outputTokens": 4,
+        "totalTokens": 15,
+        "cachedInputTokens": 2,
+        "usageStatus": "reported"
+      }
+    ],
+    "calls": [
+      {
+        "slotId": "advisor-kimi-k3",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-kimi-k3",
+        "provider": "kimi-coding",
+        "model": "k3",
+        "role": "advisor",
+        "startedAtMs": 200,
+        "endedAtMs": 210,
+        "status": "completed",
+        "inputTokens": 5,
+        "outputTokens": 2,
+        "totalTokens": 7,
+        "cachedInputTokens": 0,
+        "usageStatus": "reported",
+        "costUsd": 0.01,
+        "costStatus": "reported",
+        "costSource": "fake-provider"
+      },
+      {
+        "slotId": "advisor-deepseek-v4-pro",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-deepseek-v4-pro",
+        "provider": "deepseek",
+        "model": "deepseek-v4-pro",
+        "role": "advisor",
+        "startedAtMs": 220,
+        "endedAtMs": 230,
+        "status": "completed",
+        "inputTokens": 7,
+        "outputTokens": 3,
+        "totalTokens": 10,
+        "cachedInputTokens": 0,
+        "usageStatus": "reported",
+        "costUsd": 0.01,
+        "costStatus": "reported",
+        "costSource": "fake-provider"
+      },
+      {
+        "slotId": "final-deepseek-v4-pro",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:final-deepseek-v4-pro:000001",
+        "provider": "deepseek",
+        "model": "deepseek-v4-pro",
+        "role": "final_executor",
+        "startedAtMs": 240,
+        "endedAtMs": 250,
+        "status": "completed",
+        "inputTokens": 11,
+        "outputTokens": 4,
+        "totalTokens": 15,
+        "cachedInputTokens": 2,
+        "usageStatus": "reported"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "project-valid",
+      "operation": "project",
+      "mutations": [],
+      "expected": "ok"
+    },
+    {
+      "name": "project-rejects-unknown-field",
+      "operation": "project",
+      "mutations": [
+        {"action": "set", "path": ["calls", 0, "futureField"], "value": true}
+      ],
+      "expected": "invalid"
+    },
+    {
+      "name": "project-rejects-numeric-string",
+      "operation": "project",
+      "mutations": [
+        {"action": "set", "path": ["calls", 0, "inputTokens"], "value": "5"}
+      ],
+      "expected": "invalid"
+    },
+    {
+      "name": "project-rejects-empty-partial",
+      "operation": "project",
+      "mutations": [
+        {"action": "set", "path": ["calls", 0, "usageStatus"], "value": "partial"},
+        {"action": "set", "path": ["calls", 0, "inputTokens"], "value": null},
+        {"action": "set", "path": ["calls", 0, "outputTokens"], "value": null},
+        {"action": "set", "path": ["calls", 0, "totalTokens"], "value": null},
+        {"action": "set", "path": ["calls", 0, "cachedInputTokens"], "value": null}
+      ],
+      "expected": "invalid"
+    },
+    {
+      "name": "project-rejects-call-id-drift",
+      "operation": "project",
+      "mutations": [
+        {"action": "set", "path": ["calls", 0, "callId"], "value": "forged-call-id"}
+      ],
+      "expected": "invalid"
+    },
+    {
+      "name": "merge-identical",
+      "operation": "merge",
+      "mutations": [],
+      "expected": "ok"
+    },
+    {
+      "name": "merge-keeps-terminal-over-status-regression",
+      "operation": "merge",
+      "mutations": [
+        {"action": "set", "path": ["status"], "value": "running"}
+      ],
+      "expected": "ok"
+    },
+    {
+      "name": "merge-preserves-missing-final-call-history",
+      "operation": "merge",
+      "mutations": [
+        {"action": "remove", "path": ["calls", 2]}
+      ],
+      "expected": "ok"
+    },
+    {
+      "name": "merge-rejects-started-at-rewrite",
+      "operation": "merge",
+      "mutations": [
+        {"action": "set", "path": ["calls", 0, "startedAtMs"], "value": 201}
+      ],
+      "expected": "conflict"
+    }
+  ]
+}

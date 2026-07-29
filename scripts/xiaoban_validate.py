@@ -17,6 +17,8 @@ def run(cmd: list[str]) -> None:
 
 def main() -> int:
     python = sys.executable
+    run([python, "scripts/check_xiaoban_trusted_runtime_contract.py"])
+    run([python, "scripts/check_true_moa_usage_parity.py"])
     run([python, "scripts/xiaoban_rebrand_check.py"])
     run([python, "scripts/xiaoban_smoke.py"])
     run([python, "scripts/xiaoban_server_smoke.py"])

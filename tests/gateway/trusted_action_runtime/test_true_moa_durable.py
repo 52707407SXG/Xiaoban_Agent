@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import time
 
 import pytest
 
@@ -110,6 +111,150 @@ def _close_cache(cache: _IdempotencyCache) -> None:
     durable = getattr(cache, "_durable", None)
     if durable is not None:
         durable.close()
+
+
+def test_usage_drain_lease_heartbeat_takeover_and_fencing(tmp_path: Path):
+    store = TrueMoADurableStore(
+        str(tmp_path / "usage-drain-lease.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    key = "usage-drain-lease"
+    owner_a = "owner-a"
+    owner_b = "owner-b"
+
+    generation_a = store.claim_usage_drain_lease(
+        key,
+        owner_id=owner_a,
+        lease_ms=1_000,
+        now_ms=1_000,
+    )
+    assert generation_a == 1
+    assert (
+        store.claim_usage_drain_lease(
+            key,
+            owner_id=owner_b,
+            lease_ms=1_000,
+            now_ms=1_500,
+        )
+        is None
+    )
+    assert store.renew_usage_drain_lease(
+        key,
+        owner_id=owner_a,
+        generation=generation_a,
+        lease_ms=1_000,
+        now_ms=1_500,
+    )
+    assert (
+        store.claim_usage_drain_lease(
+            key,
+            owner_id=owner_b,
+            lease_ms=1_000,
+            now_ms=2_499,
+        )
+        is None
+    )
+    generation_b = store.claim_usage_drain_lease(
+        key,
+        owner_id=owner_b,
+        lease_ms=1_000,
+        now_ms=2_501,
+    )
+    assert generation_b == 2
+    assert not store.renew_usage_drain_lease(
+        key,
+        owner_id=owner_a,
+        generation=generation_a,
+        lease_ms=1_000,
+        now_ms=2_600,
+    )
+    assert not store.release_usage_drain_lease(
+        key,
+        owner_id=owner_a,
+        generation=generation_a,
+        now_ms=2_600,
+    )
+    assert store.release_usage_drain_lease(
+        key,
+        owner_id=owner_b,
+        generation=generation_b,
+        now_ms=2_600,
+    )
+    generation_b_reclaimed = store.claim_usage_drain_lease(
+        key,
+        owner_id=owner_b,
+        lease_ms=1_000,
+        now_ms=2_601,
+    )
+    assert generation_b_reclaimed == 3
+    store.close()
+
+
+def test_stale_usage_drain_generation_cannot_persist_or_terminalize(
+    tmp_path: Path,
+):
+    store = TrueMoADurableStore(
+        str(tmp_path / "usage-drain-fence.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    key = "usage-drain-fence"
+    fingerprint = _fingerprint("usage-drain-fence")
+    assert store.claim(key, fingerprint, kind="execution") == "missing"
+    ledger = _running_ledger(wave_id="d" * 32)
+    ledger.start_slot(KIMI_ADVISOR_SLOT)
+    call_id = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    ledger.mark_dispatched(call_id)
+    usage = ledger.to_dict()
+
+    timestamp = int(time.time() * 1000)
+    generation_a = store.claim_usage_drain_lease(
+        key,
+        owner_id="owner-a",
+        lease_ms=1_000,
+        now_ms=timestamp,
+    )
+    assert generation_a == 1
+    store.save_usage(
+        key,
+        fingerprint,
+        usage,
+        state="running",
+        usage_drain_owner_id="owner-a",
+        usage_drain_generation=generation_a,
+    )
+    generation_b = store.claim_usage_drain_lease(
+        key,
+        owner_id="owner-b",
+        lease_ms=30_000,
+        now_ms=timestamp + 1_001,
+    )
+    assert generation_b == 2
+
+    with pytest.raises(RuntimeError, match="stale owner"):
+        store.save_usage(
+            key,
+            fingerprint,
+            usage,
+            state="running",
+            usage_drain_owner_id="owner-a",
+            usage_drain_generation=generation_a,
+        )
+    assert store.mark_stopped(key)
+    with pytest.raises(RuntimeError, match="stale owner"):
+        store.terminalize_orphaned_running_calls(
+            key,
+            usage_drain_owner_id="owner-a",
+            usage_drain_generation=generation_a,
+        )
+    assert store.terminalize_orphaned_running_calls(
+        key,
+        usage_drain_owner_id="owner-b",
+        usage_drain_generation=generation_b,
+    )
+    record = store.get(key)
+    assert record["state"] == "stopped"
+    assert record["usage"]["calls"][0]["status"] == "timed_out"
+    store.close()
 
 
 def _completed_ledger(

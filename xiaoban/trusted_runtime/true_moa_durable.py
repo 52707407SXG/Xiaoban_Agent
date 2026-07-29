@@ -31,11 +31,15 @@ from xiaoban.trusted_runtime.true_moa_durable_shared import (
     project_true_moa_outcome_binding,
 )
 from xiaoban.trusted_runtime.true_moa_durable_usage import project_true_moa_usage
+from xiaoban.trusted_runtime.usage_drain_lease import (
+    _TrueMoAUsageDrainLeaseMixin,
+)
 
 
 class TrueMoADurableStore(
     _TrueMoAOutcomeMixin,
     _TrueMoAAccountingMixin,
+    _TrueMoAUsageDrainLeaseMixin,
     _TrueMoADurableBase,
 ):
     """SQLite ledger with monotonic usage and separately-keyed outcomes."""

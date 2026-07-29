@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "contract": "mystand.xiaoban-trusted-runtime-contract.v1",
+  "revision": "2026-07-29.1",
+  "compatibility": {
+    "mode": "exact-match",
+    "silentFallbackAllowed": false,
+    "providerCanAuthorizeCompletion": false,
+    "completionGuardRequired": true,
+    "identitySource": "server-only",
+    "dataScopeSource": "server-only"
+  },
+  "transport": {
+    "revisionHeader": "x-xiaoban-trusted-runtime-contract",
+    "digestHeader": "x-xiaoban-trusted-runtime-contract-digest"
+  },
+  "completion": {
+    "protocol": "dynamic-evidence-v2",
+    "verificationSchema": "mystand.xiaoban-completion-verification.v2",
+    "factRequirementSchema": "mystand.fact-requirement.v1",
+    "factQueryPlanSchema": "mystand.xiaoban-fact-query-plan.v1",
+    "factRequirementBindingSchema": "mystand.xiaoban-trusted-fact-requirement-binding.v1",
+    "factVerificationSchema": "mystand.xiaoban-fact-verification.v1",
+    "queryResultSchema": "mystand.query-result.v1",
+    "collectionEvidenceSchema": "mystand.collection-evidence.v1",
+    "resourceIndexPageSchema": "mystand.resource-index.page.v1",
+    "resourceIndexCompleteSchema": "mystand.resource-index.complete.v1"
+  },
+  "usage": {
+    "agentCallSchema": "mystand.agent-call-usage.v1",
+    "trueMoaSchema": "mystand.true-moa.usage.v1",
+    "maxBytes": 65536,
+    "normalCallLimit": 8,
+    "trueMoaTotalCallLimit": 10,
+    "trueMoaFinalCallLimit": 8
+  },
+  "billing": {
+    "normal": {
+      "policyRevision": "deepseek-v4-pro-20260729-v1",
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "role": "agent",
+      "inputMaxBytes": 131072,
+      "outputMaxTokens": 4096,
+      "callLimit": 8
+    },
+    "trueMoa": {
+      "presetId": "mystand-true-moa-v1",
+      "presetRevision": "2026-07-27.1",
+      "mode": "moa",
+      "authorizationSource": "ui-reasoning-toggle",
+      "advisorInputMaxBytes": 65536,
+      "advisorOutputMaxTokens": 4096,
+      "finalInputMaxBytes": 131072,
+      "finalOutputMaxTokens": 4096,
+      "slots": [
+        {
+          "slotId": "advisor-kimi-k3",
+          "provider": "kimi-coding",
+          "model": "k3",
+          "role": "advisor",
+          "maxCalls": 1
+        },
+        {
+          "slotId": "advisor-deepseek-v4-pro",
+          "provider": "deepseek",
+          "model": "deepseek-v4-pro",
+          "role": "advisor",
+          "maxCalls": 1
+        },
+        {
+          "slotId": "final-deepseek-v4-pro",
+          "provider": "deepseek",
+          "model": "deepseek-v4-pro",
+          "role": "final_executor",
+          "maxCalls": 8
+        }
+      ]
+    }
+  },
+  "durability": {
+    "completedOutcomeSchema": "mystand.true-moa.completed-outcome.v1",
+    "outcomeBindingSchema": "mystand.true-moa.outcome-binding.v1",
+    "outcomeAadSchema": "mystand.true-moa.outcome-aad.v1",
+    "trustedDeliverySchema": "mystand.xiaoban-trusted-delivery.v1",
+    "requestEnvelopeSchema": "mystand.xiaoban-request-envelope.v1",
+    "chatVerificationSchema": "mystand.xiaoban-chat-verification.v1",
+    "outcomeAckSchema": "mystand.xiaoban-true-moa-outcome-ack.v1",
+    "settlementCheckpointSchema": "mystand.xiaoban-settlement-checkpoint.v1",
+    "requestSnapshotSchema": "mystand.xiaoban-request-snapshot.v1",
+    "invocationSnapshotSchema": "mystand.xiaoban-invocation-snapshot.v1",
+    "invocationDiagnosticsSchema": "mystand.xiaoban-invocation-diagnostics.v1"
+  },
+  "write": {
+    "receiptVersion": "authorization-write-receipt-v2",
+    "confirmationIntentSchema": "mystand.xiaoban-write-confirmation-intent.v1",
+    "previewBindingSchema": "mystand.xiaoban-write-preview-binding.v1",
+    "successRequiresOk": true,
+    "successRequiresVerified": true
+  },
+  "tools": {
+    "resourceIndex": {
+      "contract": "mystand.resource-index-tool.v1",
+      "sha256": "5456e9eebab7822a0c7645c2e3c5956f988b25172e09d8bb16769e59bc199138"
+    },
+    "query": {
+      "contract": "mystand.query-tool.v1",
+      "sha256": "3d16be0505571b4558f3a4369d4c2a81ffc57d48f843312ee4812ef29532b0b9"
+    }
+  },
+  "parityFixtures": {
+    "trueMoaUsageSha256": "f6a19920f97ce5597ee64c672a805131605bbaa474df92ba3a8ce885c2aa4ee6"
+  },
+  "protectedInvariants": [
+    "server-identity-and-datascope-only",
+    "action-result-and-evidence-before-completion",
+    "completion-guard-before-egress",
+    "verified-write-receipt-only",
+    "per-physical-call-usage",
+    "no-silent-model-or-protocol-fallback",
+    "channel-neutral-trusted-runtime",
+    "no-private-plaintext-in-ledgers"
+  ]
+}

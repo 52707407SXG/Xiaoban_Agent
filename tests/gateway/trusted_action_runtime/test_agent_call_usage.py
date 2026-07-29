@@ -244,6 +244,7 @@ def test_finished_request_releases_stale_dispatch_marker_drain_owner(
             usage,
             *,
             state,
+            **lease_fence,
         ):
             call_status = (
                 usage["calls"][0]["status"]
@@ -257,6 +258,7 @@ def test_finished_request_releases_stale_dispatch_marker_drain_owner(
                         save_fingerprint,
                         usage,
                         state=state,
+                        **lease_fence,
                     )
                 raise OSError("fake dispatch marker confirmation failure")
             return original_save_usage(
@@ -264,6 +266,7 @@ def test_finished_request_releases_stale_dispatch_marker_drain_owner(
                 save_fingerprint,
                 usage,
                 state=state,
+                **lease_fence,
             )
 
         monkeypatch.setattr(

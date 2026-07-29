@@ -8,6 +8,15 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from xiaoban_cli.model_normalize import normalize_model_for_provider
+from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_NORMAL_BILLING_POLICY_REVISION,
+    MYSTAND_NORMAL_CALL_LIMIT,
+    MYSTAND_NORMAL_INPUT_MAX_BYTES,
+    MYSTAND_NORMAL_MODEL,
+    MYSTAND_NORMAL_OUTPUT_MAX_TOKENS,
+    MYSTAND_NORMAL_PROVIDER,
+    MYSTAND_NORMAL_ROLE,
+)
 
 
 @dataclass(frozen=True)
@@ -39,14 +48,16 @@ class PaidCallPolicyError(RuntimeError):
 
 SIGNED_MYSTAND_AGENT_POLICY = FixedPaidCallPolicy(
     policy_id="mystand.signed-normal-paid-call.v1",
-    provider="deepseek",
-    model="deepseek-v4-pro",
-    role="agent",
-    input_max_bytes=131_072,
-    output_max_tokens=4_096,
-    call_limit=8,
+    provider=MYSTAND_NORMAL_PROVIDER,
+    model=MYSTAND_NORMAL_MODEL,
+    role=MYSTAND_NORMAL_ROLE,
+    input_max_bytes=MYSTAND_NORMAL_INPUT_MAX_BYTES,
+    output_max_tokens=MYSTAND_NORMAL_OUTPUT_MAX_TOKENS,
+    call_limit=MYSTAND_NORMAL_CALL_LIMIT,
 )
-SIGNED_MYSTAND_AGENT_POLICY_REVISION = "deepseek-v4-pro-20260729-v1"
+SIGNED_MYSTAND_AGENT_POLICY_REVISION = (
+    MYSTAND_NORMAL_BILLING_POLICY_REVISION
+)
 SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER = (
     "X-Xiaoban-Agent-Billing-Policy-Revision"
 )

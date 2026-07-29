@@ -12,6 +12,9 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
+from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_COMPLETED_OUTCOME_SCHEMA,
+)
 from xiaoban.trusted_runtime.true_moa_durable_shared import (
     TRUE_MOA_DURABLE_MAX_ROWS,
     TRUE_MOA_OUTCOME_DEFAULT_TTL_SECONDS,
@@ -131,7 +134,8 @@ class _TrueMoADurableBase:
             length=32,
             salt=bytes.fromhex(storage_key),
             info=(
-                b"mystand.true-moa.completed-outcome.v1\0"
+                MYSTAND_COMPLETED_OUTCOME_SCHEMA.encode("ascii")
+                + b"\0"
                 + str(key_id).encode("ascii")
             ),
         ).derive(master_key)
@@ -275,6 +279,15 @@ class _TrueMoADurableBase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_true_moa_idem_updated
                     ON true_moa_idempotency(updated_at_ms);
+                CREATE TABLE IF NOT EXISTS true_moa_usage_drain_leases (
+                    storage_key TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL,
+                    lease_until_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_true_moa_usage_drain_expiry
+                    ON true_moa_usage_drain_leases(lease_until_ms);
                 """
             )
             columns = {
@@ -320,14 +333,22 @@ class _TrueMoADurableBase:
             for column, statement in migrations.items():
                 if column not in columns:
                     connection.execute(statement)
+            timestamp = int(time.time() * 1000)
             connection.execute(
                 """
                 UPDATE true_moa_idempotency
                 SET state = 'interrupted', updated_at_ms = ?
                 WHERE kind = 'execution'
                   AND state IN ('claimed', 'running')
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM true_moa_usage_drain_leases AS lease
+                    WHERE lease.storage_key =
+                          true_moa_idempotency.storage_key
+                      AND lease.lease_until_ms > ?
+                  )
                 """,
-                (int(time.time() * 1000),),
+                (timestamp, timestamp),
             )
         self._harden_files()
 

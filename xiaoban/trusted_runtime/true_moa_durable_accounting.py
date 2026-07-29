@@ -30,15 +30,33 @@ class _TrueMoAAccountingMixin:
         usage: Mapping[str, Any],
         *,
         state: str,
+        usage_drain_owner_id: str = "",
+        usage_drain_generation: int = 0,
     ) -> None:
         if state not in _VALID_STATES:
             raise ValueError("invalid true MoA durable state")
         projected = project_durable_usage(usage)
         storage_key = _storage_key(key)
         clean_fingerprint = _safe_text(fingerprint, required=True)
+        clean_lease_owner = (
+            _safe_text(usage_drain_owner_id, required=True)
+            if usage_drain_owner_id
+            else ""
+        )
+        clean_lease_generation = int(usage_drain_generation)
+        if bool(clean_lease_owner) != (clean_lease_generation > 0):
+            raise ValueError("invalid usage drain lease fence")
         timestamp = int(time.time() * 1000)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if clean_lease_owner:
+                self._assert_usage_drain_lease_row(
+                    connection,
+                    storage_key=storage_key,
+                    owner_id=clean_lease_owner,
+                    generation=clean_lease_generation,
+                    now_ms=timestamp,
+                )
             row = connection.execute(
                 """
                 SELECT fingerprint, kind, state, usage_json
@@ -82,6 +100,13 @@ class _TrueMoAAccountingMixin:
                     allow_restart_late_accounting
                 ),
             )
+            if str(row["state"] or "") == "stopped":
+                # A late provider callback may fill exact token/cost fields,
+                # but it cannot rewrite the user-visible stop decision into a
+                # completed execution.  Individual calls retain their physical
+                # outcome while the delivery remains cancelled.
+                projected["status"] = "cancelled"
+                projected = project_durable_usage(projected)
             encoded = json.dumps(
                 projected,
                 ensure_ascii=True,
@@ -199,20 +224,36 @@ class _TrueMoAAccountingMixin:
         self._harden_files()
         return accepted
 
-    def terminalize_stopped_running_calls(self, key: str) -> bool:
+    def terminalize_stopped_running_calls(
+        self,
+        key: str,
+        *,
+        usage_drain_owner_id: str = "",
+        usage_drain_generation: int = 0,
+    ) -> bool:
         """Fence orphaned receipts after a durable stop."""
 
         return self._terminalize_orphaned_running_calls(
             key,
             allowed_states={"stopped"},
+            usage_drain_owner_id=usage_drain_owner_id,
+            usage_drain_generation=usage_drain_generation,
         )
 
-    def terminalize_orphaned_running_calls(self, key: str) -> bool:
+    def terminalize_orphaned_running_calls(
+        self,
+        key: str,
+        *,
+        usage_drain_owner_id: str = "",
+        usage_drain_generation: int = 0,
+    ) -> bool:
         """Fence orphaned receipts after either stop or process restart."""
 
         return self._terminalize_orphaned_running_calls(
             key,
             allowed_states={"stopped", "interrupted", "failed"},
+            usage_drain_owner_id=usage_drain_owner_id,
+            usage_drain_generation=usage_drain_generation,
         )
 
     def _terminalize_orphaned_running_calls(
@@ -220,6 +261,8 @@ class _TrueMoAAccountingMixin:
         key: str,
         *,
         allowed_states: set[str],
+        usage_drain_owner_id: str = "",
+        usage_drain_generation: int = 0,
     ) -> bool:
         """Atomically close active receipts whose process owner is gone.
 
@@ -231,9 +274,25 @@ class _TrueMoAAccountingMixin:
 
         storage_key = _storage_key(key)
         timestamp = int(time.time() * 1000)
+        clean_lease_owner = (
+            _safe_text(usage_drain_owner_id, required=True)
+            if usage_drain_owner_id
+            else ""
+        )
+        clean_lease_generation = int(usage_drain_generation)
+        if bool(clean_lease_owner) != (clean_lease_generation > 0):
+            raise ValueError("invalid usage drain lease fence")
         changed = False
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if clean_lease_owner:
+                self._assert_usage_drain_lease_row(
+                    connection,
+                    storage_key=storage_key,
+                    owner_id=clean_lease_owner,
+                    generation=clean_lease_generation,
+                    now_ms=timestamp,
+                )
             row = connection.execute(
                 """
                 SELECT state, usage_json

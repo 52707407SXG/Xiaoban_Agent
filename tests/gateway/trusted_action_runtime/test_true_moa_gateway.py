@@ -38,6 +38,12 @@ from xiaoban.trusted_runtime.paid_call_policy import (
     SIGNED_MYSTAND_AGENT_POLICY_REVISION,
     SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
 )
+from xiaoban.trusted_runtime.protocol_contract import (
+    TRUSTED_RUNTIME_CONTRACT_DIGEST,
+    TRUSTED_RUNTIME_CONTRACT_DIGEST_HEADER,
+    TRUSTED_RUNTIME_CONTRACT_REVISION,
+    TRUSTED_RUNTIME_CONTRACT_REVISION_HEADER,
+)
 from xiaoban.trusted_runtime.true_moa import (
     DEEPSEEK_ADVISOR_SLOT,
     FINAL_EXECUTOR_SLOT,
@@ -99,6 +105,10 @@ def _mystand_headers(
         "X-Xiaoban-Request-Fingerprint": hashlib.sha256(
             f"request:{key}".encode(),
         ).hexdigest(),
+        TRUSTED_RUNTIME_CONTRACT_REVISION_HEADER:
+            TRUSTED_RUNTIME_CONTRACT_REVISION,
+        TRUSTED_RUNTIME_CONTRACT_DIGEST_HEADER:
+            TRUSTED_RUNTIME_CONTRACT_DIGEST,
         REASONING_MODE_HEADER: mode,
         MODE_EPOCH_HEADER: epoch,
         MOA_PRESET_ID_HEADER: preset_id,
@@ -114,6 +124,31 @@ def _normal_direct_headers() -> dict[str, str]:
         "X-Xiaoban-Message-Id": "normal-direct-message",
         REASONING_MODE_HEADER: "normal",
     }
+
+
+@pytest.mark.asyncio
+async def test_mystand_contract_mismatch_stops_before_provider_dispatch():
+    adapter = _adapter()
+    headers = _mystand_headers("contract-mismatch")
+    headers[TRUSTED_RUNTIME_CONTRACT_DIGEST_HEADER] = "0" * 64
+
+    async with TestClient(TestServer(_app(adapter))) as client:
+        with patch.object(adapter, "_run_agent") as run_agent:
+            response = await client.post(
+                "/v1/chat/completions",
+                headers=headers,
+                json={
+                    "model": "xiaoban-agent",
+                    "messages": [{"role": "user", "content": "不应调用模型"}],
+                },
+            )
+            payload = await response.json()
+
+    assert response.status == 409
+    assert payload["error"]["code"] == (
+        "xiaoban_trusted_runtime_contract_mismatch"
+    )
+    run_agent.assert_not_called()
 
 
 class _FakeFinalAgent:
@@ -3071,8 +3106,10 @@ async def test_create_restart_stop_fences_late_completion_and_keeps_usage(
     assert before_restart["state"] == "running"
     assert before_restart["usage"]["calls"][-1]["status"] == "running"
 
-    # Release the single-process durable lock just as a real old process
-    # exits, then create the replacement process over the same SQLite file.
+    # Release the single-process durable lock while the old provider callback
+    # is still alive, then create the replacement process over the same
+    # SQLite file.  The persistent usage-drain lease must prevent the
+    # replacement from falsely declaring that live callback interrupted.
     original._durable.close()
     restarted = api_server._IdempotencyCache(
         max_items=8,
@@ -3082,7 +3119,7 @@ async def test_create_restart_stop_fences_late_completion_and_keeps_usage(
     )
     monkeypatch.setattr(api_server, "_idem_cache", restarted)
     interrupted = restarted.durable_record(scoped_key)
-    assert interrupted["state"] == "interrupted"
+    assert interrupted["state"] == "running"
 
     app = web.Application()
     app.router.add_post(
@@ -3108,20 +3145,13 @@ async def test_create_restart_stop_fences_late_completion_and_keeps_usage(
             json={"idempotency_key": raw_key},
         )
         pending_payload = await pending_usage.json()
-        assert pending_usage.status == 200
-        assert pending_payload["status"] == "settlement_blocked"
+        assert pending_usage.status == 202
+        assert pending_payload["status"] == "stopped_draining"
+        assert pending_payload["final"] is False
         assert pending_payload["terminalState"] == "stopped"
         assert pending_payload["settlementBlocked"] is True
         assert pending_payload["outcomeStatus"] == "none"
-        assert all(
-            call["status"] != "running"
-            for call in pending_payload["usage"]["calls"]
-        )
-        assert pending_payload["usage"]["calls"][-1]["status"] == "timed_out"
-        assert (
-            pending_payload["usage"]["calls"][-1]["usageStatus"]
-            == "unavailable"
-        )
+        assert pending_payload["usage"]["calls"][-1]["status"] == "running"
         assert pending_payload["usage"]["calls"][0]["totalTokens"] == 6
 
         release_late_completion.set()
@@ -3134,7 +3164,7 @@ async def test_create_restart_stop_fences_late_completion_and_keeps_usage(
         stopped_record = restarted.durable_record(scoped_key)
         assert stopped_record["state"] == "stopped"
         assert stopped_record["usage"]["status"] == "cancelled"
-        assert stopped_record["usage"]["calls"][-1]["status"] == "timed_out"
+        assert stopped_record["usage"]["calls"][-1]["status"] == "completed"
         assert stopped_record["usage"]["calls"][-1]["totalTokens"] == 18
         assert (
             stopped_record["usage"]["calls"][-1]["usageStatus"]
@@ -3156,7 +3186,7 @@ async def test_create_restart_stop_fences_late_completion_and_keeps_usage(
         assert recovered_payload["usage"]["status"] == "cancelled"
         assert (
             recovered_payload["usage"]["calls"][-1]["status"]
-            == "timed_out"
+            == "completed"
         )
         assert recovered_payload["usage"]["calls"][-1]["totalTokens"] == 18
         assert recovered_payload["usage"]["calls"][-1]["costUsd"] == 0.05

@@ -42,6 +42,12 @@ from xiaoban.trusted_runtime.paid_call_policy import (
     SIGNED_MYSTAND_AGENT_POLICY_REVISION,
     SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
 )
+from xiaoban.trusted_runtime.protocol_contract import (
+    TRUSTED_RUNTIME_CONTRACT_DIGEST,
+    TRUSTED_RUNTIME_CONTRACT_DIGEST_HEADER,
+    TRUSTED_RUNTIME_CONTRACT_REVISION,
+    TRUSTED_RUNTIME_CONTRACT_REVISION_HEADER,
+)
 from xiaoban.trusted_runtime.turns import begin_turn
 from xiaoban.trusted_runtime.types import (
     ActionCall,
@@ -158,6 +164,12 @@ def _headers_with_requirement(
         "X-Xiaoban-Request-Fingerprint": str(bound["request_fingerprint"]),
         SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER: (
             SIGNED_MYSTAND_AGENT_POLICY_REVISION
+        ),
+        TRUSTED_RUNTIME_CONTRACT_REVISION_HEADER: (
+            TRUSTED_RUNTIME_CONTRACT_REVISION
+        ),
+        TRUSTED_RUNTIME_CONTRACT_DIGEST_HEADER: (
+            TRUSTED_RUNTIME_CONTRACT_DIGEST
         ),
     }
     if requirement is not None:

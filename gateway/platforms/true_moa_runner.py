@@ -20,6 +20,9 @@ from gateway.platforms.true_moa_runner_workflow import (
     TrueMoARunnerTraceState,
     run_agent_sync,
 )
+from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_COMPLETION_PROTOCOL,
+)
 
 
 def _mystand_index_followup_tool(
@@ -30,7 +33,10 @@ def _mystand_index_followup_tool(
     valid_tool_names: set[str],
 ) -> str:
     """Choose the post-index tool without weakening the dynamic v2 path."""
-    if completion_protocol == "dynamic-evidence-v2" and fact_requirement is None:
+    if (
+        completion_protocol == MYSTAND_COMPLETION_PROTOCOL
+        and fact_requirement is None
+    ):
         return "mystand_query" if "mystand_query" in valid_tool_names else ""
     if (
         resource_index_required
