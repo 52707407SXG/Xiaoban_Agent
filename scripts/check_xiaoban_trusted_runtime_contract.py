@@ -11,6 +11,14 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
+EGRESS_SEAL_MODULE = Path(
+    "gateway/platforms/mystand_egress_seal.py"
+)
+EGRESS_SEAL_CALLERS = {
+    EGRESS_SEAL_MODULE,
+    Path("gateway/platforms/api_server.py"),
+    Path("gateway/platforms/true_moa_idempotency.py"),
+}
 
 from xiaoban.trusted_runtime.agent_call_usage_codec import (
     AGENT_CALL_LIMIT,
@@ -60,6 +68,29 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _check_egress_seal_callers() -> None:
+    for root_name in ("agent", "gateway", "tools", "xiaoban"):
+        for path in (REPO_ROOT / root_name).rglob("*.py"):
+            relative = path.relative_to(REPO_ROOT)
+            source = path.read_text(encoding="utf-8")
+            if (
+                "seal_mystand_egress_projection" in source
+                and relative not in EGRESS_SEAL_CALLERS
+            ):
+                raise SystemExit(
+                    "unauthorized My Stand egress seal caller: "
+                    f"{relative}"
+                )
+            if (
+                "_MYSTAND_EGRESS_SEAL" in source
+                and relative != EGRESS_SEAL_MODULE
+            ):
+                raise SystemExit(
+                    "egress seal capability escaped its module: "
+                    f"{relative}"
+                )
+
+
 def _peer_file(peer_root: Path, candidates: tuple[str, ...]) -> Path:
     for candidate in candidates:
         path = peer_root / candidate
@@ -72,6 +103,7 @@ def _peer_file(peer_root: Path, candidates: tuple[str, ...]) -> Path:
 
 
 def check_local() -> None:
+    _check_egress_seal_callers()
     contract = TRUSTED_RUNTIME_CONTRACT
     completion = contract["completion"]
     usage = contract["usage"]
