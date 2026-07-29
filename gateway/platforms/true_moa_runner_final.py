@@ -20,6 +20,9 @@ from gateway.platforms.api_server import (
     _tool_result_looks_successful,
     _true_moa_usage_summary,
 )
+from gateway.platforms.mystand_egress_seal import (
+    is_mystand_egress_sealed,
+)
 from gateway.platforms.true_moa_stop_projection import (
     CompletionStoppedError,
 )
@@ -547,7 +550,7 @@ class TrueMoARunnerFinalMixin:
             })
             result["messages"] = []
         elif (
-            result.get("_mystand_egress_finalized") is not True
+            not is_mystand_egress_sealed(result)
             or not isinstance(
                 result.get("_mystand_egress_output_digest"),
                 str,

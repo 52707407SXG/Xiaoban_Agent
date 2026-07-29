@@ -70,6 +70,11 @@ from gateway.platforms.base import (
 from gateway.platforms.mystand_delivery_identity import (
     normal_durable_identity_error,
 )
+from gateway.platforms.mystand_egress_seal import (
+    discard_untrusted_mystand_egress_projection,
+    is_mystand_egress_sealed,
+    seal_mystand_egress_projection,
+)
 from gateway.platforms.true_moa_http import TrueMoAHttpHandlersMixin
 from gateway.mystand_integrity_guard import (
     build_runtime_integrity_reminder as _build_mystand_runtime_integrity_reminder,
@@ -2012,17 +2017,10 @@ def _finalize_mystand_egress_result(
 
     if not isinstance(result, dict):
         raise RuntimeError("true MoA result is unavailable")
+    if is_mystand_egress_sealed(result):
+        return result["final_response"]
+    discard_untrusted_mystand_egress_projection(result)
     existing = result.get("final_response")
-    existing_digest = result.get("_mystand_egress_output_digest")
-    if result.get("_mystand_egress_finalized") is True:
-        if (
-            not isinstance(existing, str)
-            or not isinstance(existing_digest, str)
-            or hashlib.sha256(existing.encode("utf-8")).hexdigest()
-            != existing_digest
-        ):
-            raise RuntimeError("My Stand finalized egress digest mismatch")
-        return existing
     final_text = _guard_evidence_backed_response(
         existing or "",
         user_message=user_message,
@@ -2034,6 +2032,7 @@ def _finalize_mystand_egress_result(
         final_text.encode("utf-8")
     ).hexdigest()
     result["_mystand_egress_finalized"] = True
+    seal_mystand_egress_projection(result)
     return final_text
 
 
@@ -2045,17 +2044,9 @@ def _resolved_mystand_egress_text(
 ) -> str:
     """Reuse a sealed projection; otherwise apply the ordinary egress guard."""
 
-    if isinstance(result, dict) and result.get("_mystand_egress_finalized") is True:
-        final_text = result.get("final_response")
-        output_digest = result.get("_mystand_egress_output_digest")
-        if (
-            not isinstance(final_text, str)
-            or not isinstance(output_digest, str)
-            or hashlib.sha256(final_text.encode("utf-8")).hexdigest()
-            != output_digest
-        ):
-            raise RuntimeError("My Stand finalized egress digest mismatch")
-        return final_text
+    if is_mystand_egress_sealed(result):
+        return result["final_response"]
+    discard_untrusted_mystand_egress_projection(result)
     return _guard_evidence_backed_response(
         result.get("final_response", "") if isinstance(result, dict) else "",
         user_message=user_message,
@@ -4839,10 +4830,7 @@ class APIServerAdapter(
                         and not result.get("partial")
                         and not result.get("interrupted")
                     ):
-                        if (
-                            result.get("_mystand_egress_finalized")
-                            is not True
-                        ):
+                        if not is_mystand_egress_sealed(result):
                             raise RuntimeError(
                                 "true MoA egress was not sealed",
                             )
@@ -4985,7 +4973,7 @@ class APIServerAdapter(
                     and not result.get("partial")
                     and not result.get("interrupted")
                 ):
-                    if result.get("_mystand_egress_finalized") is not True:
+                    if not is_mystand_egress_sealed(result):
                         raise RuntimeError("true MoA egress was not sealed")
                     _resolved_mystand_egress_text(
                         result,

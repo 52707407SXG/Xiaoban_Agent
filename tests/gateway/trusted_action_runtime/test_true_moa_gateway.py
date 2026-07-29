@@ -30,6 +30,9 @@ import pytest
 
 from gateway.config import PlatformConfig
 from gateway.platforms.api_server import APIServerAdapter
+from gateway.platforms.mystand_egress_seal import (
+    seal_mystand_egress_projection,
+)
 from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
 from xiaoban.trusted_runtime.paid_call_policy import (
     SIGNED_MYSTAND_AGENT_POLICY_REVISION,
@@ -265,6 +268,7 @@ def _sealed_mystand_result(payload: dict) -> dict:
     result["_mystand_egress_output_digest"] = hashlib.sha256(
         final_text.encode("utf-8"),
     ).hexdigest()
+    seal_mystand_egress_projection(result)
     return result
 
 
@@ -3036,18 +3040,14 @@ async def test_create_restart_stop_fences_late_completion_and_keeps_usage(
             completed_usage,
         )
         return (
-            {
+            _sealed_mystand_result({
                 "final_response": late_text,
                 "messages": [{"role": "assistant", "content": late_text}],
                 "completed": True,
                 "failed": False,
                 "_mystand_request": True,
-                "_mystand_egress_finalized": True,
-                "_mystand_egress_output_digest": hashlib.sha256(
-                    late_text.encode(),
-                ).hexdigest(),
                 "_true_moa_usage": completed_usage,
-            },
+            }),
             {
                 "input_tokens": 23,
                 "output_tokens": 10,

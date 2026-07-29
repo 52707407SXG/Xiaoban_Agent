@@ -14,6 +14,10 @@ from gateway.platforms.true_moa_stop_projection import (
     _cancel_chat_agent_ref,
     _stopped_chat_completion_response,
 )
+from gateway.platforms.mystand_egress_seal import (
+    is_mystand_egress_sealed,
+    seal_mystand_egress_projection,
+)
 
 class _IdempotencyCache:
     """Fast in-process replay cache backed by a plaintext-free durable fence."""
@@ -170,6 +174,7 @@ class _IdempotencyCache:
                 result["_mystand_completion_protocol"] = (
                     completion_protocol
                 )
+            seal_mystand_egress_projection(result)
             return result, usage
         return (
             {
@@ -292,7 +297,7 @@ class _IdempotencyCache:
             or result.get("failed")
             or result.get("partial")
             or result.get("interrupted")
-            or result.get("_mystand_egress_finalized") is not True
+            or not is_mystand_egress_sealed(result)
         ):
             raise RuntimeError(
                 "true MoA completed outcome was not finalized"
