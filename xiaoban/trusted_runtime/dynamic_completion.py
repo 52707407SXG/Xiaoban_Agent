@@ -30,6 +30,11 @@ NO_EVIDENCE_MESSAGE = (
 )
 _MAX_COMPLETION_TEXT = 4_000
 _DYNAMIC_ACTION_IDS = frozenset(ACTION_OUTPUT_CONTRACTS)
+DYNAMIC_READ_NOT_DISPATCHED = "read_not_dispatched_after_index"
+DYNAMIC_ACTION_NOT_DISPATCHED = "action_not_dispatched"
+DYNAMIC_READ_PRECONDITION_NOT_MET = "read_precondition_not_met"
+DYNAMIC_ACTION_RESULT_MISSING = "action_result_missing"
+DYNAMIC_INDEX_INCOMPLETE = "index_incomplete"
 _HARD_PREACTION_ERRORS = frozenset(
     {
         "duplicate_call_id",
@@ -41,6 +46,312 @@ _HARD_PREACTION_ERRORS = frozenset(
         "unknown_action",
         "write_isolated",
     }
+)
+_TRANSIENT_TIMEOUT_CODES = frozenset(
+    {
+        "deadline_exceeded",
+        "gateway_timeout",
+        "handler_timeout",
+        "provider_timeout",
+        "read_timeout",
+        "request_timeout",
+        "timed_out",
+        "timeout",
+        "upstream_timeout",
+    }
+)
+_TRANSIENT_UNAVAILABLE_CODES = frozenset(
+    {
+        "connection_error",
+        "connection_failed",
+        "econnrefused",
+        "econnreset",
+        "mystand_authorization_transport_failed",
+        "mystand_query_transport_failed",
+        "network_unavailable",
+        "provider_unavailable",
+        "service_unavailable",
+        "upstream_unavailable",
+    }
+)
+_TRANSIENT_RECOVERY_CODES = (
+    _TRANSIENT_TIMEOUT_CODES | _TRANSIENT_UNAVAILABLE_CODES
+)
+_PRESENTATION_UNAVAILABLE_CODES = _TRANSIENT_UNAVAILABLE_CODES | frozenset(
+    {
+        # These codes are safe to explain as an unavailable site-data
+        # connection, but they are deliberately not recoverable: retrying a
+        # missing bridge/configuration cannot fix it and only spends another
+        # paid call.
+        "mystand_authorization_unavailable",
+        "mystand_query_unavailable",
+        "mystand_resource_index_transport_failed",
+        "mystand_resource_index_unavailable",
+    }
+)
+_FAILURE_INCOMPLETE_RE = re.compile(
+    r"(?:"
+    r"(?:没有|没能|未能|无法|不能|尚未|还没有|还没|暂时无法|暂时不能)"
+    r"[^。！？；，,]{0,24}"
+    r"(?:完成|办完|处理完|查完|读完|继续|回答|拿到|查到|读到|读取|返回)"
+    r"|(?:失败|中断|超时|没成功|未成功|被拒绝|无权读取|没有读取权限)"
+    r"|(?:未完成|没有完成|还未完成|还没完成)"
+    r")"
+)
+_FAILURE_INTERNAL_RE = re.compile(
+    r"(?:"
+    r"系统提示|固定回复|动态证据|证据回执|回执|内部协议|协议校验|"
+    r"实例|运行环境|状态码|错误码|明确点击重试|点击重试|"
+    r"mystand_(?:query|resource_index|authorization)|"
+    r"\b(?:tool|function|api|gateway|delivery|receipt|protocol|"
+    r"status(?:\s*code)?|error(?:_code)?|exception|traceback)\b|"
+    r"(?:^|[\s(])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]+|"
+    r"<[/!]?[a-zA-Z][^>]*>|```|[{}]"
+    r")",
+    re.IGNORECASE,
+)
+_FAILURE_UNBOUND_FACT_RE = re.compile(
+    r"(?:"
+    r"[0-9０-９]|[￥¥$€£%％]|"
+    r"[零〇一二三四五六七八九十百千万亿两]+(?:多|余)?"
+    r"(?:元|块|个|位|名|套|份|笔|条|项|户|人|家)|"
+    r"(?:查询结果|数据|资料|事实|结论|答案)"
+    r"[^。！？；，,]{0,12}(?:显示|表明|是|为)|"
+    r"(?:还有|共有|总共|合计|总计)"
+    r")"
+)
+_FAILURE_BUSINESS_SUBJECT_RE = re.compile(
+    r"(?:"
+    r"提成|佣金|业绩|金额|余额|结算|到账|房源|客源|客户|业主|"
+    r"手机号|电话号码?|成交|合同|账本|流水"
+    r")"
+)
+_FAILURE_POSITIVE_RESULT_RE = re.compile(
+    r"(?:"
+    r"(?:已经|已)(?:查到|读到|拿到|取得|完成|办完|处理完|"
+    r"读取完成|查询完成|成功|确认)|"
+    r"(?:工资|薪资|商铺|店铺|房源|记录|老板|领导|客户|业主)"
+    r"[^。！？；，,]{0,16}"
+    r"(?:发放|出租|删除|批准|成交|到账|完成|成功)"
+    r")"
+)
+_FAILURE_NEGATED_CAUSE_RE = re.compile(
+    r"(?:"
+    r"(?:没有|没|并无|不存在)(?:任何)?(?:问题|错误|失败|异常)|"
+    r"(?:一切|状态|结果)?(?:正常|无误|没问题)|"
+    r"(?:已经|已)(?:确认|核实)"
+    r")"
+)
+_FAILURE_PERMISSION_CAUSE_RE = re.compile(
+    r"(?:权限|授权|无权|拒绝|禁止|访问条件)"
+)
+_FAILURE_TIMEOUT_CAUSE_RE = re.compile(
+    r"(?:超时|网络|连接|断线|服务不可用|服务中断)"
+)
+_FAILURE_NOT_FOUND_RE = re.compile(
+    r"(?:没有找到|没找到|未找到|找不到|无法定位|不能确定|"
+    r"不够明确|唯一匹配|存在歧义)"
+)
+_FAILURE_NO_PROGRESS_RE = re.compile(
+    r"(?:"
+    r"(?:定位|找到|核对).{0,18}(?:资料|范围|目录|候选)"
+    r"|(?:资料|范围|目录|候选).{0,18}(?:定位|找到|核对)"
+    r")"
+)
+_FAILURE_NO_READ_RE = re.compile(
+    r"(?:"
+    r"没有|没能|未能|尚未|还没|无法"
+    r").{0,20}(?:继续读取|读取|读到|拿到|取得|完成查询|查完)"
+)
+_FAILURE_NOT_STARTED_RE = re.compile(
+    r"(?:"
+    r"(?:没有|没能|未能|尚未|还没).{0,18}"
+    r"(?:开始|发起|实际处理|执行)"
+    r"|(?:实际处理|执行).{0,18}(?:没有|没能|未能)(?:开始|发起)"
+    r")"
+)
+_FAILURE_FIRST_PERSON_PREFIX = (
+    r"(?:抱歉[，,]|不好意思[，,])?"
+    r"(?:我(?:这次|本轮)?|(?:这次|本轮)我)"
+)
+_FAILURE_INCOMPLETE_TAIL = (
+    r"(?:所以|因此|目前|现在)?"
+    r"(?:"
+    r"(?:这项|这次|本轮)?(?:任务|查询)"
+    r"(?:还|仍然|仍|尚)?(?:没有|没|没能|未能|未)"
+    r"(?:完成|办完|处理完|查完)"
+    r"|(?:我)?(?:目前|暂时|现在)?(?:还)?(?:无法|不能|没法)"
+    r"(?:完成(?:这项|这次|本轮)?任务|"
+    r"给(?:你)?(?:可靠|准确|明确)?(?:答复|结果|答案)|"
+    r"确认(?:最终)?结果|继续回答)"
+    r")"
+)
+_FAILURE_NO_PROGRESS_INDEX_FULL_RE = re.compile(
+    rf"^{_FAILURE_FIRST_PERSON_PREFIX}"
+    r"(?:已经|已)?(?:完成|做完)(?:了)?资料目录"
+    r"(?:查询|核对)"
+    r"[，,；;。](?:但|不过)?(?:这次|本轮)?我?"
+    r"(?:没有|没能|未能|还没|尚未)继续"
+    r"(?:读取|读到|拿到|取得)(?:到)?"
+    r"(?:能回答问题的|可用于回答的|可回答的)?"
+    r"(?:内容|正文|结果)"
+    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
+)
+_FAILURE_NOT_STARTED_FULL_RE = re.compile(
+    rf"^{_FAILURE_FIRST_PERSON_PREFIX}"
+    r"(?:没有|没能|未能|还没|尚未)"
+    r"(?:发起|开始)(?:实际)?(?:处理|执行)"
+    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
+)
+_FAILURE_NOT_FOUND_FULL_RE = re.compile(
+    rf"^{_FAILURE_FIRST_PERSON_PREFIX}"
+    r"(?:没有找到|没找到|未找到|找不到|无法定位|不能确定)"
+    r"(?:能够|可以)?(?:唯一)?(?:匹配的)?(?:相关)?"
+    r"(?:目标|资料|记录|对象|候选|内容)"
+    r"(?:"
+    r"[，,；;。](?:需要|请)你补充(?:更)?(?:准确|具体|明确)的"
+    r"(?:名称|范围|信息)"
+    rf"|[，,；;。]{_FAILURE_INCOMPLETE_TAIL}"
+    r")[。！？!?]?$"
+)
+_FAILURE_DENIED_FULL_RE = re.compile(
+    rf"^{_FAILURE_FIRST_PERSON_PREFIX}"
+    r"(?:没有|没能|未能|无法)"
+    r"(?:取得|获得|通过)?(?:完成任务所需的)?"
+    r"(?:读取|访问)?(?:权限|授权|访问条件)"
+    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
+)
+_FAILURE_EMPTY_FULL_RE = re.compile(
+    rf"^{_FAILURE_FIRST_PERSON_PREFIX}(?:已经|已)?"
+    r"(?:发起|完成)?(?:了)?(?:读取|查询|处理)"
+    r"[，,；;。](?:但|不过)?我?"
+    r"(?:没有|没能|未能|无法)"
+    r"(?:读到|拿到|取得)(?:可用|有效|完整)?(?:的)?"
+    r"(?:内容|结果|正文|资料)"
+    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
+)
+_FAILURE_GENERIC_FULL_RE = re.compile(
+    rf"^{_FAILURE_FIRST_PERSON_PREFIX}(?:已经|已)?"
+    r"(?:(?:发起|开始|尝试)(?:了)?(?:实际)?(?:处理|执行|查询|读取)|处理)"
+    r"[，,；;。](?:但|不过)?(?:处理|执行|查询|读取)?"
+    r"(?:没有成功|未成功|失败|出了问题|返回了错误)"
+    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
+)
+_FAILURE_TIMEOUT_FULL_RE = re.compile(
+    rf"^{_FAILURE_FIRST_PERSON_PREFIX}(?:已经|已)?"
+    r"(?:发起|开始|尝试)(?:了)?(?:实际)?(?:处理|执行|查询|读取)"
+    r"[，,；;。](?:但|不过)?(?:等待|处理|执行|查询|读取)?"
+    r"(?:结果)?(?:超时|超过等待时间)(?:了)?"
+    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
+)
+_FAILURE_UNAVAILABLE_FULL_RE = re.compile(
+    rf"^{_FAILURE_FIRST_PERSON_PREFIX}(?:已经|已)?"
+    r"(?:发起|开始|尝试)(?:了)?(?:实际)?(?:处理|执行|查询|读取)"
+    r"[，,；;。](?:但|不过)?"
+    r"(?:连接失败|网络中断|服务暂时不可用|读取服务暂时不可用)"
+    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
+)
+_FAILURE_CANCELLED_FULL_RE = re.compile(
+    rf"^{_FAILURE_FIRST_PERSON_PREFIX}(?:已经|已)?"
+    r"(?:发起|开始)(?:了)?(?:实际)?(?:处理|执行|查询|读取)"
+    r"[，,；;。](?:但|不过)?(?:随后)?"
+    r"(?:被停止|被取消|已经停止|已经取消)"
+    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
+)
+_FAILURE_READ_PRECONDITION_FULL_RE = re.compile(
+    rf"^{_FAILURE_FIRST_PERSON_PREFIX}"
+    r"(?:没有|没能|未能)先(?:完成|做好)"
+    r"(?:资料)?(?:目录查询|资料定位|前置准备)"
+    r"[，,；;。](?:所以|因此)?(?:正文)?读取"
+    r"(?:没有|没能|未能)(?:发起|开始)"
+    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
+)
+_FAILURE_RESULT_MISSING_FULL_RE = re.compile(
+    rf"^{_FAILURE_FIRST_PERSON_PREFIX}(?:的)?(?:处理|查询|读取)请求"
+    r"(?:已经|已)(?:生成|准备好|登记)"
+    r"[，,；;。](?:但|不过)?(?:没有|没能|未能)"
+    r"(?:形成|收到|拿到|取得)(?:完整|最终|可以确认|可确认)?"
+    r"(?:的)?(?:结果|返回内容)"
+    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
+)
+_FAILURE_INDEX_INCOMPLETE_FULL_RE = re.compile(
+    rf"^{_FAILURE_FIRST_PERSON_PREFIX}(?:已经|已)?"
+    r"(?:发起|完成)(?:了)?资料目录(?:查询|核对)"
+    r"[，,；;。](?:但|不过)?(?:返回|拿到|取得)(?:的)?"
+    r"(?:目录|结果|内容)(?:不完整|无法确认)"
+    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
+)
+_FAILURE_NEGATIVE_CLAUSE_RE = re.compile(
+    r"(?:"
+    r"失败|错误|出错|问题|异常|超时|不完整|"
+    r"(?:没有|无)响应|"
+    r"(?:服务|网络|连接).{0,8}(?:不可用|中断|失败)|"
+    r"(?:停止|取消)|权限|授权|无权|拒绝|禁止|"
+    r"(?:还)?(?:没有|没|未)(?:找到|查到|读到|等到|拿到|"
+    r"取得|完成|成功|通过)|"
+    r"(?:无法|不能|没法|没能|未能).{0,12}"
+    r"(?:完成|继续|答复|确认|回答|读取|查询|发起|开始)"
+    r")"
+)
+_FAILURE_DIRECT_ASSERTION_RE = re.compile(
+    r"(?:"
+    r"(?:遇到|遇到了|出现|出现了|发生|发生了)"
+    r"(?:错误|问题|异常)|"
+    r"失败|出错|错误|有问题|出了?问题|异常|超时|不完整|"
+    r"(?:没有|无)响应|(?:暂时)?不可用|被(?:停止|取消)|"
+    r"(?:还)?(?:没有|没|未)(?:成功|找到|查到|读到|等到|拿到|"
+    r"取得|完成|通过)|"
+    r"(?:暂时)?(?:没能|未能|无法|不能|没法)"
+    r"(?:完成|继续|答复|确认|回答|读取|查询|发起|开始|确定|定位)|"
+    r"(?:没有|没能|未能|无法|不能|没法)?(?:权限|授权)"
+    r")"
+)
+_FAILURE_DIRECT_ASSERTION_PREFIX_RE = re.compile(
+    r"(?:"
+    r"(?:这次|本轮)?我(?:这次|本轮)?|"
+    r"(?:处理|执行|查询|读取|读|查|连接|网络|服务|目录|索引|"
+    r"任务|请求)(?:时|后来|随后)?|"
+    r"(?:等待(?:结果)?|遇到|遇到了|出现|出现了|发生|发生了|"
+    r"出了|返回|返回了)"
+    r")$"
+)
+_FAILURE_FIRST_PERSON_EXECUTION_BINDING_RE = re.compile(
+    r"(?:(?:这次|本轮)?我|我(?:这次|本轮)?)"
+    r"[^，,；;。！？!?]{0,14}"
+    r"(?:"
+    r"(?:已经|已)?(?:发起|开始|尝试|处理|执行|查询|查|读取|"
+    r"读|等待)|"
+    r"(?:还)?(?:没有|没|未)(?:找到|查到|读到|等到|拿到|"
+    r"取得|完成|成功|权限)|"
+    r"(?:没能|未能|无法|不能|没法)(?:取得|获得|找到|定位|"
+    r"确定|完成|继续|答复|确认|回答|读取|查询|发起|开始|给)|"
+    r"(?:权限|授权)"
+    r")"
+)
+_FAILURE_CURRENT_EXECUTION_BINDING_RE = re.compile(
+    r"^(?:这次|本轮)(?:的)?(?:实际)?"
+    r"(?:处理|执行|查询|读取|任务|请求)"
+)
+_FAILURE_UNBOUND_SCOPE_RE = re.compile(
+    r"(?:项目|计划|申请|订单|工单|审批)"
+)
+_FAILURE_SAFE_CONTINUATION_FULL_RE = re.compile(
+    r"^(?:"
+    r"(?:等待(?:结果)?|连接|网络|(?:读取)?服务|处理|执行|查询|"
+    r"读取).{0,10}(?:超时|失败|中断|不可用|(?:没有|无)响应|"
+    r"没成功|未成功|出了?问题|返回了?错误|被停止|被取消)|"
+    r"(?:一直)?(?:没有|没|没能|未能)(?:继续)?"
+    r"(?:等到|查到|读到|拿到|取得).{0,18}"
+    r"(?:结果|内容|正文|资料)|"
+    r"(?:暂时)?(?:无法|不能|没法|没能|未能)(?:继续)?"
+    r"(?:完成(?:你的请求|这项任务|任务)?|"
+    r"给你(?:可靠|准确|明确)?(?:答复|结果|答案)|"
+    r"确认(?:最终)?(?:结果)?|回答(?:你的问题)?|继续回答)|"
+    r"(?:这项|这次|本轮)?(?:任务|查询|请求)"
+    r"(?:还|仍然|仍|尚)?(?:没有|没|未能|未)?完成|"
+    r"(?:没能|未能)(?:继续)?完成|"
+    r"(?:处理|执行|查询|读取)(?:后来)?被(?:停止|取消)"
+    r")了?$"
 )
 
 
@@ -279,6 +590,465 @@ def _validated_terminal_text(final_text: str) -> str:
     if not text.strip() or len(text) > _MAX_COMPLETION_TEXT or "\x00" in text:
         return ""
     return text
+
+
+def _natural_failure_clauses_are_execution_bound(
+    clauses: Sequence[str],
+) -> bool:
+    """Reject negative facts that are not about this turn's own execution."""
+    execution_bound = False
+    semantic_units = [
+        unit
+        for clause in clauses
+        for unit in re.split(r"(?=(?:但|不过|所以|因此))", clause)
+        if unit
+    ]
+    for clause in semantic_units:
+        body = re.sub(
+            r"^(?:抱歉|不好意思|但|不过|所以|因此|目前|现在)",
+            "",
+            clause,
+        )
+        explicitly_bound = bool(
+            _FAILURE_FIRST_PERSON_EXECUTION_BINDING_RE.search(body)
+            or _FAILURE_CURRENT_EXECUTION_BINDING_RE.search(body)
+        )
+        has_negative_status = bool(_FAILURE_NEGATIVE_CLAUSE_RE.search(body))
+        if explicitly_bound:
+            if (
+                has_negative_status
+                and _FAILURE_UNBOUND_SCOPE_RE.search(body)
+            ):
+                return False
+            for assertion in _FAILURE_DIRECT_ASSERTION_RE.finditer(body):
+                if not _FAILURE_DIRECT_ASSERTION_PREFIX_RE.search(
+                    body[:assertion.start()]
+                ):
+                    return False
+            execution_bound = True
+            continue
+        if not has_negative_status:
+            continue
+        if (
+            not execution_bound
+            or _FAILURE_UNBOUND_SCOPE_RE.search(body)
+            or not _FAILURE_SAFE_CONTINUATION_FULL_RE.fullmatch(body)
+        ):
+            return False
+    return True
+
+
+def _validated_natural_failure_text(
+    final_text: str,
+    *,
+    failure_class: str,
+    failure_reason: str = "",
+) -> bool:
+    """Accept only a whole, status-bound explanation with no free-form tail."""
+    text = re.sub(r"\s+", "", str(final_text or "").strip())
+    if (
+        not text
+        or _FAILURE_INTERNAL_RE.search(text)
+        or _FAILURE_UNBOUND_FACT_RE.search(text)
+        or _FAILURE_BUSINESS_SUBJECT_RE.search(text)
+    ):
+        return False
+    if failure_class == "no_progress":
+        patterns = {
+            DYNAMIC_ACTION_NOT_DISPATCHED: _FAILURE_NOT_STARTED_FULL_RE,
+            DYNAMIC_READ_NOT_DISPATCHED: _FAILURE_NO_PROGRESS_INDEX_FULL_RE,
+            DYNAMIC_READ_PRECONDITION_NOT_MET:
+                _FAILURE_READ_PRECONDITION_FULL_RE,
+            DYNAMIC_ACTION_RESULT_MISSING: _FAILURE_RESULT_MISSING_FULL_RE,
+            DYNAMIC_INDEX_INCOMPLETE: _FAILURE_INDEX_INCOMPLETE_FULL_RE,
+        }
+        pattern = patterns.get(failure_reason)
+    elif failure_class in {"not_found", "ambiguous"}:
+        pattern = _FAILURE_NOT_FOUND_FULL_RE
+    elif failure_class == "denied":
+        pattern = _FAILURE_DENIED_FULL_RE
+    elif failure_class == "empty":
+        pattern = _FAILURE_EMPTY_FULL_RE
+    elif failure_reason == "timeout":
+        pattern = _FAILURE_TIMEOUT_FULL_RE
+    elif failure_reason == "unavailable":
+        pattern = _FAILURE_UNAVAILABLE_FULL_RE
+    elif failure_class == "cancelled":
+        pattern = _FAILURE_CANCELLED_FULL_RE
+    else:
+        pattern = _FAILURE_GENERIC_FULL_RE
+    if pattern and pattern.fullmatch(text):
+        return True
+
+    # Models naturally vary word order and connective words.  Keep the
+    # category and safety binding strict, but do not require one memorized
+    # sentence grammar.
+    if (
+        len(text) > 180
+        or "我" not in text
+        or _FAILURE_POSITIVE_RESULT_RE.search(text)
+        or _FAILURE_NEGATED_CAUSE_RE.search(text)
+    ):
+        return False
+    clauses = [
+        clause
+        for clause in re.split(r"[，,；;。！？!?]+", text)
+        if clause
+    ]
+    if not 1 <= len(clauses) <= 4:
+        return False
+    if not _natural_failure_clauses_are_execution_bound(clauses):
+        return False
+
+    incomplete = bool(
+        _FAILURE_INCOMPLETE_RE.search(text)
+        or re.search(
+            r"(?:无法|不能|没法|没能).{0,16}"
+            r"(?:答复|确认|完成|继续)",
+            text,
+        )
+    )
+    needs_detail = bool(
+        re.search(
+            r"(?:请|需要).{0,10}"
+            r"(?:(?:补充|提供).{0,12}(?:名称|范围|信息|资料|对象)"
+            r"|(?:再)?说(?:得)?(?:更)?具体(?:一点)?)",
+            text,
+        )
+    )
+    if not incomplete and not needs_detail:
+        return False
+
+    category_checks = {
+        DYNAMIC_ACTION_NOT_DISPATCHED: lambda: bool(
+            _FAILURE_NOT_STARTED_RE.search(text)
+        ),
+        DYNAMIC_READ_NOT_DISPATCHED: lambda: bool(
+            _FAILURE_NO_PROGRESS_RE.search(text)
+            and _FAILURE_NO_READ_RE.search(text)
+        ),
+        DYNAMIC_READ_PRECONDITION_NOT_MET: lambda: bool(
+            re.search(r"(?:定位|目录|前置)", text)
+            and re.search(
+                r"(?:读取|查询).{0,12}(?:没有|没能|未能|无法)"
+                r"(?:发起|开始|继续)",
+                text,
+            )
+        ),
+        DYNAMIC_ACTION_RESULT_MISSING: lambda: bool(
+            re.search(r"(?:请求|处理).{0,12}(?:生成|登记|发起)", text)
+            and re.search(
+                r"(?:没有|没能|未能).{0,12}(?:结果|返回)",
+                text,
+            )
+        ),
+        DYNAMIC_INDEX_INCOMPLETE: lambda: bool(
+            re.search(r"(?:目录|索引).{0,12}(?:不完整|无法确认)", text)
+        ),
+        "not_found": lambda: bool(_FAILURE_NOT_FOUND_RE.search(text)),
+        "ambiguous": lambda: bool(_FAILURE_NOT_FOUND_RE.search(text)),
+        "denied": lambda: bool(_FAILURE_PERMISSION_CAUSE_RE.search(text)),
+        "empty": lambda: bool(
+            _FAILURE_NO_READ_RE.search(text)
+            or re.search(
+                r"(?:没有|没能|未能).{0,12}"
+                r"(?:查到|读到|拿到).{0,12}"
+                r"(?:回答|答复|确认|内容|结果|资料)",
+                text,
+            )
+        ),
+        "timeout": lambda: bool(
+            re.search(r"(?:超时|等待时间|没等到|没有等到)", text)
+        ),
+        "unavailable": lambda: bool(
+            re.search(
+                r"(?:连接失败|网络中断|服务(?:暂时)?不可用|"
+                r"读取服务不可用|服务(?:没有|无)响应)",
+                text,
+            )
+        ),
+        "cancelled": lambda: bool(re.search(r"(?:停止|取消)", text)),
+        "execution_error": lambda: bool(
+            re.search(r"(?:失败|错误|问题|没成功|未成功)", text)
+        ),
+        "mixed": lambda: bool(
+            re.search(r"(?:失败|错误|问题|没成功|未成功)", text)
+        ),
+    }
+    category = (
+        failure_reason if failure_class == "no_progress" else failure_reason
+    )
+    category_check = category_checks.get(category)
+    if category_check is None or not category_check():
+        return False
+
+    common_clause = re.compile(
+        r"(?:"
+        r"^(?:抱歉|不好意思)$|"
+        r"(?:我|这次|本轮).{0,28}"
+        r"(?:发起|开始|尝试|处理|执行|查询|查|读取)|"
+        r"(?:没有|没|没能|未能|无法|不能|尚未|还没|暂时无法|暂时不能)|"
+        r"(?:失败|错误|问题|超时|停止|取消|权限|授权|连接|网络|"
+        r"服务不可用|服务暂时不可用|响应|不完整|找不到|未找到|没找到)|"
+        r"(?:请|需要).{0,12}(?:补充|提供|再说|说得)"
+        r")"
+    )
+    return all(common_clause.search(clause) for clause in clauses)
+
+
+def _failure_reason_category(
+    failure_class: str,
+    failures: Sequence[Any],
+) -> str:
+    """Reduce handler-controlled codes to a safe user-facing cause class."""
+    if failure_class != "error":
+        return failure_class
+    error_codes = {
+        str(result.error_code or "").strip().lower()
+        for result in failures
+        if str(result.error_code or "").strip()
+    }
+    if error_codes and error_codes <= _TRANSIENT_TIMEOUT_CODES:
+        return "timeout"
+    if error_codes and error_codes <= _PRESENTATION_UNAVAILABLE_CODES:
+        return "unavailable"
+    return "execution_error"
+
+
+def dynamic_transient_recovery_plan(
+    turn: WorkTurn,
+) -> Optional[dict[str, Any]]:
+    """Allow one caller-controlled recovery turn for a transient read failure.
+
+    This function only authenticates the current failure.  The conversation
+    loop owns the one-shot budget, so a second failed physical call always
+    proceeds to the normal failure finalizer.
+    """
+    if (
+        turn.completion_protocol != MYSTAND_COMPLETION_PROTOCOL_V2
+        or turn.fact_requirement is not None
+        or turn.evidence
+        or _hard_runtime_violation(turn)
+    ):
+        return None
+    lifecycle = _validated_failure_lifecycle(
+        turn,
+        include_single_preaction=True,
+    )
+    if lifecycle is None:
+        return None
+    _, failures = lifecycle
+    if len(failures) != 1:
+        return None
+    failure = failures[0]
+    failed_calls = [
+        call
+        for call in turn.action_calls
+        if call.call_id == failure.call_id
+        and call.action_id == failure.action_id
+    ]
+    if len(failed_calls) != 1:
+        return None
+    failed_call = failed_calls[0]
+    error_code = str(failure.error_code or "").strip().lower()
+    contract = ACTION_OUTPUT_CONTRACTS.get(failure.action_id)
+    _, index_items = _dynamic_index_binding(turn)
+    if (
+        failure.status != "error"
+        or contract is None
+        # A failed index cannot safely "change path" because no trusted scope
+        # exists yet; retrying it would still need another read + finalizer and
+        # can only add cost.  Recovery is therefore limited to one failed read
+        # after a complete owner-bound index.
+        or contract.kind != "read"
+        or not index_items
+        or error_code not in _TRANSIENT_RECOVERY_CODES
+    ):
+        return None
+    reason = (
+        "timeout"
+        if error_code in _TRANSIENT_TIMEOUT_CODES
+        else "unavailable"
+    )
+    safe_scope = [
+        {
+            "resourceUid": str(item["resourceUid"]),
+            "safeLabel": str(item["safeLabel"]),
+            "resourceType": str(item["resourceType"]),
+            "canRead": bool(item["canRead"]),
+            "locked": bool(item["locked"]),
+        }
+        for item in index_items
+    ]
+    indexed_by_ref = {
+        str(item.get("resourceUid") or ""): item
+        for item in index_items
+        if str(item.get("resourceUid") or "")
+    }
+    retry_refs: list[str] = []
+    for key in ("resource_uid", "authorization_id"):
+        value = failed_call.arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            retry_refs.append(value.strip())
+    for key in (
+        "record_refs",
+        "recordRefs",
+        "resource_refs",
+        "resourceRefs",
+    ):
+        values = failed_call.arguments.get(key)
+        if isinstance(values, list):
+            retry_refs.extend(
+                value.strip()
+                for value in values
+                if isinstance(value, str) and value.strip()
+            )
+    retry_refs = sorted(set(retry_refs))
+    if (
+        not retry_refs
+        or _indexed_read_refs(
+            payload={},
+            required_refs=retry_refs,
+            indexed_by_ref=indexed_by_ref,
+        )
+        != retry_refs
+    ):
+        return None
+    return {
+        "reason": reason,
+        "state": (
+            "上一次只读处理等待超时"
+            if reason == "timeout"
+            else "上一次只读处理遇到暂时不可用"
+        ),
+        "safe_scope": safe_scope,
+        "retry": {
+            "action_id": failed_call.action_id,
+            "version": failed_call.version,
+            "arguments": dict(failed_call.arguments),
+            "arguments_digest": _canonical_digest(
+                failed_call.arguments
+            ),
+        },
+    }
+
+
+def dynamic_transient_recovery_tool_call_valid(
+    turn: WorkTurn,
+    *,
+    action_id: str,
+    arguments: Mapping[str, Any],
+) -> bool:
+    """Accept only the exact server-recorded read selected for one recovery."""
+    plan = dynamic_transient_recovery_plan(turn)
+    retry = plan.get("retry") if plan else None
+    return bool(
+        isinstance(retry, Mapping)
+        and str(action_id or "") == str(retry.get("action_id") or "")
+        and isinstance(arguments, Mapping)
+        and _canonical_digest(dict(arguments))
+        == str(retry.get("arguments_digest") or "")
+    )
+
+
+def dynamic_failure_presentation(turn: WorkTurn) -> Optional[dict[str, str]]:
+    """Project one truthful, prompt-safe failure state from runtime facts."""
+    no_progress = _validated_no_progress_failure(turn)
+    if no_progress is not None:
+        failure_class = "no_progress"
+        failure_reason = str(no_progress["reason"])
+    else:
+        lifecycle = _validated_failure_lifecycle(
+            turn,
+            include_single_preaction=True,
+        )
+        if lifecycle is None:
+            return None
+        _, failures = lifecycle
+        statuses = sorted({str(result.status) for result in failures})
+        failure_class = statuses[0] if len(statuses) == 1 else "mixed"
+        failure_reason = _failure_reason_category(failure_class, failures)
+    presentations = {
+        DYNAMIC_READ_NOT_DISPATCHED: (
+            "资料目录查询已完成，但没有继续读取正文",
+            "我完成了资料目录查询，但没有继续读取到能回答问题的内容，"
+            "所以这项任务还没有完成。",
+        ),
+        DYNAMIC_ACTION_NOT_DISPATCHED: (
+            "没有发起实际处理",
+            "我这次没有发起实际处理，所以这项任务还没有完成。",
+        ),
+        DYNAMIC_READ_PRECONDITION_NOT_MET: (
+            "没有先完成资料定位，因此正文读取没有发起",
+            "我这次没能先完成资料定位，所以正文读取没有发起，"
+            "这项任务还没有完成。",
+        ),
+        DYNAMIC_ACTION_RESULT_MISSING: (
+            "处理请求已生成，但没有形成可确认结果",
+            "我这次的处理请求已经生成，但没有形成可以确认的结果，"
+            "所以这项任务还没有完成。",
+        ),
+        DYNAMIC_INDEX_INCOMPLETE: (
+            "资料目录查询已发起，但返回的目录不完整",
+            "我这次发起了资料目录查询，但返回的目录不完整，"
+            "所以这项任务还没有完成。",
+        ),
+        "empty": (
+            "读取已发起，但没有取得可回答内容",
+            "我这次已经发起读取，但没能读到可用内容，"
+            "所以这项任务还没有完成。",
+        ),
+        "not_found": (
+            "没有找到能够唯一匹配的资料",
+            "我这次没有找到能够唯一匹配的资料，"
+            "需要你补充更准确的名称。",
+        ),
+        "denied": (
+            "没有取得完成任务所需的读取权限",
+            "我这次没能取得完成任务所需的读取权限，"
+            "所以这项任务还没有完成。",
+        ),
+        "ambiguous": (
+            "读取目标无法唯一确认",
+            "我这次不能确定唯一匹配的资料，"
+            "需要你补充更准确的名称。",
+        ),
+        "timeout": (
+            "实际处理已发起，但等待结果超时",
+            "我这次已经发起实际处理，但等待结果超时，"
+            "所以这项任务还没有完成。",
+        ),
+        "unavailable": (
+            "实际处理已发起，但读取服务暂时不可用",
+            "我这次已经发起实际处理，但读取服务暂时不可用，"
+            "所以这项任务还没有完成。",
+        ),
+        "cancelled": (
+            "实际处理已发起，但随后被停止",
+            "我这次已经发起实际处理，但随后被停止，"
+            "所以这项任务还没有完成。",
+        ),
+        "mixed": (
+            "实际处理已发起，但其中有步骤没有成功",
+            "我这次已经发起实际处理，但处理没有成功，"
+            "所以这项任务还没有完成。",
+        ),
+        "execution_error": (
+            "实际处理已发起，但执行返回了错误",
+            "我这次已经发起实际处理，但执行返回了错误，"
+            "所以这项任务还没有完成。",
+        ),
+    }
+    state, example = presentations.get(
+        failure_reason,
+        presentations["execution_error"],
+    )
+    return {
+        "failure_class": failure_class,
+        "failure_reason": failure_reason,
+        "state": state,
+        "example": example,
+    }
 
 
 def _matched_action_lifecycle(
@@ -573,6 +1343,58 @@ def _validated_read_evidence(
     return verified, sorted(public_refs)
 
 
+def _validated_transient_recovery_results(
+    turn: WorkTurn,
+    matched: Sequence[tuple[Any, Any]],
+) -> Optional[list[Any]]:
+    """Bind one transient failure to a later exact-target successful retry."""
+    non_success = [
+        (call, result)
+        for call, result in matched
+        if result.status != "success"
+    ]
+    if not non_success:
+        return []
+    if len(non_success) != 1:
+        return None
+    failed_call, failed_result = non_success[0]
+    failed_contract = ACTION_OUTPUT_CONTRACTS.get(failed_call.action_id)
+    error_code = str(failed_result.error_code or "").strip().lower()
+    if (
+        failed_result.status != "error"
+        or failed_contract is None
+        or failed_contract.kind != "read"
+        or error_code not in _TRANSIENT_RECOVERY_CODES
+    ):
+        return None
+    ordered_calls = {
+        call.call_id: index
+        for index, call in enumerate(turn.action_calls)
+    }
+    failed_position = ordered_calls.get(failed_call.call_id)
+    failed_arguments_digest = _canonical_digest(failed_call.arguments)
+    if failed_position is None:
+        return None
+    post_failure = [
+        (call, result)
+        for call, result in matched
+        if (
+            ordered_calls.get(call.call_id, -1) > failed_position
+        )
+    ]
+    if len(post_failure) != 1:
+        return None
+    recovered_call, recovered_result = post_failure[0]
+    recovered = (
+        recovered_result.status == "success"
+        and recovered_call.action_id == failed_call.action_id
+        and recovered_call.version == failed_call.version
+        and _canonical_digest(recovered_call.arguments)
+        == failed_arguments_digest
+    )
+    return [failed_result] if recovered else None
+
+
 def _dynamic_evidence_completion(
     turn: WorkTurn,
     final_text: str,
@@ -603,12 +1425,22 @@ def _dynamic_evidence_completion(
             "blocked_dynamic_action_binding",
         )
     verified_evidence, record_refs = validated
+    transient_failures = _validated_transient_recovery_results(
+        turn,
+        matched,
+    )
+    if transient_failures is None:
+        return CompletionDecision(
+            False,
+            NO_EVIDENCE_MESSAGE,
+            "blocked_dynamic_recovery_binding",
+        )
     receipt = turn.index_receipt
     verification = {
         **_completion_receipt(
             turn,
             completion_kind="evidence-bound",
-            action_count=1 + len(verified_evidence),
+            action_count=len(matched),
             evidence_count=len(verified_evidence),
             output=output,
             decision="evidence_access_verified",
@@ -621,6 +1453,28 @@ def _dynamic_evidence_completion(
         "record_refs_digest": _canonical_digest(record_refs),
         "evidence_digest": evidence_receipt_digest(verified_evidence),
     }
+    if transient_failures:
+        verification.update(
+            {
+                "transient_failure_count": len(transient_failures),
+                "transient_action_result_digest": _canonical_digest(
+                    [
+                        {
+                            "call_id": result.call_id,
+                            "action_id": result.action_id,
+                            "status": result.status,
+                            "error_code": result.error_code,
+                            "payload_digest": _canonical_digest(
+                                result.normalized_payload
+                            ),
+                            "started_at": result.started_at,
+                            "finished_at": result.finished_at,
+                        }
+                        for result in transient_failures
+                    ]
+                ),
+            }
+        )
     return CompletionDecision(
         True,
         output,
@@ -639,13 +1493,17 @@ def _dynamic_failure_completion(
         turn,
         include_single_preaction=True,
     )
+    no_progress_failure = _validated_no_progress_failure(turn)
     if (
         getattr(turn, "completion_finalization", "") != "failure"
         or not output
         or not _completion_binding_valid(turn)
         or _hard_runtime_violation(turn)
         or turn.evidence
-        or failure_lifecycle is None
+        or (
+            failure_lifecycle is None
+            and no_progress_failure is None
+        )
         or getattr(
             turn,
             "completion_finalization_output_digest",
@@ -658,29 +1516,57 @@ def _dynamic_failure_completion(
             NO_EVIDENCE_MESSAGE,
             "blocked_dynamic_failure_binding",
         )
-    action_count, failures = failure_lifecycle
-    failure_statuses = sorted({result.status for result in failures})
-    failure_class = (
-        failure_statuses[0]
-        if len(failure_statuses) == 1
-        else "mixed"
-    )
-    action_result_digest = _canonical_digest(
-        [
-            {
-                "call_id": result.call_id,
-                "action_id": result.action_id,
-                "status": result.status,
-                "error_code": result.error_code,
-                "payload_digest": _canonical_digest(
-                    result.normalized_payload
-                ),
-                "started_at": result.started_at,
-                "finished_at": result.finished_at,
-            }
-            for result in failures
-        ]
-    )
+    if no_progress_failure is not None:
+        action_count = no_progress_failure["action_count"]
+        failure_class = "no_progress"
+        action_result_digest = _canonical_digest(no_progress_failure)
+        failed_action_count = 0
+    else:
+        action_count, failures = failure_lifecycle
+        failure_statuses = sorted({result.status for result in failures})
+        failure_class = (
+            failure_statuses[0]
+            if len(failure_statuses) == 1
+            else "mixed"
+        )
+        action_result_digest = _canonical_digest(
+            [
+                {
+                    "call_id": result.call_id,
+                    "action_id": result.action_id,
+                    "status": result.status,
+                    "error_code": result.error_code,
+                    "payload_digest": _canonical_digest(
+                        result.normalized_payload
+                    ),
+                    "started_at": result.started_at,
+                    "finished_at": result.finished_at,
+                }
+                for result in failures
+            ]
+        )
+        failed_action_count = len(failures)
+    presentation = dynamic_failure_presentation(turn)
+    if (
+        presentation is None
+        or presentation["failure_class"] != failure_class
+    ):
+        return CompletionDecision(
+            False,
+            NO_EVIDENCE_MESSAGE,
+            "blocked_dynamic_failure_binding",
+        )
+    failure_reason = presentation["failure_reason"]
+    if not _validated_natural_failure_text(
+        output,
+        failure_class=failure_class,
+        failure_reason=failure_reason,
+    ):
+        return CompletionDecision(
+            False,
+            NO_EVIDENCE_MESSAGE,
+            "blocked_dynamic_failure_presentation",
+        )
     verification = {
         **_completion_receipt(
             turn,
@@ -691,7 +1577,7 @@ def _dynamic_failure_completion(
             decision="execution_status_bound",
         ),
         "action_result_digest": action_result_digest,
-        "failed_action_count": len(failures),
+        "failed_action_count": failed_action_count,
         "failure_class": failure_class,
     }
     return CompletionDecision(
@@ -735,6 +1621,194 @@ def _validated_failure_lifecycle(
     return len(matched), failures
 
 
+def _validated_no_progress_failure(
+    turn: WorkTurn,
+) -> Optional[dict[str, Any]]:
+    """Authenticate a server-observed no-dispatch execution failure."""
+    reason = getattr(turn, "completion_execution_failure", "")
+    if (
+        reason not in {
+            DYNAMIC_READ_NOT_DISPATCHED,
+            DYNAMIC_ACTION_NOT_DISPATCHED,
+            DYNAMIC_READ_PRECONDITION_NOT_MET,
+            DYNAMIC_ACTION_RESULT_MISSING,
+            DYNAMIC_INDEX_INCOMPLETE,
+        }
+        or turn.completion_protocol != MYSTAND_COMPLETION_PROTOCOL_V2
+        or turn.fact_requirement is not None
+        or turn.evidence
+        or _hard_runtime_violation(turn)
+    ):
+        return None
+    if reason == DYNAMIC_ACTION_NOT_DISPATCHED:
+        if (
+            turn.interaction_kind != "WORK"
+            or turn.index_receipt is not None
+            or turn.action_calls
+            or turn.action_results
+        ):
+            return None
+        return {
+            "schema": "mystand.dynamic-execution-failure.v1",
+            "reason": DYNAMIC_ACTION_NOT_DISPATCHED,
+            "action_count": 0,
+        }
+    if reason == DYNAMIC_READ_PRECONDITION_NOT_MET:
+        denials = list(turn.action_results)
+        if (
+            turn.interaction_kind != "WORK"
+            or turn.action_calls
+            or not denials
+            or turn.pre_action_denials != len(denials)
+            or any(
+                result.status != "denied"
+                or result.error_code != "missing_index_receipt"
+                or ACTION_OUTPUT_CONTRACTS.get(result.action_id) is None
+                or ACTION_OUTPUT_CONTRACTS[result.action_id].kind != "read"
+                for result in denials
+            )
+        ):
+            return None
+        return {
+            "schema": "mystand.dynamic-execution-failure.v1",
+            "reason": DYNAMIC_READ_PRECONDITION_NOT_MET,
+            "action_count": 0,
+            "denial_digest": _canonical_digest(
+                [
+                    {
+                        "call_id": result.call_id,
+                        "action_id": result.action_id,
+                        "status": result.status,
+                        "error_code": result.error_code,
+                    }
+                    for result in denials
+                ]
+            ),
+        }
+    if reason == DYNAMIC_ACTION_RESULT_MISSING:
+        calls = list(turn.action_calls)
+        if not calls:
+            return None
+        call_ids = {call.call_id for call in calls}
+        result_ids = [result.call_id for result in turn.action_results]
+        if (
+            len(call_ids) != len(calls)
+            or len(result_ids) != len(set(result_ids))
+            or any(result_id not in call_ids for result_id in result_ids)
+            or call_ids == set(result_ids)
+        ):
+            return None
+        return {
+            "schema": "mystand.dynamic-execution-failure.v1",
+            "reason": DYNAMIC_ACTION_RESULT_MISSING,
+            "action_count": len(calls),
+            "lifecycle_digest": _canonical_digest(
+                {
+                    "calls": [
+                        {
+                            "call_id": call.call_id,
+                            "action_id": call.action_id,
+                            "version": call.version,
+                        }
+                        for call in calls
+                    ],
+                    "results": [
+                        {
+                            "call_id": result.call_id,
+                            "action_id": result.action_id,
+                            "status": result.status,
+                            "error_code": result.error_code,
+                        }
+                        for result in turn.action_results
+                    ],
+                }
+            ),
+        }
+    if reason == DYNAMIC_INDEX_INCOMPLETE:
+        matched = _matched_action_lifecycle(turn)
+        receipt = turn.index_receipt
+        if (
+            matched is None
+            or not matched
+            or receipt is None
+            or receipt.status != "unavailable"
+            or any(
+                call.action_id != "mystand_resource_index"
+                or result.status != "success"
+                for call, result in matched
+            )
+        ):
+            return None
+        return {
+            "schema": "mystand.dynamic-execution-failure.v1",
+            "reason": DYNAMIC_INDEX_INCOMPLETE,
+            "action_count": len(matched),
+            "index_receipt_digest": _canonical_digest(_mapping(receipt)),
+        }
+    index_receipt_digest, _ = _dynamic_index_binding(turn)
+    matched = _matched_action_lifecycle(turn)
+    if (
+        not index_receipt_digest
+        or matched is None
+        or not matched
+        or any(
+            call.action_id != "mystand_resource_index"
+            or result.status != "success"
+            for call, result in matched
+        )
+        or any(
+            ACTION_OUTPUT_CONTRACTS.get(call.action_id)
+            and ACTION_OUTPUT_CONTRACTS[call.action_id].kind == "read"
+            for call in turn.action_calls
+        )
+    ):
+        return None
+    return {
+        "schema": "mystand.dynamic-execution-failure.v1",
+        "reason": reason,
+        "action_count": len(matched),
+        "index_receipt_digest": index_receipt_digest,
+    }
+
+
+def mark_dynamic_read_no_progress(turn: WorkTurn) -> bool:
+    """Mark a complete index lookup that never dispatched the required read."""
+    previous = getattr(turn, "completion_execution_failure", "")
+    turn.completion_execution_failure = DYNAMIC_READ_NOT_DISPATCHED
+    if _validated_no_progress_failure(turn) is not None:
+        return True
+    turn.completion_execution_failure = previous
+    return False
+
+
+def mark_dynamic_action_no_progress(turn: WorkTurn) -> bool:
+    """Mark a trusted work turn where no site action was dispatched."""
+    previous = getattr(turn, "completion_execution_failure", "")
+    turn.completion_execution_failure = DYNAMIC_ACTION_NOT_DISPATCHED
+    if _validated_no_progress_failure(turn) is not None:
+        return True
+    turn.completion_execution_failure = previous
+    return False
+
+
+def mark_dynamic_execution_no_progress(turn: WorkTurn) -> bool:
+    """Authenticate every safe unfinished lifecycle before finalization."""
+    previous = getattr(turn, "completion_execution_failure", "")
+    candidates = (
+        DYNAMIC_READ_NOT_DISPATCHED,
+        DYNAMIC_READ_PRECONDITION_NOT_MET,
+        DYNAMIC_ACTION_RESULT_MISSING,
+        DYNAMIC_INDEX_INCOMPLETE,
+        DYNAMIC_ACTION_NOT_DISPATCHED,
+    )
+    for reason in candidates:
+        turn.completion_execution_failure = reason
+        if _validated_no_progress_failure(turn) is not None:
+            return True
+    turn.completion_execution_failure = previous
+    return False
+
+
 def dynamic_finalization_mode(
     turn: WorkTurn,
     *,
@@ -762,6 +1836,8 @@ def dynamic_finalization_mode(
         include_single_preaction=include_single_preaction,
     ) is not None:
         return "failure"
+    if not turn.evidence and _validated_no_progress_failure(turn) is not None:
+        return "failure"
     return ""
 
 
@@ -786,6 +1862,11 @@ def check_dynamic_completion(
             NO_EVIDENCE_MESSAGE,
             "blocked_dynamic_not_executed",
         )
+    if (
+        getattr(turn, "completion_finalization", "") == "failure"
+        and _validated_no_progress_failure(turn) is not None
+    ):
+        return _dynamic_failure_completion(turn, final_text)
     action_ids = {
         call.action_id for call in turn.action_calls
     } | {

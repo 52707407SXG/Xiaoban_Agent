@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -37,6 +38,29 @@ from tools.terminal_tool import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname, env_float, env_int
 
 logger = logging.getLogger(__name__)
+
+_STRICT_PAID_SHUTDOWN_GRACE_ENV = "XIAOBAN_STRICT_PAID_SHUTDOWN_GRACE_SECONDS"
+_STRICT_PAID_SHUTDOWN_GRACE_DEFAULT_SECONDS = 10.0
+_STRICT_PAID_SHUTDOWN_GRACE_MIN_SECONDS = 1.0
+_STRICT_PAID_SHUTDOWN_GRACE_MAX_SECONDS = 60.0
+_STRICT_PAID_TERMINAL_ACCOUNTING_EVENT_ATTR = (
+    "_strict_paid_terminal_accounting_event"
+)
+
+
+class StrictPaidWorkerShutdownTimeout(TimeoutError):
+    """A force-closed strict paid provider worker missed its exit grace."""
+
+    def __init__(self, *, reason: str, grace_seconds: float):
+        self.reason = reason
+        self.grace_seconds = grace_seconds
+        self.usage_indeterminate = True
+        self.late_accounting_pending = True
+        super().__init__(
+            "Strict paid provider worker did not stop within "
+            f"{grace_seconds:g}s after forced close ({reason}); "
+            "the request was cancelled"
+        )
 
 
 def _ra():
@@ -122,6 +146,19 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _strict_paid_shutdown_grace_seconds() -> float:
+    configured = _env_float(
+        _STRICT_PAID_SHUTDOWN_GRACE_ENV,
+        _STRICT_PAID_SHUTDOWN_GRACE_DEFAULT_SECONDS,
+    )
+    if not math.isfinite(configured):
+        configured = _STRICT_PAID_SHUTDOWN_GRACE_DEFAULT_SECONDS
+    return min(
+        _STRICT_PAID_SHUTDOWN_GRACE_MAX_SECONDS,
+        max(_STRICT_PAID_SHUTDOWN_GRACE_MIN_SECONDS, configured),
+    )
+
+
 def interruptible_api_call(agent, api_kwargs: dict):
     """
     Run the API call in a background thread so the main conversation loop
@@ -137,6 +174,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
     provider fallback.
     """
     result = {"response": None, "error": None}
+    result_lock = threading.Lock()
     request_client_holder = {"client": None, "owner_tid": None}
     request_client_lock = threading.Lock()
     # Request-local cancellation flag. Distinct from agent._interrupt_requested
@@ -148,6 +186,199 @@ def interruptible_api_call(agent, api_kwargs: dict):
     # a network bug and surfaced to the caller. (PR #6600 — cascading interrupt
     # hang.)
     _request_cancelled = {"value": False}
+    late_usage_callback = getattr(
+        agent,
+        "_strict_late_provider_usage_callback",
+        None,
+    )
+    late_usage_reported = {"value": False}
+    late_usage_persisted = {"value": False}
+    defer_late_callback_until_outer_terminal = {"value": False}
+    outer_terminal_accounting_complete = threading.Event()
+    cancelled_accounting = {
+        "captured": False,
+        "usage": None,
+        "cost_usd": None,
+        "cost_status": None,
+        "cost_source": None,
+    }
+
+    def _capture_accounting_locked(response: Any) -> None:
+        """Keep billing metadata without retaining cancelled response text."""
+
+        if response is None or cancelled_accounting["captured"]:
+            return
+        cancelled_accounting["captured"] = True
+        for field in (
+            "usage",
+            "cost_usd",
+            "cost_status",
+            "cost_source",
+        ):
+            cancelled_accounting[field] = getattr(response, field, None)
+
+    def _attach_cancelled_accounting(error: BaseException) -> None:
+        with result_lock:
+            accounting = dict(cancelled_accounting)
+        if not accounting["captured"]:
+            return
+        for field in (
+            "usage",
+            "cost_usd",
+            "cost_status",
+            "cost_source",
+        ):
+            value = accounting[field]
+            if value is not None:
+                setattr(error, field, value)
+        if hasattr(error, "late_accounting_pending"):
+            error.late_accounting_pending = False
+
+    def _accounting_only_response(response: Any) -> SimpleNamespace:
+        projected = {}
+        for field in (
+            "usage",
+            "cost_usd",
+            "cost_status",
+            "cost_source",
+        ):
+            value = getattr(response, field, None)
+            if value is not None:
+                projected[field] = value
+        return SimpleNamespace(**projected)
+
+    def _invoke_late_usage_callback(response: Any) -> bool:
+        try:
+            late_usage_callback(response)
+        except Exception:
+            logger.exception(
+                "Failed to persist late strict paid provider usage."
+            )
+            return False
+        with result_lock:
+            late_usage_persisted["value"] = True
+        return True
+
+    def _persist_late_usage(
+        response: Any,
+        *,
+        wait_for_outer_terminal: bool = False,
+    ) -> bool:
+        if wait_for_outer_terminal:
+            # Never make the provider worker wait for outer receipt
+            # terminalization: the caller may still be joining this worker.
+            # Project away response text, let the worker exit, and fill usage
+            # only after execute_llm_request explicitly seals cancelled.
+            accounting_response = _accounting_only_response(response)
+
+            def _persist_after_outer_terminal() -> None:
+                outer_terminal_accounting_complete.wait()
+                _invoke_late_usage_callback(accounting_response)
+
+            threading.Thread(
+                target=_persist_after_outer_terminal,
+                daemon=True,
+            ).start()
+            return True
+        return _invoke_late_usage_callback(response)
+
+    def _publish_response(response: Any) -> bool:
+        late_callback = None
+        wait_for_outer_terminal = False
+        with result_lock:
+            if _request_cancelled["value"]:
+                published = False
+                _capture_accounting_locked(response)
+                wait_for_outer_terminal = (
+                    defer_late_callback_until_outer_terminal["value"]
+                )
+                if (
+                    callable(late_usage_callback)
+                    and not late_usage_reported["value"]
+                ):
+                    late_usage_reported["value"] = True
+                    late_callback = late_usage_callback
+            else:
+                result["response"] = response
+                published = True
+        if not published:
+            logger.debug(
+                "Discarding provider response produced after request cancellation."
+            )
+            if late_callback is not None:
+                _persist_late_usage(
+                    response,
+                    wait_for_outer_terminal=wait_for_outer_terminal,
+                )
+        return published
+
+    def _cancel_request(
+        *,
+        error: BaseException | None = None,
+        report_late_usage: bool = True,
+    ) -> None:
+        late_response = None
+        with result_lock:
+            _request_cancelled["value"] = True
+            response = result["response"]
+            _capture_accounting_locked(response)
+            result["response"] = None
+            if error is not None:
+                result["error"] = error
+            if (
+                response is not None
+                and report_late_usage
+                and callable(late_usage_callback)
+                and not late_usage_reported["value"]
+            ):
+                late_usage_reported["value"] = True
+                late_response = response
+            elif response is not None and not report_late_usage:
+                # This response is carried by the cancellation exception, so
+                # a second callback would duplicate accounting and could race
+                # the outer cancelled terminalization. If no response exists
+                # yet, leave the callback armed for the genuinely late worker.
+                late_usage_reported["value"] = True
+            elif response is None and not report_late_usage:
+                defer_late_callback_until_outer_terminal["value"] = True
+        if late_response is not None:
+            logger.debug(
+                "Discarding provider response published before request cancellation."
+            )
+            _persist_late_usage(late_response)
+        if error is not None:
+            with result_lock:
+                wait_for_outer_terminal = (
+                    defer_late_callback_until_outer_terminal["value"]
+                )
+            if wait_for_outer_terminal:
+                setattr(
+                    error,
+                    _STRICT_PAID_TERMINAL_ACCOUNTING_EVENT_ATTR,
+                    outer_terminal_accounting_complete,
+                )
+            with result_lock:
+                usage_was_persisted = late_usage_persisted["value"]
+            if usage_was_persisted:
+                if hasattr(error, "late_accounting_pending"):
+                    error.late_accounting_pending = False
+            else:
+                _attach_cancelled_accounting(error)
+
+    def _interrupted_error(message: str) -> InterruptedError:
+        error = InterruptedError(message)
+        _attach_cancelled_accounting(error)
+        with result_lock:
+            wait_for_outer_terminal = (
+                defer_late_callback_until_outer_terminal["value"]
+            )
+        if wait_for_outer_terminal:
+            setattr(
+                error,
+                _STRICT_PAID_TERMINAL_ACCOUNTING_EVENT_ATTR,
+                outer_terminal_accounting_complete,
+            )
+        return error
 
     def _set_request_client(client):
         with request_client_lock:
@@ -199,13 +430,19 @@ def interruptible_api_call(agent, api_kwargs: dict):
                         api_kwargs=api_kwargs,
                     )
                 )
-                result["response"] = agent._run_codex_stream(
-                    api_kwargs,
-                    client=request_client,
-                    on_first_delta=getattr(agent, "_codex_on_first_delta", None),
+                _publish_response(
+                    agent._run_codex_stream(
+                        api_kwargs,
+                        client=request_client,
+                        on_first_delta=getattr(
+                            agent,
+                            "_codex_on_first_delta",
+                            None,
+                        ),
+                    )
                 )
             elif agent.api_mode == "anthropic_messages":
-                result["response"] = agent._anthropic_messages_create(api_kwargs)
+                _publish_response(agent._anthropic_messages_create(api_kwargs))
             elif agent.api_mode == "bedrock_converse":
                 # Bedrock uses boto3 directly — no OpenAI client needed.
                 # normalize_converse_response produces an OpenAI-compatible
@@ -228,7 +465,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     if is_stale_connection_error(_bedrock_exc):
                         invalidate_runtime_client(region)
                     raise
-                result["response"] = normalize_converse_response(raw_response)
+                _publish_response(normalize_converse_response(raw_response))
             else:
                 request_client = _set_request_client(
                     agent._create_request_openai_client(
@@ -236,20 +473,23 @@ def interruptible_api_call(agent, api_kwargs: dict):
                         api_kwargs=api_kwargs,
                     )
                 )
-                result["response"] = request_client.chat.completions.create(**api_kwargs)
+                _publish_response(request_client.chat.completions.create(**api_kwargs))
         except Exception as e:
             # If the request was cancelled by the main thread's interrupt
             # handler, the transport error is the expected consequence of our
             # own force-close, NOT a network bug. Swallow it instead of
             # surfacing — the main thread raises InterruptedError. (#6600)
-            if _request_cancelled["value"]:
+            with result_lock:
+                cancelled = _request_cancelled["value"]
+                if not cancelled:
+                    result["error"] = e
+            if cancelled:
                 logger.debug(
                     "Non-streaming worker caught %s after request cancellation — "
                     "exiting without surfacing a network error.",
                     type(e).__name__,
                 )
                 return
-            result["error"] = e
         finally:
             _close_request_client_once("request_complete")
 
@@ -374,14 +614,29 @@ def interruptible_api_call(agent, api_kwargs: dict):
             t.join(timeout=2.0)
             return
 
-        strict_poll_count = 0
+        grace_seconds = _strict_paid_shutdown_grace_seconds()
+        shutdown_deadline = time.monotonic() + grace_seconds
         while t.is_alive():
-            t.join(timeout=0.3)
-            strict_poll_count += 1
-            if strict_poll_count % 100 == 0:
-                agent._touch_activity(
-                    f"waiting for strict paid worker shutdown ({reason})"
-                )
+            remaining = shutdown_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            t.join(timeout=min(0.3, remaining))
+
+        if not t.is_alive():
+            return
+
+        shutdown_error = StrictPaidWorkerShutdownTimeout(
+            reason=reason,
+            grace_seconds=grace_seconds,
+        )
+        _cancel_request(
+            error=shutdown_error,
+            report_late_usage=not (
+                reason == "interrupt_abort"
+                or bool(agent._interrupt_requested)
+            ),
+        )
+        raise shutdown_error
 
     _poll_count = 0
     while t.is_alive():
@@ -554,7 +809,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
             # exception handler recognizes the forced transport error as a
             # cancel and exits cleanly instead of surfacing a network error or
             # (in the streaming path) burning full retry cycles. (#6600)
-            _request_cancelled["value"] = True
+            _cancel_request(report_late_usage=False)
             logger.debug(
                 "Force-closing httpx client due to interrupt (not a network error)."
             )
@@ -570,7 +825,9 @@ def interruptible_api_call(agent, api_kwargs: dict):
             except Exception:
                 pass
             _join_after_forced_close("interrupt_abort")
-            raise InterruptedError("Agent interrupted during API call")
+            raise _interrupted_error(
+                "Agent interrupted during API call"
+            )
     # The worker can publish a response and exit between the loop condition
     # and its interrupt check.  For strict paid turns, cancellation must win
     # before any response reaches progress callbacks, transcript persistence,
@@ -579,9 +836,10 @@ def interruptible_api_call(agent, api_kwargs: dict):
         getattr(agent, "_strict_no_automatic_paid_retry", False)
         and agent._interrupt_requested
     ):
-        _request_cancelled["value"] = True
-        result["response"] = None
-        raise InterruptedError("Agent interrupted at provider terminal boundary")
+        _cancel_request(report_late_usage=False)
+        raise _interrupted_error(
+            "Agent interrupted at provider terminal boundary"
+        )
     if result["error"] is not None:
         raise result["error"]
     return result["response"]

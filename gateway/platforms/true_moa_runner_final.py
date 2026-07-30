@@ -58,6 +58,10 @@ class TrueMoARunnerFinalMixin:
                 "true MoA final stage stopped before tools",
             )
         initial_tool_choice = trusted_initial_tool_choice
+        if bool(
+            getattr(trusted_turn, "business_tools_disabled", False)
+        ):
+            initial_tool_choice = ""
         if (
             not initial_tool_choice
             or initial_tool_choice not in self.agent.valid_tool_names

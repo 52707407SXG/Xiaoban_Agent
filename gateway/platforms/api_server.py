@@ -314,6 +314,7 @@ _MYSTAND_STREAM_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 _MYSTAND_FACT_REQUIREMENT_HEADER = "X-Xiaoban-Fact-Requirement"
 _MYSTAND_FACT_SIGNATURE_HEADER = "X-Xiaoban-Fact-Signature"
 _MYSTAND_COMPLETION_PROTOCOL_HEADER = "X-Xiaoban-Completion-Protocol"
+_MYSTAND_BUSINESS_TOOL_MODE_HEADER = "X-Xiaoban-Business-Tool-Mode"
 _MYSTAND_INVOCATION_FINGERPRINT_HEADER = (
     "X-Xiaoban-Invocation-Fingerprint"
 )
@@ -923,6 +924,28 @@ def _mystand_dynamic_evidence_required(
     return False
 
 
+def _mystand_business_tools_disabled(
+    headers: Any,
+    *,
+    completion_protocol: str,
+) -> bool:
+    """Bind diagnostic no-tool mode to the authenticated API request."""
+
+    value = _fact_header_value(
+        headers,
+        _MYSTAND_BUSINESS_TOOL_MODE_HEADER,
+    )
+    if completion_protocol:
+        if value not in {"enabled", "disabled"}:
+            raise ValueError("dynamic business tool mode is invalid")
+        return value == "disabled"
+    if value:
+        raise ValueError(
+            "dynamic business tool mode requires a protocol",
+        )
+    return False
+
+
 def _resolve_mystand_initial_tool_choice(
     user_message: Any,
     system_prompt: Any = None,
@@ -1183,6 +1206,10 @@ def _run_mystand_preexecuted_evidence(
     and the result is bound to the gate-issued callId via PostAction.
     """
     evidence: List[Dict[str, Any]] = []
+    if bool(
+        getattr(trusted_turn, "business_tools_disabled", False)
+    ):
+        return evidence
 
     def _ensure_active() -> None:
         if terminal_controller is not None and terminal_controller.is_set:
@@ -4569,6 +4596,12 @@ class APIServerAdapter(
                     completion_protocol=completion_protocol,
                 )
             )
+            completion_business_tools_disabled = (
+                _mystand_business_tools_disabled(
+                    request.headers,
+                    completion_protocol=completion_protocol,
+                )
+            )
         except ValueError:
             return web.json_response(
                 _openai_error(
@@ -4911,6 +4944,9 @@ class APIServerAdapter(
                         dynamic_evidence_required=(
                             completion_evidence_required
                         ),
+                        business_tools_disabled=(
+                            completion_business_tools_disabled
+                        ),
                         true_moa_snapshot=true_moa_snapshot,
                         paid_call_usage_callback=(
                             (
@@ -5057,6 +5093,9 @@ class APIServerAdapter(
                     completion_binding=completion_binding,
                     dynamic_evidence_required=(
                         completion_evidence_required
+                    ),
+                    business_tools_disabled=(
+                        completion_business_tools_disabled
                     ),
                     true_moa_snapshot=true_moa_snapshot,
                     paid_call_usage_callback=paid_call_usage_callback,
@@ -7330,6 +7369,7 @@ class APIServerAdapter(
             _MYSTAND_FACT_SIGNATURE_HEADER,
             _MYSTAND_COMPLETION_PROTOCOL_HEADER,
             _MYSTAND_EVIDENCE_REQUIRED_HEADER,
+            _MYSTAND_BUSINESS_TOOL_MODE_HEADER,
             _MYSTAND_INVOCATION_FINGERPRINT_HEADER,
         )
         mystand_request = cls._header_present(headers, "X-Xiaoban-Toolset-Policy")

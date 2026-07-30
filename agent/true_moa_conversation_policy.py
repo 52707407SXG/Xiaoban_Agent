@@ -196,6 +196,23 @@ def execute_llm_request(
                 raise RuntimeError(
                     "provider call durable dispatch marker failed"
                 )
+        previous_late_usage_callback = getattr(
+            agent,
+            "_strict_late_provider_usage_callback",
+            None,
+        )
+
+        def persist_late_usage(late_response: Any) -> None:
+            finish_paid_provider_call(
+                agent,
+                ledger,
+                call_id,
+                status="timed_out",
+                response=late_response,
+                error_category="provider_worker_shutdown_timeout",
+            )
+
+        agent._strict_late_provider_usage_callback = persist_late_usage
         try:
             response = perform_api_call(next_api_kwargs)
         except BaseException as exc:
@@ -210,15 +227,46 @@ def execute_llm_request(
                 agent,
                 ledger,
                 call_id,
-                status="cancelled" if cancelled else "failed",
+                status=(
+                    "cancelled"
+                    if cancelled
+                    else (
+                        "timed_out"
+                        if getattr(exc, "usage_indeterminate", False)
+                        else "failed"
+                    )
+                ),
                 response=exc,
                 error_category=(
                     "completion_stopped"
                     if cancelled
-                    else "provider_call_failed"
+                    else (
+                        "provider_worker_shutdown_timeout"
+                        if getattr(exc, "usage_indeterminate", False)
+                        else "provider_call_failed"
+                    )
                 ),
             )
+            terminal_accounting_event = getattr(
+                exc,
+                "_strict_paid_terminal_accounting_event",
+                None,
+            )
+            if terminal_accounting_event is not None:
+                terminal_accounting_event.set()
             raise
+        finally:
+            if (
+                getattr(
+                    agent,
+                    "_strict_late_provider_usage_callback",
+                    None,
+                )
+                is persist_late_usage
+            ):
+                agent._strict_late_provider_usage_callback = (
+                    previous_late_usage_callback
+                )
         finish_paid_provider_call(
             agent,
             ledger,

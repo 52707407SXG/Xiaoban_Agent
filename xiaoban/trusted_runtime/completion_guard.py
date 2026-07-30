@@ -38,6 +38,7 @@ from xiaoban.trusted_runtime.fact_contract import (
 )
 from xiaoban.trusted_runtime.types import (
     CompletionDecision,
+    MYSTAND_COMPLETION_PROTOCOL_V2,
     TrustedIdentity,
     WorkTurn,
     INTERACTION_CHAT,
@@ -801,6 +802,35 @@ def check_completion(final_text: str, turn: WorkTurn) -> CompletionDecision:
     """对最终公开回答做确定性检查；阻断时给出安全文案与结构化原因。"""
     try:
         text = str(final_text or "")
+        if bool(getattr(turn, "business_tools_disabled", False)):
+            diagnostic_denials_only = all(
+                result.status == "denied"
+                and result.error_code == "business_tools_disabled"
+                for result in turn.action_results
+            )
+            if (
+                turn.completion_protocol == MYSTAND_COMPLETION_PROTOCOL_V2
+                and turn.fact_requirement is None
+                and not turn.action_calls
+                and not turn.evidence
+                and turn.index_receipt is None
+                and diagnostic_denials_only
+            ):
+                # The API authenticated this as a read-only explanation of a
+                # previous execution.  Provider tools are hidden and registry
+                # probes are denied before handlers, so no current business
+                # result is being claimed.  Preserve the model's explanation
+                # instead of rewriting it as a fake permission failure.
+                return CompletionDecision(
+                    True,
+                    text,
+                    "allowed_execution_diagnostic",
+                )
+            return CompletionDecision(
+                False,
+                NO_EVIDENCE_MESSAGE,
+                "blocked_execution_diagnostic_contamination",
+            )
         dynamic_decision = check_dynamic_completion(
             turn,
             final_text=text,

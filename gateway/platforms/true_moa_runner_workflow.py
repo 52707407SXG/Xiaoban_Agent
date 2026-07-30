@@ -52,6 +52,7 @@ class TrueMoARunRequest:
     completion_protocol: str
     completion_binding: Dict[str, Any]
     dynamic_evidence_required: bool
+    business_tools_disabled: bool
     true_moa_snapshot: Any
     paid_call_usage_callback: Any
     request_user_id: str
@@ -136,6 +137,13 @@ class TrueMoARunWorkflow(
                     False,
                 )
             )
+            business_tools_disabled = bool(
+                getattr(
+                    request,
+                    "business_tools_disabled",
+                    False,
+                )
+            )
             if dynamic_evidence_required and (
                 not request.mystand_request
                 or request.completion_protocol
@@ -146,7 +154,7 @@ class TrueMoARunWorkflow(
                     "invalid dynamic evidence requirement",
                 )
             trusted_initial_tool_choice = ""
-            if request.mystand_request:
+            if request.mystand_request and not business_tools_disabled:
                 trusted_initial_tool_choice = (
                     request.resolve_mystand_initial_tool_choice(
                         request.user_message,
@@ -229,6 +237,9 @@ class TrueMoARunWorkflow(
                     fact_requirement=request.fact_requirement,
                     completion_protocol=request.completion_protocol,
                     completion_binding=request.completion_binding,
+                    business_tools_disabled=(
+                        business_tools_disabled
+                    ),
                 )
                 trusted_turn_token = activate_turn(trusted_turn)
         except Exception:

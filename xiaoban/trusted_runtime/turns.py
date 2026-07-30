@@ -332,6 +332,7 @@ def begin_turn(
     fact_requirement: Optional[Mapping[str, Any]] = None,
     completion_protocol: str = "",
     completion_binding: Optional[Mapping[str, Any]] = None,
+    business_tools_disabled: bool = False,
 ) -> WorkTurn:
     """服务端开回合：稳定 request/message ID + 服务端解析身份。"""
     turn_id = hashlib.sha256(
@@ -378,20 +379,27 @@ def begin_turn(
             raise ValueError("invalid My Stand completion binding")
     elif bound_completion:
         raise ValueError("completion binding requires a protocol")
+    if business_tools_disabled and protocol != MYSTAND_COMPLETION_PROTOCOL_V2:
+        raise ValueError("business tool mode requires a completion protocol")
     turn = WorkTurn(
         turn_id=turn_id,
         request_id=request_id,
         message_id=message_id,
         channel=channel,
         identity=identity,
-        interaction_kind=classify_interaction(
-            user_message,
-            conversation_history,
-            evidence_required=bool(evidence_required or fact_requirement),
+        interaction_kind=(
+            INTERACTION_CHAT
+            if business_tools_disabled
+            else classify_interaction(
+                user_message,
+                conversation_history,
+                evidence_required=bool(evidence_required or fact_requirement),
+            )
         ),
         index_receipt=None,
         completion_protocol=protocol,
         completion_binding=bound_completion,
+        business_tools_disabled=bool(business_tools_disabled),
         fact_requirement=bound_requirement,
         fact_requirement_digest=(
             _canonical_digest(bound_requirement)
@@ -447,6 +455,13 @@ def begin_action(
     try:
         if not turn.request_id or not turn.message_id:
             return _record_denial(turn, call_id, action_id, "missing_turn_id")
+        if bool(getattr(turn, "business_tools_disabled", False)):
+            return _record_denial(
+                turn,
+                call_id,
+                action_id,
+                "business_tools_disabled",
+            )
         if is_write_action(action_id, args):
             # 写动作不属于只读合同，绝不经由只读链执行或采证。
             return _record_denial(turn, call_id, action_id, "write_isolated")
@@ -997,7 +1012,9 @@ def gate_registry_action(
                 call_id = _approval_tool_call_id.get()
             call_id = call_id or f"mystand_pre_{uuid.uuid4().hex}"
             reason = "dynamic_tool_stage_closed"
-            if write_action:
+            if bool(getattr(turn, "business_tools_disabled", False)):
+                reason = "business_tools_disabled"
+            elif write_action:
                 reason = "write_isolated"
             elif str(
                 getattr(turn, "completion_finalization", "") or ""

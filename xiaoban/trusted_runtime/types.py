@@ -267,6 +267,10 @@ class WorkTurn:
     index_receipt: Optional[IndexReceipt]
     completion_protocol: str = ""
     completion_binding: Dict[str, Any] = field(default_factory=dict)
+    business_tools_disabled: bool = False
+    completion_finalization: str = ""
+    completion_finalization_output_digest: str = ""
+    completion_execution_failure: str = ""
     fact_requirement: Optional[Dict[str, Any]] = None
     fact_requirement_digest: str = ""
     collection_evidence: Optional[Dict[str, Any]] = None
