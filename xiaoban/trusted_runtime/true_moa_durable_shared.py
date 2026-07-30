@@ -392,18 +392,28 @@ def _project_trusted_verification(
             "record_refs_digest",
             "evidence_digest",
         }
+        transient_recovery_fields = {
+            "transient_failure_count",
+            "transient_action_result_digest",
+        }
         failure_fields = {
             "action_result_digest",
             "failed_action_count",
             "failure_class",
         }
         completion_kind = projected.get("completion_kind")
+        no_progress_failure = bool(
+            completion_kind == "failure-bound"
+            and projected.get("failure_class") == "no_progress"
+        )
         common_invalid = (
             projected.get("binding_verified") is not True
             or projected.get("semantic_verified") is not False
             or isinstance(projected.get("action_count"), bool)
             or not isinstance(projected.get("action_count"), int)
-            or projected["action_count"] < 1
+            or projected["action_count"] < (
+                0 if no_progress_failure else 1
+            )
             or isinstance(projected.get("evidence_count"), bool)
             or not isinstance(projected.get("evidence_count"), int)
             or projected["evidence_count"] < 0
@@ -445,22 +455,34 @@ def _project_trusted_verification(
                 "true MoA dynamic verification binding mismatch"
             )
         if completion_kind == "failure-bound":
+            failure_class = projected.get("failure_class")
+            failed_action_count = projected.get("failed_action_count")
+            failure_count_valid = (
+                isinstance(failed_action_count, int)
+                and not isinstance(failed_action_count, bool)
+                and failed_action_count == 0
+                if failure_class == "no_progress"
+                else (
+                    isinstance(failed_action_count, int)
+                    and not isinstance(failed_action_count, bool)
+                    and 1 <= failed_action_count
+                    <= projected["action_count"]
+                )
+            )
             if (
                 set(projected) != common_fields | failure_fields
                 or projected.get("evidence_count") != 0
                 or projected.get("decision") != "execution_status_bound"
-                or isinstance(projected.get("failed_action_count"), bool)
-                or not isinstance(projected.get("failed_action_count"), int)
-                or projected["failed_action_count"] < 1
-                or projected["failed_action_count"]
-                > projected["action_count"]
-                or projected.get("failure_class")
+                or not failure_count_valid
+                or failure_class
                 not in {
                     "ambiguous",
+                    "cancelled",
                     "denied",
                     "empty",
                     "error",
                     "mixed",
+                    "no_progress",
                     "not_found",
                 }
                 or not _OUTCOME_DIGEST.fullmatch(
@@ -472,8 +494,38 @@ def _project_trusted_verification(
                 )
             return projected
         record_refs = projected.get("record_refs")
+        has_transient_recovery = any(
+            field in projected for field in transient_recovery_fields
+        )
+        evidence_expected_fields = common_fields | evidence_fields
+        if has_transient_recovery:
+            evidence_expected_fields |= transient_recovery_fields
+        transient_recovery_valid = (
+            (
+                projected.get("transient_failure_count") == 1
+                and not isinstance(
+                    projected.get("transient_failure_count"),
+                    bool,
+                )
+                and _OUTCOME_DIGEST.fullmatch(
+                    str(
+                        projected.get(
+                            "transient_action_result_digest",
+                        )
+                        or ""
+                    )
+                )
+                and projected.get("action_count")
+                == projected.get("evidence_count") + 2
+            )
+            if has_transient_recovery
+            else (
+                projected.get("action_count")
+                == projected.get("evidence_count") + 1
+            )
+        )
         if (
-            set(projected) != common_fields | evidence_fields
+            set(projected) != evidence_expected_fields
             or completion_kind != "evidence-bound"
             or projected.get("binding_verified") is not True
             or projected.get("semantic_verified") is not False
@@ -486,8 +538,7 @@ def _project_trusted_verification(
                     == "projected_evidence"
                 )
                 or (
-                    projected.get("action_count")
-                    == projected.get("evidence_count") + 1
+                    transient_recovery_valid
                     and projected.get("decision")
                     == "evidence_access_verified"
                 )
