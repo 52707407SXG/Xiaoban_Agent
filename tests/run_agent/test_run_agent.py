@@ -21,13 +21,29 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agent.codex_responses_adapter import _normalize_codex_response
-from agent.conversation_loop import _prepare_finalize_only_call
+from agent.conversation_loop import (
+    _prepare_dynamic_transient_recovery_call,
+    _prepare_finalize_only_call,
+)
 
 import run_agent
 from run_agent import AIAgent
 from agent.error_classifier import FailoverReason
 from agent.memory_manager import MemoryManager
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
+from agent.transports.types import NormalizedResponse
+from xiaoban.trusted_runtime import (
+    TrustedIdentity,
+    activate_turn,
+    begin_action,
+    begin_turn,
+    deactivate_turn,
+    finish_action,
+)
+from xiaoban.trusted_runtime.completion_guard import check_completion
+from xiaoban.trusted_runtime.dynamic_completion import (
+    mark_dynamic_execution_no_progress,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +64,39 @@ def _make_tool_defs(*names: str) -> list:
         }
         for n in names
     ]
+
+
+def _dynamic_work_turn(seed: str):
+    identity = TrustedIdentity(
+        account_id=f"owner-{seed}",
+        data_scope="mystand",
+        source="server_session",
+    )
+    delivery_id = f"delivery-{seed}"
+    message_id = f"message-{seed}"
+    return begin_turn(
+        channel="web",
+        user_message="请处理这项站内任务",
+        identity=identity,
+        request_id=delivery_id,
+        message_id=message_id,
+        evidence_required=True,
+        completion_protocol="dynamic-evidence-v2",
+        completion_binding={
+            "user_id": identity.account_id,
+            "session_id": f"session-{seed}",
+            "delivery_id": delivery_id,
+            "attempt": 1,
+            "message_id": message_id,
+            "request_fingerprint": hashlib.sha256(
+                f"request-{seed}".encode("utf-8")
+            ).hexdigest(),
+            "invocation_fingerprint": hashlib.sha256(
+                f"invocation-{seed}".encode("utf-8")
+            ).hexdigest(),
+            "datascope_fingerprint": identity.datascope_fingerprint,
+        },
+    )
 
 
 def test_is_destructive_command_treats_cp_as_mutating():
@@ -2637,7 +2686,7 @@ class TestExecuteToolCalls:
         with patch("run_agent.time.sleep", return_value=None):
             result = agent.run_conversation("hello")
 
-        assert result["completed"] is True
+        assert result["completed"] is True, result
         assert result["final_response"] == "Recovered"
         output = captured.getvalue()
         assert "API call failed" not in output
@@ -4623,6 +4672,8 @@ class TestRunConversation:
         agent._strict_no_automatic_paid_retry = True
         agent._disable_streaming = True
         agent.max_iterations = 3
+        agent.tools = _make_tool_defs("mystand_resource_index")
+        agent.valid_tool_names = {"mystand_resource_index"}
         first = _mock_response(
             content="我已经查到资料，答案是肯定的。",
             finish_reason="stop",
@@ -4631,51 +4682,1489 @@ class TestRunConversation:
             content="我仍然没有调用站内工具。",
             finish_reason="stop",
         )
+        final = _mock_response(
+            content=(
+                "这次我还没开始实际处理，"
+                "因此我暂时无法完成这项任务。"
+            ),
+            finish_reason="stop",
+        )
         observed_requests = []
 
         def _provider(payload):
             observed_requests.append(payload)
-            return [first, second][len(observed_requests) - 1]
+            return [first, second, final][len(observed_requests) - 1]
 
-        trusted_turn = SimpleNamespace(
-            completion_protocol="dynamic-evidence-v2",
-            interaction_kind="WORK",
-            fact_requirement=None,
-            action_calls=[],
-            action_results=[],
-            evidence=[],
-        )
-        with (
-            patch.object(
-                agent,
-                "_interruptible_api_call",
-                side_effect=_provider,
-            ),
-            patch(
-                "xiaoban.trusted_runtime.turns.current_turn",
-                return_value=trusted_turn,
-            ),
-            patch(
-                "xiaoban.trusted_runtime.dynamic_completion."
-                "dynamic_finalization_mode",
-                return_value="",
-            ),
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("请处理这件事")
+        trusted_turn = _dynamic_work_turn("zero-action-finalizer")
+        active = activate_turn(trusted_turn)
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_api_call",
+                    side_effect=_provider,
+                ),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation("请处理这件事")
+        finally:
+            deactivate_turn(active)
 
-        assert len(observed_requests) == 2
+        assert len(observed_requests) == 3
         retry_system = observed_requests[1]["messages"][0]["content"]
         assert "no completed current-turn My Stand evidence" in str(
             retry_system
         )
-        assert result["final_response"] == "我仍然没有调用站内工具。"
+        assert observed_requests[0].get("tools")
+        assert observed_requests[1].get("tools")
+        assert not observed_requests[2].get("tools")
+        assert result["final_response"] == (
+            "这次我还没开始实际处理，"
+            "因此我暂时无法完成这项任务。"
+        )
         assert "我已经查到资料" not in json.dumps(
             result["messages"],
             ensure_ascii=False,
         )
+        decision = check_completion(
+            result["final_response"],
+            trusted_turn,
+        )
+        assert decision.allowed is True
+        assert decision.verification["failure_class"] == "no_progress"
+        assert decision.verification["action_count"] == 0
+
+    @pytest.mark.parametrize(
+        "bad_response_kind",
+        [
+            "provider_error",
+            "malformed_response",
+            "truncated_response",
+            "content_filter",
+        ],
+    )
+    def test_zero_action_continuation_failure_still_gets_final_reply(
+        self,
+        agent,
+        bad_response_kind,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent.max_iterations = 3
+        agent.tools = _make_tool_defs("mystand_resource_index")
+        agent.valid_tool_names = {"mystand_resource_index"}
+        first = _mock_response(
+            content="我已经查到资料，答案是肯定的。",
+            finish_reason="stop",
+        )
+        if bad_response_kind == "malformed_response":
+            bad_response = SimpleNamespace(choices=[])
+        elif bad_response_kind == "truncated_response":
+            bad_response = _mock_response(
+                content="未完成的截断内容",
+                finish_reason="length",
+            )
+        elif bad_response_kind == "content_filter":
+            bad_response = _mock_response(
+                content="",
+                finish_reason="content_filter",
+            )
+        else:
+            bad_response = None
+        final = _mock_response(
+            content=(
+                "这次我还没开始实际处理，"
+                "因此我暂时无法完成这项任务。"
+            ),
+            finish_reason="stop",
+        )
+        observed_requests = []
+
+        def provider(payload):
+            observed_requests.append(payload)
+            call_number = len(observed_requests)
+            if call_number == 1:
+                return first
+            if (
+                bad_response_kind == "provider_error"
+                and call_number == 2
+            ):
+                raise RuntimeError("simulated continuation provider failure")
+            if call_number == 2:
+                return bad_response
+            return final
+
+        trusted_turn = _dynamic_work_turn(
+            f"zero-action-{bad_response_kind}"
+        )
+        active = activate_turn(trusted_turn)
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_api_call",
+                    side_effect=provider,
+                ),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation("请处理这件事")
+        finally:
+            deactivate_turn(active)
+
+        assert len(observed_requests) == 3
+        assert observed_requests[0].get("tools")
+        assert observed_requests[1].get("tools")
+        assert not observed_requests[2].get("tools")
+        assert result["api_calls"] == 3
+        assert result["final_response"] == (
+            "这次我还没开始实际处理，"
+            "因此我暂时无法完成这项任务。"
+        )
+        decision = check_completion(
+            result["final_response"],
+            trusted_turn,
+        )
+        assert decision.allowed is True
+        assert decision.verification["failure_class"] == "no_progress"
+        assert decision.verification["action_count"] == 0
+
+    def test_indeterminate_transient_worker_does_not_start_finalizer(
+        self,
+        agent,
+    ):
+        from agent.chat_completion_helpers import (
+            StrictPaidWorkerShutdownTimeout,
+        )
+
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent.max_iterations = 3
+        agent.tools = _make_tool_defs("mystand_authorization")
+        agent.valid_tool_names = {"mystand_authorization"}
+        trusted_turn = _dynamic_work_turn(
+            "transient-indeterminate-worker"
+        )
+        index = begin_action(
+            trusted_turn,
+            "mystand_resource_index",
+            "v1",
+            {},
+            call_id="indeterminate-index",
+        )
+        assert index.decision == "allow"
+        finish_action(
+            trusted_turn,
+            index.call.call_id,
+            "mystand_resource_index",
+            "v1",
+            {
+                "schema": "mystand.resource-index.complete.v1",
+                "ok": True,
+                "items": [
+                    {
+                        "resourceUid": "resource-indeterminate",
+                        "safeLabel": "目标资料",
+                        "resourceType": "generic-record",
+                        "canRead": True,
+                        "locked": False,
+                    }
+                ],
+                "hasMore": False,
+                "nextCursor": "",
+            },
+        )
+        failed = begin_action(
+            trusted_turn,
+            "mystand_authorization",
+            "v1",
+            {
+                "operation": "resolve",
+                "resource_uid": "resource-indeterminate",
+            },
+            call_id="indeterminate-timeout",
+        )
+        assert failed.decision == "allow"
+        finish_action(
+            trusted_turn,
+            failed.call.call_id,
+            "mystand_authorization",
+            "v1",
+            {
+                "ok": False,
+                "status": 503,
+                "code": "mystand_authorization_transport_failed",
+            },
+        )
+        observed_requests = []
+
+        def provider(payload):
+            observed_requests.append(payload)
+            raise StrictPaidWorkerShutdownTimeout(
+                reason="stale_call_kill",
+                grace_seconds=10,
+            )
+
+        active = activate_turn(trusted_turn)
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_api_call",
+                    side_effect=provider,
+                ),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation("读取目标资料")
+        finally:
+            deactivate_turn(active)
+
+        assert len(observed_requests) == 1
+        assert observed_requests[0].get("tools")
+        assert result["api_calls"] == 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["final_response"] is None
+        assert "Provider call failed" in result["error"]
+
+    def test_dynamic_index_no_read_uses_one_clean_failure_finalizer(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent.max_iterations = 4
+        agent.tools = _make_tool_defs("mystand_query")
+        agent.valid_tool_names = {"mystand_query"}
+        responses = [
+            _mock_response(
+                content="我已经看过资料，直接回答。",
+                finish_reason="stop",
+            ),
+            _mock_response(
+                content="我仍然不调用后续读取。",
+                finish_reason="stop",
+            ),
+            _mock_response(
+                content=(
+                    "我完成了资料目录查询，"
+                    "但没有继续读取到能回答问题的内容，"
+                    "所以这项任务还没有完成。"
+                ),
+                finish_reason="stop",
+            ),
+        ]
+        observed_requests = []
+
+        def _provider(payload):
+            observed_requests.append(payload)
+            return responses[len(observed_requests) - 1]
+
+        trusted_turn = _dynamic_work_turn("index-no-read-finalizer")
+        index = begin_action(
+            trusted_turn,
+            "mystand_resource_index",
+            "v1",
+            {},
+            call_id="index-call",
+        )
+        assert index.decision == "allow"
+        finish_action(
+            trusted_turn,
+            index.call.call_id,
+            "mystand_resource_index",
+            "v1",
+            {
+                "schema": "mystand.resource-index.complete.v1",
+                "ok": True,
+                "items": [
+                    {
+                        "resourceUid": "resource-run-agent",
+                        "safeLabel": "目标资料",
+                        "resourceType": "generic-record",
+                        "canRead": True,
+                        "locked": False,
+                    }
+                ],
+                "hasMore": False,
+                "nextCursor": "",
+            },
+        )
+        active = activate_turn(trusted_turn)
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_api_call",
+                    side_effect=_provider,
+                ),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation("读取目标资料")
+        finally:
+            deactivate_turn(active)
+
+        assert len(observed_requests) == 3
+        assert observed_requests[0].get("tools")
+        assert observed_requests[1].get("tools")
+        assert not observed_requests[2].get("tools")
+        finalizer_text = json.dumps(
+            observed_requests[2]["messages"],
+            ensure_ascii=False,
+        )
+        assert "资料目录查询已完成，但没有继续读取正文" in finalizer_text
+        assert "我已经看过资料" not in finalizer_text
+        assert "我仍然不调用后续读取" not in finalizer_text
+        assert result["final_response"] == (
+            "我完成了资料目录查询，但没有继续读取到能回答问题的内容，"
+            "所以这项任务还没有完成。"
+        )
+        assert result["completed"] is True
+        assert trusted_turn.completion_finalization == "failure"
+        decision = check_completion(
+            result["final_response"],
+            trusted_turn,
+        )
+        assert decision.allowed is True
+        assert decision.verification["failure_class"] == "no_progress"
+        assert decision.verification["action_count"] == 1
+
+    def test_transient_recovery_request_drops_failed_tool_body(self):
+        trusted_turn = _dynamic_work_turn("transient-redaction")
+        index = begin_action(
+            trusted_turn,
+            "mystand_resource_index",
+            "v1",
+            {},
+            call_id="redaction-index",
+        )
+        assert index.decision == "allow"
+        finish_action(
+            trusted_turn,
+            index.call.call_id,
+            "mystand_resource_index",
+            "v1",
+            {
+                "schema": "mystand.resource-index.complete.v1",
+                "ok": True,
+                "items": [
+                    {
+                        "resourceUid": "resource-redaction",
+                        "safeLabel": "目标资料",
+                        "resourceType": "generic-record",
+                        "canRead": True,
+                        "locked": False,
+                    }
+                ],
+                "hasMore": False,
+                "nextCursor": "",
+            },
+        )
+        failed = begin_action(
+            trusted_turn,
+            "mystand_authorization",
+            "v1",
+            {
+                "operation": "resolve",
+                "resource_uid": "resource-redaction",
+            },
+            call_id="redaction-timeout",
+        )
+        assert failed.decision == "allow"
+        finish_action(
+            trusted_turn,
+            failed.call.call_id,
+            "mystand_authorization",
+            "v1",
+            {
+                "ok": False,
+                "status": 503,
+                "code": "provider_timeout",
+                "detail": "PRIVATE_ERROR_BODY",
+            },
+        )
+        agent = SimpleNamespace(
+            _strict_no_automatic_paid_retry=True,
+            max_iterations=3,
+            iteration_budget=SimpleNamespace(remaining=1),
+        )
+        api_messages = [
+            {"role": "system", "content": "stable policy"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "failed-call"}],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "failed-call",
+                "content": "PRIVATE_ERROR_BODY",
+            },
+        ]
+        active = activate_turn(trusted_turn)
+        try:
+            prepared = _prepare_dynamic_transient_recovery_call(
+                agent,
+                2,
+                api_messages,
+                recovery_used=False,
+                original_user_message="读取目标资料",
+            )
+        finally:
+            deactivate_turn(active)
+
+        assert prepared is True
+        encoded = json.dumps(api_messages, ensure_ascii=False)
+        assert "PRIVATE_ERROR_BODY" not in encoded
+        assert "provider_timeout" not in encoded
+        assert "resource-redaction" in encoded
+        assert "读取目标资料" in encoded
+        assert all(message["role"] != "tool" for message in api_messages)
+
+    def test_zero_future_slot_skips_recovery_and_uses_failure_finalizer(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent.max_iterations = 2
+        agent.tools = _make_tool_defs("mystand_authorization")
+        agent.valid_tool_names = {"mystand_authorization"}
+        trusted_turn = _dynamic_work_turn("transient-final-slot")
+        index = begin_action(
+            trusted_turn,
+            "mystand_resource_index",
+            "v1",
+            {},
+            call_id="final-slot-index",
+        )
+        assert index.decision == "allow"
+        finish_action(
+            trusted_turn,
+            index.call.call_id,
+            "mystand_resource_index",
+            "v1",
+            {
+                "schema": "mystand.resource-index.complete.v1",
+                "ok": True,
+                "items": [
+                    {
+                        "resourceUid": "resource-final-slot",
+                        "safeLabel": "目标资料",
+                        "resourceType": "generic-record",
+                        "canRead": True,
+                        "locked": False,
+                    }
+                ],
+                "hasMore": False,
+                "nextCursor": "",
+            },
+        )
+        failed_arguments = {
+            "operation": "resolve",
+            "resource_uid": "resource-final-slot",
+        }
+        responses = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    _mock_tool_call(
+                        name="mystand_authorization",
+                        arguments=json.dumps(failed_arguments),
+                        call_id="final-slot-timeout",
+                    )
+                ],
+            ),
+            _mock_response(
+                content=(
+                    "我这次已经发起实际处理，但等待结果超时，"
+                    "所以这项任务还没有完成。"
+                ),
+                finish_reason="stop",
+            ),
+        ]
+        observed_requests = []
+        handler_calls = 0
+
+        def provider(payload):
+            observed_requests.append(payload)
+            return responses[len(observed_requests) - 1]
+
+        def execute_failed_read(
+            assistant_message,
+            messages,
+            _task_id,
+            _api_call_count,
+        ):
+            nonlocal handler_calls
+            handler_calls += 1
+            tool_call = assistant_message.tool_calls[0]
+            started = begin_action(
+                trusted_turn,
+                tool_call.function.name,
+                "v1",
+                json.loads(tool_call.function.arguments),
+                call_id=tool_call.id,
+            )
+            assert started.decision == "allow"
+            finish_action(
+                trusted_turn,
+                tool_call.id,
+                tool_call.function.name,
+                "v1",
+                {
+                    "ok": False,
+                    "status": 504,
+                    "code": "provider_timeout",
+                },
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "name": tool_call.function.name,
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(
+                        {
+                            "ok": False,
+                            "status": 504,
+                            "code": "provider_timeout",
+                        }
+                    ),
+                }
+            )
+
+        active = activate_turn(trusted_turn)
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_api_call",
+                    side_effect=provider,
+                ),
+                patch.object(
+                    agent,
+                    "_execute_tool_calls",
+                    side_effect=execute_failed_read,
+                ),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation("读取目标资料")
+        finally:
+            deactivate_turn(active)
+
+        assert len(observed_requests) == 2
+        assert result["api_calls"] == 2
+        assert observed_requests[0].get("tools")
+        assert not observed_requests[1].get("tools")
+        assert handler_calls == 1
+        assert result["final_response"] == (
+            "我这次已经发起实际处理，但等待结果超时，"
+            "所以这项任务还没有完成。"
+        )
+        decision = check_completion(
+            result["final_response"],
+            trusted_turn,
+        )
+        assert decision.allowed is True
+        assert decision.verification["failure_class"] == "error"
+        assert decision.verification["action_count"] == 2
+        assert decision.verification["failed_action_count"] == 1
+
+    @pytest.mark.parametrize(
+        "bad_response_kind",
+        [
+            "invalid_tool",
+            "invalid_json",
+            "empty",
+            "provider_error",
+            "malformed_response",
+            "truncated_response",
+            "content_filter",
+            "duplicate_retry",
+            "exact_plus_unrelated",
+        ],
+    )
+    def test_transient_recovery_protocol_failure_still_gets_final_reply(
+        self,
+        agent,
+        bad_response_kind,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent.max_iterations = 3
+        agent.tools = _make_tool_defs("mystand_authorization")
+        agent.valid_tool_names = {"mystand_authorization"}
+        trusted_turn = _dynamic_work_turn(
+            f"transient-protocol-{bad_response_kind}"
+        )
+        index = begin_action(
+            trusted_turn,
+            "mystand_resource_index",
+            "v1",
+            {},
+            call_id=f"{bad_response_kind}-index",
+        )
+        assert index.decision == "allow"
+        finish_action(
+            trusted_turn,
+            index.call.call_id,
+            "mystand_resource_index",
+            "v1",
+            {
+                "schema": "mystand.resource-index.complete.v1",
+                "ok": True,
+                "items": [
+                    {
+                        "resourceUid": "resource-protocol-failure",
+                        "safeLabel": "目标资料",
+                        "resourceType": "generic-record",
+                        "canRead": True,
+                        "locked": False,
+                    }
+                ],
+                "hasMore": False,
+                "nextCursor": "",
+            },
+        )
+        failed = begin_action(
+            trusted_turn,
+            "mystand_authorization",
+            "v1",
+            {
+                "operation": "resolve",
+                "resource_uid": "resource-protocol-failure",
+            },
+            call_id=f"{bad_response_kind}-timeout",
+        )
+        assert failed.decision == "allow"
+        finish_action(
+            trusted_turn,
+            failed.call.call_id,
+            "mystand_authorization",
+            "v1",
+            {
+                "ok": False,
+                "status": 503,
+                "code": "mystand_authorization_transport_failed",
+            },
+        )
+        if bad_response_kind == "invalid_tool":
+            bad_response = _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    _mock_tool_call(
+                        name="invented_tool",
+                        arguments="{}",
+                        call_id="bad-tool-call",
+                    )
+                ],
+            )
+        elif bad_response_kind == "invalid_json":
+            bad_response = _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    _mock_tool_call(
+                        name="mystand_authorization",
+                        arguments="{",
+                        call_id="bad-json-call",
+                    )
+                ],
+            )
+        elif bad_response_kind in {
+            "duplicate_retry",
+            "exact_plus_unrelated",
+        }:
+            exact_arguments = json.dumps(
+                {
+                    "operation": "resolve",
+                    "resource_uid": "resource-protocol-failure",
+                }
+            )
+            second_arguments = exact_arguments
+            if bad_response_kind == "exact_plus_unrelated":
+                second_arguments = json.dumps(
+                    {
+                        "operation": "resolve",
+                        "resource_uid": "resource-other",
+                    }
+                )
+            bad_response = _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    _mock_tool_call(
+                        name="mystand_authorization",
+                        arguments=exact_arguments,
+                        call_id="parallel-retry-a",
+                    ),
+                    _mock_tool_call(
+                        name="mystand_authorization",
+                        arguments=second_arguments,
+                        call_id="parallel-retry-b",
+                    ),
+                ],
+            )
+        elif bad_response_kind == "provider_error":
+            bad_response = None
+        elif bad_response_kind == "malformed_response":
+            bad_response = SimpleNamespace(choices=[])
+        elif bad_response_kind == "truncated_response":
+            bad_response = _mock_response(
+                content="未完成的截断内容",
+                finish_reason="length",
+            )
+        elif bad_response_kind == "content_filter":
+            bad_response = _mock_response(
+                content="",
+                finish_reason="content_filter",
+            )
+        else:
+            bad_response = _mock_response(
+                content="",
+                finish_reason="stop",
+            )
+        responses = [
+            bad_response,
+            _mock_response(
+                content=(
+                    "我这次已经发起实际处理，但读取服务暂时不可用，"
+                    "所以这项任务还没有完成。"
+                ),
+                finish_reason="stop",
+            ),
+        ]
+        observed_requests = []
+
+        def provider(payload):
+            observed_requests.append(payload)
+            if (
+                bad_response_kind == "provider_error"
+                and len(observed_requests) == 1
+            ):
+                raise RuntimeError("simulated recovery provider failure")
+            return responses[len(observed_requests) - 1]
+
+        active = activate_turn(trusted_turn)
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_api_call",
+                    side_effect=provider,
+                ),
+                patch.object(
+                    agent,
+                    "_execute_tool_calls",
+                    side_effect=AssertionError(
+                        "invalid recovery output reached tool execution"
+                    ),
+                ),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation("读取目标资料")
+        finally:
+            deactivate_turn(active)
+
+        assert len(observed_requests) == 2
+        assert observed_requests[0].get("tools")
+        assert not observed_requests[1].get("tools")
+        assert "resource-protocol-failure" in json.dumps(
+            observed_requests[0],
+            ensure_ascii=False,
+        )
+        assert result["api_calls"] == 2
+        assert result["final_response"] == (
+            "我这次已经发起实际处理，但读取服务暂时不可用，"
+            "所以这项任务还没有完成。"
+        )
+        decision = check_completion(
+            result["final_response"],
+            trusted_turn,
+        )
+        assert decision.allowed is True
+        assert decision.verification["failure_class"] == "error"
+
+    def test_transient_read_recovery_succeeds_and_accounts_every_call(
+        self,
+        agent,
+    ):
+        from xiaoban.trusted_runtime.agent_call_usage import (
+            AgentCallUsageLedger,
+        )
+        from xiaoban.trusted_runtime.paid_call_policy import (
+            SIGNED_MYSTAND_AGENT_POLICY,
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION,
+        )
+
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent.max_iterations = 2
+        agent.provider = SIGNED_MYSTAND_AGENT_POLICY.provider
+        agent.model = SIGNED_MYSTAND_AGENT_POLICY.model
+        agent.max_tokens = min(
+            4_096,
+            SIGNED_MYSTAND_AGENT_POLICY.output_max_tokens,
+        )
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        agent.tools = _make_tool_defs("mystand_authorization")
+        agent.valid_tool_names = {"mystand_authorization"}
+        ledger = AgentCallUsageLedger(
+            provider=str(agent.provider),
+            model=str(agent.model),
+            execution_id="9" * 32,
+        )
+        agent._paid_call_usage_ledger = ledger
+        agent._true_moa_usage_ledger = None
+        agent._paid_call_policy_revision = (
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION
+        )
+
+        trusted_turn = _dynamic_work_turn("transient-loop-success")
+        index = begin_action(
+            trusted_turn,
+            "mystand_resource_index",
+            "v1",
+            {},
+            call_id="loop-index",
+        )
+        assert index.decision == "allow"
+        finish_action(
+            trusted_turn,
+            index.call.call_id,
+            "mystand_resource_index",
+            "v1",
+            {
+                "schema": "mystand.resource-index.complete.v1",
+                "ok": True,
+                "items": [
+                    {
+                        "resourceUid": "resource-loop",
+                        "safeLabel": "目标资料",
+                        "resourceType": "generic-record",
+                        "canRead": True,
+                        "locked": False,
+                    }
+                ],
+                "hasMore": False,
+                "nextCursor": "",
+            },
+        )
+        failed_arguments = {
+            "operation": "resolve",
+            "resource_uid": "resource-loop",
+        }
+        failed = begin_action(
+            trusted_turn,
+            "mystand_authorization",
+            "v1",
+            failed_arguments,
+            call_id="loop-read-timeout",
+        )
+        assert failed.decision == "allow"
+        finish_action(
+            trusted_turn,
+            failed.call.call_id,
+            "mystand_authorization",
+            "v1",
+            {
+                "ok": False,
+                "status": 502,
+                "code": "mystand_authorization_transport_failed",
+                "detail": "PRIVATE_ERROR_BODY",
+            },
+        )
+        responses = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    _mock_tool_call(
+                        name="mystand_authorization",
+                        arguments=json.dumps(failed_arguments),
+                        call_id="loop-read-retry",
+                    )
+                ],
+                usage={
+                    "prompt_tokens": 11,
+                    "completion_tokens": 2,
+                    "total_tokens": 13,
+                    "cached_input_tokens": 0,
+                },
+            ),
+            _mock_response(
+                content="我重新读取成功，目标资料内容是“恢复后的内容”。",
+                finish_reason="stop",
+                usage={
+                    "prompt_tokens": 13,
+                    "completion_tokens": 5,
+                    "total_tokens": 18,
+                    "cached_input_tokens": 0,
+                },
+            ),
+        ]
+        observed_requests = []
+
+        def provider(payload):
+            observed_requests.append(payload)
+            return responses[len(observed_requests) - 1]
+
+        def execute_recovery(
+            assistant_message,
+            messages,
+            _task_id,
+            _api_call_count,
+        ):
+            tool_call = assistant_message.tool_calls[0]
+            arguments = json.loads(tool_call.function.arguments)
+            started = begin_action(
+                trusted_turn,
+                tool_call.function.name,
+                "v1",
+                arguments,
+                call_id=tool_call.id,
+            )
+            assert started.decision == "allow"
+            finish_action(
+                trusted_turn,
+                tool_call.id,
+                tool_call.function.name,
+                "v1",
+                {
+                    "ok": True,
+                    "content": "恢复后的内容",
+                    "resourceUid": "resource-loop",
+                },
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "name": tool_call.function.name,
+                    "tool_call_id": tool_call.id,
+                    "content": "TAMPERED_TRANSCRIPT_BODY",
+                }
+            )
+
+        active = activate_turn(trusted_turn)
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_api_call",
+                    side_effect=provider,
+                ),
+                patch.object(
+                    agent,
+                    "_execute_tool_calls",
+                    side_effect=execute_recovery,
+                ),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation(
+                    "读取目标资料",
+                    conversation_history=[
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "loop-read-retry",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "mystand_authorization",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "name": "mystand_authorization",
+                            "tool_call_id": "loop-read-retry",
+                            "content": "PRIVATE_OLD_BODY",
+                        },
+                    ],
+                )
+        finally:
+            deactivate_turn(active)
+
+        assert result["completed"] is True, result
+        assert result["api_calls"] == 2
+        assert len(observed_requests) == 2
+        assert "PRIVATE_ERROR_BODY" not in json.dumps(
+            observed_requests[0],
+            ensure_ascii=False,
+        )
+        assert "PRIVATE_ERROR_BODY" not in json.dumps(
+            observed_requests[1],
+            ensure_ascii=False,
+        )
+        assert "PRIVATE_OLD_BODY" not in json.dumps(
+            observed_requests[1],
+            ensure_ascii=False,
+        )
+        assert "TAMPERED_TRANSCRIPT_BODY" not in json.dumps(
+            observed_requests[1],
+            ensure_ascii=False,
+        )
+        assert "恢复后的内容" in json.dumps(
+            observed_requests[1],
+            ensure_ascii=False,
+        )
+        assert observed_requests[0].get("tools")
+        assert not observed_requests[1].get("tools")
+        assert len(trusted_turn.action_calls) == 3
+        assert len(trusted_turn.action_results) == 3
+        completion = check_completion(
+            result["final_response"],
+            trusted_turn,
+        )
+        assert completion.allowed is True
+        assert completion.verification["action_count"] == 3
+        assert completion.verification["transient_failure_count"] == 1
+        call_receipts = ledger.to_dict()["calls"]
+        assert len(call_receipts) == 2
+        assert all(call["status"] == "completed" for call in call_receipts)
+        assert all(call["usageStatus"] == "reported" for call in call_receipts)
+
+    def test_transient_read_retry_failure_finalizes_and_accounts_all_calls(
+        self,
+        agent,
+    ):
+        from xiaoban.trusted_runtime.agent_call_usage import (
+            AgentCallUsageLedger,
+        )
+        from xiaoban.trusted_runtime.paid_call_policy import (
+            SIGNED_MYSTAND_AGENT_POLICY,
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION,
+        )
+
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent.max_iterations = 4
+        agent.provider = SIGNED_MYSTAND_AGENT_POLICY.provider
+        agent.model = SIGNED_MYSTAND_AGENT_POLICY.model
+        agent.max_tokens = min(
+            4_096,
+            SIGNED_MYSTAND_AGENT_POLICY.output_max_tokens,
+        )
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        agent.tools = _make_tool_defs(
+            "mystand_resource_index",
+            "mystand_authorization",
+        )
+        agent.valid_tool_names = {
+            "mystand_resource_index",
+            "mystand_authorization",
+        }
+        ledger = AgentCallUsageLedger(
+            provider=str(agent.provider),
+            model=str(agent.model),
+            execution_id="8" * 32,
+        )
+        agent._paid_call_usage_ledger = ledger
+        agent._true_moa_usage_ledger = None
+        agent._paid_call_policy_revision = (
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION
+        )
+        trusted_turn = _dynamic_work_turn("transient-loop-failed")
+        arguments = {
+            "operation": "resolve",
+            "resource_uid": "resource-failed-loop",
+        }
+        responses = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    _mock_tool_call(
+                        name="mystand_resource_index",
+                        arguments="{}",
+                        call_id="failed-loop-index",
+                    )
+                ],
+                usage={
+                    "prompt_tokens": 8,
+                    "completion_tokens": 2,
+                    "total_tokens": 10,
+                    "cached_input_tokens": 0,
+                },
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    _mock_tool_call(
+                        name="mystand_authorization",
+                        arguments=json.dumps(arguments),
+                        call_id="failed-loop-first-read",
+                    )
+                ],
+                usage={
+                    "prompt_tokens": 9,
+                    "completion_tokens": 2,
+                    "total_tokens": 11,
+                    "cached_input_tokens": 0,
+                },
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    _mock_tool_call(
+                        name="mystand_authorization",
+                        arguments=json.dumps(arguments),
+                        call_id="failed-loop-retry-read",
+                    )
+                ],
+                usage={
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "total_tokens": 12,
+                    "cached_input_tokens": 0,
+                },
+            ),
+            _mock_response(
+                content=(
+                    "我这次已经发起实际处理，但读取服务暂时不可用，"
+                    "所以这项任务还没有完成。"
+                ),
+                finish_reason="stop",
+                usage={
+                    "prompt_tokens": 8,
+                    "completion_tokens": 5,
+                    "total_tokens": 13,
+                    "cached_input_tokens": 0,
+                },
+            ),
+        ]
+        observed_requests = []
+        handler_calls = 0
+
+        def provider(payload):
+            observed_requests.append(payload)
+            return responses[len(observed_requests) - 1]
+
+        def execute_failed_read(
+            assistant_message,
+            messages,
+            _task_id,
+            _api_call_count,
+        ):
+            nonlocal handler_calls
+            handler_calls += 1
+            tool_call = assistant_message.tool_calls[0]
+            parsed_arguments = json.loads(tool_call.function.arguments)
+            if tool_call.function.name == "mystand_resource_index":
+                assert parsed_arguments == {}
+                started = begin_action(
+                    trusted_turn,
+                    tool_call.function.name,
+                    "v1",
+                    parsed_arguments,
+                    call_id=tool_call.id,
+                )
+                assert started.decision == "allow"
+                index_result = {
+                    "schema": "mystand.resource-index.complete.v1",
+                    "ok": True,
+                    "items": [
+                        {
+                            "resourceUid": "resource-failed-loop",
+                            "safeLabel": "目标资料",
+                            "resourceType": "generic-record",
+                            "canRead": True,
+                            "locked": False,
+                        }
+                    ],
+                    "hasMore": False,
+                    "nextCursor": "",
+                }
+                finish_action(
+                    trusted_turn,
+                    tool_call.id,
+                    tool_call.function.name,
+                    "v1",
+                    index_result,
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "name": tool_call.function.name,
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(index_result),
+                    }
+                )
+                return
+            assert parsed_arguments == arguments
+            started = begin_action(
+                trusted_turn,
+                tool_call.function.name,
+                "v1",
+                parsed_arguments,
+                call_id=tool_call.id,
+            )
+            assert started.decision == "allow"
+            private_detail = f"PRIVATE_FAILURE_{handler_calls - 1}"
+            finish_action(
+                trusted_turn,
+                tool_call.id,
+                tool_call.function.name,
+                "v1",
+                {
+                    "ok": False,
+                    "status": 502,
+                    "code": "mystand_authorization_transport_failed",
+                    "detail": private_detail,
+                },
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "name": tool_call.function.name,
+                    "tool_call_id": tool_call.id,
+                    "content": private_detail,
+                }
+            )
+
+        active = activate_turn(trusted_turn)
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_api_call",
+                    side_effect=provider,
+                ),
+                patch.object(
+                    agent,
+                    "_execute_tool_calls",
+                    side_effect=execute_failed_read,
+                ),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation("读取目标资料")
+        finally:
+            deactivate_turn(active)
+
+        assert len(observed_requests) == 4
+        assert result["api_calls"] == 4
+        assert handler_calls == 3
+        assert observed_requests[0].get("tools")
+        assert observed_requests[1].get("tools")
+        assert observed_requests[2].get("tools")
+        assert not observed_requests[3].get("tools")
+        finalizer_payload = json.dumps(
+            observed_requests[3],
+            ensure_ascii=False,
+        )
+        assert "PRIVATE_FAILURE_1" not in finalizer_payload
+        assert "PRIVATE_FAILURE_2" not in finalizer_payload
+        assert len(trusted_turn.action_calls) == 3
+        assert len(trusted_turn.action_results) == 3
+        assert result["final_response"] == (
+            "我这次已经发起实际处理，但读取服务暂时不可用，"
+            "所以这项任务还没有完成。"
+        )
+        decision = check_completion(
+            result["final_response"],
+            trusted_turn,
+        )
+        assert decision.allowed is True
+        assert decision.verification["action_count"] == 3
+        assert decision.verification["failed_action_count"] == 2
+        call_receipts = ledger.to_dict()["calls"]
+        assert len(call_receipts) == 4
+        assert [call["ordinal"] for call in call_receipts] == [1, 2, 3, 4]
+        assert len({call["callId"] for call in call_receipts}) == 4
+        assert all(call["status"] == "completed" for call in call_receipts)
+        assert all(call["usageStatus"] == "reported" for call in call_receipts)
+
+    def test_failure_finalizer_does_not_retry_incomplete_scratchpad(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent.max_iterations = 2
+        agent.tools = _make_tool_defs("mystand_resource_index")
+        agent.valid_tool_names = {"mystand_resource_index"}
+        trusted_turn = _dynamic_work_turn("finalizer-scratchpad")
+        assert mark_dynamic_execution_no_progress(trusted_turn) is True
+        provider = MagicMock(
+            return_value=_mock_response(
+                content="<REASONING_SCRATCHPAD>unfinished",
+                finish_reason="stop",
+            )
+        )
+        active = activate_turn(trusted_turn)
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_api_call",
+                    side_effect=provider,
+                ),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation("请处理这件事")
+        finally:
+            deactivate_turn(active)
+
+        assert provider.call_count == 1
+        assert result["completed"] is False
+        assert result.get("partial") is True, result
+        assert "incomplete reasoning scratchpad" in result["error"]
+
+    def test_failure_finalizer_rejects_codex_intermediate_ack_once(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent.max_iterations = 2
+        agent.tools = _make_tool_defs("mystand_resource_index")
+        agent.valid_tool_names = {"mystand_resource_index"}
+        agent.api_mode = "chat_completions"
+        trusted_turn = _dynamic_work_turn("finalizer-codex-ack")
+        assert mark_dynamic_execution_no_progress(trusted_turn) is True
+        provider = MagicMock(
+            return_value=_mock_response(
+                content="明白，我马上处理。",
+                finish_reason="stop",
+            )
+        )
+        transport = agent._get_transport()
+
+        def _normalize_as_codex(_response, **_kwargs):
+            agent.api_mode = "codex_responses"
+            return NormalizedResponse(
+                content="明白，我马上处理。",
+                tool_calls=[],
+                finish_reason="stop",
+            )
+
+        active = activate_turn(trusted_turn)
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_api_call",
+                    side_effect=provider,
+                ),
+                patch.object(
+                    transport,
+                    "normalize_response",
+                    side_effect=_normalize_as_codex,
+                ),
+                patch.object(
+                    agent,
+                    "_get_transport",
+                    return_value=transport,
+                ),
+                patch.object(
+                    agent,
+                    "_looks_like_codex_intermediate_ack",
+                    return_value=True,
+                ),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation("请处理这件事")
+        finally:
+            deactivate_turn(active)
+
+        assert provider.call_count == 1
+        assert result["completed"] is False
+        assert result.get("partial") is True, result
+        assert result["turn_exit_reason"].endswith(
+            "(finalize_intermediate_ack)"
+        )
+
+    def test_failure_finalizer_does_not_retry_response_processing_error(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent.max_iterations = 2
+        agent.tools = _make_tool_defs("mystand_resource_index")
+        agent.valid_tool_names = {"mystand_resource_index"}
+        agent.api_mode = "chat_completions"
+        trusted_turn = _dynamic_work_turn("finalizer-processing-error")
+        assert mark_dynamic_execution_no_progress(trusted_turn) is True
+        provider = MagicMock(
+            return_value=_mock_response(
+                content="不会公开的占位回复",
+                finish_reason="stop",
+            )
+        )
+        transport = agent._get_transport()
+        active = activate_turn(trusted_turn)
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_api_call",
+                    side_effect=provider,
+                ),
+                patch.object(
+                    transport,
+                    "normalize_response",
+                    side_effect=RuntimeError("synthetic normalize failure"),
+                ) as normalize,
+                patch.object(
+                    agent,
+                    "_get_transport",
+                    return_value=transport,
+                ),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation("请处理这件事")
+        finally:
+            deactivate_turn(active)
+
+        assert provider.call_count == 1
+        assert normalize.call_count == 1, result
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result.get("final_response") is None
+        assert "response processing failed" in result["error"]
 
     def test_dynamic_finalize_budget_keeps_single_call_usable(self):
         trusted_turn = SimpleNamespace(

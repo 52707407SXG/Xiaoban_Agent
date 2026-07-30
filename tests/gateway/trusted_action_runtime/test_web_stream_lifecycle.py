@@ -82,6 +82,8 @@ DELIVERY_DYNAMIC_INVALID = "xbd_" + "0e" * 20
 DELIVERY_DYNAMIC_CONFLICT = "xbd_" + "0f" * 20
 DELIVERY_DYNAMIC_WORK = "xbd_" + "10" * 20
 DELIVERY_DYNAMIC_CHAT = "xbd_" + "11" * 20
+DELIVERY_DYNAMIC_DIAGNOSTIC = "xbd_" + "12" * 20
+DELIVERY_DYNAMIC_TOOL_MODE_CONFLICT = "xbd_" + "13" * 20
 FINGERPRINT_A = hashlib.sha256(b"wave2-stream-fingerprint-a").hexdigest()
 FINGERPRINT_B = hashlib.sha256(b"wave2-stream-fingerprint-b").hexdigest()
 
@@ -141,11 +143,13 @@ def _dynamic_stream_headers(
     delivery_id: str,
     *,
     evidence_required: str = "0",
+    business_tool_mode: str = "enabled",
 ) -> dict[str, str]:
     headers = _mystand_stream_headers(delivery_id)
     headers.update({
         "X-Xiaoban-Completion-Protocol": "dynamic-evidence-v2",
         MYSTAND_EVIDENCE_REQUIRED_HEADER: evidence_required,
+        "X-Xiaoban-Business-Tool-Mode": business_tool_mode,
         "X-Xiaoban-Delivery-Attempt": "1",
         "X-Xiaoban-Invocation-Fingerprint": FINGERPRINT_B,
     })
@@ -179,7 +183,15 @@ def _visible_sse_text(body: str) -> str:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "mutation",
-    ["missing", "empty", "word", "number", "without_protocol"],
+    [
+        "missing",
+        "empty",
+        "word",
+        "number",
+        "missing_tool_mode",
+        "invalid_tool_mode",
+        "without_protocol",
+    ],
 )
 async def test_dynamic_evidence_header_rejects_before_agent_dispatch(
     mutation,
@@ -194,6 +206,10 @@ async def test_dynamic_evidence_header_rejects_before_agent_dispatch(
         headers[MYSTAND_EVIDENCE_REQUIRED_HEADER] = "true"
     elif mutation == "number":
         headers[MYSTAND_EVIDENCE_REQUIRED_HEADER] = "2"
+    elif mutation == "missing_tool_mode":
+        headers.pop("X-Xiaoban-Business-Tool-Mode")
+    elif mutation == "invalid_tool_mode":
+        headers["X-Xiaoban-Business-Tool-Mode"] = "diagnostic"
     else:
         headers.pop("X-Xiaoban-Completion-Protocol")
     mock_run = AsyncMock(
@@ -250,16 +266,108 @@ async def test_dynamic_work_bit_is_idempotency_bound():
 
 
 @pytest.mark.asyncio
+async def test_dynamic_business_tool_mode_is_idempotency_bound():
+    adapter = _make_adapter()
+    mock_run = AsyncMock(
+        return_value=({"final_response": "中性回复", "messages": []}, _USAGE)
+    )
+    app = _create_app(adapter)
+    with patch.object(adapter, "_run_agent", new=mock_run):
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post(
+                "/v1/chat/completions",
+                headers=_dynamic_stream_headers(
+                    DELIVERY_DYNAMIC_TOOL_MODE_CONFLICT,
+                    business_tool_mode="enabled",
+                ),
+                json=_stream_body("请解释上一轮"),
+            )
+            await first.read()
+            second = await cli.post(
+                "/v1/chat/completions",
+                headers=_dynamic_stream_headers(
+                    DELIVERY_DYNAMIC_TOOL_MODE_CONFLICT,
+                    business_tool_mode="disabled",
+                ),
+                json=_stream_body("请解释上一轮"),
+            )
+            second_body = await second.text()
+
+    assert first.status == 200
+    assert second.status == 409, second_body
+    assert mock_run.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_normal_diagnostic_tool_mode_reaches_stream_and_nonstream_runner(
+    monkeypatch,
+    tmp_path,
+    stream,
+):
+    from gateway.platforms import api_server
+
+    adapter = _make_adapter()
+    delivery_id = "xbd_" + ("14" if stream else "15") * 20
+    headers = _dynamic_stream_headers(
+        delivery_id,
+        evidence_required="0",
+        business_tool_mode="disabled",
+    )
+    if not stream:
+        headers["Idempotency-Key"] = delivery_id
+    mock_run = AsyncMock(
+        return_value=(
+            {"final_response": "上一轮没有形成可用结果。", "messages": []},
+            _USAGE,
+        ),
+    )
+    cache = api_server._IdempotencyCache(
+        durable_path=str(tmp_path / f"normal-diagnostic-{stream}.sqlite"),
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    app = _create_app(adapter)
+    with patch.object(adapter, "_run_agent", new=mock_run):
+        async with TestClient(TestServer(app)) as cli:
+            response = await cli.post(
+                "/v1/chat/completions",
+                headers=headers,
+                json={
+                    "model": "test",
+                    "messages": [{
+                        "role": "user",
+                        "content": (
+                            "刚才查 AUTH-ABCDEFG 为什么失败？"
+                            "不要索引，直接读库"
+                        ),
+                    }],
+                    "stream": stream,
+                },
+            )
+            await response.read()
+    cache._durable.close()
+
+    assert response.status == 200
+    mock_run.assert_awaited_once()
+    runner_kwargs = mock_run.await_args.kwargs
+    assert runner_kwargs["business_tools_disabled"] is True
+    assert runner_kwargs["dynamic_evidence_required"] is False
+    assert runner_kwargs["true_moa_snapshot"] is None
+
+
+@pytest.mark.asyncio
 async def test_dynamic_work_and_chat_use_only_server_bit_for_zero_call_egress():
     adapter = _make_adapter()
     answer = "同一条没有工具调用的模型正文"
     mock_agent = _mock_agent(answer)
     interaction_kinds: list[str] = []
+    business_tool_modes: list[bool] = []
     from xiaoban.trusted_runtime.turns import begin_turn as real_begin_turn
 
     def _recording_begin_turn(*args, **kwargs):
         turn = real_begin_turn(*args, **kwargs)
         interaction_kinds.append(turn.interaction_kind)
+        business_tool_modes.append(turn.business_tools_disabled)
         return turn
 
     app = _create_app(adapter)
@@ -289,13 +397,25 @@ async def test_dynamic_work_and_chat_use_only_server_bit_for_zero_call_egress():
                 json=_stream_body("请处理这件事"),
             )
             chat_body = await chat.text()
+            diagnostic = await cli.post(
+                "/v1/chat/completions",
+                headers=_dynamic_stream_headers(
+                    DELIVERY_DYNAMIC_DIAGNOSTIC,
+                    evidence_required="0",
+                    business_tool_mode="disabled",
+                ),
+                json=_stream_body("请解释上一轮为什么失败"),
+            )
+            diagnostic_body = await diagnostic.text()
 
-    assert work.status == chat.status == 200
-    assert interaction_kinds == ["WORK", "CHAT"]
+    assert work.status == chat.status == diagnostic.status == 200
+    assert interaction_kinds == ["WORK", "CHAT", "CHAT"]
+    assert business_tool_modes == [False, False, True]
     assert _visible_sse_text(work_body) == ""
     assert "这轮我没有真正查到站内资料" not in work_body
     assert "event: xiaoban.error" in work_body
     assert _visible_sse_text(chat_body) == answer
+    assert _visible_sse_text(diagnostic_body) == answer
 
 
 # R1（§B R1 / G2）：trusted turn request_id 绑定 Delivery-Id 原值

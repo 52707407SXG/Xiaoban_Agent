@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
+from agent import chat_completion_helpers as helpers
+from agent import true_moa_conversation_policy as conversation_policy
 from agent.true_moa_conversation_policy import execute_llm_request
+from agent.chat_completion_helpers import StrictPaidWorkerShutdownTimeout
 from gateway.platforms.agent_call_accounting import bind_paid_call_ledger
 from gateway.platforms.api_server import _IdempotencyCache
 from gateway.platforms.api_server import APIServerAdapter
@@ -364,6 +370,354 @@ def test_stop_fence_keeps_late_usage_without_reopening_status():
     assert receipt["errorCategory"] == "completion_stopped"
     assert receipt["usageStatus"] == "reported"
     assert receipt["totalTokens"] == 11
+
+
+def test_worker_shutdown_timeout_blocks_zero_settlement_until_late_usage():
+    snapshots: list[dict] = []
+    ledger = AgentCallUsageLedger(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        execution_id="e" * 32,
+        on_change=lambda value: snapshots.append(value),
+    )
+    agent = _agent(ledger)
+    late_callback = None
+
+    def provider_call(_kwargs):
+        nonlocal late_callback
+        late_callback = agent._strict_late_provider_usage_callback
+        raise StrictPaidWorkerShutdownTimeout(
+            reason="stale_call_kill",
+            grace_seconds=10,
+        )
+
+    with pytest.raises(StrictPaidWorkerShutdownTimeout):
+        _execute(agent, provider_call, request_id="late-usage", count=1)
+
+    before = ledger.to_dict()["calls"][0]
+    assert before["status"] == "timed_out"
+    assert before["usageStatus"] == "unavailable"
+    assert before["errorCategory"] == "provider_worker_shutdown_timeout"
+    assert late_callback is not None
+
+    late_callback(SimpleNamespace(usage=_usage(9, 4)))
+
+    after = ledger.to_dict()["calls"][0]
+    assert after["status"] == "timed_out"
+    assert after["usageStatus"] == "reported"
+    assert after["totalTokens"] == 13
+    assert snapshots[-1]["calls"][0]["totalTokens"] == 13
+
+
+def test_worker_shutdown_usage_keeps_cancelled_terminal_status():
+    ledger = AgentCallUsageLedger(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        execution_id="f" * 32,
+    )
+    agent = _agent(ledger)
+
+    def provider_call(_kwargs):
+        agent._interrupt_requested = True
+        error = StrictPaidWorkerShutdownTimeout(
+            reason="interrupt_abort",
+            grace_seconds=10,
+        )
+        error.usage = _usage(12, 6)
+        error.late_accounting_pending = False
+        raise error
+
+    with pytest.raises(StrictPaidWorkerShutdownTimeout):
+        _execute(agent, provider_call, request_id="cancelled-usage", count=1)
+
+    receipt = ledger.to_dict()["calls"][0]
+    assert receipt["status"] == "cancelled"
+    assert receipt["usageStatus"] == "reported"
+    assert receipt["totalTokens"] == 18
+    assert receipt["errorCategory"] == "completion_stopped"
+
+
+def test_interrupt_reports_usage_after_cancelled_main_thread_returns(
+    monkeypatch,
+):
+    ledger = AgentCallUsageLedger(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        execution_id="1" * 32,
+    )
+    agent = _agent(ledger)
+    provider_entered = threading.Event()
+    release_provider = threading.Event()
+    worker_finished = threading.Event()
+    fake_client = MagicMock()
+    sentinel = SimpleNamespace(
+        choices=[SimpleNamespace(message="PRIVATE_LATE_CANCELLED")],
+        usage=_usage(14, 9),
+    )
+
+    def create(**_kwargs):
+        provider_entered.set()
+        agent._interrupt_requested = True
+        assert release_provider.wait(2)
+        return sentinel
+
+    def close(_client, *, reason):
+        assert reason == "request_complete"
+        worker_finished.set()
+
+    fake_client.chat.completions.create.side_effect = create
+    agent._strict_no_automatic_paid_retry = True
+    agent._compute_non_stream_stale_timeout = lambda _kwargs: 5.0
+    agent._touch_activity = MagicMock()
+    agent._create_request_openai_client = MagicMock(
+        return_value=fake_client
+    )
+    agent._abort_request_openai_client = MagicMock()
+    agent._close_request_openai_client = MagicMock(side_effect=close)
+    monkeypatch.setattr(
+        helpers,
+        "_strict_paid_shutdown_grace_seconds",
+        lambda: 0.05,
+    )
+
+    def provider_call(kwargs):
+        return helpers.interruptible_api_call(agent, kwargs)
+
+    with pytest.raises(StrictPaidWorkerShutdownTimeout) as exc_info:
+        _execute(
+            agent,
+            provider_call,
+            request_id="late-after-cancel",
+            count=1,
+        )
+
+    assert provider_entered.is_set()
+    assert "PRIVATE_LATE_CANCELLED" not in str(exc_info.value)
+    before = ledger.to_dict()["calls"][0]
+    assert before["status"] == "cancelled"
+    assert before["usageStatus"] == "unavailable"
+    assert before["errorCategory"] == "completion_stopped"
+
+    release_provider.set()
+    assert worker_finished.wait(1)
+
+    after = ledger.to_dict()["calls"][0]
+    assert after["status"] == "cancelled"
+    assert after["usageStatus"] == "reported"
+    assert after["totalTokens"] == 23
+    assert after["errorCategory"] == "completion_stopped"
+
+
+def test_interrupt_response_during_shutdown_grace_does_not_deadlock(
+    monkeypatch,
+):
+    usage_reported = threading.Event()
+
+    def capture_usage(snapshot):
+        calls = snapshot.get("calls") or []
+        if calls and calls[0].get("usageStatus") == "reported":
+            usage_reported.set()
+
+    ledger = AgentCallUsageLedger(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        execution_id="3" * 32,
+        on_change=capture_usage,
+    )
+    agent = _agent(ledger)
+    provider_entered = threading.Event()
+    release_provider = threading.Event()
+    abort_seen = threading.Event()
+    worker_finished = threading.Event()
+    fake_client = MagicMock()
+    sentinel = SimpleNamespace(
+        choices=[SimpleNamespace(message="PRIVATE_DURING_GRACE")],
+        usage=_usage(16, 11),
+    )
+
+    def create(**_kwargs):
+        provider_entered.set()
+        agent._interrupt_requested = True
+        assert release_provider.wait(3)
+        return sentinel
+
+    def abort(_client, *, reason):
+        assert reason == "interrupt_abort"
+        abort_seen.set()
+
+    def close(_client, *, reason):
+        assert reason == "request_complete"
+        worker_finished.set()
+
+    fake_client.chat.completions.create.side_effect = create
+    agent._strict_no_automatic_paid_retry = True
+    agent._compute_non_stream_stale_timeout = lambda _kwargs: 5.0
+    agent._touch_activity = MagicMock()
+    agent._create_request_openai_client = MagicMock(
+        return_value=fake_client
+    )
+    agent._abort_request_openai_client = MagicMock(side_effect=abort)
+    agent._close_request_openai_client = MagicMock(side_effect=close)
+    monkeypatch.setattr(
+        helpers,
+        "_strict_paid_shutdown_grace_seconds",
+        lambda: 2.0,
+    )
+
+    caught: list[BaseException] = []
+
+    def provider_call(kwargs):
+        return helpers.interruptible_api_call(agent, kwargs)
+
+    def run_request():
+        try:
+            _execute(
+                agent,
+                provider_call,
+                request_id="response-during-grace",
+                count=1,
+            )
+        except BaseException as exc:
+            caught.append(exc)
+
+    request_thread = threading.Thread(target=run_request)
+    request_thread.start()
+    try:
+        assert provider_entered.wait(1)
+        assert abort_seen.wait(1)
+        time.sleep(0.05)
+        release_provider.set()
+        assert worker_finished.wait(1)
+        request_thread.join(timeout=1)
+    finally:
+        release_provider.set()
+        request_thread.join(timeout=3)
+
+    assert not request_thread.is_alive()
+    assert len(caught) == 1
+    assert type(caught[0]) is InterruptedError
+    assert "PRIVATE_DURING_GRACE" not in str(caught[0])
+    assert usage_reported.wait(1)
+
+    after = ledger.to_dict()["calls"][0]
+    assert after["status"] == "cancelled"
+    assert after["usageStatus"] == "reported"
+    assert after["totalTokens"] == 27
+    assert after["errorCategory"] == "completion_stopped"
+
+
+def test_interrupt_usage_waits_for_slow_cancel_terminalization(
+    monkeypatch,
+):
+    ledger = AgentCallUsageLedger(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        execution_id="2" * 32,
+    )
+    agent = _agent(ledger)
+    provider_entered = threading.Event()
+    release_provider = threading.Event()
+    worker_finished = threading.Event()
+    outer_finish_entered = threading.Event()
+    release_outer_finish = threading.Event()
+    usage_reported = threading.Event()
+    fake_client = MagicMock()
+    sentinel = SimpleNamespace(
+        choices=[SimpleNamespace(message="PRIVATE_SLOW_CANCELLED")],
+        usage=_usage(15, 10),
+    )
+
+    def create(**_kwargs):
+        provider_entered.set()
+        agent._interrupt_requested = True
+        assert release_provider.wait(3)
+        return sentinel
+
+    def close(_client, *, reason):
+        assert reason == "request_complete"
+        worker_finished.set()
+
+    fake_client.chat.completions.create.side_effect = create
+    agent._strict_no_automatic_paid_retry = True
+    agent._compute_non_stream_stale_timeout = lambda _kwargs: 5.0
+    agent._touch_activity = MagicMock()
+    agent._create_request_openai_client = MagicMock(
+        return_value=fake_client
+    )
+    agent._abort_request_openai_client = MagicMock()
+    agent._close_request_openai_client = MagicMock(side_effect=close)
+    monkeypatch.setattr(
+        helpers,
+        "_strict_paid_shutdown_grace_seconds",
+        lambda: 0.05,
+    )
+
+    real_finish_paid_provider_call = (
+        conversation_policy.finish_paid_provider_call
+    )
+
+    def slow_finish_paid_provider_call(*args, **kwargs):
+        if kwargs.get("status") == "cancelled":
+            outer_finish_entered.set()
+            assert release_outer_finish.wait(3)
+        result = real_finish_paid_provider_call(*args, **kwargs)
+        receipt = ledger.to_dict()["calls"][0]
+        if receipt["usageStatus"] == "reported":
+            usage_reported.set()
+        return result
+
+    monkeypatch.setattr(
+        conversation_policy,
+        "finish_paid_provider_call",
+        slow_finish_paid_provider_call,
+    )
+
+    caught: list[BaseException] = []
+
+    def provider_call(kwargs):
+        return helpers.interruptible_api_call(agent, kwargs)
+
+    def run_request():
+        try:
+            _execute(
+                agent,
+                provider_call,
+                request_id="slow-cancel-terminal",
+                count=1,
+            )
+        except BaseException as exc:
+            caught.append(exc)
+
+    request_thread = threading.Thread(target=run_request)
+    request_thread.start()
+    try:
+        assert provider_entered.wait(1)
+        assert outer_finish_entered.wait(2)
+        release_provider.set()
+        assert worker_finished.wait(1)
+
+        # The old one-second polling fence wrote timed_out here while the
+        # intentionally slow cancelled terminalization was still blocked.
+        time.sleep(1.1)
+        during_block = ledger.to_dict()["calls"][0]
+        assert during_block["status"] == "running"
+        assert during_block["usageStatus"] == "unavailable"
+    finally:
+        release_provider.set()
+        release_outer_finish.set()
+        request_thread.join(timeout=2)
+
+    assert not request_thread.is_alive()
+    assert len(caught) == 1
+    assert isinstance(caught[0], StrictPaidWorkerShutdownTimeout)
+    assert "PRIVATE_SLOW_CANCELLED" not in str(caught[0])
+    assert usage_reported.wait(1)
+
+    after = ledger.to_dict()["calls"][0]
+    assert after["status"] == "cancelled"
+    assert after["usageStatus"] == "reported"
+    assert after["totalTokens"] == 25
+    assert after["errorCategory"] == "completion_stopped"
 
 
 def test_restart_terminalizes_running_as_unknown_not_zero(tmp_path: Path):

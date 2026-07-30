@@ -29,6 +29,11 @@ from xiaoban.trusted_runtime.true_moa import (
     run_true_moa_advisors,
 )
 from xiaoban.trusted_runtime import true_moa_durable, true_moa_providers
+from xiaoban.trusted_runtime import begin_action, begin_turn, finish_action
+from xiaoban.trusted_runtime.completion_guard import check_completion
+from xiaoban.trusted_runtime.dynamic_completion import (
+    mark_dynamic_execution_no_progress,
+)
 from xiaoban.trusted_runtime.true_moa_durable import (
     TRUE_MOA_COMPLETED_OUTCOME_SCHEMA,
     TRUE_MOA_DURABLE_MAX_CALLS,
@@ -357,6 +362,18 @@ def _completed_outcome(
             "decision": "projected_evidence",
         }
     return outcome
+
+
+def _dynamic_completed_outcome(text: str, verification: dict) -> dict:
+    return {
+        "schema": TRUE_MOA_COMPLETED_OUTCOME_SCHEMA,
+        "completed": True,
+        "finalResponse": text,
+        "outputDigest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "factGuardRequired": False,
+        "completionProtocol": "dynamic-evidence-v2",
+        "trustedVerification": verification,
+    }
 
 
 def test_terminal_true_moa_ledger_rejects_appended_provider_call(
@@ -1250,6 +1267,352 @@ def test_fact_guard_outcome_round_trips_its_bound_verification(
     assert recovered["factGuardRequired"] is True
     assert recovered["trustedVerification"] == (
         outcome["trustedVerification"]
+    )
+    store.close()
+
+
+def test_no_progress_outcome_seals_recovers_acks_and_rejects_foreign_owner(
+    tmp_path: Path,
+):
+    path = tmp_path / "no-progress-outcome.sqlite"
+    key = "no-progress-delivery"
+    fingerprint = _fingerprint(key)
+    identity = TrustedIdentity(
+        account_id="owner-user",
+        data_scope="mystand",
+        source="server_session",
+    )
+    binding = {
+        **_outcome_binding(),
+        "completionProtocol": "dynamic-evidence-v2",
+        "invocationFingerprint": _fingerprint("no-progress-invocation"),
+    }
+    completion_binding = {
+        "user_id": binding["userId"],
+        "session_id": "session-no-progress",
+        "delivery_id": binding["deliveryId"],
+        "attempt": binding["attempt"],
+        "message_id": binding["messageId"],
+        "request_fingerprint": binding["requestFingerprint"],
+        "invocation_fingerprint": binding["invocationFingerprint"],
+        "datascope_fingerprint": binding["datascopeFingerprint"],
+    }
+    turn = begin_turn(
+        channel="web",
+        user_message="请处理这项站内任务",
+        identity=identity,
+        request_id=binding["deliveryId"],
+        message_id=binding["messageId"],
+        evidence_required=True,
+        completion_protocol="dynamic-evidence-v2",
+        completion_binding=completion_binding,
+    )
+    assert mark_dynamic_execution_no_progress(turn) is True
+    reply = "我这次没有发起实际处理，所以这项任务还没有完成。"
+    turn.completion_finalization = "failure"
+    turn.completion_finalization_output_digest = hashlib.sha256(
+        reply.encode("utf-8")
+    ).hexdigest()
+    decision = check_completion(reply, turn)
+    assert decision.allowed is True
+    assert decision.verification["failure_class"] == "no_progress"
+    outcome = {
+        "schema": TRUE_MOA_COMPLETED_OUTCOME_SCHEMA,
+        "completed": True,
+        "finalResponse": reply,
+        "outputDigest": hashlib.sha256(reply.encode("utf-8")).hexdigest(),
+        "factGuardRequired": False,
+        "completionProtocol": "dynamic-evidence-v2",
+        "trustedVerification": decision.verification,
+    }
+    usage = _completed_ledger()
+
+    store = TrueMoADurableStore(
+        str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    assert store.claim(key, fingerprint, kind="execution") == "missing"
+    outcome_id = store.save_completed_outcome(
+        key,
+        fingerprint,
+        usage,
+        outcome,
+        binding=binding,
+    )
+    store.close()
+
+    store = TrueMoADurableStore(
+        str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    foreign = {
+        **binding,
+        "userId": "foreign-owner",
+        "datascopeFingerprint": TrustedIdentity(
+            account_id="foreign-owner",
+            data_scope="mystand",
+            source="server_session",
+        ).datascope_fingerprint,
+    }
+    with pytest.raises(TrueMoAOutcomeBindingError):
+        store.recover_completed_outcome(key, binding=foreign)
+    recovered = store.recover_completed_outcome(key, binding=binding)
+    assert recovered["finalResponse"] == reply
+    assert recovered["trustedVerification"] == decision.verification
+    assert store.acknowledge_completed_outcome(
+        key,
+        binding=binding,
+        outcome_id=outcome_id,
+    ) == "acknowledged"
+    with pytest.raises(TrueMoAOutcomeUnavailableError):
+        store.recover_completed_outcome(key, binding=binding)
+    store.close()
+
+
+def test_cancelled_dynamic_outcome_survives_restart_and_ack(
+    tmp_path: Path,
+):
+    path = tmp_path / "cancelled-dynamic-outcome.sqlite"
+    key = "cancelled-dynamic-delivery"
+    fingerprint = _fingerprint(key)
+    identity = TrustedIdentity(
+        account_id="owner-user",
+        data_scope="mystand",
+        source="server_session",
+    )
+    binding = {
+        **_outcome_binding(),
+        "completionProtocol": "dynamic-evidence-v2",
+        "invocationFingerprint": _fingerprint(
+            "cancelled-dynamic-invocation"
+        ),
+    }
+    turn = begin_turn(
+        channel="web",
+        user_message="请读取目标资料",
+        identity=identity,
+        request_id=binding["deliveryId"],
+        message_id=binding["messageId"],
+        evidence_required=True,
+        completion_protocol="dynamic-evidence-v2",
+        completion_binding={
+            "user_id": binding["userId"],
+            "session_id": "session-cancelled-dynamic",
+            "delivery_id": binding["deliveryId"],
+            "attempt": binding["attempt"],
+            "message_id": binding["messageId"],
+            "request_fingerprint": binding["requestFingerprint"],
+            "invocation_fingerprint": binding["invocationFingerprint"],
+            "datascope_fingerprint": binding["datascopeFingerprint"],
+        },
+    )
+    started = begin_action(
+        turn,
+        "mystand_resource_index",
+        "v1",
+        {},
+        call_id="cancelled-durable-index",
+    )
+    assert started.decision == "allow"
+    cancelled = finish_action(
+        turn,
+        started.call.call_id,
+        "mystand_resource_index",
+        "v1",
+        {},
+        cancelled=True,
+    )
+    assert cancelled is not None
+    assert cancelled.status == "cancelled"
+    reply = (
+        "我这次已经发起实际处理，但随后被停止，"
+        "所以这项任务还没有完成。"
+    )
+    turn.completion_finalization = "failure"
+    turn.completion_finalization_output_digest = hashlib.sha256(
+        reply.encode("utf-8")
+    ).hexdigest()
+    decision = check_completion(reply, turn)
+    assert decision.allowed is True
+    assert decision.verification["failure_class"] == "cancelled"
+    outcome = _dynamic_completed_outcome(
+        reply,
+        decision.verification,
+    )
+
+    store = TrueMoADurableStore(
+        str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    assert store.claim(key, fingerprint, kind="execution") == "missing"
+    outcome_id = store.save_completed_outcome(
+        key,
+        fingerprint,
+        _completed_ledger(),
+        outcome,
+        binding=binding,
+    )
+    store.close()
+
+    store = TrueMoADurableStore(
+        str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    recovered = store.recover_completed_outcome(key, binding=binding)
+    assert recovered["finalResponse"] == reply
+    assert recovered["trustedVerification"] == decision.verification
+    assert store.acknowledge_completed_outcome(
+        key,
+        binding=binding,
+        outcome_id=outcome_id,
+    ) == "acknowledged"
+    with pytest.raises(TrueMoAOutcomeUnavailableError):
+        store.recover_completed_outcome(key, binding=binding)
+    store.close()
+
+
+def test_transient_recovery_outcome_survives_restart(
+    tmp_path: Path,
+):
+    path = tmp_path / "transient-recovery-outcome.sqlite"
+    key = "transient-recovery-delivery"
+    fingerprint = _fingerprint(key)
+    identity = TrustedIdentity(
+        account_id="owner-user",
+        data_scope="mystand",
+        source="server_session",
+    )
+    binding = {
+        **_outcome_binding(),
+        "completionProtocol": "dynamic-evidence-v2",
+        "invocationFingerprint": _fingerprint(
+            "transient-recovery-invocation"
+        ),
+    }
+    turn = begin_turn(
+        channel="web",
+        user_message="请读取目标资料",
+        identity=identity,
+        request_id=binding["deliveryId"],
+        message_id=binding["messageId"],
+        evidence_required=True,
+        completion_protocol="dynamic-evidence-v2",
+        completion_binding={
+            "user_id": binding["userId"],
+            "session_id": "session-transient-recovery",
+            "delivery_id": binding["deliveryId"],
+            "attempt": binding["attempt"],
+            "message_id": binding["messageId"],
+            "request_fingerprint": binding["requestFingerprint"],
+            "invocation_fingerprint": binding["invocationFingerprint"],
+            "datascope_fingerprint": binding["datascopeFingerprint"],
+        },
+    )
+    index = begin_action(
+        turn,
+        "mystand_resource_index",
+        "v1",
+        {},
+        call_id="transient-durable-index",
+    )
+    assert index.decision == "allow"
+    finish_action(
+        turn,
+        index.call.call_id,
+        "mystand_resource_index",
+        "v1",
+        {
+            "schema": "mystand.resource-index.complete.v1",
+            "ok": True,
+            "items": [
+                {
+                    "resourceUid": "resource-transient-durable",
+                    "safeLabel": "目标资料",
+                    "resourceType": "generic-record",
+                    "canRead": True,
+                    "locked": False,
+                }
+            ],
+            "hasMore": False,
+            "nextCursor": "",
+        },
+    )
+    arguments = {
+        "operation": "resolve",
+        "resource_uid": "resource-transient-durable",
+    }
+    failed = begin_action(
+        turn,
+        "mystand_authorization",
+        "v1",
+        arguments,
+        call_id="transient-durable-failed",
+    )
+    assert failed.decision == "allow"
+    finish_action(
+        turn,
+        failed.call.call_id,
+        "mystand_authorization",
+        "v1",
+        {
+            "ok": False,
+            "status": 502,
+            "code": "mystand_authorization_transport_failed",
+        },
+    )
+    recovered_read = begin_action(
+        turn,
+        "mystand_authorization",
+        "v1",
+        arguments,
+        call_id="transient-durable-recovered",
+    )
+    assert recovered_read.decision == "allow"
+    finish_action(
+        turn,
+        recovered_read.call.call_id,
+        "mystand_authorization",
+        "v1",
+        {
+            "ok": True,
+            "content": "恢复后的内容",
+            "resourceUid": "resource-transient-durable",
+        },
+    )
+    reply = "我重新读取成功，目标资料内容是“恢复后的内容”。"
+    decision = check_completion(reply, turn)
+    assert decision.allowed is True
+    assert decision.verification["action_count"] == 3
+    assert decision.verification["transient_failure_count"] == 1
+    outcome = _dynamic_completed_outcome(
+        reply,
+        decision.verification,
+    )
+
+    store = TrueMoADurableStore(
+        str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    assert store.claim(key, fingerprint, kind="execution") == "missing"
+    store.save_completed_outcome(
+        key,
+        fingerprint,
+        _completed_ledger(),
+        outcome,
+        binding=binding,
+    )
+    store.close()
+
+    store = TrueMoADurableStore(
+        str(path),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    recovered = store.recover_completed_outcome(key, binding=binding)
+    assert recovered["finalResponse"] == reply
+    assert recovered["trustedVerification"] == decision.verification
+    assert (
+        recovered["trustedVerification"]["transient_failure_count"]
+        == 1
     )
     store.close()
 

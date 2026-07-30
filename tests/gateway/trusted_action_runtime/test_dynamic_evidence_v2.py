@@ -553,6 +553,208 @@ def test_ordinary_failed_attempt_does_not_poison_later_valid_read_chain():
     assert decision.verification["action_count"] == 2
 
 
+def test_transient_failed_read_then_success_binds_every_physical_action():
+    turn = _turn()
+    _record_index(
+        turn,
+        [_index_item("res-selected", "中海城南一号2-1-1001")],
+    )
+    failed = _record(
+        turn,
+        "mystand_authorization",
+        {"operation": "resolve", "resource_uid": "res-selected"},
+        {
+            "ok": False,
+            "status": 502,
+            "code": "mystand_authorization_transport_failed",
+            "internalDetail": "PRIVATE_ERROR_BODY",
+        },
+        "call-auth-timeout",
+    )
+    assert failed.status == "error"
+    _record(
+        turn,
+        "mystand_authorization",
+        {"operation": "resolve", "resource_uid": "res-selected"},
+        {
+            "ok": True,
+            "content": "真实读取内容",
+            "resourceUid": "res-selected",
+        },
+        "call-auth-recovered",
+    )
+
+    model_reply = "第一次读取超时后，我重新读取成功，目标资料内容是“真实读取内容”。"
+    decision = check_completion(model_reply, turn)
+
+    assert decision.allowed is True
+    assert len(turn.action_calls) == 3
+    assert len(turn.action_results) == 3
+    assert decision.verification["action_count"] == 3
+    assert decision.verification["evidence_count"] == 1
+    assert decision.verification["transient_failure_count"] == 1
+    assert len(
+        decision.verification["transient_action_result_digest"]
+    ) == 64
+    assert "PRIVATE_ERROR_BODY" not in json.dumps(
+        decision.verification,
+        ensure_ascii=False,
+    )
+
+
+@pytest.mark.parametrize("extra_target", ["res-selected", "res-other"])
+def test_transient_recovery_rejects_any_second_post_failure_read(
+    extra_target,
+):
+    turn = _turn()
+    _record_index(
+        turn,
+        [
+            _index_item("res-selected", "资料 selected"),
+            _index_item("res-other", "资料 other"),
+        ],
+    )
+    arguments = {
+        "operation": "resolve",
+        "resource_uid": "res-selected",
+    }
+    _record(
+        turn,
+        "mystand_authorization",
+        arguments,
+        {
+            "ok": False,
+            "status": 502,
+            "code": "mystand_authorization_transport_failed",
+        },
+        "call-retry-failed",
+    )
+    _record(
+        turn,
+        "mystand_authorization",
+        arguments,
+        {
+            "ok": True,
+            "content": "selected 内容",
+            "resourceUid": "res-selected",
+        },
+        "call-retry-exact",
+    )
+    _record(
+        turn,
+        "mystand_authorization",
+        {
+            "operation": "resolve",
+            "resource_uid": extra_target,
+        },
+        {
+            "ok": True,
+            "content": f"{extra_target} 内容",
+            "resourceUid": extra_target,
+        },
+        "call-retry-extra",
+    )
+
+    decision = check_completion("我已经读取完成。", turn)
+
+    assert decision.allowed is False
+    assert decision.reason == "blocked_dynamic_recovery_binding"
+
+
+def test_unrecovered_parallel_target_failure_blocks_success():
+    turn = _turn()
+    _record_index(
+        turn,
+        [
+            _index_item("res-a", "资料 A"),
+            _index_item("res-b", "资料 B"),
+        ],
+    )
+    _record(
+        turn,
+        "mystand_authorization",
+        {"operation": "resolve", "resource_uid": "res-a"},
+        {"ok": True, "content": "A 内容", "resourceUid": "res-a"},
+        "call-a-success",
+    )
+    _record(
+        turn,
+        "mystand_authorization",
+        {"operation": "resolve", "resource_uid": "res-b"},
+        {
+            "ok": False,
+            "status": 502,
+            "code": "mystand_authorization_transport_failed",
+        },
+        "call-b-timeout",
+    )
+
+    decision = check_completion("我已经读取完成。", turn)
+
+    assert decision.allowed is False
+    assert decision.reason == "blocked_dynamic_recovery_binding"
+
+
+def test_different_target_success_does_not_cover_transient_failure():
+    turn = _turn()
+    _record_index(
+        turn,
+        [
+            _index_item("res-x", "资料 X"),
+            _index_item("res-y", "资料 Y"),
+        ],
+    )
+    _record(
+        turn,
+        "mystand_authorization",
+        {"operation": "resolve", "resource_uid": "res-x"},
+        {
+            "ok": False,
+            "status": 502,
+            "code": "mystand_authorization_transport_failed",
+        },
+        "call-x-timeout",
+    )
+    _record(
+        turn,
+        "mystand_authorization",
+        {"operation": "resolve", "resource_uid": "res-y"},
+        {"ok": True, "content": "Y 内容", "resourceUid": "res-y"},
+        "call-y-success",
+    )
+
+    assert check_completion("我已经读取完成。", turn).allowed is False
+
+
+def test_success_before_failure_does_not_count_as_recovery():
+    turn = _turn()
+    _record_index(
+        turn,
+        [_index_item("res-x", "资料 X")],
+    )
+    arguments = {"operation": "resolve", "resource_uid": "res-x"}
+    _record(
+        turn,
+        "mystand_authorization",
+        arguments,
+        {"ok": True, "content": "X 内容", "resourceUid": "res-x"},
+        "call-x-success-first",
+    )
+    _record(
+        turn,
+        "mystand_authorization",
+        arguments,
+        {
+            "ok": False,
+            "status": 502,
+            "code": "mystand_authorization_transport_failed",
+        },
+        "call-x-timeout-last",
+    )
+
+    assert check_completion("我已经读取完成。", turn).allowed is False
+
+
 def test_query_kind_hint_is_scoped_to_dynamic_protocol():
     dynamic_turn = _turn()
     _record_index(
@@ -1268,7 +1470,10 @@ def test_failed_dynamic_read_delivers_model_failure_with_bound_receipt():
     assert query_result is not None
     assert query_result.status == "error"
     turn.completion_finalization = "failure"
-    model_reply = "我这次没有读到有效资料，需要你补充更准确的名称。"
+    model_reply = (
+        "我这次已经发起实际处理，但执行返回了错误，"
+        "所以这项任务还没有完成。"
+    )
     turn.completion_finalization_output_digest = hashlib.sha256(
         model_reply.encode("utf-8")
     ).hexdigest()

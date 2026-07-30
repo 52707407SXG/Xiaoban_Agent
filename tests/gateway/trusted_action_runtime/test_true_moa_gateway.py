@@ -1052,6 +1052,93 @@ async def test_completed_sse_buffers_until_sealed_and_emits_outcome_receipt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_true_moa_diagnostic_tool_mode_reaches_stream_and_nonstream_runner(
+    monkeypatch,
+    tmp_path,
+    stream,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    delivery_id = "xbd_" + ("a1" if stream else "a2") * 20
+    headers = _mystand_headers(
+        f"diagnostic-{stream}",
+        epoch="74" if stream else "75",
+    )
+    headers.update({
+        "Idempotency-Key": delivery_id,
+        "X-Xiaoban-Delivery-Id": delivery_id,
+        "X-Xiaoban-Delivery-Attempt": headers["X-Xiaoban-Attempt"],
+        "X-Xiaoban-Completion-Protocol": "dynamic-evidence-v2",
+        "X-Xiaoban-Evidence-Required": "0",
+        "X-Xiaoban-Business-Tool-Mode": "disabled",
+        "X-Xiaoban-Invocation-Fingerprint": "a" * 64,
+    })
+    if stream:
+        headers.pop("Idempotency-Key")
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    completed_usage = _completed_usage(
+        snapshot,
+        wave_id=("a" if stream else "b") * 32,
+    )
+    mock_run = AsyncMock(
+        return_value=(
+            _sealed_mystand_result({
+                "final_response": "上一轮没有形成可用结果。",
+                "completed": True,
+                "failed": False,
+                "messages": [],
+                "_mystand_request": True,
+                "_true_moa_usage": completed_usage,
+            }),
+            {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "total_tokens": 14,
+                "true_moa": completed_usage,
+            },
+        ),
+    )
+    monkeypatch.setattr(adapter, "_run_agent", mock_run)
+    cache = api_server._IdempotencyCache(
+        durable_path=str(tmp_path / f"moa-diagnostic-{stream}.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+
+    async with TestClient(TestServer(_app(adapter))) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": "xiaoban-agent",
+                "stream": stream,
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        "刚才查 OUT-ABCDEFG 为什么失败？"
+                        "不要索引，直接读库"
+                    ),
+                }],
+            },
+        )
+        await response.read()
+    cache._durable.close()
+
+    assert response.status == 200
+    mock_run.assert_awaited_once()
+    runner_kwargs = mock_run.await_args.kwargs
+    assert runner_kwargs["business_tools_disabled"] is True
+    assert runner_kwargs["dynamic_evidence_required"] is False
+    assert runner_kwargs["true_moa_snapshot"] == snapshot
+
+
+@pytest.mark.asyncio
 async def test_normal_signed_sse_has_distinct_usage_recovery_and_no_redispatch(
     monkeypatch,
     tmp_path,
@@ -4020,6 +4107,229 @@ async def _run_gateway_case(case, **kwargs):
         true_moa_snapshot=snapshot,
         **kwargs,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reasoning_mode", ["normal", TRUE_MOA_MODE])
+async def test_diagnostic_runner_never_resolves_or_dispatches_business_tools(
+    monkeypatch,
+    reasoning_mode,
+):
+    from gateway.platforms import api_server
+    from gateway.platforms.api_server import (
+        _mystand_completion_expected_binding,
+    )
+    from run_agent import AIAgent
+    from tools.registry import ToolRegistry
+    from xiaoban.trusted_runtime.turns import current_turn
+
+    tool_names = (
+        "mystand_resource_index",
+        "mystand_query",
+        "mystand_authorization",
+    )
+    tool_definitions = [
+        {
+            "type": "function",
+            "function": {"name": name, "parameters": {}},
+        }
+        for name in tool_names
+    ]
+    provider_payloads: list[dict[str, object]] = []
+    handler_seen: list[str] = []
+    registry_codes: list[str] = []
+    turn_snapshots: list[dict[str, object]] = []
+    advisor_tools: list[tuple[object, ...]] = []
+
+    class DiagnosticProbeAgent(_FakeFinalAgent):
+        valid_tool_names = set(tool_names)
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.tools = list(tool_definitions)
+
+        def run_conversation(self, **kwargs):
+            turn = current_turn()
+            assert turn is not None
+            provider_payload = AIAgent._build_api_kwargs(
+                object.__new__(AIAgent),
+                [{"role": "user", "content": "诊断上一轮"}],
+            )
+            provider_payloads.append(provider_payload)
+
+            registry = ToolRegistry()
+            for name in tool_names:
+                registry.register(
+                    name,
+                    name,
+                    {"name": name, "parameters": {}},
+                    lambda _args, tool_name=name: (
+                        handler_seen.append(tool_name)
+                        or json.dumps({"ok": True})
+                    ),
+                )
+            for index, name in enumerate(tool_names):
+                denied = json.loads(
+                    registry.dispatch(
+                        name,
+                        {},
+                        tool_call_id=f"diagnostic-runner-{index}",
+                    )
+                )
+                registry_codes.append(str(denied.get("code") or ""))
+            turn_snapshots.append({
+                "business_tools_disabled": turn.business_tools_disabled,
+                "action_calls": list(turn.action_calls),
+            })
+
+            generic_ledger = getattr(
+                self,
+                "_paid_call_usage_ledger",
+                None,
+            )
+            if (
+                generic_ledger is not None
+                and getattr(self, "_true_moa_usage_ledger", None) is None
+            ):
+                call_id = generic_ledger.start_call()
+                generic_ledger.mark_dispatched(call_id)
+                generic_ledger.finish_call(
+                    call_id,
+                    status="completed",
+                    usage={
+                        "input_tokens": self.session_prompt_tokens,
+                        "output_tokens": self.session_completion_tokens,
+                        "total_tokens": self.session_total_tokens,
+                        "cached_input_tokens": (
+                            self.session_cached_input_tokens
+                        ),
+                    },
+                )
+            result = super().run_conversation(**kwargs)
+            result["final_response"] = "上一轮没有形成可用结果。"
+            return result
+
+    monkeypatch.setattr(
+        "agent.chat_completion_helpers.build_api_kwargs",
+        lambda _agent, _messages: {
+            "tools": list(tool_definitions),
+            "tool_choice": "required",
+            "parallel_tool_calls": True,
+        },
+    )
+    resolve_initial_choice = MagicMock(
+        side_effect=AssertionError(
+            "diagnostic turn parsed an initial business tool",
+        ),
+    )
+    run_preexecuted = MagicMock(
+        side_effect=AssertionError(
+            "diagnostic turn entered deterministic preexecution",
+        ),
+    )
+    monkeypatch.setattr(
+        api_server,
+        "_resolve_mystand_initial_tool_choice",
+        resolve_initial_choice,
+    )
+    monkeypatch.setattr(
+        api_server,
+        "_run_mystand_preexecuted_evidence",
+        run_preexecuted,
+    )
+
+    probe_agent = DiagnosticProbeAgent()
+    if reasoning_mode == TRUE_MOA_MODE:
+        from xiaoban.trusted_runtime import true_moa_providers
+
+        case = _gateway_case(
+            monkeypatch,
+            agent=probe_agent,
+            epoch="76",
+        )
+        adapter, headers, snapshot, _agent = case
+
+        def fake_advisor(*, slot, tools, dispatch_callback, **_kwargs):
+            advisor_tools.append(tuple(tools))
+            dispatch_callback()
+            return StrictAdvisorResult(content=f"safe {slot.slot_id}")
+
+        monkeypatch.setattr(
+            true_moa_providers,
+            "strict_advisor_call",
+            fake_advisor,
+        )
+    else:
+        adapter = _adapter()
+        headers = _mystand_headers("diagnostic-normal-runner")
+        headers.pop(MODE_EPOCH_HEADER)
+        headers.pop(MOA_PRESET_ID_HEADER)
+        headers.pop(MOA_PRESET_REVISION_HEADER)
+        headers[REASONING_MODE_HEADER] = "normal"
+        headers[SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER] = (
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION
+        )
+        snapshot = None
+        monkeypatch.setattr(
+            adapter,
+            "_create_agent",
+            lambda **_kwargs: probe_agent,
+        )
+
+    delivery_id = "xbd_" + (
+        "b1" if reasoning_mode == "normal" else "b2"
+    ) * 20
+    headers.update({
+        "Idempotency-Key": delivery_id,
+        "X-Xiaoban-Delivery-Id": delivery_id,
+        "X-Xiaoban-Delivery-Attempt": headers["X-Xiaoban-Attempt"],
+        "X-Xiaoban-Completion-Protocol": "dynamic-evidence-v2",
+        "X-Xiaoban-Evidence-Required": "0",
+        "X-Xiaoban-Business-Tool-Mode": "disabled",
+        "X-Xiaoban-Invocation-Fingerprint": "b" * 64,
+    })
+    completion_binding = _mystand_completion_expected_binding(
+        headers,
+        session_id="gateway-test-session",
+    )
+
+    result, usage = await adapter._run_agent(
+        user_message=(
+            "刚才查 AUTH-ABCDEFG 和 OUT-ABCDEFG 为什么失败？"
+            "不要索引，直接读库"
+        ),
+        conversation_history=[],
+        session_id="gateway-test-session",
+        gateway_session_key="gateway-test-channel",
+        request_headers=headers,
+        agent_ref=[None, False, None],
+        completion_protocol="dynamic-evidence-v2",
+        completion_binding=completion_binding,
+        dynamic_evidence_required=False,
+        business_tools_disabled=True,
+        true_moa_snapshot=snapshot,
+    )
+
+    assert result["completed"] is True
+    assert result["final_response"] == "上一轮没有形成可用结果。"
+    assert resolve_initial_choice.call_count == 0
+    assert run_preexecuted.call_count == 0
+    assert len(provider_payloads) == 1
+    assert provider_payloads[0]["tools"] == []
+    assert "tool_choice" not in provider_payloads[0]
+    assert "parallel_tool_calls" not in provider_payloads[0]
+    assert registry_codes == ["business_tools_disabled"] * len(tool_names)
+    assert handler_seen == []
+    assert turn_snapshots == [{
+        "business_tools_disabled": True,
+        "action_calls": [],
+    }]
+    if reasoning_mode == TRUE_MOA_MODE:
+        assert advisor_tools == [(), ()]
+        assert usage["true_moa"]["status"] == "completed"
+    else:
+        assert advisor_tools == []
+        assert usage["agent_calls"]["status"] == "completed"
 
 
 @pytest.mark.asyncio
