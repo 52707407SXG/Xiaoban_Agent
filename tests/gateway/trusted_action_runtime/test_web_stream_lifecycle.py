@@ -30,6 +30,7 @@ from xiaoban.trusted_runtime.paid_call_policy import (
     SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
 )
 from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_EVIDENCE_REQUIRED_HEADER,
     TRUSTED_RUNTIME_CONTRACT_DIGEST,
     TRUSTED_RUNTIME_CONTRACT_DIGEST_HEADER,
     TRUSTED_RUNTIME_CONTRACT_REVISION,
@@ -77,6 +78,10 @@ DELIVERY_R3_USER = "xbd_" + "09" * 20
 DELIVERY_R3_SITE = "xbd_" + "0a" * 20
 DELIVERY_R2_ATTEMPT = "xbd_" + "0b" * 20
 DELIVERY_R5_DENIED = "xbd_" + "0c" * 20
+DELIVERY_DYNAMIC_INVALID = "xbd_" + "0e" * 20
+DELIVERY_DYNAMIC_CONFLICT = "xbd_" + "0f" * 20
+DELIVERY_DYNAMIC_WORK = "xbd_" + "10" * 20
+DELIVERY_DYNAMIC_CHAT = "xbd_" + "11" * 20
 FINGERPRINT_A = hashlib.sha256(b"wave2-stream-fingerprint-a").hexdigest()
 FINGERPRINT_B = hashlib.sha256(b"wave2-stream-fingerprint-b").hexdigest()
 
@@ -132,6 +137,21 @@ def _stream_body(message: str) -> dict:
     return {"model": "test", "messages": [{"role": "user", "content": message}], "stream": True}
 
 
+def _dynamic_stream_headers(
+    delivery_id: str,
+    *,
+    evidence_required: str = "0",
+) -> dict[str, str]:
+    headers = _mystand_stream_headers(delivery_id)
+    headers.update({
+        "X-Xiaoban-Completion-Protocol": "dynamic-evidence-v2",
+        MYSTAND_EVIDENCE_REQUIRED_HEADER: evidence_required,
+        "X-Xiaoban-Delivery-Attempt": "1",
+        "X-Xiaoban-Invocation-Fingerprint": FINGERPRINT_B,
+    })
+    return headers
+
+
 def _mock_agent(final_response: str) -> MagicMock:
     agent = MagicMock()
     agent.provider = "deepseek"
@@ -154,6 +174,128 @@ def _visible_sse_text(body: str) -> str:
         for choice in payload.get("choices", []):
             parts.append(choice.get("delta", {}).get("content", ""))
     return "".join(parts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing", "empty", "word", "number", "without_protocol"],
+)
+async def test_dynamic_evidence_header_rejects_before_agent_dispatch(
+    mutation,
+):
+    adapter = _make_adapter()
+    headers = _dynamic_stream_headers(DELIVERY_DYNAMIC_INVALID)
+    if mutation == "missing":
+        headers.pop(MYSTAND_EVIDENCE_REQUIRED_HEADER)
+    elif mutation == "empty":
+        headers[MYSTAND_EVIDENCE_REQUIRED_HEADER] = ""
+    elif mutation == "word":
+        headers[MYSTAND_EVIDENCE_REQUIRED_HEADER] = "true"
+    elif mutation == "number":
+        headers[MYSTAND_EVIDENCE_REQUIRED_HEADER] = "2"
+    else:
+        headers.pop("X-Xiaoban-Completion-Protocol")
+    mock_run = AsyncMock(
+        return_value=({"final_response": "不得执行", "messages": []}, _USAGE)
+    )
+    app = _create_app(adapter)
+    with patch.object(adapter, "_run_agent", new=mock_run):
+        async with TestClient(TestServer(app)) as cli:
+            response = await cli.post(
+                "/v1/chat/completions",
+                headers=headers,
+                json=_stream_body("请处理这件事"),
+            )
+            body = await response.text()
+
+    assert response.status == 400, body
+    assert json.loads(body)["error"]["code"] == (
+        "invalid_completion_protocol"
+    )
+    mock_run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dynamic_work_bit_is_idempotency_bound():
+    adapter = _make_adapter()
+    mock_run = AsyncMock(
+        return_value=({"final_response": "中性回复", "messages": []}, _USAGE)
+    )
+    app = _create_app(adapter)
+    with patch.object(adapter, "_run_agent", new=mock_run):
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post(
+                "/v1/chat/completions",
+                headers=_dynamic_stream_headers(
+                    DELIVERY_DYNAMIC_CONFLICT,
+                    evidence_required="0",
+                ),
+                json=_stream_body("请处理这件事"),
+            )
+            await first.read()
+            second = await cli.post(
+                "/v1/chat/completions",
+                headers=_dynamic_stream_headers(
+                    DELIVERY_DYNAMIC_CONFLICT,
+                    evidence_required="1",
+                ),
+                json=_stream_body("请处理这件事"),
+            )
+            second_body = await second.text()
+
+    assert first.status == 200
+    assert second.status == 409, second_body
+    assert mock_run.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_dynamic_work_and_chat_use_only_server_bit_for_zero_call_egress():
+    adapter = _make_adapter()
+    answer = "同一条没有工具调用的模型正文"
+    mock_agent = _mock_agent(answer)
+    interaction_kinds: list[str] = []
+    from xiaoban.trusted_runtime.turns import begin_turn as real_begin_turn
+
+    def _recording_begin_turn(*args, **kwargs):
+        turn = real_begin_turn(*args, **kwargs)
+        interaction_kinds.append(turn.interaction_kind)
+        return turn
+
+    app = _create_app(adapter)
+    with (
+        patch.object(adapter, "_create_agent", return_value=mock_agent),
+        patch(
+            "xiaoban.trusted_runtime.turns.begin_turn",
+            new=_recording_begin_turn,
+        ),
+    ):
+        async with TestClient(TestServer(app)) as cli:
+            work = await cli.post(
+                "/v1/chat/completions",
+                headers=_dynamic_stream_headers(
+                    DELIVERY_DYNAMIC_WORK,
+                    evidence_required="1",
+                ),
+                json=_stream_body("请处理这件事"),
+            )
+            work_body = await work.text()
+            chat = await cli.post(
+                "/v1/chat/completions",
+                headers=_dynamic_stream_headers(
+                    DELIVERY_DYNAMIC_CHAT,
+                    evidence_required="0",
+                ),
+                json=_stream_body("请处理这件事"),
+            )
+            chat_body = await chat.text()
+
+    assert work.status == chat.status == 200
+    assert interaction_kinds == ["WORK", "CHAT"]
+    assert _visible_sse_text(work_body) == ""
+    assert "这轮我没有真正查到站内资料" not in work_body
+    assert "event: xiaoban.error" in work_body
+    assert _visible_sse_text(chat_body) == answer
 
 
 # R1（§B R1 / G2）：trusted turn request_id 绑定 Delivery-Id 原值

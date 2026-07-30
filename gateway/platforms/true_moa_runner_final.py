@@ -160,7 +160,9 @@ class TrueMoARunnerFinalMixin:
             # Guard mutation remains worker-local until settlement commits.
             result["_trusted_turn"] = guarded_turn
             result["_mystand_evidence_required"] = bool(
-                trusted_initial_tool_choice or request.fact_requirement
+                getattr(request, "dynamic_evidence_required", False)
+                or trusted_initial_tool_choice
+                or request.fact_requirement
             )
             if request.fact_requirement is not None:
                 result["_mystand_fact_requirement"] = (
@@ -397,7 +399,9 @@ class TrueMoARunnerFinalMixin:
             )
             result["_trusted_turn"] = trusted_turn
             result["_mystand_evidence_required"] = bool(
-                trusted_initial_tool_choice or request.fact_requirement
+                getattr(request, "dynamic_evidence_required", False)
+                or trusted_initial_tool_choice
+                or request.fact_requirement
             )
             if request.fact_requirement is not None:
                 result["_mystand_fact_requirement"] = (

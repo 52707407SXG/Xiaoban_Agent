@@ -16,6 +16,7 @@ resolved through :func:`_ra` so those patches keep working.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -82,6 +83,209 @@ logger = logging.getLogger(__name__)
 # cancelled while waiting on the provider. Surfaces (ACP, TUI) match on this
 # to treat it as cancellation metadata rather than assistant prose.
 INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model response ("
+_FINALIZE_ONLY_INSTRUCTION = (
+    "Runtime finalization: tool access for this turn is now closed. "
+    "Reply once in natural language using only the actual tool results already "
+    "present in this conversation. If those results failed or are insufficient, "
+    "explain that plainly and state what information is needed. Do not claim "
+    "unobserved facts, request another tool call, or simulate one."
+)
+_DYNAMIC_EVIDENCE_CONTINUATION_INSTRUCTION = (
+    "Trusted runtime continuation: this server-classified work turn still "
+    "has no completed current-turn My Stand evidence or failure state. "
+    "Before answering, use the available My Stand tool that fits the request. "
+    "Do not answer from memory, claim a lookup, or repeat this instruction."
+)
+
+
+def _append_api_only_system_instruction(
+    api_messages: list[dict[str, Any]],
+    instruction: str,
+) -> None:
+    """Add one request-local instruction without persisting transcript text."""
+    if api_messages and api_messages[0].get("role") == "system":
+        system_content = api_messages[0].get("content")
+        if isinstance(system_content, list):
+            api_messages[0] = {
+                **api_messages[0],
+                "content": [
+                    *system_content,
+                    {"type": "text", "text": instruction},
+                ],
+            }
+        else:
+            api_messages[0] = {
+                **api_messages[0],
+                "content": "\n\n".join(
+                    part
+                    for part in (
+                        str(system_content or "").strip(),
+                        instruction,
+                    )
+                    if part
+                ),
+            }
+        return
+    api_messages.insert(
+        0,
+        {"role": "system", "content": instruction},
+    )
+
+
+def _dynamic_incomplete_work_fingerprint() -> str:
+    """Fingerprint unfinished trusted lifecycle state without private text."""
+    try:
+        from xiaoban.trusted_runtime.dynamic_completion import (
+            dynamic_finalization_mode,
+        )
+        from xiaoban.trusted_runtime.turns import current_turn
+
+        trusted_turn = current_turn()
+    except Exception:
+        return ""
+    if (
+        trusted_turn is None
+        or getattr(trusted_turn, "completion_protocol", "")
+        != "dynamic-evidence-v2"
+        or getattr(trusted_turn, "interaction_kind", "") != "WORK"
+        or getattr(trusted_turn, "fact_requirement", None) is not None
+    ):
+        return ""
+    try:
+        if dynamic_finalization_mode(trusted_turn):
+            return ""
+    except Exception:
+        return ""
+
+    def _projection(items: Any, fields: tuple[str, ...]) -> list[dict[str, str]]:
+        return [
+            {
+                field: str(getattr(item, field, "") or "")
+                for field in fields
+            }
+            for item in (items or [])
+        ]
+
+    receipt = getattr(trusted_turn, "index_receipt", None)
+    lifecycle = {
+        "turn_id": str(getattr(trusted_turn, "turn_id", "") or ""),
+        "state": str(getattr(trusted_turn, "state", "") or ""),
+        "index": {
+            "count": str(getattr(receipt, "resource_count", "") or ""),
+            "digest": str(
+                getattr(receipt, "resource_refs_digest", "") or ""
+            ),
+            "has_more": str(getattr(receipt, "has_more", "") or ""),
+        },
+        "calls": _projection(
+            getattr(trusted_turn, "action_calls", None),
+            ("call_id", "action_id", "input_digest"),
+        ),
+        "results": _projection(
+            getattr(trusted_turn, "action_results", None),
+            (
+                "call_id",
+                "action_id",
+                "status",
+                "error_code",
+                "output_digest",
+            ),
+        ),
+        "evidence": _projection(
+            getattr(trusted_turn, "evidence", None),
+            (
+                "evidence_id",
+                "call_id",
+                "action_id",
+                "verification_status",
+            ),
+        ),
+    }
+    return hashlib.sha256(
+        json.dumps(
+            lifecycle,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _prepare_finalize_only_call(
+    agent: Any,
+    api_call_count: int,
+    api_messages: list[dict[str, Any]],
+) -> bool:
+    """Reserve the last paid slot, or close tools once trusted evidence exists."""
+    if not getattr(agent, "_strict_no_automatic_paid_retry", False):
+        return False
+    if agent.max_iterations <= 1:
+        return False
+    try:
+        from xiaoban.trusted_runtime.dynamic_completion import (
+            dynamic_finalization_mode,
+        )
+        from xiaoban.trusted_runtime.turns import current_turn
+
+        trusted_turn = current_turn()
+    except Exception:
+        trusted_turn = None
+    if (
+        trusted_turn is None
+        or getattr(trusted_turn, "completion_protocol", "")
+        != "dynamic-evidence-v2"
+    ):
+        return False
+    try:
+        finalization_mode = dynamic_finalization_mode(
+            trusted_turn,
+            include_single_preaction=(
+                api_call_count >= agent.max_iterations
+            ),
+        )
+    except Exception:
+        finalization_mode = ""
+    if api_call_count < agent.max_iterations and not finalization_mode:
+        return False
+    if not finalization_mode:
+        finalization_mode = "not_executed"
+    setattr(
+        trusted_turn,
+        "completion_finalization",
+        finalization_mode,
+    )
+    setattr(
+        trusted_turn,
+        "completion_finalization_output_digest",
+        "",
+    )
+    if api_messages and api_messages[0].get("role") == "system":
+        system_content = api_messages[0].get("content")
+        if isinstance(system_content, list):
+            api_messages[0] = {
+                **api_messages[0],
+                "content": [
+                    *system_content,
+                    {
+                        "type": "text",
+                        "text": _FINALIZE_ONLY_INSTRUCTION,
+                    },
+                ],
+            }
+        else:
+            system_text = str(system_content or "")
+            api_messages[0] = {
+                **api_messages[0],
+                "content": (
+                    f"{system_text}\n\n{_FINALIZE_ONLY_INSTRUCTION}"
+                ).strip(),
+            }
+    else:
+        api_messages.insert(
+            0,
+            {"role": "system", "content": _FINALIZE_ONLY_INSTRUCTION},
+        )
+    return True
 
 
 def _image_error_max_dimension(error: Exception) -> Optional[int]:
@@ -554,6 +758,8 @@ def run_conversation(
     interrupted = False
     failed = False
     codex_ack_continuations = 0
+    dynamic_evidence_continuation_states: set[str] = set()
+    dynamic_evidence_continuation_pending = False
     length_continue_retries = 0
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
@@ -796,6 +1002,21 @@ def run_conversation(
             for idx, pfm in enumerate(agent.prefill_messages):
                 api_messages.insert(sys_offset + idx, pfm.copy())
 
+        if dynamic_evidence_continuation_pending:
+            _append_api_only_system_instruction(
+                api_messages,
+                _DYNAMIC_EVIDENCE_CONTINUATION_INSTRUCTION,
+            )
+            dynamic_evidence_continuation_pending = False
+
+        # Finalization must be selected before provider-specific prompt-cache
+        # transforms turn system text into structured content blocks.
+        _finalize_only_call = _prepare_finalize_only_call(
+            agent,
+            api_call_count,
+            api_messages,
+        )
+
         # Apply Anthropic prompt caching for Claude models on native
         # Anthropic, OpenRouter, and third-party Anthropic-compatible
         # gateways. Auto-detected: if ``_use_prompt_caching`` is set,
@@ -993,6 +1214,10 @@ def run_conversation(
                 # isn't sent with stale, primary-shaped reasoning fields.
                 agent._reapply_reasoning_echo_for_provider(api_messages)
                 api_kwargs = agent._build_api_kwargs(api_messages)
+                if _finalize_only_call:
+                    api_kwargs.pop("tools", None)
+                    api_kwargs.pop("tool_choice", None)
+                    api_kwargs.pop("parallel_tool_calls", None)
                 if agent._force_ascii_payload:
                     _sanitize_structure_non_ascii(api_kwargs)
                 if agent.api_mode == "codex_responses":
@@ -3811,6 +4036,23 @@ def run_conversation(
             elif hasattr(agent, "_codex_incomplete_retries"):
                 agent._codex_incomplete_retries = 0
             
+            # A finalize-only request never executes a model-emitted tool call,
+            # even if a provider returns one despite receiving no tool schema.
+            if _finalize_only_call and assistant_message.tool_calls:
+                finalize_failure = _strict_failure_result(
+                    agent,
+                    messages,
+                    conversation_history,
+                    api_call_count=api_call_count,
+                    error="Model attempted a tool call after tool access closed",
+                    partial=True,
+                )
+                finalize_failure["turn_exit_reason"] = (
+                    "strict_iteration_budget_reached"
+                    "(finalize_tool_call_rejected)"
+                )
+                return finalize_failure
+
             # Check for tool calls
             if assistant_message.tool_calls:
                 if not agent.quiet_mode:
@@ -4523,6 +4765,51 @@ def run_conversation(
                     length_continue_retries = 0
                 
                 final_response = agent._strip_think_blocks(final_response).strip()
+                dynamic_incomplete_fingerprint = (
+                    _dynamic_incomplete_work_fingerprint()
+                    if not _finalize_only_call
+                    else ""
+                )
+                if (
+                    dynamic_incomplete_fingerprint
+                    and dynamic_incomplete_fingerprint
+                    not in dynamic_evidence_continuation_states
+                    and agent.max_iterations - api_call_count >= 2
+                    and agent.iteration_budget.remaining >= 2
+                ):
+                    # The first zero-action answer is untrusted and never
+                    # enters the transcript. Give the model one generic,
+                    # request-local chance to execute the appropriate site
+                    # tool; a second refusal falls through to CompletionGuard.
+                    dynamic_evidence_continuation_states.add(
+                        dynamic_incomplete_fingerprint
+                    )
+                    dynamic_evidence_continuation_pending = True
+                    final_response = None
+                    continue
+                if _finalize_only_call:
+                    try:
+                        from xiaoban.trusted_runtime.turns import current_turn
+
+                        trusted_turn = current_turn()
+                    except Exception:
+                        trusted_turn = None
+                    if (
+                        trusted_turn is not None
+                        and getattr(
+                            trusted_turn,
+                            "completion_protocol",
+                            "",
+                        )
+                        == "dynamic-evidence-v2"
+                    ):
+                        setattr(
+                            trusted_turn,
+                            "completion_finalization_output_digest",
+                            hashlib.sha256(
+                                final_response.encode("utf-8")
+                            ).hexdigest(),
+                        )
 
                 final_msg = agent._build_assistant_message(assistant_message, finish_reason)
 

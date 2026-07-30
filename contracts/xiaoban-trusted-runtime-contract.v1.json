@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "contract": "mystand.xiaoban-trusted-runtime-contract.v1",
-  "revision": "2026-07-29.3",
+  "revision": "2026-07-30.2",
   "compatibility": {
     "mode": "exact-match",
     "silentFallbackAllowed": false,
@@ -17,6 +17,20 @@
   "completion": {
     "protocol": "dynamic-evidence-v2",
     "verificationSchema": "mystand.xiaoban-completion-verification.v2",
+    "verificationKinds": [
+      "evidence-bound",
+      "failure-bound"
+    ],
+    "evidenceBinding": "valid-read-subchain",
+    "failureBinding": "finalize-only-execution-status",
+    "legacyEvidenceDecision": "projected_evidence",
+    "currentEvidenceDecision": "evidence_access_verified",
+    "evidenceRequiredHeader": "x-xiaoban-evidence-required",
+    "evidenceRequiredValues": [
+      "0",
+      "1"
+    ],
+    "evidenceRequiredSource": "server-trusted-intent",
     "factRequirementSchema": "mystand.fact-requirement.v1",
     "factQueryPlanSchema": "mystand.xiaoban-fact-query-plan.v1",
     "factRequirementBindingSchema": "mystand.xiaoban-trusted-fact-requirement-binding.v1",

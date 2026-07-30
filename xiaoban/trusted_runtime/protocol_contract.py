@@ -106,6 +106,12 @@ MYSTAND_COMPLETION_PROTOCOL = str(_COMPLETION["protocol"])
 MYSTAND_COMPLETION_VERIFICATION_SCHEMA = str(
     _COMPLETION["verificationSchema"]
 )
+MYSTAND_EVIDENCE_REQUIRED_HEADER = str(
+    _COMPLETION["evidenceRequiredHeader"]
+)
+MYSTAND_EVIDENCE_REQUIRED_VALUES = frozenset(
+    str(value) for value in _COMPLETION["evidenceRequiredValues"]
+)
 MYSTAND_FACT_REQUIREMENT_SCHEMA = str(
     _COMPLETION["factRequirementSchema"]
 )

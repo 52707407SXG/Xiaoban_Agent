@@ -21,7 +21,6 @@ from xiaoban.trusted_runtime.dynamic_completion import (
     check_dynamic_completion,
     dynamic_result_turn_binding_valid,
     evidence_receipt_digest as _evidence_receipt_digest,
-    project_dynamic_answer,
     validate_dynamic_result_protocol,
 )
 from xiaoban.trusted_runtime.turns import (
@@ -750,10 +749,6 @@ def project_answer(turn: WorkTurn) -> str:
     索引只负责资源发现（记录在 IndexReceipt），公开业务事实只从
     业务读取动作的 content 字段投影。
     """
-    dynamic_projected = project_dynamic_answer(turn)
-    if dynamic_projected is not None:
-        return dynamic_projected
-
     parts: List[str] = []
     for item in turn.evidence:
         try:
@@ -808,6 +803,7 @@ def check_completion(final_text: str, turn: WorkTurn) -> CompletionDecision:
         text = str(final_text or "")
         dynamic_decision = check_dynamic_completion(
             turn,
+            final_text=text,
             failure_message=_failure_message(turn),
         )
         if dynamic_decision is not None:

@@ -456,13 +456,24 @@ def begin_action(
             return _record_denial(turn, call_id, action_id, "unknown_action", status="error")
         if catalog_lookup is not None and not catalog_lookup(action_id):
             return _record_denial(turn, call_id, action_id, "not_in_catalog")
-        if action_id == "mystand_query" and (
-            args.get("query_kind") is not None
-            or (
-                isinstance(turn.fact_requirement, Mapping)
-                and turn.fact_requirement.get("fact_kind") == "collection"
+        signed_query_plan_required = (
+            action_id == "mystand_query"
+            and (
+                args.get("query_kind") is not None
+                or (
+                    isinstance(turn.fact_requirement, Mapping)
+                    and turn.fact_requirement.get("fact_kind")
+                    == "collection"
+                )
             )
-        ):
+        )
+        dynamic_query_hint = (
+            signed_query_plan_required
+            and turn.completion_protocol
+            == MYSTAND_COMPLETION_PROTOCOL_V2
+            and turn.fact_requirement is None
+        )
+        if signed_query_plan_required and not dynamic_query_hint:
             signed_plan = build_fact_query_plan(turn.fact_requirement)
             if signed_plan != args:
                 return _record_denial(

@@ -6,6 +6,7 @@ are made.
 """
 
 import ast
+import hashlib
 import inspect
 import io
 import json
@@ -20,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agent.codex_responses_adapter import _normalize_codex_response
+from agent.conversation_loop import _prepare_finalize_only_call
 
 import run_agent
 from run_agent import AIAgent
@@ -4498,6 +4500,221 @@ class TestRunConversation:
         assert result["failed"] is True
         assert result["turn_exit_reason"].startswith(
             "strict_iteration_budget_reached",
+        )
+
+    def test_strict_paid_turn_reserves_last_call_for_toolless_final_reply(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent._use_prompt_caching = True
+        agent.max_iterations = 8
+        first = _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[
+                _mock_tool_call(
+                    name="web_search",
+                    arguments="{}",
+                    call_id="strict-finalize-tool",
+                )
+            ],
+        )
+        final = _mock_response(
+            content="我已经根据这次真实执行结果说明情况。",
+            finish_reason="stop",
+        )
+        observed_requests = []
+
+        def _provider(payload):
+            observed_requests.append(payload)
+            return [first, final][len(observed_requests) - 1]
+
+        def _cache_system_blocks(messages, **_kwargs):
+            cached = [dict(message) for message in messages]
+            if (
+                cached
+                and cached[0].get("role") == "system"
+                and "Runtime finalization:"
+                in str(cached[0].get("content") or "")
+            ):
+                assert isinstance(cached[0]["content"], str)
+                cached[0]["content"] = [{
+                    "type": "text",
+                    "text": cached[0]["content"],
+                    "cache_control": {"type": "ephemeral"},
+                }]
+            return cached
+
+        trusted_turn = SimpleNamespace(
+            completion_protocol="dynamic-evidence-v2",
+        )
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=_provider,
+            ),
+            patch("run_agent.handle_function_call", return_value="tool result"),
+            patch(
+                "xiaoban.trusted_runtime.turns.current_turn",
+                return_value=trusted_turn,
+            ),
+            patch(
+                "xiaoban.trusted_runtime.dynamic_completion."
+                "dynamic_finalization_mode",
+                side_effect=["", "failure"],
+            ),
+            patch(
+                "agent.conversation_loop.apply_anthropic_cache_control",
+                side_effect=_cache_system_blocks,
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("先查，再自然回复")
+
+        assert len(observed_requests) == 2
+        assert observed_requests[0].get("tools")
+        assert not observed_requests[1].get("tools")
+        assert "tool_choice" not in observed_requests[1]
+        final_system_content = observed_requests[1]["messages"][0]["content"]
+        assert isinstance(final_system_content, list)
+        assert "Runtime finalization:" in final_system_content[0]["text"]
+        assert result["api_calls"] == 2
+        assert result["final_response"] == "我已经根据这次真实执行结果说明情况。"
+        assert result["completed"] is True
+        assert trusted_turn.completion_finalization == "failure"
+        assert trusted_turn.completion_finalization_output_digest == (
+            hashlib.sha256(
+                result["final_response"].encode("utf-8")
+            ).hexdigest()
+        )
+
+    def test_dynamic_work_discards_first_zero_action_answer_and_retries(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent.max_iterations = 3
+        first = _mock_response(
+            content="我已经查到资料，答案是肯定的。",
+            finish_reason="stop",
+        )
+        second = _mock_response(
+            content="我仍然没有调用站内工具。",
+            finish_reason="stop",
+        )
+        observed_requests = []
+
+        def _provider(payload):
+            observed_requests.append(payload)
+            return [first, second][len(observed_requests) - 1]
+
+        trusted_turn = SimpleNamespace(
+            completion_protocol="dynamic-evidence-v2",
+            interaction_kind="WORK",
+            fact_requirement=None,
+            action_calls=[],
+            action_results=[],
+            evidence=[],
+        )
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=_provider,
+            ),
+            patch(
+                "xiaoban.trusted_runtime.turns.current_turn",
+                return_value=trusted_turn,
+            ),
+            patch(
+                "xiaoban.trusted_runtime.dynamic_completion."
+                "dynamic_finalization_mode",
+                return_value="",
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("请处理这件事")
+
+        assert len(observed_requests) == 2
+        retry_system = observed_requests[1]["messages"][0]["content"]
+        assert "no completed current-turn My Stand evidence" in str(
+            retry_system
+        )
+        assert result["final_response"] == "我仍然没有调用站内工具。"
+        assert "我已经查到资料" not in json.dumps(
+            result["messages"],
+            ensure_ascii=False,
+        )
+
+    def test_dynamic_finalize_budget_keeps_single_call_usable(self):
+        trusted_turn = SimpleNamespace(
+            completion_protocol="dynamic-evidence-v2",
+        )
+        one_call_agent = SimpleNamespace(
+            _strict_no_automatic_paid_retry=True,
+            max_iterations=1,
+        )
+        messages = [{"role": "system", "content": "system"}]
+        with (
+            patch(
+                "xiaoban.trusted_runtime.turns.current_turn",
+                return_value=trusted_turn,
+            ),
+            patch(
+                "xiaoban.trusted_runtime.dynamic_completion."
+                "dynamic_finalization_mode",
+                return_value="failure",
+            ),
+        ):
+            assert _prepare_finalize_only_call(
+                one_call_agent,
+                1,
+                messages,
+            ) is False
+        assert messages == [{"role": "system", "content": "system"}]
+
+        two_call_agent = SimpleNamespace(
+            _strict_no_automatic_paid_retry=True,
+            max_iterations=2,
+        )
+        block_messages = [{
+            "role": "system",
+            "content": [{
+                "type": "text",
+                "text": "cached system",
+                "cache_control": {"type": "ephemeral"},
+            }],
+        }]
+        with (
+            patch(
+                "xiaoban.trusted_runtime.turns.current_turn",
+                return_value=trusted_turn,
+            ),
+            patch(
+                "xiaoban.trusted_runtime.dynamic_completion."
+                "dynamic_finalization_mode",
+                return_value="failure",
+            ),
+        ):
+            assert _prepare_finalize_only_call(
+                two_call_agent,
+                2,
+                block_messages,
+            ) is True
+        assert isinstance(block_messages[0]["content"], list)
+        assert block_messages[0]["content"][0]["text"] == "cached system"
+        assert "Runtime finalization:" in (
+            block_messages[0]["content"][1]["text"]
         )
 
     def test_strict_paid_length_is_terminal_and_preserves_usage(self, agent):

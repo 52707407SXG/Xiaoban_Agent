@@ -64,6 +64,7 @@ class TrueMoARunnerMixin:
         fact_requirement: Optional[Dict[str, Any]] = None,
         completion_protocol: str = "",
         completion_binding: Optional[Dict[str, Any]] = None,
+        dynamic_evidence_required: bool = False,
         true_moa_snapshot: Any = None,
         paid_call_usage_callback=None,
     ) -> tuple:
@@ -246,6 +247,7 @@ class TrueMoARunnerMixin:
             fact_requirement=fact_requirement,
             completion_protocol=completion_protocol,
             completion_binding=completion_binding or {},
+            dynamic_evidence_required=dynamic_evidence_required,
             true_moa_snapshot=true_moa_snapshot,
             paid_call_usage_callback=paid_call_usage_callback,
             request_user_id=request_user_id,

@@ -20,6 +20,9 @@ from gateway.platforms.true_moa_runner_preflight import (
 from gateway.platforms.true_moa_stop_projection import (
     CompletionStoppedError,
 )
+from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_COMPLETION_PROTOCOL,
+)
 
 
 @dataclass
@@ -48,6 +51,7 @@ class TrueMoARunRequest:
     fact_requirement: Optional[Dict[str, Any]]
     completion_protocol: str
     completion_binding: Dict[str, Any]
+    dynamic_evidence_required: bool
     true_moa_snapshot: Any
     paid_call_usage_callback: Any
     request_user_id: str
@@ -125,15 +129,31 @@ class TrueMoARunWorkflow(
         trusted_turn_token = None
         deactivate_turn = None
         try:
-            trusted_initial_tool_choice = (
-                request.resolve_mystand_initial_tool_choice(
-                    request.user_message,
-                    self.run_system_prompt,
-                    fact_requirement=request.fact_requirement,
+            dynamic_evidence_required = bool(
+                getattr(
+                    request,
+                    "dynamic_evidence_required",
+                    False,
                 )
-                if request.mystand_request
-                else ""
             )
+            if dynamic_evidence_required and (
+                not request.mystand_request
+                or request.completion_protocol
+                != MYSTAND_COMPLETION_PROTOCOL
+                or request.fact_requirement is not None
+            ):
+                raise ValueError(
+                    "invalid dynamic evidence requirement",
+                )
+            trusted_initial_tool_choice = ""
+            if request.mystand_request:
+                trusted_initial_tool_choice = (
+                    request.resolve_mystand_initial_tool_choice(
+                        request.user_message,
+                        self.run_system_prompt,
+                        fact_requirement=request.fact_requirement,
+                    )
+                )
             if request.metadata_trace is not None:
                 attempt_value = request.adapter._header_value(
                     request.request_headers,
@@ -202,7 +222,8 @@ class TrueMoARunWorkflow(
                         request.request_message_id or ""
                     ),
                     evidence_required=bool(
-                        trusted_initial_tool_choice
+                        dynamic_evidence_required
+                        or trusted_initial_tool_choice
                         or request.fact_requirement
                     ),
                     fact_requirement=request.fact_requirement,

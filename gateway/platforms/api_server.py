@@ -90,6 +90,8 @@ from xiaoban.trusted_runtime.fact_contract import (
 )
 from xiaoban.trusted_runtime.protocol_contract import (
     MYSTAND_COMPLETION_PROTOCOL as _MYSTAND_COMPLETION_PROTOCOL_V2,
+    MYSTAND_EVIDENCE_REQUIRED_HEADER as _MYSTAND_EVIDENCE_REQUIRED_HEADER,
+    MYSTAND_EVIDENCE_REQUIRED_VALUES,
     MYSTAND_FACT_QUERY_PLAN_SCHEMA,
     MYSTAND_FACT_REQUIREMENT_BINDING_SCHEMA,
     MYSTAND_FACT_REQUIREMENT_SCHEMA,
@@ -895,6 +897,30 @@ def _mystand_completion_expected_binding(
         raise ValueError("completion invocation fingerprint is invalid")
     binding["invocation_fingerprint"] = invocation_fingerprint
     return binding
+
+
+def _mystand_dynamic_evidence_required(
+    headers: Any,
+    *,
+    completion_protocol: str,
+) -> bool:
+    """Require an explicit server intent bit on every dynamic turn."""
+
+    value = _fact_header_value(
+        headers,
+        _MYSTAND_EVIDENCE_REQUIRED_HEADER,
+    )
+    if completion_protocol:
+        if value not in MYSTAND_EVIDENCE_REQUIRED_VALUES:
+            raise ValueError(
+                "dynamic evidence requirement is invalid",
+            )
+        return value == "1"
+    if value:
+        raise ValueError(
+            "dynamic evidence requirement requires a protocol",
+        )
+    return False
 
 
 def _resolve_mystand_initial_tool_choice(
@@ -1888,6 +1914,24 @@ def _guard_evidence_backed_response(
         isinstance(result, dict)
         and isinstance(result.get("_mystand_fact_requirement"), dict)
     )
+    has_dynamic_completion = bool(
+        isinstance(result, dict)
+        and result.get("_mystand_completion_protocol")
+        == _MYSTAND_COMPLETION_PROTOCOL_V2
+    )
+    trusted_turn = (
+        result.get("_trusted_turn")
+        if isinstance(result, dict)
+        else None
+    )
+    has_dynamic_lifecycle = bool(
+        has_dynamic_completion
+        and trusted_turn is not None
+        and (
+            getattr(trusted_turn, "action_calls", None)
+            or getattr(trusted_turn, "action_results", None)
+        )
+    )
     if not final_text and not has_fact_requirement:
         return final_text
     if isinstance(result, dict):
@@ -1910,7 +1954,11 @@ def _guard_evidence_backed_response(
         final_text = integrity_decision.text
 
     required_evidence_groups: list[set[str]] = []
-    if isinstance(result, dict) and not has_fact_requirement:
+    if (
+        isinstance(result, dict)
+        and not has_fact_requirement
+        and not has_dynamic_lifecycle
+    ):
         for raw_group in result.get("_mystand_required_evidence_groups") or []:
             if isinstance(raw_group, (list, tuple, set)):
                 group = {str(item) for item in raw_group if str(item)}
@@ -1968,6 +2016,23 @@ def _guard_evidence_backed_response(
                 "unsupported_claim_blocked reason=%s channel=web",
                 completion.reason,
             )
+            if (
+                result.get("_mystand_completion_protocol")
+                == _MYSTAND_COMPLETION_PROTOCOL_V2
+                and result.get("_mystand_evidence_required") is True
+            ):
+                # A server-classified work turn without a valid evidence- or
+                # failure-bound receipt is a failed execution, not an
+                # assistant reply. Never replace the model's lie with another
+                # fixed assistant sentence.
+                result["completed"] = False
+                result["failed"] = True
+                result["partial"] = False
+                result["error"] = "trusted work did not complete"
+                result["final_response"] = ""
+                result["messages"] = []
+                result["_mystand_completion_allowed"] = False
+                return ""
             return completion.text
         result["_mystand_completion_allowed"] = True
         if completion.verification is not None:
@@ -2111,8 +2176,9 @@ def _install_mystand_completion_persistence_guard(
             )
 
             decision = check_completion(terminal_text, trusted_turn)
-            safe_assistant["content"] = decision.text
-            safe_messages.append(safe_assistant)
+            if decision.allowed:
+                safe_assistant["content"] = decision.text
+                safe_messages.append(safe_assistant)
         original_persist(safe_messages, conversation_history)
 
     agent._persist_session = _guarded_persist
@@ -4496,6 +4562,21 @@ class APIServerAdapter(
             request.headers,
             _MYSTAND_COMPLETION_PROTOCOL_HEADER,
         )
+        try:
+            completion_evidence_required = (
+                _mystand_dynamic_evidence_required(
+                    request.headers,
+                    completion_protocol=completion_protocol,
+                )
+            )
+        except ValueError:
+            return web.json_response(
+                _openai_error(
+                    "Invalid My Stand completion protocol",
+                    code="invalid_completion_protocol",
+                ),
+                status=400,
+            )
         completion_invocation_fingerprint = _fact_header_value(
             request.headers,
             _MYSTAND_INVOCATION_FINGERPRINT_HEADER,
@@ -4827,6 +4908,9 @@ class APIServerAdapter(
                         fact_requirement=fact_requirement,
                         completion_protocol=completion_protocol,
                         completion_binding=completion_binding,
+                        dynamic_evidence_required=(
+                            completion_evidence_required
+                        ),
                         true_moa_snapshot=true_moa_snapshot,
                         paid_call_usage_callback=(
                             (
@@ -4971,6 +5055,9 @@ class APIServerAdapter(
                     fact_requirement=fact_requirement,
                     completion_protocol=completion_protocol,
                     completion_binding=completion_binding,
+                    dynamic_evidence_required=(
+                        completion_evidence_required
+                    ),
                     true_moa_snapshot=true_moa_snapshot,
                     paid_call_usage_callback=paid_call_usage_callback,
                 )
@@ -7242,6 +7329,7 @@ class APIServerAdapter(
             _MYSTAND_FACT_REQUIREMENT_HEADER,
             _MYSTAND_FACT_SIGNATURE_HEADER,
             _MYSTAND_COMPLETION_PROTOCOL_HEADER,
+            _MYSTAND_EVIDENCE_REQUIRED_HEADER,
             _MYSTAND_INVOCATION_FINGERPRINT_HEADER,
         )
         mystand_request = cls._header_present(headers, "X-Xiaoban-Toolset-Policy")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,7 +12,9 @@ from gateway.config import PlatformConfig
 from gateway.platforms.api_server import (
     APIServerAdapter,
     _finalize_mystand_egress_result,
+    _install_mystand_completion_persistence_guard,
     _mystand_completion_expected_binding,
+    _mystand_dynamic_evidence_required,
 )
 from gateway.platforms.mystand_egress_seal import (
     is_mystand_egress_sealed,
@@ -34,6 +37,9 @@ from xiaoban.trusted_runtime.true_moa_durable import (
     TRUE_MOA_OUTCOME_BINDING_SCHEMA,
     TrueMoAOutcomeBindingError,
     project_true_moa_completed_outcome,
+)
+from xiaoban.trusted_runtime.dynamic_completion import (
+    dynamic_finalization_mode,
 )
 from xiaoban.trusted_runtime.paid_call_policy import (
     SIGNED_MYSTAND_AGENT_POLICY_REVISION,
@@ -67,13 +73,14 @@ def _binding(*, attempt: int = 1) -> dict:
     }
 
 
-def _turn(*, attempt: int = 1):
+def _turn(*, attempt: int = 1, evidence_required: bool = False):
     return begin_turn(
         channel="web",
         user_message="这套房有车位吗",
         identity=IDENTITY,
         request_id=DELIVERY_ID,
         message_id=MESSAGE_ID,
+        evidence_required=evidence_required,
         completion_protocol=PROTOCOL,
         completion_binding=_binding(attempt=attempt),
     )
@@ -195,10 +202,11 @@ def test_dynamic_parking_projects_only_structured_fact_and_full_receipt():
         "call-query",
     )
 
-    decision = check_completion("模型原始回答不可信", turn)
+    model_reply = "我查到了这套房的资料，资料里记录的是有车位。"
+    decision = check_completion(model_reply, turn)
 
     assert decision.allowed is True
-    assert decision.text == "有"
+    assert decision.text == model_reply
     assert "13800000000" not in decision.text
     assert decision.verification is not None
     assert decision.verification["schema"] == (
@@ -273,6 +281,74 @@ def test_explicit_linked_record_refs_are_nonempty_complete_index_subset():
     assert blocked.allowed is False
     assert blocked.verification is None
 
+    foreign_turn = _turn()
+    _record_index(
+        foreign_turn,
+        [_index_item("res-selected", "中海城南一号2-1-1001")],
+    )
+    _record(
+        foreign_turn,
+        "mystand_query",
+        _query_arguments(),
+        _query_payload(
+            resource_uid="res-selected",
+            record_refs=["res-foreign", "res-selected"],
+        ),
+        "call-query",
+    )
+    foreign = check_completion("不能静默丢掉未索引引用", foreign_turn)
+    assert foreign.allowed is False
+    assert foreign.verification is None
+
+    malformed_turn = _turn()
+    _record_index(
+        malformed_turn,
+        [_index_item("res-selected", "中海城南一号2-1-1001")],
+    )
+    _record(
+        malformed_turn,
+        "mystand_query",
+        _query_arguments(),
+        _query_payload(
+            resource_uid="res-selected",
+            record_refs=["res-selected", {"resourceUid": "res-hidden"}],
+        ),
+        "call-query",
+    )
+    malformed = check_completion(
+        "不能静默忽略格式错误的引用",
+        malformed_turn,
+    )
+    assert malformed.allowed is False
+    assert malformed.verification is None
+
+
+def test_argument_resource_uid_must_match_result_primary_resource():
+    turn = _turn()
+    _record_index(
+        turn,
+        [
+            _index_item("res-a", "资料甲"),
+            _index_item("res-b", "资料乙"),
+        ],
+    )
+    _record(
+        turn,
+        "mystand_authorization",
+        {"operation": "resolve", "resource_uid": "res-a"},
+        {
+            "ok": True,
+            "content": "资料乙的内容",
+            "resourceUid": "res-b",
+        },
+        "call-auth-mismatch",
+    )
+
+    decision = check_completion("不能把甲的请求绑定到乙的结果", turn)
+
+    assert decision.allowed is False
+    assert decision.verification is None
+
 
 @pytest.mark.parametrize(
     "facts",
@@ -299,7 +375,7 @@ def test_explicit_linked_record_refs_are_nonempty_complete_index_subset():
         ],
     ],
 )
-def test_dynamic_parking_rejects_conflicts_and_non_contract_values(facts):
+def test_dynamic_gate_does_not_hardcode_module_specific_fact_shapes(facts):
     turn = _turn()
     _record_index(
         turn,
@@ -313,10 +389,12 @@ def test_dynamic_parking_rejects_conflicts_and_non_contract_values(facts):
         "call-query",
     )
 
-    decision = check_completion("不能采用", turn)
+    model_reply = "我已读取资料，并会按资料原文说明。"
+    decision = check_completion(model_reply, turn)
 
-    assert decision.allowed is False
-    assert decision.verification is None
+    assert decision.allowed is True
+    assert decision.text == model_reply
+    assert decision.verification["semantic_verified"] is False
 
 
 def test_v2_capability_does_not_change_chat_or_unrelated_evidence():
@@ -350,7 +428,7 @@ def test_v2_capability_does_not_change_chat_or_unrelated_evidence():
     assert web.verification is None
 
 
-def test_v2_authorization_read_is_blocked_but_legacy_read_still_projects():
+def test_v2_authorization_read_is_a_valid_registered_read_chain():
     dynamic_turn = _turn()
     _record_index(
         dynamic_turn,
@@ -367,9 +445,13 @@ def test_v2_authorization_read_is_blocked_but_legacy_read_still_projects():
         },
         "call-auth",
     )
-    dynamic = check_completion("不得采用", dynamic_turn)
-    assert dynamic.allowed is False
-    assert dynamic.verification is None
+    model_reply = "我已从这份授权资料中读到对应内容。"
+    dynamic = check_completion(model_reply, dynamic_turn)
+    assert dynamic.allowed is True
+    assert dynamic.text == model_reply
+    assert dynamic.verification is not None
+    assert dynamic.verification["evidence_count"] == 1
+    assert dynamic.verification["record_refs"] == ["res-selected"]
 
     legacy_turn = begin_turn(
         channel="web",
@@ -399,6 +481,208 @@ def test_v2_authorization_read_is_blocked_but_legacy_read_still_projects():
     assert legacy.verification is None
 
 
+def test_multiple_registered_reads_share_one_verified_index_chain():
+    turn = _turn()
+    _record_index(
+        turn,
+        [
+            _index_item("res-a", "资料甲"),
+            _index_item("res-b", "资料乙"),
+        ],
+    )
+    for suffix in ("a", "b"):
+        _record(
+            turn,
+            "mystand_authorization",
+            {"operation": "resolve", "resource_uid": f"res-{suffix}"},
+            {
+                "ok": True,
+                "content": f"资料{suffix}的真实内容",
+                "resourceUid": f"res-{suffix}",
+            },
+            f"call-auth-{suffix}",
+        )
+
+    model_reply = "我已读取两份目标资料，并根据它们一起说明。"
+    decision = check_completion(model_reply, turn)
+
+    assert decision.allowed is True
+    assert decision.text == model_reply
+    assert decision.verification["action_count"] == 3
+    assert decision.verification["evidence_count"] == 2
+    assert decision.verification["record_refs"] == ["res-a", "res-b"]
+
+
+def test_ordinary_failed_attempt_does_not_poison_later_valid_read_chain():
+    turn = _turn()
+    denied = begin_action(
+        turn,
+        "mystand_query",
+        "v1",
+        {
+            "operation": "read",
+            "query_kind": "resource-read",
+        },
+        call_id="call-denied",
+    )
+    assert denied.decision == "deny"
+    assert denied.reason == "missing_index_receipt"
+    _record_index(
+        turn,
+        [_index_item("res-selected", "中海城南一号2-1-1001")],
+    )
+    _record(
+        turn,
+        "mystand_authorization",
+        {"operation": "resolve", "resource_uid": "res-selected"},
+        {
+            "ok": True,
+            "content": "真实读取内容",
+            "resourceUid": "res-selected",
+        },
+        "call-auth-success",
+    )
+
+    model_reply = "前一次定位方式不合适，但随后我已从目标资料中读取成功。"
+    decision = check_completion(model_reply, turn)
+
+    assert turn.pre_action_denials == 1
+    assert decision.allowed is True
+    assert decision.text == model_reply
+    assert decision.verification["evidence_count"] == 1
+    assert decision.verification["action_count"] == 2
+
+
+def test_query_kind_hint_is_scoped_to_dynamic_protocol():
+    dynamic_turn = _turn()
+    _record_index(
+        dynamic_turn,
+        [_index_item("res-selected", "中海城南一号2-1-1001")],
+    )
+    dynamic = begin_action(
+        dynamic_turn,
+        "mystand_query",
+        "v1",
+        {
+            **_query_arguments(),
+            "query_kind": "resource-read",
+        },
+        call_id="call-dynamic-query-kind",
+    )
+    assert dynamic.decision == "allow"
+
+    legacy_turn = begin_turn(
+        channel="web",
+        user_message="读取资料",
+        identity=IDENTITY,
+        request_id="request-legacy-query-kind",
+        message_id="message-legacy-query-kind",
+    )
+    _record_index(
+        legacy_turn,
+        [_index_item("res-selected", "中海城南一号2-1-1001")],
+    )
+    legacy = begin_action(
+        legacy_turn,
+        "mystand_query",
+        "v1",
+        {
+            **_query_arguments(),
+            "query_kind": "resource-read",
+        },
+        call_id="call-legacy-query-kind",
+    )
+    assert legacy.decision == "deny"
+    assert legacy.reason == "unbound_fact_query_plan"
+
+
+def test_failure_bound_reply_requires_finalize_only_runtime_state():
+    turn = _turn()
+    _record_index(
+        turn,
+        [_index_item("res-selected", "中海城南一号2-1-1001")],
+    )
+    _record(
+        turn,
+        "mystand_query",
+        _query_arguments(),
+        {
+            "ok": False,
+            "status": 404,
+            "code": "resource_not_found",
+            "error": "没有找到匹配资料",
+        },
+        "call-query-missing",
+    )
+    model_reply = "我这次没有找到能够唯一匹配的资料，需要你补充更准确的名称。"
+
+    blocked = check_completion(model_reply, turn)
+    assert blocked.allowed is False
+    assert blocked.verification is None
+
+    turn.completion_finalization = "failure"
+    turn.completion_finalization_output_digest = hashlib.sha256(
+        model_reply.encode("utf-8")
+    ).hexdigest()
+    allowed = check_completion(model_reply, turn)
+    assert allowed.allowed is True
+    assert allowed.text == model_reply
+    assert allowed.verification is not None
+    assert allowed.verification["completion_kind"] == "failure-bound"
+    assert allowed.verification["semantic_verified"] is False
+    assert allowed.verification["evidence_count"] == 0
+    assert allowed.verification["action_result_digest"]
+    assert allowed.verification["failed_action_count"] == 1
+    assert allowed.verification["failure_class"] == "not_found"
+
+    turn.completion_finalization_output_digest = hashlib.sha256(
+        "另一个未绑定回复".encode("utf-8")
+    ).hexdigest()
+    tampered = check_completion(model_reply, turn)
+    assert tampered.allowed is False
+    assert tampered.verification is None
+
+
+def test_dynamic_finalization_uses_real_failure_or_repeated_no_progress():
+    failed = _turn()
+    _record(
+        failed,
+        "mystand_resource_index",
+        {},
+        {
+            "ok": False,
+            "status": 503,
+            "code": "index_unavailable",
+        },
+        "call-index-failed",
+    )
+    assert dynamic_finalization_mode(failed) == "failure"
+
+    denied = _turn()
+    first = begin_action(
+        denied,
+        "mystand_query",
+        "v1",
+        _query_arguments(),
+        call_id="call-denied-first",
+    )
+    assert first.reason == "missing_index_receipt"
+    assert dynamic_finalization_mode(denied) == ""
+    assert dynamic_finalization_mode(
+        denied,
+        include_single_preaction=True,
+    ) == "failure"
+    second = begin_action(
+        denied,
+        "mystand_query",
+        "v1",
+        _query_arguments(),
+        call_id="call-denied-second",
+    )
+    assert second.reason == "missing_index_receipt"
+    assert dynamic_finalization_mode(denied) == "failure"
+
+
 def test_completion_attempt_must_be_positive_and_dual_headers_must_match():
     with pytest.raises(ValueError):
         _turn(attempt=0)
@@ -416,6 +700,32 @@ def test_completion_attempt_must_be_positive_and_dual_headers_must_match():
         _mystand_completion_expected_binding(
             headers,
             session_id=SESSION_ID,
+        )
+
+
+def test_dynamic_evidence_requirement_is_explicit_and_protocol_bound():
+    assert _mystand_dynamic_evidence_required(
+        {"X-Xiaoban-Evidence-Required": "0"},
+        completion_protocol=PROTOCOL,
+    ) is False
+    assert _mystand_dynamic_evidence_required(
+        {"X-Xiaoban-Evidence-Required": "1"},
+        completion_protocol=PROTOCOL,
+    ) is True
+    with pytest.raises(ValueError):
+        _mystand_dynamic_evidence_required(
+            {},
+            completion_protocol=PROTOCOL,
+        )
+    with pytest.raises(ValueError):
+        _mystand_dynamic_evidence_required(
+            {"X-Xiaoban-Evidence-Required": "true"},
+            completion_protocol=PROTOCOL,
+        )
+    with pytest.raises(ValueError):
+        _mystand_dynamic_evidence_required(
+            {"X-Xiaoban-Evidence-Required": "1"},
+            completion_protocol="",
         )
 
 
@@ -492,6 +802,91 @@ async def test_normal_dynamic_evidence_uses_strict_paid_call_fence(
 
     assert result["completed"] is True
     assert create_kwargs["strict_no_automatic_paid_retry"] is True
+
+
+@pytest.mark.asyncio
+async def test_server_work_marker_blocks_zero_call_claim_and_chat_stays_visible(
+    monkeypatch,
+):
+    from gateway.platforms import api_server
+
+    adapter = APIServerAdapter(
+        PlatformConfig(enabled=True, extra={"key": "sk-test-only"}),
+    )
+    headers = _normal_request_headers()
+    headers.update(
+        {
+            "X-Xiaoban-Attempt": "1",
+            "X-Xiaoban-Delivery-Attempt": "1",
+            "X-Xiaoban-Request-Fingerprint": REQUEST_FINGERPRINT,
+            "X-Xiaoban-Invocation-Fingerprint": INVOCATION_FINGERPRINT,
+        },
+    )
+    binding = _mystand_completion_expected_binding(
+        headers,
+        session_id=SESSION_ID,
+    )
+    neutral_message = "请处理这件事"
+    preexecuted: list[str] = []
+
+    def _fake_create_agent(**_kwargs):
+        agent = _RetryFenceAgent()
+        return agent
+
+    def _empty_preexecution(initial_tool_choice, **_kwargs):
+        preexecuted.append(initial_tool_choice)
+        return []
+
+    monkeypatch.setattr(adapter, "_create_agent", _fake_create_agent)
+    monkeypatch.setattr(
+        api_server,
+        "_run_mystand_preexecuted_evidence",
+        _empty_preexecution,
+    )
+
+    work_result, _usage = await adapter._run_agent(
+        user_message=neutral_message,
+        conversation_history=[],
+        session_id=SESSION_ID,
+        request_headers=headers,
+        completion_protocol=PROTOCOL,
+        completion_binding=binding,
+        dynamic_evidence_required=True,
+    )
+    work_text = _finalize_mystand_egress_result(
+        work_result,
+        user_message=neutral_message,
+        conversation_history=[],
+    )
+
+    assert preexecuted == []
+    assert work_result["_mystand_evidence_required"] is True
+    assert work_result["_trusted_turn"].interaction_kind == "WORK"
+    assert work_text == ""
+    assert work_result["completed"] is False
+    assert work_result["failed"] is True
+    assert work_result["messages"] == []
+    assert "_mystand_trusted_verification" not in work_result
+
+    chat_result, _usage = await adapter._run_agent(
+        user_message=neutral_message,
+        conversation_history=[],
+        session_id=SESSION_ID,
+        request_headers=headers,
+        completion_protocol=PROTOCOL,
+        completion_binding=binding,
+        dynamic_evidence_required=False,
+    )
+    chat_text = _finalize_mystand_egress_result(
+        chat_result,
+        user_message=neutral_message,
+        conversation_history=[],
+    )
+
+    assert preexecuted == []
+    assert chat_result["_mystand_evidence_required"] is False
+    assert chat_result["_trusted_turn"].interaction_kind == "CHAT"
+    assert chat_text == "普通回复"
 
 
 @pytest.mark.asyncio
@@ -724,7 +1119,132 @@ def test_durable_v2_outcome_requires_bound_receipt_and_chat_stays_legacy():
     assert "trustedVerification" not in chat_payload
 
 
-def test_failed_dynamic_read_keeps_protocol_and_durable_seal_fails_closed():
+def test_dynamic_completion_bypasses_legacy_fixed_tool_group_gate():
+    turn = _turn()
+    _record_index(
+        turn,
+        [_index_item("res-selected", "中海城南一号2-1-1001")],
+    )
+    _record(
+        turn,
+        "mystand_authorization",
+        {"operation": "resolve", "resource_uid": "res-selected"},
+        {
+            "ok": True,
+            "content": "真实读取内容",
+            "resourceUid": "res-selected",
+        },
+        "call-auth",
+    )
+    model_reply = "我已从目标资料中读取成功，下面按资料内容说明。"
+    result = {
+        "final_response": model_reply,
+        "messages": [],
+        "completed": True,
+        "failed": False,
+        "_mystand_request": True,
+        "_mystand_user_id": IDENTITY.account_id,
+        "_mystand_request_id": DELIVERY_ID,
+        "_mystand_message_id": MESSAGE_ID,
+        "_mystand_completion_protocol": PROTOCOL,
+        "_mystand_completion_binding": dict(turn.completion_binding),
+        "_mystand_required_evidence_groups": [["mystand_query"]],
+        "_trusted_turn": turn,
+    }
+
+    final_text = _finalize_mystand_egress_result(
+        result,
+        user_message="读取目标资料",
+        conversation_history=[],
+    )
+
+    assert final_text == model_reply
+    assert result["_mystand_trusted_verification"]["completion_kind"] == (
+        "evidence-bound"
+    )
+
+
+def test_zero_call_dynamic_claim_cannot_bypass_legacy_required_group():
+    turn = _turn()
+    model_reply = "我已经查到资料，答案是肯定的。"
+    result = {
+        "final_response": model_reply,
+        "messages": [],
+        "completed": True,
+        "failed": False,
+        "_mystand_request": True,
+        "_mystand_user_id": IDENTITY.account_id,
+        "_mystand_request_id": DELIVERY_ID,
+        "_mystand_message_id": MESSAGE_ID,
+        "_mystand_completion_protocol": PROTOCOL,
+        "_mystand_completion_binding": dict(turn.completion_binding),
+        "_mystand_required_evidence_groups": [["mystand_query"]],
+        "_trusted_turn": turn,
+    }
+
+    final_text = _finalize_mystand_egress_result(
+        result,
+        user_message="读取目标资料",
+        conversation_history=[],
+    )
+
+    assert final_text != model_reply
+    assert "_mystand_trusted_verification" not in result
+
+
+def test_finalize_only_not_executed_claim_is_blocked_without_legacy_group():
+    turn = _turn()
+    turn.completion_finalization = "not_executed"
+    model_reply = "我已经查到资料，答案是肯定的。"
+    result = {
+        "final_response": model_reply,
+        "messages": [],
+        "completed": True,
+        "failed": False,
+        "_mystand_request": True,
+        "_mystand_user_id": IDENTITY.account_id,
+        "_mystand_request_id": DELIVERY_ID,
+        "_mystand_message_id": MESSAGE_ID,
+        "_mystand_completion_protocol": PROTOCOL,
+        "_mystand_completion_binding": dict(turn.completion_binding),
+        "_trusted_turn": turn,
+    }
+
+    final_text = _finalize_mystand_egress_result(
+        result,
+        user_message="读取目标资料",
+        conversation_history=[],
+    )
+
+    assert final_text != model_reply
+    assert "_mystand_trusted_verification" not in result
+
+
+def test_zero_call_work_claim_is_not_persisted_as_fixed_fallback():
+    turn = _turn(evidence_required=True)
+    persisted: list[list[dict]] = []
+    agent = SimpleNamespace(
+        _persist_session=lambda messages, _history=None: persisted.append(
+            list(messages)
+        )
+    )
+    _install_mystand_completion_persistence_guard(agent, turn)
+
+    agent._persist_session(
+        [
+            {"role": "user", "content": "请处理这件事"},
+            {
+                "role": "assistant",
+                "content": "我已经查到资料，答案是肯定的。",
+            },
+        ],
+        [],
+    )
+
+    assert persisted == [[{"role": "user", "content": "请处理这件事"}]]
+
+
+def test_failed_dynamic_read_delivers_model_failure_with_bound_receipt():
     turn = _turn()
     _record_index(
         turn,
@@ -747,9 +1267,14 @@ def test_failed_dynamic_read_keeps_protocol_and_durable_seal_fails_closed():
     )
     assert query_result is not None
     assert query_result.status == "error"
+    turn.completion_finalization = "failure"
+    model_reply = "我这次没有读到有效资料，需要你补充更准确的名称。"
+    turn.completion_finalization_output_digest = hashlib.sha256(
+        model_reply.encode("utf-8")
+    ).hexdigest()
 
     result = {
-        "final_response": "模型声称查到了",
+        "final_response": model_reply,
         "messages": [],
         "completed": True,
         "failed": False,
@@ -767,12 +1292,12 @@ def test_failed_dynamic_read_keeps_protocol_and_durable_seal_fails_closed():
         conversation_history=[],
     )
 
-    assert final_text == "站内资料读取暂时没有接稳，请稍后再试。"
-    assert turn.terminal_reason == "blocked_no_evidence"
+    assert final_text == model_reply
     assert result["_mystand_completion_protocol"] == PROTOCOL
-    assert "_mystand_trusted_verification" not in result
-    with pytest.raises(
-        RuntimeError,
-        match="true MoA dynamic completion receipt is invalid",
-    ):
-        _IdempotencyCache._completed_outcome_payload(result)
+    verification = result["_mystand_trusted_verification"]
+    assert verification["completion_kind"] == "failure-bound"
+    assert verification["decision"] == "execution_status_bound"
+    assert verification["failure_class"] == "error"
+    assert verification["failed_action_count"] == 1
+    payload = _IdempotencyCache._completed_outcome_payload(result)
+    assert payload["trustedVerification"] == verification

@@ -365,7 +365,7 @@ def _project_trusted_verification(
         isinstance(projected, dict)
         and projected.get("schema") == _DYNAMIC_VERIFICATION_SCHEMA
     ):
-        expected_fields = {
+        common_fields = {
             "schema",
             "completion_kind",
             "binding_verified",
@@ -382,6 +382,8 @@ def _project_trusted_verification(
             "output_digest",
             "decision",
             "verified_at",
+        }
+        evidence_fields = {
             "index_count",
             "index_has_more",
             "index_receipt_digest",
@@ -390,19 +392,106 @@ def _project_trusted_verification(
             "record_refs_digest",
             "evidence_digest",
         }
-        record_refs = projected.get("record_refs")
-        if (
-            set(projected) != expected_fields
-            or projected.get("completion_kind") != "evidence-bound"
-            or projected.get("binding_verified") is not True
+        failure_fields = {
+            "action_result_digest",
+            "failed_action_count",
+            "failure_class",
+        }
+        completion_kind = projected.get("completion_kind")
+        common_invalid = (
+            projected.get("binding_verified") is not True
             or projected.get("semantic_verified") is not False
             or isinstance(projected.get("action_count"), bool)
-            or projected.get("action_count") != 2
+            or not isinstance(projected.get("action_count"), int)
+            or projected["action_count"] < 1
             or isinstance(projected.get("evidence_count"), bool)
-            or projected.get("evidence_count") != 1
+            or not isinstance(projected.get("evidence_count"), int)
+            or projected["evidence_count"] < 0
             or isinstance(projected.get("attempt"), bool)
             or not isinstance(projected.get("attempt"), int)
-            or projected.get("decision") != "projected_evidence"
+            or any(
+                not _OUTCOME_DIGEST.fullmatch(
+                    str(projected.get(name) or "")
+                )
+                for name in (
+                    "request_fingerprint",
+                    "invocation_fingerprint",
+                    "output_digest",
+                )
+            )
+            or projected.get("output_digest") != output_digest
+            or not isinstance(projected.get("verified_at"), str)
+            or not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+                r"(?:\.\d+)?Z",
+                projected["verified_at"],
+            )
+            or not isinstance(binding, Mapping)
+            or binding.get("completionProtocol")
+            != _DYNAMIC_COMPLETION_PROTOCOL
+            or projected.get("delivery_id") != binding.get("deliveryId")
+            or projected.get("request_id") != binding.get("deliveryId")
+            or projected.get("message_id") != binding.get("messageId")
+            or projected.get("attempt") != binding.get("attempt")
+            or projected.get("request_fingerprint")
+            != binding.get("requestFingerprint")
+            or projected.get("invocation_fingerprint")
+            != binding.get("invocationFingerprint")
+            or projected.get("datascope_fingerprint")
+            != binding.get("datascopeFingerprint")
+        )
+        if common_invalid:
+            raise TrueMoAOutcomeBindingError(
+                "true MoA dynamic verification binding mismatch"
+            )
+        if completion_kind == "failure-bound":
+            if (
+                set(projected) != common_fields | failure_fields
+                or projected.get("evidence_count") != 0
+                or projected.get("decision") != "execution_status_bound"
+                or isinstance(projected.get("failed_action_count"), bool)
+                or not isinstance(projected.get("failed_action_count"), int)
+                or projected["failed_action_count"] < 1
+                or projected["failed_action_count"]
+                > projected["action_count"]
+                or projected.get("failure_class")
+                not in {
+                    "ambiguous",
+                    "denied",
+                    "empty",
+                    "error",
+                    "mixed",
+                    "not_found",
+                }
+                or not _OUTCOME_DIGEST.fullmatch(
+                    str(projected.get("action_result_digest") or "")
+                )
+            ):
+                raise TrueMoAOutcomeBindingError(
+                    "true MoA dynamic failure verification mismatch"
+                )
+            return projected
+        record_refs = projected.get("record_refs")
+        if (
+            set(projected) != common_fields | evidence_fields
+            or completion_kind != "evidence-bound"
+            or projected.get("binding_verified") is not True
+            or projected.get("semantic_verified") is not False
+            or projected.get("evidence_count") < 1
+            or not (
+                (
+                    projected.get("action_count") == 2
+                    and projected.get("evidence_count") == 1
+                    and projected.get("decision")
+                    == "projected_evidence"
+                )
+                or (
+                    projected.get("action_count")
+                    == projected.get("evidence_count") + 1
+                    and projected.get("decision")
+                    == "evidence_access_verified"
+                )
+            )
             or projected.get("index_has_more") is not False
             or isinstance(projected.get("index_count"), bool)
             or not isinstance(projected.get("index_count"), int)
@@ -423,9 +512,6 @@ def _project_trusted_verification(
                     str(projected.get(name) or "")
                 )
                 for name in (
-                    "request_fingerprint",
-                    "invocation_fingerprint",
-                    "output_digest",
                     "index_receipt_digest",
                     "index_resource_refs_digest",
                     "record_refs_digest",
@@ -437,25 +523,6 @@ def _project_trusted_verification(
             != hashlib.sha256(
                 _canonical_json_bytes(record_refs)
             ).hexdigest()
-            or not isinstance(projected.get("verified_at"), str)
-            or not re.fullmatch(
-                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
-                r"(?:\.\d+)?Z",
-                projected["verified_at"],
-            )
-            or not isinstance(binding, Mapping)
-            or binding.get("completionProtocol")
-            != _DYNAMIC_COMPLETION_PROTOCOL
-            or projected.get("delivery_id") != binding.get("deliveryId")
-            or projected.get("request_id") != binding.get("deliveryId")
-            or projected.get("message_id") != binding.get("messageId")
-            or projected.get("attempt") != binding.get("attempt")
-            or projected.get("request_fingerprint")
-            != binding.get("requestFingerprint")
-            or projected.get("invocation_fingerprint")
-            != binding.get("invocationFingerprint")
-            or projected.get("datascope_fingerprint")
-            != binding.get("datascopeFingerprint")
         ):
             raise TrueMoAOutcomeBindingError(
                 "true MoA dynamic verification binding mismatch"
