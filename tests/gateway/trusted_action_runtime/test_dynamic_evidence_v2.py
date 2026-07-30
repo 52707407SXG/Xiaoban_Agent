@@ -643,7 +643,7 @@ def test_failure_bound_reply_requires_finalize_only_runtime_state():
     assert tampered.verification is None
 
 
-def test_dynamic_finalization_uses_real_failure_or_repeated_no_progress():
+def test_dynamic_finalization_uses_only_real_dispatched_failure():
     failed = _turn()
     _record(
         failed,
@@ -671,7 +671,7 @@ def test_dynamic_finalization_uses_real_failure_or_repeated_no_progress():
     assert dynamic_finalization_mode(
         denied,
         include_single_preaction=True,
-    ) == "failure"
+    ) == ""
     second = begin_action(
         denied,
         "mystand_query",
@@ -680,7 +680,7 @@ def test_dynamic_finalization_uses_real_failure_or_repeated_no_progress():
         call_id="call-denied-second",
     )
     assert second.reason == "missing_index_receipt"
-    assert dynamic_finalization_mode(denied) == "failure"
+    assert dynamic_finalization_mode(denied) == ""
 
 
 def test_completion_attempt_must_be_positive_and_dual_headers_must_match():

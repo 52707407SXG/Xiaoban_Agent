@@ -4877,7 +4877,13 @@ class AIAgent:
     def _build_api_kwargs(self, api_messages: list) -> dict:
         """Forwarder — see ``agent.chat_completion_helpers.build_api_kwargs``."""
         from agent.chat_completion_helpers import build_api_kwargs
-        return build_api_kwargs(self, api_messages)
+        from xiaoban.trusted_runtime.tool_visibility import (
+            filter_dynamic_evidence_api_kwargs,
+        )
+
+        return filter_dynamic_evidence_api_kwargs(
+            build_api_kwargs(self, api_messages)
+        )
 
     def _supports_reasoning_extra_body(self) -> bool:
         """Return True when reasoning extra_body is safe to send for this route/model.

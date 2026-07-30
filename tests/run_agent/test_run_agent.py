@@ -4511,12 +4511,20 @@ class TestRunConversation:
         agent._disable_streaming = True
         agent._use_prompt_caching = True
         agent.max_iterations = 8
+        agent.tools = [{
+            "type": "function",
+            "function": {
+                "name": "mystand_resource_index",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }]
+        agent.valid_tool_names = {"mystand_resource_index"}
         first = _mock_response(
             content="",
             finish_reason="tool_calls",
             tool_calls=[
                 _mock_tool_call(
-                    name="web_search",
+                    name="mystand_resource_index",
                     arguments="{}",
                     call_id="strict-finalize-tool",
                 )
@@ -4584,6 +4592,19 @@ class TestRunConversation:
         final_system_content = observed_requests[1]["messages"][0]["content"]
         assert isinstance(final_system_content, list)
         assert "Runtime finalization:" in final_system_content[0]["text"]
+        final_request_text = json.dumps(
+            observed_requests[1]["messages"],
+            ensure_ascii=False,
+        )
+        assert "自然中文" in final_request_text
+        assert all(
+            message.get("role") != "tool"
+            for message in observed_requests[1]["messages"]
+        )
+        assert all(
+            not message.get("tool_calls")
+            for message in observed_requests[1]["messages"]
+        )
         assert result["api_calls"] == 2
         assert result["final_response"] == "我已经根据这次真实执行结果说明情况。"
         assert result["completed"] is True
@@ -4711,11 +4732,14 @@ class TestRunConversation:
                 2,
                 block_messages,
             ) is True
-        assert isinstance(block_messages[0]["content"], list)
-        assert block_messages[0]["content"][0]["text"] == "cached system"
-        assert "Runtime finalization:" in (
-            block_messages[0]["content"][1]["text"]
-        )
+        assert [message["role"] for message in block_messages] == [
+            "system",
+            "user",
+            "user",
+        ]
+        assert "Runtime finalization:" in block_messages[0]["content"]
+        assert "cached system" not in json.dumps(block_messages)
+        assert "自然中文" in block_messages[-1]["content"]
 
     def test_strict_paid_length_is_terminal_and_preserves_usage(self, agent):
         self._setup_agent(agent)

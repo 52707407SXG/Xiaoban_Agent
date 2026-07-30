@@ -712,45 +712,18 @@ def _validated_failure_lifecycle(
     if turn.action_calls and matched is None:
         return None
     matched = matched or []
-    call_ids = {call.call_id for call in turn.action_calls}
+    _ = include_single_preaction  # retained for call-site compatibility
     matched_failures = [
         result
         for call, result in matched
         if ACTION_OUTPUT_CONTRACTS[call.action_id].kind in {"index", "read"}
         and result.status != "success"
     ]
-    preaction_failures = [
-        result
-        for result in turn.action_results
-        if result.call_id not in call_ids
-        and result.action_id in ACTION_OUTPUT_CONTRACTS
-        and ACTION_OUTPUT_CONTRACTS[result.action_id].kind
-        in {"index", "read"}
-        and result.status != "success"
-        and result.error_code not in _HARD_PREACTION_ERRORS
-    ]
-    if preaction_failures and not include_single_preaction:
-        repeated = {
-            (result.action_id, result.error_code)
-            for result in preaction_failures
-            if sum(
-                1
-                for candidate in preaction_failures
-                if (
-                    candidate.action_id,
-                    candidate.error_code,
-                )
-                == (result.action_id, result.error_code)
-            )
-            >= 2
-        }
-        preaction_failures = [
-            result
-            for result in preaction_failures
-            if (result.action_id, result.error_code) in repeated
-        ]
+    # A natural failure reply may describe only a handler that really ran and
+    # returned a bound non-success result.  PreAction denials are protocol
+    # errors/no-dispatch states, never user-facing execution evidence.
     failures = sorted(
-        [*matched_failures, *preaction_failures],
+        matched_failures,
         key=lambda result: (
             str(result.call_id),
             str(result.action_id),
@@ -759,7 +732,7 @@ def _validated_failure_lifecycle(
     )
     if not failures:
         return None
-    return len(matched) + len(preaction_failures), failures
+    return len(matched), failures
 
 
 def dynamic_finalization_mode(

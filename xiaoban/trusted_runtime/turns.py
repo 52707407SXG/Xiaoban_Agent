@@ -965,10 +965,12 @@ def gate_registry_action(
     返回 None 表示非可信目录动作或非 My Stand 服务端会话，保持原路径；
     返回 (turn, decision) 时调用方必须按 decision 执行或拒绝。
     """
-    if name not in ACTION_OUTPUT_CONTRACTS or is_write_action(
-        name, args if isinstance(args, dict) else None
-    ):
-        return None
+    catalog_action = name in ACTION_OUTPUT_CONTRACTS
+    write_action = is_write_action(
+        name,
+        args if isinstance(args, dict) else None,
+    )
+    dynamic_guard_active = False
     try:
         from gateway.session_context import get_session_env
 
@@ -978,12 +980,81 @@ def gate_registry_action(
             # 非 My Stand 服务端会话：工具 handler 自身已有 fail-closed 门禁。
             return None
         turn = current_turn()
+        dynamic_guard_active = bool(
+            turn is not None
+            and turn.completion_protocol == MYSTAND_COMPLETION_PROTOCOL_V2
+            and turn.fact_requirement is None
+        )
+        from xiaoban.trusted_runtime.tool_visibility import (
+            dynamic_evidence_allowed_tool_names,
+        )
+
+        allowed_names = dynamic_evidence_allowed_tool_names(turn)
+        if dynamic_guard_active and name not in allowed_names:
+            if not call_id:
+                from tools.approval import _approval_tool_call_id
+
+                call_id = _approval_tool_call_id.get()
+            call_id = call_id or f"mystand_pre_{uuid.uuid4().hex}"
+            reason = "dynamic_tool_stage_closed"
+            if write_action:
+                reason = "write_isolated"
+            elif str(
+                getattr(turn, "completion_finalization", "") or ""
+            ):
+                reason = "dynamic_finalization_stage_closed"
+            elif name == "mystand_resource_index":
+                reason = "dynamic_index_stage_closed"
+            return turn, _record_denial(
+                turn,
+                call_id,
+                name,
+                reason,
+            )
+        if not catalog_action:
+            return None
+        if write_action:
+            if dynamic_guard_active:
+                if not call_id:
+                    from tools.approval import _approval_tool_call_id
+
+                    call_id = _approval_tool_call_id.get()
+                call_id = call_id or f"mystand_pre_{uuid.uuid4().hex}"
+                return turn, _record_denial(
+                    turn,
+                    call_id,
+                    name,
+                    "write_isolated",
+                )
+            # Existing confirmed-write runtime owns every non-dynamic write.
+            return None
         if turn is None:
             return None, PreActionDecision("deny", "no_active_turn")
         if not call_id:
             from tools.approval import _approval_tool_call_id
 
             call_id = _approval_tool_call_id.get()
+        call_id = call_id or f"mystand_pre_{uuid.uuid4().hex}"
+        dynamic_open_read = dynamic_guard_active
+        gated_args = dict(args) if isinstance(args, dict) else {}
+        if (
+            name == "mystand_resource_index"
+            and dynamic_open_read
+        ):
+            if (
+                turn.index_receipt is not None
+                and turn.index_receipt.status == "found"
+            ):
+                return turn, _record_denial(
+                    turn,
+                    call_id,
+                    name,
+                    "dynamic_index_stage_closed",
+                )
+            # In open dynamic discovery the model may suggest a module name,
+            # but only the server-owned index result may establish location.
+            gated_args.pop("module_id", None)
+            gated_args.pop("moduleId", None)
         pending = next(
             (
                 call
@@ -1001,14 +1072,16 @@ def gate_registry_action(
                 turn,
                 name,
                 "v1",
-                args if isinstance(args, dict) else {},
+                gated_args,
                 call_id=call_id,
             )
         )
         return turn, decision
     except Exception:
         # 策略异常默认拒绝（只影响可信目录动作）。
-        return None, PreActionDecision("deny", "preaction_error")
+        if catalog_action or dynamic_guard_active:
+            return None, PreActionDecision("deny", "preaction_error")
+        return None
 
 
 def _current_turn_messages(result: Any) -> List[Mapping[str, Any]]:

@@ -623,10 +623,10 @@ def _apply_ephemeral_tool_choice(
     return api_kwargs
 
 
-def _tools_for_ephemeral_choice(agent) -> list:
+def _tools_for_ephemeral_choice(agent, tools: Optional[list] = None) -> list:
     """Expose only the required first tool so providers cannot choose another."""
 
-    tools = list(agent.tools or [])
+    tools = list(agent.tools or []) if tools is None else list(tools)
     tool_name = str(getattr(agent, "_ephemeral_tool_choice", "") or "").strip()
     if not tool_name:
         return tools
@@ -645,7 +645,24 @@ def _tools_for_ephemeral_choice(agent) -> list:
 
 def build_api_kwargs(agent, api_messages: list) -> dict:
     """Build the keyword arguments dict for the active API mode."""
-    tools_for_api = _tools_for_ephemeral_choice(agent)
+    from xiaoban.trusted_runtime.tool_visibility import (
+        filter_dynamic_evidence_tools,
+    )
+
+    canonical_tools = list(agent.tools or [])
+    visible_tools = filter_dynamic_evidence_tools(canonical_tools)
+    if visible_tools is not canonical_tools:
+        visible_names = {
+            str((tool.get("function") or {}).get("name") or tool.get("name") or "")
+            for tool in visible_tools
+            if isinstance(tool, dict)
+        }
+        ephemeral_choice = str(
+            getattr(agent, "_ephemeral_tool_choice", "") or ""
+        ).strip()
+        if ephemeral_choice and ephemeral_choice not in visible_names:
+            agent._ephemeral_tool_choice = ""
+    tools_for_api = _tools_for_ephemeral_choice(agent, visible_tools)
 
     if agent.api_mode == "anthropic_messages":
         _transport = agent._get_transport()

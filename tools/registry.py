@@ -418,7 +418,13 @@ class ToolRegistry:
                 return json.dumps(
                     {"ok": False, "status": 403, "code": decision.reason}
                 )
-            raw = self._dispatch_entry(entry, args, **kwargs)
+            # Execute the exact arguments admitted and bound by PreAction.
+            # The model-supplied dict may contain fields stripped by policy.
+            raw = self._dispatch_entry(
+                entry,
+                dict(decision.call.arguments),
+                **kwargs,
+            )
             try:
                 from xiaoban.trusted_runtime.turns import finish_action
 
