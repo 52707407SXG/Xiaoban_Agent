@@ -89,6 +89,9 @@ from xiaoban.trusted_runtime.fact_contract import (
     normalized_fact_query_text as _normalized_mystand_fact_query_text,
 )
 from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_BUSINESS_TOOL_MODE_DISABLED_VALUE,
+    MYSTAND_BUSINESS_TOOL_MODE_HEADER as _MYSTAND_BUSINESS_TOOL_MODE_HEADER,
+    MYSTAND_BUSINESS_TOOL_MODE_VALUES,
     MYSTAND_COMPLETION_PROTOCOL as _MYSTAND_COMPLETION_PROTOCOL_V2,
     MYSTAND_EVIDENCE_REQUIRED_HEADER as _MYSTAND_EVIDENCE_REQUIRED_HEADER,
     MYSTAND_EVIDENCE_REQUIRED_VALUES,
@@ -314,7 +317,6 @@ _MYSTAND_STREAM_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 _MYSTAND_FACT_REQUIREMENT_HEADER = "X-Xiaoban-Fact-Requirement"
 _MYSTAND_FACT_SIGNATURE_HEADER = "X-Xiaoban-Fact-Signature"
 _MYSTAND_COMPLETION_PROTOCOL_HEADER = "X-Xiaoban-Completion-Protocol"
-_MYSTAND_BUSINESS_TOOL_MODE_HEADER = "X-Xiaoban-Business-Tool-Mode"
 _MYSTAND_INVOCATION_FINGERPRINT_HEADER = (
     "X-Xiaoban-Invocation-Fingerprint"
 )
@@ -936,9 +938,9 @@ def _mystand_business_tools_disabled(
         _MYSTAND_BUSINESS_TOOL_MODE_HEADER,
     )
     if completion_protocol:
-        if value not in {"enabled", "disabled"}:
+        if value not in MYSTAND_BUSINESS_TOOL_MODE_VALUES:
             raise ValueError("dynamic business tool mode is invalid")
-        return value == "disabled"
+        return value == MYSTAND_BUSINESS_TOOL_MODE_DISABLED_VALUE
     if value:
         raise ValueError(
             "dynamic business tool mode requires a protocol",

@@ -10,6 +10,9 @@ from scripts.check_xiaoban_trusted_runtime_contract import (
     assert_unique_contract_revision,
 )
 from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_BUSINESS_TOOL_MODE_DISABLED_VALUE,
+    MYSTAND_BUSINESS_TOOL_MODE_ENABLED_VALUE,
+    MYSTAND_BUSINESS_TOOL_MODE_HEADER,
     TRUSTED_RUNTIME_CONTRACT,
     TRUSTED_RUNTIME_CONTRACT_DIGEST,
     TRUSTED_RUNTIME_CONTRACT_DIGEST_HEADER,
@@ -48,6 +51,14 @@ def test_trusted_runtime_contract_protects_non_negotiable_invariants():
         TRUSTED_RUNTIME_CONTRACT["write"]["successRequiresVerified"]
         is True
     )
+    completion = TRUSTED_RUNTIME_CONTRACT["completion"]
+    assert MYSTAND_BUSINESS_TOOL_MODE_HEADER == (
+        "x-xiaoban-business-tool-mode"
+    )
+    assert MYSTAND_BUSINESS_TOOL_MODE_ENABLED_VALUE == "enabled"
+    assert MYSTAND_BUSINESS_TOOL_MODE_DISABLED_VALUE == "disabled"
+    assert completion["businessToolModeRequired"] is True
+    assert completion["businessToolModeSource"] == "server-trusted-intent"
     with pytest.raises(TypeError):
         TRUSTED_RUNTIME_CONTRACT["compatibility"]["mode"] = "fallback"
     with pytest.raises(TypeError):

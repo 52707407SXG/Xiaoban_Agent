@@ -32,6 +32,9 @@ from xiaoban.trusted_runtime.paid_call_policy import (
     SIGNED_MYSTAND_AGENT_POLICY_REVISION,
 )
 from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_BUSINESS_TOOL_MODE_DISABLED_VALUE,
+    MYSTAND_BUSINESS_TOOL_MODE_ENABLED_VALUE,
+    MYSTAND_BUSINESS_TOOL_MODE_HEADER,
     TRUSTED_RUNTIME_CONTRACT,
     TRUSTED_RUNTIME_CONTRACT_DIGEST,
     TRUSTED_RUNTIME_CONTRACT_PATH,
@@ -189,6 +192,46 @@ def check_local() -> None:
         MYSTAND_COMPLETION_VERIFICATION_SCHEMA_V2,
         completion["verificationSchema"],
     )
+    _expect(
+        "business tool mode header",
+        MYSTAND_BUSINESS_TOOL_MODE_HEADER,
+        completion["businessToolModeHeader"],
+    )
+    _expect(
+        "business tool mode enabled value",
+        MYSTAND_BUSINESS_TOOL_MODE_ENABLED_VALUE,
+        completion["businessToolModeEnabledValue"],
+    )
+    _expect(
+        "business tool mode disabled value",
+        MYSTAND_BUSINESS_TOOL_MODE_DISABLED_VALUE,
+        completion["businessToolModeDisabledValue"],
+    )
+    _expect(
+        "business tool mode required",
+        completion["businessToolModeRequired"],
+        True,
+    )
+    _expect(
+        "business tool mode source",
+        completion["businessToolModeSource"],
+        "server-trusted-intent",
+    )
+    api_server_source = (
+        REPO_ROOT / "gateway/platforms/api_server.py"
+    ).read_text(encoding="utf-8")
+    if (
+        "MYSTAND_BUSINESS_TOOL_MODE_HEADER as "
+        "_MYSTAND_BUSINESS_TOOL_MODE_HEADER"
+        not in api_server_source
+        or "MYSTAND_BUSINESS_TOOL_MODE_VALUES"
+        not in api_server_source
+        or "_MYSTAND_BUSINESS_TOOL_MODE_HEADER = \""
+        in api_server_source
+    ):
+        raise SystemExit(
+            "business tool mode is not bound to the runtime contract"
+        )
     _expect("agent usage schema", AGENT_CALL_USAGE_SCHEMA, usage["agentCallSchema"])
     _expect("agent call limit", AGENT_CALL_LIMIT, usage["normalCallLimit"])
     _expect("usage max bytes", AGENT_CALL_USAGE_MAX_BYTES, usage["maxBytes"])

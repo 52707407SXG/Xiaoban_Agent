@@ -112,6 +112,21 @@ MYSTAND_EVIDENCE_REQUIRED_HEADER = str(
 MYSTAND_EVIDENCE_REQUIRED_VALUES = frozenset(
     str(value) for value in _COMPLETION["evidenceRequiredValues"]
 )
+MYSTAND_BUSINESS_TOOL_MODE_HEADER = str(
+    _COMPLETION["businessToolModeHeader"]
+)
+MYSTAND_BUSINESS_TOOL_MODE_ENABLED_VALUE = str(
+    _COMPLETION["businessToolModeEnabledValue"]
+)
+MYSTAND_BUSINESS_TOOL_MODE_DISABLED_VALUE = str(
+    _COMPLETION["businessToolModeDisabledValue"]
+)
+MYSTAND_BUSINESS_TOOL_MODE_VALUES = frozenset(
+    {
+        MYSTAND_BUSINESS_TOOL_MODE_ENABLED_VALUE,
+        MYSTAND_BUSINESS_TOOL_MODE_DISABLED_VALUE,
+    }
+)
 MYSTAND_FACT_REQUIREMENT_SCHEMA = str(
     _COMPLETION["factRequirementSchema"]
 )

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "contract": "mystand.xiaoban-trusted-runtime-contract.v1",
-  "revision": "2026-07-30.2",
+  "revision": "2026-07-31.1",
   "compatibility": {
     "mode": "exact-match",
     "silentFallbackAllowed": false,
@@ -31,6 +31,11 @@
       "1"
     ],
     "evidenceRequiredSource": "server-trusted-intent",
+    "businessToolModeHeader": "x-xiaoban-business-tool-mode",
+    "businessToolModeEnabledValue": "enabled",
+    "businessToolModeDisabledValue": "disabled",
+    "businessToolModeRequired": true,
+    "businessToolModeSource": "server-trusted-intent",
     "factRequirementSchema": "mystand.fact-requirement.v1",
     "factQueryPlanSchema": "mystand.xiaoban-fact-query-plan.v1",
     "factRequirementBindingSchema": "mystand.xiaoban-trusted-fact-requirement-binding.v1",
