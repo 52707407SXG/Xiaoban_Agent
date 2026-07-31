@@ -83,6 +83,114 @@ def test_reader_accepts_new_failure_classes(
     ) == verification
 
 
+@pytest.mark.parametrize(
+    ("failure_class", "failure_reason"),
+    [
+        ("error", "invalid_arguments"),
+        ("error", "timeout"),
+        ("no_progress", "read_not_dispatched_after_index"),
+        ("cancelled", "cancelled"),
+    ],
+)
+def test_reader_accepts_safe_failure_reason(
+    failure_class: str,
+    failure_reason: str,
+):
+    action_count = 0 if failure_class == "no_progress" else 1
+    verification = {
+        **_common(
+            completion_kind="failure-bound",
+            action_count=action_count,
+            evidence_count=0,
+        ),
+        "action_result_digest": "d" * 64,
+        "failed_action_count": action_count,
+        "failure_class": failure_class,
+        "failure_reason": failure_reason,
+    }
+
+    assert _project_trusted_verification(
+        verification,
+        output_digest=OUTPUT_DIGEST,
+        binding=BINDING,
+    ) == verification
+
+
+@pytest.mark.parametrize(
+    ("failure_class", "failure_reason"),
+    [
+        ("error", "denied"),
+        ("no_progress", "invalid_arguments"),
+        ("cancelled", "execution_error"),
+        ("error", "raw backend detail"),
+    ],
+)
+def test_reader_rejects_failure_reason_outside_safe_class_mapping(
+    failure_class: str,
+    failure_reason: str,
+):
+    action_count = 0 if failure_class == "no_progress" else 1
+    verification = {
+        **_common(
+            completion_kind="failure-bound",
+            action_count=action_count,
+            evidence_count=0,
+        ),
+        "action_result_digest": "d" * 64,
+        "failed_action_count": action_count,
+        "failure_class": failure_class,
+        "failure_reason": failure_reason,
+    }
+
+    with pytest.raises(TrueMoAOutcomeBindingError):
+        _project_trusted_verification(
+            verification,
+            output_digest=OUTPUT_DIGEST,
+            binding=BINDING,
+        )
+
+
+def test_reader_accepts_failure_recovery_and_system_receipt_fields():
+    verification = {
+        **_common(
+            completion_kind="failure-bound",
+            action_count=3,
+            evidence_count=0,
+        ),
+        "action_result_digest": "d" * 64,
+        "failed_action_count": 2,
+        "failure_class": "error",
+        "failure_reason": "timeout",
+        "recovery_reason": "invalid_arguments",
+        "output_presentation": "system-receipt",
+        "answer_status": "incomplete",
+    }
+
+    assert _project_trusted_verification(
+        verification,
+        output_digest=OUTPUT_DIGEST,
+        binding=BINDING,
+    ) == verification
+
+    invalid = dict(verification)
+    invalid["recovery_reason"] = "denied"
+    with pytest.raises(TrueMoAOutcomeBindingError):
+        _project_trusted_verification(
+            invalid,
+            output_digest=OUTPUT_DIGEST,
+            binding=BINDING,
+        )
+
+    incomplete_presentation = dict(verification)
+    incomplete_presentation.pop("answer_status")
+    with pytest.raises(TrueMoAOutcomeBindingError):
+        _project_trusted_verification(
+            incomplete_presentation,
+            output_digest=OUTPUT_DIGEST,
+            binding=BINDING,
+        )
+
+
 def test_reader_accepts_one_bound_transient_failure_before_success():
     verification = {
         **_common(
@@ -117,3 +225,14 @@ def test_reader_accepts_one_bound_transient_failure_before_success():
             output_digest=OUTPUT_DIGEST,
             binding=BINDING,
         )
+
+    system_receipt = {
+        **verification,
+        "output_presentation": "system-receipt",
+        "answer_status": "incomplete",
+    }
+    assert _project_trusted_verification(
+        system_receipt,
+        output_digest=OUTPUT_DIGEST,
+        binding=BINDING,
+    ) == system_receipt

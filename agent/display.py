@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from utils import safe_json_loads
-from agent.tool_result_classification import file_mutation_result_landed
+from agent.tool_result_classification import tool_result_failed
 
 # ANSI escape codes for coloring tool failure indicators
 _RED = "\033[31m"
@@ -926,7 +926,7 @@ def _trim_error(msg: str) -> str:
     return msg
 
 
-def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]:
+def _detect_tool_failure(tool_name: str, result: Any) -> tuple[bool, str]:
     """Inspect a tool result string for signs of failure.
 
     Returns ``(is_failure, suffix)`` where *suffix* is a short informational
@@ -936,7 +936,7 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
     """
     if result is None:
         return False, ""
-    if file_mutation_result_landed(tool_name, result):
+    if not tool_result_failed(tool_name, result):
         return False, ""
 
     data = safe_json_loads(result)
@@ -950,7 +950,6 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
                 if err_msg:
                     return True, f" [{_trim_error(str(err_msg))}]"
                 return True, f" [exit {exit_code}]"
-        return False, ""
 
     # Memory: distinguish "store full" from real errors.
     if tool_name == "memory":
@@ -958,22 +957,17 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
             if data.get("success") is False and "exceed the limit" in data.get("error", ""):
                 return True, " [full]"
 
-    # Structured error in JSON result (any tool that surfaces {"error": ...}).
     if isinstance(data, dict):
+        status = data.get("status")
         err = data.get("error") or data.get("message")
-        if err and (data.get("success") is False or "error" in data):
+        if err:
             return True, f" [{_trim_error(str(err))}]"
-
-    # Generic heuristic for non-terminal tools
-    # Multimodal tool results (dicts with _multimodal=True) are not strings —
-    # treat them as successes since failures would be JSON-encoded strings.
-    if not isinstance(result, str):
-        return False, ""
-    lower = result[:500].lower()
-    if '"error"' in lower or '"failed"' in lower or result.startswith("Error"):
-        return True, " [error]"
-
-    return False, ""
+        code = str(data.get("code") or "").strip()
+        if code:
+            return True, f" [{_trim_error(code)}]"
+        if status is not None:
+            return True, f" [status {status}]"
+    return True, " [error]"
 
 
 def get_cute_tool_message(

@@ -6,6 +6,12 @@ import urllib.error
 
 from gateway.session_context import clear_session_vars, set_session_vars
 from tools import mystand_query_tool as bridge
+from xiaoban.trusted_runtime import (
+    TrustedIdentity,
+    activate_turn,
+    begin_turn,
+    deactivate_turn,
+)
 
 FACT_NEEDS = {
     "owner.name",
@@ -245,6 +251,84 @@ def test_handler_rejects_invalid_semantic_enums_and_duplicate_fact_needs(
     invalid_fact_type = _valid_plan()
     invalid_fact_type["fact_needs"] = [{"predicate": "owner.name"}]
     assert _call(invalid_fact_type)["code"] == "invalid_mystand_query_arguments"
+
+
+def test_dynamic_handler_returns_specific_semantic_correction_without_dispatch(
+    monkeypatch,
+):
+    dispatched = []
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda *args: dispatched.append(args) or json.dumps({"ok": True}),
+    )
+    identity = TrustedIdentity(
+        account_id="ZYJ005",
+        data_scope="mystand",
+        source="server_session",
+    )
+    request_id = "dynamic-query-correction"
+    message_id = "dynamic-query-correction-message"
+    turn = begin_turn(
+        channel="web",
+        user_message="查一下特征卡并给我建议",
+        identity=identity,
+        request_id=request_id,
+        message_id=message_id,
+        evidence_required=True,
+        completion_protocol="dynamic-evidence-v2",
+        completion_binding={
+            "user_id": identity.account_id,
+            "session_id": "dynamic-query-correction-session",
+            "delivery_id": request_id,
+            "attempt": 1,
+            "message_id": message_id,
+            "request_fingerprint": "a" * 64,
+            "invocation_fingerprint": "b" * 64,
+            "datascope_fingerprint": identity.datascope_fingerprint,
+        },
+    )
+    active = activate_turn(turn)
+    try:
+        result = _call(
+            {
+                "operation": "read",
+                "query_kind": "resource-read",
+                "module_id": "profile",
+                "fact_paths": ["resource.summary"],
+                "query_args": {},
+                "coverage_required": False,
+                "resource": {
+                    "name": "特征卡",
+                    "type_hint": "profile-card",
+                },
+                "fact_needs": ["document.content", "resource.summary"],
+                "mode": "summary",
+            },
+            user_message="查一下特征卡并给我建议",
+        )
+    finally:
+        deactivate_turn(active)
+
+    assert result["ok"] is False
+    assert result["code"] == "invalid_mystand_query_arguments"
+    assert result["retryable"] is True
+    assert result["error"] == "semantic 查询参数包含不允许的字段"
+    assert result["correction"] == {
+        "allowed_fields": [
+            "operation",
+            "resource",
+            "entities",
+            "fact_needs",
+            "mode",
+        ],
+        "required_fields": ["operation", "resource", "fact_needs"],
+        "locator_rule": (
+            "preserve the indexed resource; entities may only narrow it"
+        ),
+        "max_calls": 1,
+    }
+    assert dispatched == []
 
 
 def test_handler_requires_authenticated_api_session_and_trusted_user_message(

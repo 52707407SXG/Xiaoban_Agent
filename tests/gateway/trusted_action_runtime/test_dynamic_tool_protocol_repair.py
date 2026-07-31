@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent.conversation_loop import (
+    _cap_dynamic_evidence_tool_calls,
     _contains_raw_tool_protocol_content,
     _prepare_finalize_only_call,
     _reject_finalize_only_protocol_candidate,
@@ -18,9 +19,14 @@ from agent.transports.bedrock import BedrockTransport
 from agent.tool_executor import _trusted_preaction_denial
 from gateway.session_context import clear_session_vars, set_session_vars
 from gateway.platforms.api_server import (
+    APIServerAdapter,
     _run_mystand_preexecuted_evidence,
 )
 from tools.registry import ToolRegistry
+from tools.mystand_query_tool import (
+    MYSTAND_QUERY_SCHEMA,
+    validate_mystand_semantic_query_plan,
+)
 from xiaoban.trusted_runtime import (
     TrustedIdentity,
     activate_turn,
@@ -35,10 +41,12 @@ from xiaoban.trusted_runtime.tool_visibility import (
 from xiaoban.trusted_runtime.dynamic_completion import (
     dynamic_failure_presentation,
     dynamic_finalization_mode,
+    dynamic_turn_outcome,
     dynamic_transient_recovery_plan,
     dynamic_transient_recovery_tool_call_valid,
     mark_dynamic_execution_no_progress,
     mark_dynamic_read_no_progress,
+    render_dynamic_failure_report,
 )
 from xiaoban.trusted_runtime.fact_contract import canonical_digest
 from xiaoban.trusted_runtime.completion_guard import check_completion
@@ -91,6 +99,15 @@ def _tools(*names: str) -> list[dict]:
         }
         for name in names
     ]
+
+
+def _canonical_query_tool() -> dict:
+    return {
+        "type": "function",
+        "function": json.loads(
+            json.dumps(MYSTAND_QUERY_SCHEMA, ensure_ascii=False)
+        ),
+    }
 
 
 def _tool_names(payload: dict) -> list[str]:
@@ -159,12 +176,15 @@ def test_complete_index_without_read_enters_bound_natural_failure():
     allowed = check_completion(model_reply, turn)
 
     assert allowed.allowed is True
-    assert allowed.text == model_reply
+    assert allowed.text == render_dynamic_failure_report(turn)
+    assert allowed.reason == "execution_status_system_receipt"
     assert allowed.verification["completion_kind"] == "failure-bound"
     assert allowed.verification["failure_class"] == "no_progress"
     assert allowed.verification["failed_action_count"] == 0
     assert allowed.verification["action_count"] == 1
     assert allowed.verification["evidence_count"] == 0
+    assert allowed.verification["output_presentation"] == "system-receipt"
+    assert allowed.verification["turn_outcome"]["attempt_count"] == 0
 
     natural_variant = (
         "抱歉，这次我完成了资料目录查询，但没能继续读到可回答的正文。"
@@ -172,7 +192,7 @@ def test_complete_index_without_read_enters_bound_natural_failure():
     )
     variant = _complete_bound_failure(turn, natural_variant)
     assert variant.allowed is True
-    assert variant.text == natural_variant
+    assert variant.text == allowed.text
 
 
 def test_zero_action_work_enters_bound_natural_failure():
@@ -184,7 +204,8 @@ def test_zero_action_work_enters_bound_natural_failure():
     allowed = _complete_bound_failure(turn, reply)
 
     assert allowed.allowed is True
-    assert allowed.text == reply
+    assert allowed.text == render_dynamic_failure_report(turn)
+    assert allowed.reason == "execution_status_system_receipt"
     assert allowed.verification["failure_class"] == "no_progress"
     assert allowed.verification["action_count"] == 0
     assert allowed.verification["failed_action_count"] == 0
@@ -192,7 +213,9 @@ def test_zero_action_work_enters_bound_natural_failure():
     natural_variant = (
         "这次我还没开始实际处理，因此我暂时无法完成这项任务。"
     )
-    assert _complete_bound_failure(turn, natural_variant).allowed is True
+    variant = _complete_bound_failure(turn, natural_variant)
+    assert variant.allowed is True
+    assert variant.text == allowed.text
 
 
 def test_preaction_denial_enters_bound_natural_failure():
@@ -293,7 +316,7 @@ def test_incomplete_index_receipt_enters_bound_natural_failure():
     assert allowed.verification["failed_action_count"] == 0
 
 
-def test_runtime_failure_examples_are_accepted_for_each_safe_class():
+def test_runtime_failure_reports_ignore_model_wording_for_each_safe_class():
     cases = (
         (
             {"ok": True, "items": [], "hasMore": False, "nextCursor": ""},
@@ -399,7 +422,10 @@ def test_runtime_failure_examples_are_accepted_for_each_safe_class():
         presentation = dynamic_failure_presentation(turn)
         assert presentation is not None
         assert presentation["failure_reason"] == expected_reason
-        allowed = _complete_bound_failure(turn, presentation["example"])
+        allowed = _complete_bound_failure(
+            turn,
+            "模型候选只是一段没有事实约束的状态话术。",
+        )
         assert allowed.allowed is True
         natural = _complete_bound_failure(turn, variants[expected_reason])
         assert natural.allowed is True
@@ -469,7 +495,10 @@ def test_unavailable_site_bridge_is_explained_but_not_retried(
     assert presentation is not None
     assert presentation["failure_reason"] == "unavailable"
     assert dynamic_transient_recovery_plan(turn) is None
-    allowed = _complete_bound_failure(turn, presentation["example"])
+    allowed = _complete_bound_failure(
+        turn,
+        "模型候选没有资格决定失败原因或尝试次数。",
+    )
     assert allowed.allowed is True
 
 
@@ -589,7 +618,7 @@ def test_natural_failure_accepts_safe_everyday_paraphrases(payload, reply):
         "但另一项结果正常。",
     ],
 )
-def test_natural_failure_rejects_unbound_positive_tail(unbound_tail):
+def test_natural_failure_replaces_unbound_positive_tail(unbound_tail):
     turn = _dynamic_turn()
     started = begin_action(
         turn,
@@ -608,7 +637,11 @@ def test_natural_failure_rejects_unbound_positive_tail(unbound_tail):
     )
     reply = f"我这次处理失败，所以任务没完成，{unbound_tail}"
 
-    assert _complete_bound_failure(turn, reply).allowed is False
+    decision = _complete_bound_failure(turn, reply)
+    assert decision.allowed is True
+    assert decision.text != reply
+    assert unbound_tail not in decision.text
+    assert decision.verification["output_presentation"] == "system-receipt"
 
 
 @pytest.mark.parametrize(
@@ -626,7 +659,7 @@ def test_natural_failure_rejects_unbound_positive_tail(unbound_tail):
         "我查询的目标被取消了。",
     ],
 )
-def test_natural_failure_rejects_unbound_negative_tail(unbound_tail):
+def test_natural_failure_replaces_unbound_negative_tail(unbound_tail):
     turn = _dynamic_turn()
     started = begin_action(
         turn,
@@ -645,7 +678,11 @@ def test_natural_failure_rejects_unbound_negative_tail(unbound_tail):
     )
     reply = f"我这次处理失败，所以任务没完成，{unbound_tail}"
 
-    assert _complete_bound_failure(turn, reply).allowed is False
+    decision = _complete_bound_failure(turn, reply)
+    assert decision.allowed is True
+    assert decision.text != reply
+    assert unbound_tail not in decision.text
+    assert decision.verification["output_presentation"] == "system-receipt"
 
 
 def test_cancelled_action_accepts_everyday_paraphrase():
@@ -699,32 +736,55 @@ def test_transient_read_failure_allows_exactly_one_bounded_recovery():
         },
     )
 
-    assert dynamic_transient_recovery_plan(turn) == {
-        "reason": "unavailable",
-        "state": "上一次只读处理遇到暂时不可用",
-        "safe_scope": [
+    plan = dynamic_transient_recovery_plan(turn)
+    assert plan is not None
+    assert plan["reason"] == "unavailable"
+    assert plan["state"] == "上一次只读处理遇到暂时不可用"
+    assert plan["grant"]["schema"] == "xiaoban.recovery-grant.v1"
+    assert plan["grant"]["retry_of_event_id"] == "transient-first"
+    assert plan["grant"]["max_uses"] == 1
+    assert plan["grant"]["allowed_mutation"] == "exact_replay"
+    assert plan["grant"]["target_binding"]
+    assert plan["grant"]["grant_id"]
+    assert plan["safe_scope"] == [
+        {
+            "resourceUid": "resource-protocol",
+            "safeLabel": "目标资料",
+            "resourceType": "generic-record",
+            "canRead": True,
+            "locked": False,
+        }
+    ]
+    assert plan["failed_tool_call"] == {
+        "call_id": "transient-first",
+        "action_id": "mystand_authorization",
+        "version": "v1",
+        "arguments": {
+            "operation": "resolve",
+            "resource_uid": "resource-protocol",
+        },
+    }
+    assert plan["tool_result"] == {
+        "ok": False,
+        "is_error": True,
+        "status": 503,
+        "code": "service_unavailable",
+        "error": "这次正文读取服务暂时不可用。",
+        "retryable": True,
+    }
+    assert plan["retry"] == {
+        "action_id": "mystand_authorization",
+        "version": "v1",
+        "arguments": {
+            "operation": "resolve",
+            "resource_uid": "resource-protocol",
+        },
+        "arguments_digest": canonical_digest(
             {
-                "resourceUid": "resource-protocol",
-                "safeLabel": "目标资料",
-                "resourceType": "generic-record",
-                "canRead": True,
-                "locked": False,
-            }
-        ],
-        "retry": {
-            "action_id": "mystand_authorization",
-            "version": "v1",
-            "arguments": {
                 "operation": "resolve",
                 "resource_uid": "resource-protocol",
-            },
-            "arguments_digest": canonical_digest(
-                {
-                    "operation": "resolve",
-                    "resource_uid": "resource-protocol",
-                }
-            ),
-        },
+            }
+        ),
     }
     assert dynamic_transient_recovery_tool_call_valid(
         turn,
@@ -755,6 +815,772 @@ def test_transient_read_failure_allows_exactly_one_bounded_recovery():
     )
 
     assert dynamic_transient_recovery_plan(turn) is None
+
+
+def test_invalid_query_arguments_allow_one_semantic_correction():
+    turn = _dynamic_turn()
+    _record_found_index(turn)
+    mixed_arguments = {
+        "operation": "read",
+        "query_kind": "resource-read",
+        "module_id": "profile",
+        "fact_paths": ["resource.summary"],
+        "query_args": {},
+        "coverage_required": False,
+        "resource": {
+            "name": "目标特征卡",
+            "type_hint": "profile-card",
+        },
+        "fact_needs": ["document.content", "resource.summary"],
+        "mode": "summary",
+    }
+    first = begin_action(
+        turn,
+        "mystand_query",
+        "v1",
+        mixed_arguments,
+        call_id="invalid-query-shape",
+    )
+    assert first.decision == "allow"
+    finish_action(
+        turn,
+        first.call.call_id,
+        "mystand_query",
+        "v1",
+        {
+            "ok": False,
+            "status": 400,
+            "code": "invalid_mystand_query_arguments",
+            "error": "本轮正文读取的查询格式与当前阶段不一致。",
+            "retryable": True,
+        },
+    )
+
+    plan = dynamic_transient_recovery_plan(turn)
+    assert plan is not None
+    assert plan["reason"] == "invalid_arguments"
+    assert plan["mode"] == "correct_arguments"
+    assert plan["state"] == "正文读取参数混入了当前阶段不允许的字段"
+    assert plan["grant"]["schema"] == "xiaoban.recovery-grant.v1"
+    assert plan["grant"]["retry_of_event_id"] == "invalid-query-shape"
+    assert plan["grant"]["max_uses"] == 1
+    assert plan["grant"]["allowed_mutation"] == "schema_only"
+    assert plan["grant"]["target_binding"]
+    assert plan["safe_scope"] == [
+        {
+            "safeLabel": "目标资料",
+            "resourceType": "generic-record",
+            "canRead": True,
+            "locked": False,
+        }
+    ]
+    corrected = {
+        "operation": "read",
+        "resource": {
+            "name": "目标特征卡",
+            "type_hint": "profile-card",
+        },
+        "entities": [],
+        "fact_needs": ["document.content", "resource.summary"],
+        "mode": "summary",
+    }
+    assert plan["correction"]["arguments"] == corrected
+    assert plan["tool_result"]["ok"] is False
+    assert plan["tool_result"]["is_error"] is True
+    assert plan["tool_result"]["code"] == "invalid_mystand_query_arguments"
+    assert dynamic_transient_recovery_tool_call_valid(
+        turn,
+        action_id="mystand_query",
+        arguments=corrected,
+    ) is True
+    assert dynamic_transient_recovery_tool_call_valid(
+        turn,
+        action_id="mystand_query",
+        arguments=mixed_arguments,
+    ) is False
+    changed_target = {
+        **corrected,
+        "resource": {
+            "name": "另一张特征卡",
+            "type_hint": "profile-card",
+        },
+    }
+    assert dynamic_transient_recovery_tool_call_valid(
+        turn,
+        action_id="mystand_query",
+        arguments=changed_target,
+    ) is False
+    assert dynamic_transient_recovery_tool_call_valid(
+        turn,
+        action_id="mystand_authorization",
+        arguments=corrected,
+    ) is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("query_kind", "resource-read"),
+        ("module_id", "profile"),
+        ("fact_paths", ["resource.summary"]),
+        ("query_args", {}),
+        ("coverage_required", False),
+    ],
+)
+def test_semantic_correction_rejects_every_typed_field(field, value):
+    arguments = {
+        "operation": "read",
+        "resource": {"name": "目标特征卡"},
+        "fact_needs": ["document.content"],
+        field: value,
+    }
+    with pytest.raises(ValueError):
+        validate_mystand_semantic_query_plan(arguments)
+
+    turn = _dynamic_turn()
+    _record_found_index(turn)
+    failed = begin_action(
+        turn,
+        "mystand_query",
+        "v1",
+        {
+            "operation": "read",
+            "query_kind": "resource-read",
+            "module_id": "profile",
+            "fact_paths": ["resource.summary"],
+            "query_args": {},
+            "coverage_required": False,
+        },
+        call_id=f"strict-semantic-{field}",
+    )
+    assert failed.decision == "allow"
+    finish_action(
+        turn,
+        failed.call.call_id,
+        "mystand_query",
+        "v1",
+        {
+            "ok": False,
+            "status": 400,
+            "code": "invalid_mystand_query_arguments",
+        },
+    )
+    assert dynamic_transient_recovery_tool_call_valid(
+        turn,
+        action_id="mystand_query",
+        arguments=arguments,
+    ) is False
+
+
+def test_repeated_invalid_query_failure_explains_cause_attempt_and_missing_data():
+    turn = _dynamic_turn()
+    _record_found_index(turn)
+    for index, arguments in enumerate(
+        (
+            {
+                "operation": "read",
+                "query_kind": "resource-read",
+                "module_id": "profile",
+                "fact_paths": ["resource.summary"],
+                "query_args": {},
+                "coverage_required": False,
+                "resource": {
+                    "name": "目标特征卡",
+                    "type_hint": "profile-card",
+                },
+                "entities": [],
+                "fact_needs": [
+                    "document.content",
+                    "resource.summary",
+                ],
+                "mode": "summary",
+            },
+            {
+                "operation": "read",
+                "resource": {
+                    "name": "目标特征卡",
+                    "type_hint": "profile-card",
+                },
+                "entities": [],
+                "fact_needs": ["document.content", "resource.summary"],
+                "mode": "summary",
+            },
+        ),
+        start=1,
+    ):
+        call = begin_action(
+            turn,
+            "mystand_query",
+            "v1",
+            arguments,
+            call_id=f"invalid-query-{index}",
+        )
+        assert call.decision == "allow"
+        finish_action(
+            turn,
+            call.call.call_id,
+            "mystand_query",
+            "v1",
+            {
+                "ok": False,
+                "status": 400,
+                "code": "invalid_mystand_query_arguments",
+                "error": "本轮正文读取的查询格式与当前阶段不一致。",
+            },
+        )
+
+    assert dynamic_transient_recovery_plan(turn) is None
+    presentation = dynamic_failure_presentation(turn)
+    assert presentation is not None
+    assert presentation["failure_reason"] == "invalid_arguments"
+    assert presentation["failed_attempt_count"] == 2
+    assert presentation["recovery_attempted"] is True
+    assert presentation["missing"] == "完成请求所需的可靠资料内容"
+    reply = (
+        "我这次先查询了资料目录，但读取正文时发现参数里混入了当前阶段"
+        "不允许的字段。我去掉这些字段后又尝试了一次，还是没拿到这次"
+        "要用的资料正文，"
+        "所以现在不能根据正文给你可靠建议。"
+    )
+    allowed = _complete_bound_failure(turn, reply)
+    assert allowed.allowed is True
+    assert allowed.text == render_dynamic_failure_report(turn)
+    assert "第一次读取所需内容时，参数" in allowed.text
+    assert "第二次读取参数" in allowed.text
+    assert "完成请求所需的可靠资料内容" in allowed.text
+    assert allowed.verification["failure_reason"] == "invalid_arguments"
+    assert allowed.verification["recovery_reason"] == "invalid_arguments"
+    assert allowed.verification["failed_action_count"] == 2
+    outcome = allowed.verification["turn_outcome"]
+    assert outcome["attempt_event_ids"] == [
+        "invalid-query-1",
+        "invalid-query-2",
+    ]
+    assert outcome["attempt_count"] == 2
+    assert outcome["recovery"] == {
+        "attempted": True,
+        "reason": "invalid_arguments",
+    }
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        (
+            "我已经找到了客户特征卡的资料目录。读取正文时，参数里混入"
+            "了当前阶段不允许的字段。我去掉这些字段后重试了一次，仍然"
+            "没有拿到正文，因此暂时无法根据这张卡给出可靠建议。"
+        ),
+        (
+            "我找到了房源笔记的资料目录，但读取正文时参数里包含当前"
+            "阶段不允许的字段。我去掉这些字段后又试了一次，还是没拿到正文，"
+            "所以现在不能根据正文给你可靠建议。"
+        ),
+        (
+            "我先找到了业主资料的资料目录，但读取正文时发现参数混入了"
+            "当前阶段不允许的字段。去掉这些字段后我又重试了一次，仍未取得正文，"
+            "所以没法给出可靠建议。"
+        ),
+        (
+            "我找到了财务账本的资料目录，但读取正文时参数包含当前阶段"
+            "不允许的字段。我去掉这些字段后重试了一次，仍没拿到正文，"
+            "所以暂时不能给你可靠建议。"
+        ),
+    ],
+)
+def test_repeated_invalid_query_does_not_infer_material_from_model_prose(reply):
+    turn = _dynamic_turn()
+    _record_found_index(turn)
+    arguments = (
+        {
+            "operation": "read",
+            "query_kind": "resource-read",
+            "module_id": "profile",
+            "fact_paths": ["resource.summary"],
+            "query_args": {},
+            "coverage_required": False,
+            "resource": {"name": "目标特征卡"},
+            "fact_needs": ["document.content"],
+        },
+        {
+            "operation": "read",
+            "resource": {"name": "目标特征卡"},
+            "entities": [],
+            "fact_needs": ["document.content"],
+            "mode": "summary",
+        },
+    )
+    for index, item in enumerate(arguments):
+        call = begin_action(
+            turn,
+            "mystand_query",
+            "v1",
+            item,
+            call_id=f"natural-invalid-{index}",
+        )
+        assert call.decision == "allow"
+        finish_action(
+            turn,
+            call.call.call_id,
+            "mystand_query",
+            "v1",
+            {
+                "ok": False,
+                "status": 400,
+                "code": "invalid_mystand_query_arguments",
+            },
+        )
+
+    allowed = _complete_bound_failure(turn, reply)
+    assert allowed.allowed is True
+    assert allowed.text == render_dynamic_failure_report(turn)
+    assert "客户特征卡" not in allowed.text
+    assert "房源笔记" not in allowed.text
+    assert "业主资料" not in allowed.text
+    assert "财务账本" not in allowed.text
+    assert allowed.verification["output_presentation"] == "system-receipt"
+
+
+def test_invalid_failure_wording_falls_back_to_specific_system_receipt():
+    turn = _dynamic_turn()
+    _record_found_index(turn)
+    for index, arguments in enumerate(
+        (
+            {
+                "operation": "read",
+                "query_kind": "resource-read",
+                "module_id": "profile",
+                "fact_paths": ["resource.summary"],
+                "query_args": {},
+                "coverage_required": False,
+                "resource": {"name": "目标特征卡"},
+                "fact_needs": ["document.content"],
+            },
+            {
+                "operation": "read",
+                "resource": {"name": "目标特征卡"},
+                "entities": [],
+                "fact_needs": ["document.content"],
+                "mode": "summary",
+            },
+        )
+    ):
+        call = begin_action(
+            turn,
+            "mystand_query",
+            "v1",
+            arguments,
+            call_id=f"fallback-invalid-{index}",
+        )
+        assert call.decision == "allow"
+        finish_action(
+            turn,
+            call.call.call_id,
+            "mystand_query",
+            "v1",
+            {
+                "ok": False,
+                "status": 400,
+                "code": "invalid_mystand_query_arguments",
+            },
+        )
+
+    fallback = _complete_bound_failure(
+        turn,
+        "客户特征卡显示成交金额是 100 万元，但任务失败了。",
+    )
+    assert fallback.allowed is True
+    assert fallback.reason == "execution_status_system_receipt"
+    assert "参数混入了当前阶段不允许的字段" in fallback.text
+    assert "去掉这些字段后又尝试了一次" in fallback.text
+    assert "100" not in fallback.text
+    assert fallback.verification["output_presentation"] == "system-receipt"
+    assert fallback.verification["answer_status"] == "incomplete"
+
+
+@pytest.mark.parametrize(
+    "model_text",
+    [
+        (
+            "我这次已经发起实际处理，但执行返回了错误，"
+            "所以这项任务还没有完成。"
+        ),
+        (
+            "我这次读取时发现查询格式不符合当前规则，把参数改对后"
+            "继续读了一遍，仍没拿到正文，所以不能给你建议。"
+        ),
+        (
+            "我这次读取遇到错误，修正参数后接着查，结果还是失败，"
+            "所以这项任务没有完成。"
+        ),
+    ],
+)
+def test_failure_prose_never_authenticates_cause_or_retry_count(model_text):
+    turn = _dynamic_turn()
+    _record_found_index(turn)
+    call = begin_action(
+        turn,
+        "mystand_query",
+        "v1",
+        {
+            "operation": "read",
+            "resource": {"name": "任意模块资料"},
+            "fact_needs": ["document.content"],
+        },
+        call_id="one-real-failure",
+    )
+    assert call.decision == "allow"
+    finish_action(
+        turn,
+        call.call.call_id,
+        "mystand_query",
+        "v1",
+        {
+            "ok": False,
+            "status": 500,
+            "code": "handler_failed",
+        },
+    )
+
+    decision = _complete_bound_failure(turn, model_text)
+    assert decision.allowed is True
+    assert decision.reason == "execution_status_system_receipt"
+    assert decision.text == render_dynamic_failure_report(turn)
+    assert "当前记录没有可安全确认的更细原因" in decision.text
+    assert "重试" not in decision.text
+    assert "修正参数" not in decision.text
+    outcome = decision.verification["turn_outcome"]
+    assert outcome["attempt_event_ids"] == ["one-real-failure"]
+    assert outcome["attempt_count"] == 1
+    assert outcome["recovery"]["attempted"] is False
+
+
+def test_turn_outcome_uses_physical_event_order_not_call_id_sorting():
+    turn = _dynamic_turn()
+    _record_found_index(turn)
+    first_arguments = {
+        "operation": "read",
+        "query_kind": "resource-read",
+        "resource": {"name": "任意模块资料"},
+        "fact_needs": ["document.content"],
+    }
+    second_arguments = {
+        "operation": "read",
+        "resource": {"name": "任意模块资料"},
+        "entities": [],
+        "fact_needs": ["document.content"],
+        "mode": "summary",
+    }
+    for call_id, arguments in (
+        ("z-first-physical", first_arguments),
+        ("a-second-physical", second_arguments),
+    ):
+        call = begin_action(
+            turn,
+            "mystand_query",
+            "v1",
+            arguments,
+            call_id=call_id,
+        )
+        assert call.decision == "allow"
+        finish_action(
+            turn,
+            call.call.call_id,
+            "mystand_query",
+            "v1",
+            {
+                "ok": False,
+                "status": 400,
+                "code": "invalid_mystand_query_arguments",
+            },
+        )
+
+    outcome = dynamic_turn_outcome(turn)
+    assert outcome is not None
+    assert outcome["attempt_event_ids"] == [
+        "z-first-physical",
+        "a-second-physical",
+    ]
+    assert outcome["recovery"]["attempted"] is True
+
+
+@pytest.mark.parametrize(
+    ("terminal_payload", "expected_class", "expected_reason"),
+    [
+        (
+            {"ok": False, "status": 504, "code": "provider_timeout"},
+            "error",
+            "timeout",
+        ),
+        (
+            {"ok": False, "status": 503, "code": "upstream_unavailable"},
+            "error",
+            "unavailable",
+        ),
+        (
+            {"ok": False, "status": 404, "code": "resource_not_found"},
+            "not_found",
+            "not_found",
+        ),
+    ],
+)
+def test_argument_correction_preserves_terminal_failure_reason(
+    terminal_payload,
+    expected_class,
+    expected_reason,
+):
+    turn = _dynamic_turn()
+    _record_found_index(turn)
+    first = begin_action(
+        turn,
+        "mystand_query",
+        "v1",
+        {
+            "operation": "read",
+            "query_kind": "resource-read",
+            "module_id": "profile",
+            "fact_paths": ["resource.summary"],
+            "query_args": {},
+            "coverage_required": False,
+            "resource": {"name": "目标特征卡"},
+            "fact_needs": ["document.content"],
+        },
+        call_id="ordered-first-invalid",
+    )
+    assert first.decision == "allow"
+    finish_action(
+        turn,
+        first.call.call_id,
+        "mystand_query",
+        "v1",
+        {
+            "ok": False,
+            "status": 400,
+            "code": "invalid_mystand_query_arguments",
+        },
+    )
+    terminal = begin_action(
+        turn,
+        "mystand_query",
+        "v1",
+        {
+            "operation": "read",
+            "resource": {"name": "目标特征卡"},
+            "entities": [],
+            "fact_needs": ["document.content"],
+            "mode": "summary",
+        },
+        call_id="ordered-second-terminal",
+    )
+    assert terminal.decision == "allow"
+    finish_action(
+        turn,
+        terminal.call.call_id,
+        "mystand_query",
+        "v1",
+        terminal_payload,
+    )
+
+    presentation = dynamic_failure_presentation(turn)
+    assert presentation is not None
+    assert presentation["failure_class"] == expected_class
+    assert presentation["failure_reason"] == expected_reason
+    assert presentation["recovery_reason"] == "invalid_arguments"
+    assert "不允许的字段" in presentation["state"]
+    allowed = _complete_bound_failure(
+        turn,
+        "模型候选与运行时失败事实无关。",
+    )
+    assert allowed.allowed is True
+    assert allowed.verification["failure_class"] == expected_class
+    assert allowed.verification["failure_reason"] == expected_reason
+    assert allowed.verification["recovery_reason"] == "invalid_arguments"
+
+
+def test_corrected_semantic_query_can_finish_with_evidence_and_advice():
+    turn = _dynamic_turn()
+    _record_found_index(turn)
+    failed = begin_action(
+        turn,
+        "mystand_query",
+        "v1",
+        {
+            "operation": "read",
+            "query_kind": "resource-read",
+            "module_id": "profile",
+            "fact_paths": ["resource.summary"],
+            "query_args": {},
+            "coverage_required": False,
+            "resource": {"name": "目标资料"},
+        },
+        call_id="feature-card-bad-shape",
+    )
+    assert failed.decision == "allow"
+    finish_action(
+        turn,
+        failed.call.call_id,
+        "mystand_query",
+        "v1",
+        {
+            "ok": False,
+            "status": 400,
+            "code": "invalid_mystand_query_arguments",
+            "error": "本轮正文读取的查询格式与当前阶段不一致。",
+        },
+    )
+    corrected_arguments = {
+        "operation": "read",
+        "resource": {"name": "目标资料"},
+        "entities": [],
+        "fact_needs": ["document.content", "resource.summary"],
+        "mode": "summary",
+    }
+    recovered = begin_action(
+        turn,
+        "mystand_query",
+        "v1",
+        corrected_arguments,
+        call_id="feature-card-corrected",
+    )
+    assert recovered.decision == "allow"
+    recovered_result = finish_action(
+        turn,
+        recovered.call.call_id,
+        "mystand_query",
+        "v1",
+        {
+            "schema": "mystand.query-result.v1",
+            "ok": True,
+            "status": "matched",
+            "missing_facts": [],
+            "resource": {
+                "resourceUid": "resource-protocol",
+                "display_name": "目标资料",
+                "type": "generic-record",
+            },
+            "recordRefs": ["resource-protocol"],
+            "facts": [
+                {
+                    "kind": "resource.summary",
+                    "label": "资料摘要",
+                    "value": "沟通重点清晰，下一步适合先核对需求。",
+                }
+            ],
+            "content": "沟通重点清晰，下一步适合先核对需求。",
+        },
+    )
+    assert recovered_result is not None
+    assert recovered_result.status == "success"
+
+    for mechanical in (
+        "我查到了。",
+        "资料已读取。",
+        "我拿到资料了，但先不分析。",
+    ):
+        incomplete = check_completion(mechanical, turn)
+        assert incomplete.allowed is True
+        assert incomplete.text == (
+            "资料已经读取成功，但最终回答没有使用本轮资料中的具体内容，"
+            "无法确认它真正完成了你的要求。本次任务仍按未完成处理。"
+        )
+        assert incomplete.reason == (
+            "evidence_answer_incomplete_system_receipt"
+        )
+        assert incomplete.verification["output_presentation"] == (
+            "system-receipt"
+        )
+        assert incomplete.verification["answer_status"] == "incomplete"
+
+    reply = (
+        "资料里写的是“沟通重点清晰，下一步适合先核对需求”。"
+        "这说明现在可以继续推进，但还不适合直接替客户下结论；"
+        "我的建议是先逐项核对需求，再按确认结果安排下一步跟进。"
+    )
+    allowed = check_completion(reply, turn)
+    assert allowed.allowed is True
+    assert allowed.text == reply
+    assert allowed.verification["completion_kind"] == "evidence-bound"
+    assert allowed.verification["action_count"] == 3
+    assert allowed.verification["evidence_count"] == 1
+    assert "output_presentation" not in allowed.verification
+
+
+def test_responses_history_keeps_tools_but_not_system_receipt_as_agent_speech():
+    prior = [{"role": "user", "content": "上一轮"}]
+    user_message = "查特征卡并给建议"
+    rejected = "资料拿到了，建议晚点再说。"
+    receipt = (
+        "资料已经读取成功，但最终回答没有使用本轮资料中的具体内容，"
+        "无法确认它真正完成了你的要求。本次任务仍按未完成处理。"
+    )
+    tool_call = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "query-call",
+                "type": "function",
+                "function": {
+                    "name": "mystand_query",
+                    "arguments": '{"operation":"read"}',
+                },
+            }
+        ],
+    }
+    tool_result = {
+        "role": "tool",
+        "name": "mystand_query",
+        "tool_call_id": "query-call",
+        "content": '{"ok":true}',
+    }
+    result = {
+        "messages": [
+            *prior,
+            {"role": "user", "content": user_message},
+            tool_call,
+            tool_result,
+            {"role": "assistant", "content": rejected},
+        ],
+        "final_response": receipt,
+        "_mystand_trusted_verification": {
+            "output_presentation": "system-receipt",
+            "answer_status": "incomplete",
+        },
+    }
+
+    history = APIServerAdapter._build_response_conversation_history(
+        prior,
+        user_message,
+        result,
+        receipt,
+    )
+    assert history == [
+        *prior,
+        {"role": "user", "content": user_message},
+        tool_call,
+        tool_result,
+    ]
+    assert rejected not in json.dumps(history, ensure_ascii=False)
+    assert receipt not in json.dumps(history, ensure_ascii=False)
+    assert APIServerAdapter._turn_transcript_messages(
+        prior,
+        user_message,
+        result,
+    ) == [
+        APIServerAdapter._message_response(tool_call),
+        APIServerAdapter._message_response(tool_result),
+    ]
+
+    result["messages"] = []
+    assert APIServerAdapter._build_response_conversation_history(
+        prior,
+        user_message,
+        result,
+        receipt,
+    ) == [
+        *prior,
+        {"role": "user", "content": user_message},
+    ]
 
 
 def test_transient_recovery_rejects_target_outside_owner_bound_index():
@@ -881,7 +1707,7 @@ def test_transient_index_failure_does_not_start_a_costly_partial_recovery():
     assert dynamic_transient_recovery_plan(turn) is None
 
 
-def test_no_progress_failure_rejects_business_facts_and_internal_status():
+def test_no_progress_failure_replaces_business_facts_and_internal_status():
     turn = _dynamic_turn()
     _record_found_index(turn)
     assert mark_dynamic_read_no_progress(turn) is True
@@ -905,7 +1731,12 @@ def test_no_progress_failure_rejects_business_facts_and_internal_status():
         turn.completion_finalization_output_digest = hashlib.sha256(
             text.encode("utf-8")
         ).hexdigest()
-        assert check_completion(text, turn).allowed is False
+        decision = check_completion(text, turn)
+        assert decision.allowed is True
+        assert decision.text != text
+        assert decision.verification["output_presentation"] == (
+            "system-receipt"
+        )
 
 
 def test_no_progress_mark_requires_index_only_success():
@@ -964,12 +1795,11 @@ def test_dynamic_provider_tools_switch_to_reads_after_found_index():
     turn = _dynamic_turn()
     _record_found_index(turn)
     payload = {
-        "tools": _tools(
-            "mystand_resource_index",
-            "mystand_query",
-            "mystand_authorization",
-            "terminal",
-        ),
+        "tools": [
+            *_tools("mystand_resource_index"),
+            _canonical_query_tool(),
+            *_tools("mystand_authorization", "terminal"),
+        ],
         "tool_choice": {
             "type": "function",
             "function": {"name": "mystand_resource_index"},
@@ -983,6 +1813,88 @@ def test_dynamic_provider_tools_switch_to_reads_after_found_index():
         "mystand_authorization",
     ]
     assert "tool_choice" not in filtered
+    assert filtered["parallel_tool_calls"] is False
+
+
+def test_dynamic_query_schema_is_semantic_only_after_found_index():
+    turn = _dynamic_turn()
+    _record_found_index(turn)
+    query_tool = _canonical_query_tool()
+    original_query_tool = json.loads(
+        json.dumps(query_tool, ensure_ascii=False)
+    )
+    payload = {
+        "tools": [
+            *_tools("mystand_resource_index"),
+            query_tool,
+            *_tools("mystand_authorization"),
+        ],
+        "parallel_tool_calls": True,
+    }
+
+    filtered = filter_dynamic_evidence_api_kwargs(payload, turn=turn)
+
+    visible_query = next(
+        item
+        for item in filtered["tools"]
+        if item["function"]["name"] == "mystand_query"
+    )
+    parameters = visible_query["function"]["parameters"]
+    assert set(parameters["properties"]) == {
+        "operation",
+        "resource",
+        "entities",
+        "fact_needs",
+        "mode",
+    }
+    assert parameters["required"] == [
+        "operation",
+        "resource",
+        "fact_needs",
+    ]
+    assert parameters["additionalProperties"] is False
+    assert "anyOf" not in parameters
+    assert {
+        "query_kind",
+        "module_id",
+        "fact_paths",
+        "query_args",
+        "coverage_required",
+    }.isdisjoint(parameters["properties"])
+    assert "query_kind" not in visible_query["function"]["description"]
+    assert payload["tools"][1] == original_query_tool
+    assert payload["parallel_tool_calls"] is True
+    assert filtered["parallel_tool_calls"] is False
+
+
+def test_dynamic_read_batch_executes_only_first_call_before_follow_up():
+    turn = _dynamic_turn()
+    _record_found_index(turn)
+    calls = [
+        SimpleNamespace(
+            id=f"read-{index}",
+            function=SimpleNamespace(
+                name="mystand_query",
+                arguments=json.dumps(
+                    {
+                        "operation": "read",
+                        "resource": {"name": f"目标资料{index}"},
+                        "fact_needs": ["resource.summary"],
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        for index in range(1, 4)
+    ]
+    active = activate_turn(turn)
+    try:
+        capped = _cap_dynamic_evidence_tool_calls(calls)
+    finally:
+        deactivate_turn(active)
+
+    assert [call.id for call in capped] == ["read-1"]
+    assert [call.id for call in calls] == ["read-1", "read-2", "read-3"]
 
 
 def test_dynamic_provider_tools_close_during_finalization():
@@ -1498,9 +2410,13 @@ def test_failure_finalize_view_excludes_raw_tool_trajectory():
     assert "private_ephemeral_evidence" not in serialized
     assert "stable policy" not in serialized
     assert "mystand_resource_index" not in serialized
-    assert "实际处理已发起，但执行返回了错误" in serialized
+    assert "资料读取已发起，但返回了错误" in serialized
+    assert "没有可安全确认的更细原因" in serialized
+    assert "读取目标资料" in serialized
+    assert "推荐句式" not in serialized
+    assert "不要增加任何原因" not in serialized
     assert "当前无权读取" not in serialized
-    assert "自然中文" in messages[-1]["content"]
+    assert "完整执行结果" in messages[-1]["content"]
 
 
 def test_raw_protocol_candidate_is_rejected_before_any_cleanup():
@@ -1589,12 +2505,11 @@ def test_agent_build_api_kwargs_always_applies_request_local_stage(monkeypatch):
 def test_bedrock_filters_canonical_tools_before_wire_conversion():
     turn = _dynamic_turn()
     agent = SimpleNamespace(
-        tools=_tools(
-            "mystand_resource_index",
-            "mystand_query",
-            "mystand_authorization",
-            "terminal",
-        ),
+        tools=[
+            *_tools("mystand_resource_index"),
+            _canonical_query_tool(),
+            *_tools("mystand_authorization", "terminal"),
+        ],
         _ephemeral_tool_choice="",
         api_mode="bedrock_converse",
         _get_transport=lambda: BedrockTransport(),

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from utils import safe_json_loads
-from agent.tool_result_classification import file_mutation_result_landed
+from agent.tool_result_classification import tool_result_failed
 
 
 IDEMPOTENT_TOOL_NAMES = frozenset(
@@ -195,30 +195,8 @@ def classify_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str
     from ``_detect_tool_failure``; this function exists so standalone callers
     (tests, tooling) still get consistent behavior.
     """
-    if result is None:
-        return False, ""
-    if file_mutation_result_landed(tool_name, result):
-        return False, ""
-
-    if tool_name == "terminal":
-        data = safe_json_loads(result)
-        if isinstance(data, dict):
-            exit_code = data.get("exit_code")
-            if exit_code is not None and exit_code != 0:
-                return True, f" [exit {exit_code}]"
-        return False, ""
-
-    if tool_name == "memory":
-        data = safe_json_loads(result)
-        if isinstance(data, dict):
-            if data.get("success") is False and "exceed the limit" in data.get("error", ""):
-                return True, " [full]"
-
-    lower = result[:500].lower()
-    if '"error"' in lower or '"failed"' in lower or result.startswith("Error"):
-        return True, " [error]"
-
-    return False, ""
+    failed = tool_result_failed(tool_name, result)
+    return (failed, " [error]" if failed else "")
 
 
 class ToolCallGuardrailController:
@@ -384,6 +362,11 @@ def toolguard_synthetic_result(decision: ToolGuardrailDecision) -> str:
     """Build a synthetic role=tool content string for a blocked tool call."""
     return json.dumps(
         {
+            "ok": False,
+            "is_error": True,
+            "status": "failed",
+            "phase": "preflight",
+            "retryable": False,
             "error": decision.message,
             "guardrail": decision.to_metadata(),
         },
@@ -395,6 +378,29 @@ def append_toolguard_guidance(result: str, decision: ToolGuardrailDecision) -> s
     """Append runtime guidance to the current tool result content."""
     if decision.action not in {"warn", "halt"} or not decision.message:
         return result
+    # Keep structured tool errors structured. Appending prose after a JSON
+    # object made downstream streaming classify the same failed call as
+    # completed, and deprived the next model turn of a canonical error object.
+    # Mature agent loops carry the error and steering metadata together.
+    if isinstance(result, str):
+        try:
+            structured = json.loads(result)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            structured = None
+        if isinstance(structured, dict):
+            label = (
+                "Tool loop hard stop"
+                if decision.action == "halt"
+                else "Tool loop warning"
+            )
+            structured["guardrail"] = decision.to_metadata()
+            structured["guardrail_label"] = label
+            structured["recovery_guidance"] = decision.message
+            return json.dumps(
+                structured,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
     label = "Tool loop hard stop" if decision.action == "halt" else "Tool loop warning"
     suffix = (
         f"\n\n[{label}: "

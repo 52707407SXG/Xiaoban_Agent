@@ -256,6 +256,70 @@ def finalize_turn(
         )
         failed = True
 
+    # A model's natural-language explanation does not turn an unresolved
+    # physical tool failure into a successful task.  A later result clears a
+    # failure only through canonical retry lineage or an authenticated,
+    # target-bound server recovery grant. Unrelated successes never settle
+    # another action's failure.
+    from agent.tool_outcome_lineage import unresolved_failure_ids
+
+    _tool_failure_outcome = None
+    _material_tool_outcomes = [
+        item
+        for item in (
+            getattr(agent, "_turn_tool_outcomes", None) or []
+        )
+        if isinstance(item, dict) and item.get("material") is True
+    ]
+    if _material_tool_outcomes and not interrupted:
+        _server_recovery_grants = getattr(
+            agent,
+            "_turn_tool_recovery_grants",
+            None,
+        )
+        _unresolved_ids = set(
+            unresolved_failure_ids(
+                _material_tool_outcomes,
+                server_grants=(
+                    _server_recovery_grants
+                    if isinstance(_server_recovery_grants, dict)
+                    else {}
+                ),
+                expected_turn_id=str(
+                    getattr(agent, "_current_turn_id", "") or ""
+                ),
+            )
+        )
+        _unresolved_outcomes = [
+            item
+            for item in _material_tool_outcomes
+            if str(item.get("tool_call_id") or "") in _unresolved_ids
+        ]
+        if _unresolved_outcomes:
+            _last_tool_batch = max(
+                int(item.get("batch_id") or 0)
+                for item in _unresolved_outcomes
+            )
+            failed = True
+            _tool_failure_outcome = {
+                "schema": "xiaoban.tool-turn-outcome.v1",
+                "terminal_status": "failed",
+                "batch_id": _last_tool_batch,
+                "attempt_count": len(_unresolved_outcomes),
+                "failed_tools": sorted(
+                    {
+                        str(item.get("tool_name") or "")
+                        for item in _unresolved_outcomes
+                        if str(item.get("tool_name") or "")
+                    }
+                ),
+                "event_ids": [
+                    str(item.get("tool_call_id") or "")
+                    for item in _unresolved_outcomes
+                    if str(item.get("tool_call_id") or "")
+                ],
+            }
+
     # Determine if conversation completed successfully
     normal_text_response = str(_turn_exit_reason).startswith("text_response(")
     completed = (
@@ -548,6 +612,9 @@ def finalize_turn(
     }
     if _strict_terminal_cancelled:
         result["error"] = "completion stopped"
+    elif _tool_failure_outcome is not None:
+        result["error"] = "tool execution did not produce a usable result"
+        result["tool_outcome"] = _tool_failure_outcome
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
     # Surface any post-loop cleanup failures so the caller can distinguish a

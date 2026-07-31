@@ -194,6 +194,96 @@ def _canonical_json_bytes(value: Any) -> bytes:
     return encoded.encode("utf-8")
 
 
+def _dynamic_turn_outcome_valid(
+    outcome: Any,
+    *,
+    digest: Any,
+    request_fingerprint: str,
+    failure_reason: str,
+    recovery_reason: str,
+    failed_action_count: int,
+) -> bool:
+    """Validate the runtime-derived failure truth without reading prose."""
+    if not isinstance(outcome, Mapping):
+        return False
+    expected_fields = {
+        "schema",
+        "turn_id",
+        "terminal_status",
+        "intent_binding",
+        "target_binding",
+        "attempt_event_ids",
+        "attempt_count",
+        "completed_stages",
+        "recovery",
+        "final_cause",
+        "obtained",
+        "missing",
+        "process_summary",
+        "digest",
+    }
+    attempt_ids = outcome.get("attempt_event_ids")
+    completed_stages = outcome.get("completed_stages")
+    recovery = outcome.get("recovery")
+    final_cause = outcome.get("final_cause")
+    obtained = outcome.get("obtained")
+    missing = outcome.get("missing")
+    target_binding = str(outcome.get("target_binding") or "")
+    if (
+        set(outcome) != expected_fields
+        or outcome.get("schema") != "xiaoban.turn-outcome.v1"
+        or outcome.get("terminal_status") != "failed"
+        or outcome.get("intent_binding") != request_fingerprint
+        or (target_binding and not _OUTCOME_DIGEST.fullmatch(target_binding))
+        or not isinstance(attempt_ids, list)
+        or any(not isinstance(item, str) or not item for item in attempt_ids)
+        or len(attempt_ids) != len(set(attempt_ids))
+        or outcome.get("attempt_count") != failed_action_count
+        or len(attempt_ids) != failed_action_count
+        or not isinstance(completed_stages, list)
+        or any(
+            not isinstance(item, str) or not item
+            for item in completed_stages
+        )
+        or not isinstance(recovery, Mapping)
+        or set(recovery) != {"attempted", "reason"}
+        or recovery.get("attempted") is not bool(recovery_reason)
+        or str(recovery.get("reason") or "") != recovery_reason
+        or not isinstance(final_cause, Mapping)
+        or set(final_cause) != {"event_id", "code", "safe_message"}
+        or str(final_cause.get("code") or "") != failure_reason
+        or (
+            str(final_cause.get("event_id") or "")
+            != (attempt_ids[-1] if attempt_ids else "")
+        )
+        or not isinstance(final_cause.get("safe_message"), str)
+        or not str(final_cause.get("safe_message") or "").strip()
+        or len(final_cause["safe_message"]) > 500
+        or obtained != {"material": False, "evidence_refs": []}
+        or not isinstance(missing, list)
+        or not missing
+        or any(
+            not isinstance(item, str) or not item.strip() or len(item) > 500
+            for item in missing
+        )
+        or not isinstance(outcome.get("process_summary"), str)
+        or not str(outcome.get("process_summary") or "").strip()
+        or len(outcome["process_summary"]) > 2_000
+    ):
+        return False
+    outcome_digest = str(outcome.get("digest") or "")
+    bare = dict(outcome)
+    bare.pop("digest", None)
+    expected_digest = hashlib.sha256(
+        _canonical_json_bytes(bare)
+    ).hexdigest()
+    return bool(
+        _OUTCOME_DIGEST.fullmatch(outcome_digest)
+        and outcome_digest == str(digest or "")
+        and outcome_digest == expected_digest
+    )
+
+
 def _decode_outcome_key(value: str) -> bytes:
     encoded = str(value or "").strip()
     if not encoded or len(encoded) > 128:
@@ -401,6 +491,16 @@ def _project_trusted_verification(
             "failed_action_count",
             "failure_class",
         }
+        failure_reason_fields = {"failure_reason"}
+        recovery_reason_fields = {"recovery_reason"}
+        presentation_fields = {
+            "output_presentation",
+            "answer_status",
+        }
+        turn_outcome_fields = {
+            "turn_outcome",
+            "turn_outcome_digest",
+        }
         completion_kind = projected.get("completion_kind")
         no_progress_failure = bool(
             completion_kind == "failure-bound"
@@ -456,7 +556,23 @@ def _project_trusted_verification(
             )
         if completion_kind == "failure-bound":
             failure_class = projected.get("failure_class")
+            failure_reason = projected.get("failure_reason")
             failed_action_count = projected.get("failed_action_count")
+            failure_expected_fields = common_fields | failure_fields
+            if "failure_reason" in projected:
+                failure_expected_fields |= failure_reason_fields
+            if "recovery_reason" in projected:
+                failure_expected_fields |= recovery_reason_fields
+            has_system_receipt = any(
+                field in projected for field in presentation_fields
+            )
+            if has_system_receipt:
+                failure_expected_fields |= presentation_fields
+            has_turn_outcome = any(
+                field in projected for field in turn_outcome_fields
+            )
+            if has_turn_outcome:
+                failure_expected_fields |= turn_outcome_fields
             failure_count_valid = (
                 isinstance(failed_action_count, int)
                 and not isinstance(failed_action_count, bool)
@@ -469,11 +585,86 @@ def _project_trusted_verification(
                     <= projected["action_count"]
                 )
             )
+            failure_reason_valid = (
+                True
+                if "failure_reason" not in projected
+                else (
+                    (
+                        failure_class == "error"
+                        and failure_reason
+                        in {
+                            "execution_error",
+                            "invalid_arguments",
+                            "timeout",
+                            "unavailable",
+                        }
+                    )
+                    or (
+                        failure_class == "no_progress"
+                        and failure_reason
+                        in {
+                            "action_not_dispatched",
+                            "action_result_missing",
+                            "index_incomplete",
+                            "read_not_dispatched_after_index",
+                            "read_precondition_not_met",
+                        }
+                    )
+                    or (
+                        failure_class
+                        not in {"error", "no_progress"}
+                        and failure_reason == failure_class
+                    )
+                )
+            )
+            recovery_reason = projected.get("recovery_reason")
+            recovery_reason_valid = (
+                True
+                if "recovery_reason" not in projected
+                else (
+                    "failure_reason" in projected
+                    and projected.get("failed_action_count", 0) >= 2
+                    and recovery_reason
+                    in {
+                        "invalid_arguments",
+                        "timeout",
+                        "unavailable",
+                    }
+                )
+            )
+            presentation_valid = (
+                not has_system_receipt
+                or (
+                    projected.get("output_presentation")
+                    == "system-receipt"
+                    and projected.get("answer_status") == "incomplete"
+                )
+            )
+            turn_outcome_valid = (
+                not has_turn_outcome
+                or (
+                    turn_outcome_fields <= set(projected)
+                    and _dynamic_turn_outcome_valid(
+                        projected.get("turn_outcome"),
+                        digest=projected.get("turn_outcome_digest"),
+                        request_fingerprint=str(
+                            projected.get("request_fingerprint") or ""
+                        ),
+                        failure_reason=str(failure_reason or ""),
+                        recovery_reason=str(recovery_reason or ""),
+                        failed_action_count=failed_action_count,
+                    )
+                )
+            )
             if (
-                set(projected) != common_fields | failure_fields
+                set(projected) != failure_expected_fields
                 or projected.get("evidence_count") != 0
                 or projected.get("decision") != "execution_status_bound"
                 or not failure_count_valid
+                or not failure_reason_valid
+                or not recovery_reason_valid
+                or not presentation_valid
+                or not turn_outcome_valid
                 or failure_class
                 not in {
                     "ambiguous",
@@ -500,6 +691,19 @@ def _project_trusted_verification(
         evidence_expected_fields = common_fields | evidence_fields
         if has_transient_recovery:
             evidence_expected_fields |= transient_recovery_fields
+        has_system_receipt = any(
+            field in projected for field in presentation_fields
+        )
+        if has_system_receipt:
+            evidence_expected_fields |= presentation_fields
+        presentation_valid = (
+            not has_system_receipt
+            or (
+                projected.get("output_presentation")
+                == "system-receipt"
+                and projected.get("answer_status") == "incomplete"
+            )
+        )
         transient_recovery_valid = (
             (
                 projected.get("transient_failure_count") == 1
@@ -526,6 +730,7 @@ def _project_trusted_verification(
         )
         if (
             set(projected) != evidence_expected_fields
+            or not presentation_valid
             or completion_kind != "evidence-bound"
             or projected.get("binding_verified") is not True
             or projected.get("semantic_verified") is not False

@@ -185,6 +185,9 @@ def build_turn_context(
     agent._unicode_sanitization_passes = 0
     agent._tool_guardrails.reset_for_turn()
     agent._tool_guardrail_halt_decision = None
+    agent._turn_tool_outcomes = []
+    agent._current_tool_call_execution_contexts = {}
+    agent._turn_tool_recovery_grants = {}
     agent._vision_supported = True
 
     # Pre-turn connection health check: clean up dead TCP connections.

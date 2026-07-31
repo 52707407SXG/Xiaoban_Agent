@@ -29,6 +29,10 @@ from agent.display import (
     _detect_tool_failure,
 )
 from agent.tool_guardrails import ToolGuardrailDecision
+from agent.tool_outcome_lineage import (
+    sanitize_runtime_linkage_arguments,
+    split_runtime_linkage,
+)
 from agent.true_moa_tool_fence import (
     begin_strict_tool_handler as _begin_strict_tool_handler,
     claim_strict_tool_dispatch as _claim_strict_tool_dispatch,
@@ -104,6 +108,53 @@ def _trusted_preaction_denial(name: str, args: dict, call_id: str) -> str | None
     )
 
 
+def _dynamic_raw_tool_denial(name: str) -> str | None:
+    """Reject any raw tool shape outside the server-selected dynamic stage."""
+
+    def denial() -> str:
+        return json.dumps(
+            {
+                "ok": False,
+                "is_error": True,
+                "status": "failed",
+                "phase": "preflight",
+                "retryable": False,
+                "code": "dynamic_tool_not_allowed",
+            },
+            ensure_ascii=False,
+        )
+
+    try:
+        from xiaoban.trusted_runtime.turns import current_turn
+
+        turn = current_turn()
+    except Exception:
+        if str(name or "") in {
+            "tool_call",
+            "tool_search",
+            "tool_describe",
+        } or str(name or "").startswith("mystand_"):
+            return denial()
+        return None
+    if (
+        turn is None
+        or str(getattr(turn, "completion_protocol", "") or "")
+        != "dynamic-evidence-v2"
+    ):
+        return None
+    try:
+        from xiaoban.trusted_runtime.tool_visibility import (
+            dynamic_evidence_allowed_tool_names,
+        )
+
+        allowed = dynamic_evidence_allowed_tool_names(turn)
+    except Exception:
+        return denial()
+    if allowed is None or str(name or "") not in allowed:
+        return denial()
+    return None
+
+
 def _emit_terminal_post_tool_call(
     agent,
     *,
@@ -149,6 +200,67 @@ def _cancelled_tool_result(reason: str = "user interrupt") -> str:
         },
         ensure_ascii=False,
     )
+
+
+def _emit_guardrail_preflight_lifecycle(
+    agent,
+    *,
+    tool_call_id: str,
+    function_name: str,
+    function_args: dict,
+    function_result: Any,
+) -> None:
+    """Project one blocked proposal as a correlated failed tool lifecycle.
+
+    The handler did not run, so the structured tool result carries
+    ``phase=preflight``.  We still emit the existing start/terminal callback
+    pair because chat SSE consumers correlate terminal events by call id and
+    deliberately discard orphan failures.
+    """
+    if agent.tool_progress_callback:
+        try:
+            preview = _build_tool_preview(function_name, function_args)
+            agent.tool_progress_callback(
+                "tool.started",
+                function_name,
+                preview,
+                function_args,
+            )
+        except Exception as cb_err:
+            logging.debug("Tool progress callback error: %s", cb_err)
+    if agent.tool_start_callback:
+        try:
+            agent.tool_start_callback(
+                tool_call_id,
+                function_name,
+                function_args,
+            )
+        except Exception as cb_err:
+            logging.debug("Tool start callback error: %s", cb_err)
+    if agent.tool_progress_callback:
+        try:
+            agent.tool_progress_callback(
+                "tool.completed",
+                function_name,
+                None,
+                None,
+                duration=0.0,
+                is_error=True,
+                result=function_result,
+                phase="preflight",
+            )
+        except Exception as cb_err:
+            logging.debug("Tool progress callback error: %s", cb_err)
+    if agent.tool_complete_callback:
+        try:
+            agent.tool_complete_callback(
+                tool_call_id,
+                function_name,
+                function_args,
+                function_result,
+            )
+        except Exception as cb_err:
+            logging.debug("Tool complete callback error: %s", cb_err)
 
 
 def _emit_cancelled_terminal_post_tool_call(
@@ -329,6 +441,10 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             function_args = {}
         if not isinstance(function_args, dict):
             function_args = {}
+        function_args, _ = sanitize_runtime_linkage_arguments(
+            function_name,
+            function_args,
+        )
 
         # ── Tool Search unwrap ────────────────────────────────────────
         # When the model invokes the tool_call bridge, peel it open so
@@ -346,15 +462,21 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         # scope check), so we enforce session toolset scope HERE. A tool
         # the session was not granted is rejected before any checkpoint,
         # hook, or dispatch fires.
-        _ts_scope_block = None
+        _ts_scope_block = _dynamic_raw_tool_denial(function_name)
         try:
             from tools import tool_search as _ts
-            if function_name == _ts.TOOL_CALL_NAME:
+            if (
+                _ts_scope_block is None
+                and function_name == _ts.TOOL_CALL_NAME
+            ):
                 _underlying, _underlying_args, _err = _ts.resolve_underlying_call(function_args)
                 if not _err and _underlying:
                     if _underlying in _tool_search_scoped_names(agent):
                         function_name = _underlying
                         function_args = _underlying_args
+                        function_args, _ = split_runtime_linkage(
+                            function_args
+                        )
                     else:
                         _ts_scope_block = json.dumps({
                             "error": (
@@ -365,13 +487,18 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         except Exception:
             pass
 
-        function_args, middleware_trace = _apply_tool_request_middleware_for_agent(
-            agent,
-            function_name=function_name,
-            function_args=function_args,
-            effective_task_id=effective_task_id,
-            tool_call_id=getattr(tool_call, "id", "") or "",
-        )
+        if _ts_scope_block is None:
+            function_args, middleware_trace = (
+                _apply_tool_request_middleware_for_agent(
+                    agent,
+                    function_name=function_name,
+                    function_args=function_args,
+                    effective_task_id=effective_task_id,
+                    tool_call_id=getattr(tool_call, "id", "") or "",
+                )
+            )
+        else:
+            middleware_trace = []
 
         tool_call_id = getattr(tool_call, "id", "") or ""
         terminal_dispatch_denied = not _claim_strict_tool_dispatch(
@@ -535,6 +662,21 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             else:
                 args_preview = args_str[:agent.log_prefix_chars] + "..." if len(args_str) > agent.log_prefix_chars else args_str
                 print(f"  📞 Tool {i}: {name}({list(args.keys())}) - {args_preview}")
+
+    for tc, name, args, middleware_trace, block_result, blocked_by_guardrail in parsed_calls:
+        if (
+            block_result is not None
+            and blocked_by_guardrail
+            and (getattr(tc, "id", "") or "")
+            not in terminal_fenced_call_ids
+        ):
+            _emit_guardrail_preflight_lifecycle(
+                agent,
+                tool_call_id=getattr(tc, "id", "") or "",
+                function_name=name,
+                function_args=args,
+                function_result=block_result,
+            )
 
     for tc, name, args, middleware_trace, block_result, blocked_by_guardrail in parsed_calls:
         if block_result is not None:
@@ -874,6 +1016,14 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     middleware_trace=list(middleware_trace),
                 )
             tool_duration = 0.0
+            function_result = agent._append_guardrail_observation(
+                name,
+                args,
+                function_result,
+                failed=True,
+                batch_id=api_call_count,
+                tool_call_id=tool_call_id,
+            )
         else:
             function_name, function_args, function_result, tool_duration, is_error, blocked, middleware_trace = r
 
@@ -883,6 +1033,16 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     function_args,
                     function_result,
                     failed=is_error,
+                    batch_id=api_call_count,
+                    tool_call_id=getattr(tc, "id", "") or "",
+                )
+            else:
+                agent._record_turn_tool_outcome(
+                    function_name,
+                    failed=True,
+                    batch_id=api_call_count,
+                    tool_call_id=getattr(tc, "id", "") or "",
+                    function_args=function_args,
                 )
 
             if is_error:
@@ -1018,19 +1178,31 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             function_args = {}
         if not isinstance(function_args, dict):
             function_args = {}
+        function_args, _ = sanitize_runtime_linkage_arguments(
+            function_name,
+            function_args,
+        )
 
         # Tool Search unwrap — see execute_tool_calls_concurrent for full
         # rationale, including the scope gate (the unwrap dispatches the
         # underlying tool directly, so session toolset scope is enforced here).
-        _ts_scope_block: Optional[str] = None
+        _ts_scope_block: Optional[str] = _dynamic_raw_tool_denial(
+            function_name
+        )
         try:
             from tools import tool_search as _ts
-            if function_name == _ts.TOOL_CALL_NAME:
+            if (
+                _ts_scope_block is None
+                and function_name == _ts.TOOL_CALL_NAME
+            ):
                 _underlying, _underlying_args, _err = _ts.resolve_underlying_call(function_args)
                 if not _err and _underlying:
                     if _underlying in _tool_search_scoped_names(agent):
                         function_name = _underlying
                         function_args = _underlying_args
+                        function_args, _ = split_runtime_linkage(
+                            function_args
+                        )
                     else:
                         _ts_scope_block = (
                             f"'{_underlying}' is not available in this session. "
@@ -1039,13 +1211,18 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         except Exception:
             pass
 
-        function_args, middleware_trace = _apply_tool_request_middleware_for_agent(
-            agent,
-            function_name=function_name,
-            function_args=function_args,
-            effective_task_id=effective_task_id,
-            tool_call_id=getattr(tool_call, "id", "") or "",
-        )
+        if _ts_scope_block is None:
+            function_args, middleware_trace = (
+                _apply_tool_request_middleware_for_agent(
+                    agent,
+                    function_name=function_name,
+                    function_args=function_args,
+                    effective_task_id=effective_task_id,
+                    tool_call_id=getattr(tool_call, "id", "") or "",
+                )
+            )
+        else:
+            middleware_trace = []
 
         _terminal_dispatch_denied = not _claim_strict_tool_dispatch(
             agent,
@@ -1261,6 +1438,13 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 error_type="guardrail_block",
                 error_message=getattr(_guardrail_block_decision, "message", None) or "Tool blocked by guardrail policy",
                 middleware_trace=list(middleware_trace),
+            )
+            _emit_guardrail_preflight_lifecycle(
+                agent,
+                tool_call_id=getattr(tool_call, "id", "") or "",
+                function_name=function_name,
+                function_args=function_args,
+                function_result=function_result,
             )
         elif function_name == "todo":
             def _execute(next_args: dict) -> Any:
@@ -1643,9 +1827,19 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 function_args,
                 function_result,
                 failed=_is_error_result,
+                batch_id=api_call_count,
+                tool_call_id=getattr(tool_call, "id", "") or "",
             )
             result_preview = function_result if agent.verbose_logging else (
                 function_result[:200] if len(function_result) > 200 else function_result
+            )
+        elif not _terminal_dispatch_denied:
+            agent._record_turn_tool_outcome(
+                function_name,
+                failed=True,
+                batch_id=api_call_count,
+                tool_call_id=getattr(tool_call, "id", "") or "",
+                function_args=function_args,
             )
         if _is_error_result:
             logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)

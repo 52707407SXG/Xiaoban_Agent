@@ -122,6 +122,19 @@ class TestDetectToolFailureStructured:
         assert is_failure is True
         assert "rate limited" in suffix
 
+    def test_ok_false_status_without_error_text_is_failure(self):
+        result = json.dumps(
+            {
+                "ok": False,
+                "status": 403,
+                "code": "preaction_denied",
+            }
+        )
+        assert _detect_tool_failure(
+            "mystand_query",
+            result,
+        ) == (True, " [preaction_denied]")
+
     def test_successful_result_not_flagged(self):
         result = json.dumps({"success": True, "data": "hello"})
         assert _detect_tool_failure("web_search", result) == (False, "")

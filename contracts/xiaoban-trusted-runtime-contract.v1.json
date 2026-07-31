@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "contract": "mystand.xiaoban-trusted-runtime-contract.v1",
-  "revision": "2026-07-31.1",
+  "revision": "2026-07-31.3",
   "compatibility": {
     "mode": "exact-match",
     "silentFallbackAllowed": false,

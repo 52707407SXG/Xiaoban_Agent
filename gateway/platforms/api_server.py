@@ -108,93 +108,9 @@ logger = logging.getLogger(__name__)
 def _mystand_tool_result_failed(tool_name: Any, tool_result: Any) -> bool:
     """Classify a tool result without ever adding its contents to telemetry."""
     try:
-        structured_result = tool_result
-        decoded_json = not isinstance(tool_result, str)
-        if isinstance(tool_result, str):
-            try:
-                structured_result = json.loads(tool_result)
-            except (TypeError, ValueError):
-                structured_result = None
-                decoded_json = False
-            else:
-                decoded_json = True
+        from agent.tool_result_classification import tool_result_failed
 
-        if isinstance(structured_result, dict):
-            status_failed: Optional[bool] = None
-            status = structured_result.get("status")
-            if isinstance(status, int) and not isinstance(status, bool):
-                if 400 <= status <= 599:
-                    status_failed = True
-                elif 100 <= status <= 399:
-                    status_failed = False
-            elif isinstance(status, str):
-                normalized_status = status.strip().lower()
-                if re.fullmatch(r"[45]\d{2}", normalized_status):
-                    status_failed = True
-                elif re.fullmatch(r"[123]\d{2}", normalized_status):
-                    status_failed = False
-                elif normalized_status in {
-                    "error",
-                    "failed",
-                    "failure",
-                    "cancelled",
-                    "canceled",
-                    "timeout",
-                }:
-                    status_failed = True
-                elif normalized_status in {
-                    "ok",
-                    "success",
-                    "succeeded",
-                    "completed",
-                    "complete",
-                    "done",
-                }:
-                    status_failed = False
-
-            error = structured_result.get("error")
-            has_error = bool(error)
-            exit_code = structured_result.get("exit_code")
-            has_failed_exit = (
-                isinstance(exit_code, int)
-                and not isinstance(exit_code, bool)
-                and exit_code != 0
-            )
-
-            # Failure signals win over contradictory success metadata.  This
-            # keeps explicit transport/tool failures from being displayed as
-            # completed while avoiding text scans of values such as
-            # ``{"ok": true, "failed": false}``.
-            if (
-                structured_result.get("ok") is False
-                or structured_result.get("success") is False
-                or structured_result.get("failed") is True
-                or status_failed is True
-                or has_error
-                or has_failed_exit
-            ):
-                return True
-            # A decoded object with no top-level failure contract is not
-            # searched as text.  Nested payloads commonly contain fields like
-            # ``{"failed": false}``, which are data rather than tool status.
-            return False
-
-        # Other valid JSON values are data, not prose error channels.
-        if decoded_json or not isinstance(tool_result, str):
-            return False
-
-        # Plain-text tool failures are limited to explicit executor/system
-        # markers.  Do not keyword-scan ordinary content returned by a tool.
-        return bool(re.match(
-            r"^\s*(?:"
-            r"\[?tool execution cancell?ed\b|"
-            r"error(?:\s+executing\s+tool\b|:)|"
-            r"exception:|"
-            r"traceback \(most recent call last\):"
-            r")",
-            tool_result,
-            re.IGNORECASE,
-        ))
+        return tool_result_failed(str(tool_name or ""), tool_result)
     except Exception:
         # Optional metadata must never break the request, but it must also not
         # turn an unclassifiable result into a false success signal.
@@ -1925,6 +1841,22 @@ def _bind_verification_to_visible_text(text: str, result: Any) -> str:
     return text
 
 
+def _has_system_receipt_projection(result: Any) -> bool:
+    verification = (
+        result.get("_mystand_trusted_verification")
+        if isinstance(result, dict)
+        else None
+    )
+    return bool(
+        isinstance(verification, dict)
+        and (
+            verification.get("output_presentation")
+            or verification.get("outputPresentation")
+        )
+        == "system-receipt"
+    )
+
+
 def _guard_evidence_backed_response(
     text: Any,
     *,
@@ -2068,6 +2000,15 @@ def _guard_evidence_backed_response(
             result["_mystand_trusted_verification"] = dict(
                 completion.verification
             )
+            if _has_system_receipt_projection(result):
+                # The text is a server-owned explanation of an incomplete
+                # execution, not a successful assistant answer.  Keep it
+                # visible, but make every outer protocol carry the same failed
+                # terminal truth.
+                result["completed"] = False
+                result["failed"] = True
+                result["partial"] = False
+                result["error"] = "trusted work did not complete"
         elif (
             result.get("_mystand_completion_protocol")
             == _MYSTAND_COMPLETION_PROTOCOL_V2
@@ -2205,7 +2146,15 @@ def _install_mystand_completion_persistence_guard(
             )
 
             decision = check_completion(terminal_text, trusted_turn)
-            if decision.allowed:
+            if (
+                decision.allowed
+                and not _has_system_receipt_projection(
+                    {
+                        "_mystand_trusted_verification":
+                            decision.verification or {}
+                    }
+                )
+            ):
                 safe_assistant["content"] = decision.text
                 safe_messages.append(safe_assistant)
         original_persist(safe_messages, conversation_history)
@@ -5531,7 +5480,7 @@ class APIServerAdapter(
             run_terminal_failure = bool(
                 run_stopped or run_partial or run_failed or not run_completed
             )
-            if guarded_final and not run_terminal_failure:
+            if guarded_final and not run_stopped and not run_partial:
                 content_chunk = {
                     "id": completion_id, "object": "chat.completion.chunk",
                     "created": created, "model": model,
@@ -5546,7 +5495,10 @@ class APIServerAdapter(
             if (
                 isinstance(result, dict)
                 and result.get("_mystand_request")
-                and not run_terminal_failure
+                and (
+                    not run_terminal_failure
+                    or _has_system_receipt_projection(result)
+                )
             ):
                 fact_verification = result.get("_mystand_trusted_verification")
                 verification_emitted = False
@@ -6003,13 +5955,17 @@ class APIServerAdapter(
 
                 # function_call_output added (result)
                 result_str = result if isinstance(result, str) else json.dumps(result)
+                tool_failed = _mystand_tool_result_failed(
+                    pending["name"],
+                    result,
+                )
                 output_parts = [{"type": "input_text", "text": result_str}]
                 output_item = {
                     "id": f"fco_{uuid.uuid4().hex[:24]}",
                     "type": "function_call_output",
                     "call_id": pending["call_id"],
                     "output": output_parts,
-                    "status": "completed",
+                    "status": "failed" if tool_failed else "completed",
                 }
                 idx = output_index
                 output_index += 1
@@ -6017,6 +5973,7 @@ class APIServerAdapter(
                     "type": "function_call_output",
                     "call_id": pending["call_id"],
                     "output": output_parts,
+                    "status": output_item["status"],
                 })
                 await _write_event("response.output_item.added", {
                     "type": "response.output_item.added",
@@ -6138,8 +6095,17 @@ class APIServerAdapter(
                     await _emit_text_delta(agent_final)
                 if agent_final and not final_response_text:
                     final_response_text = agent_final
-                if isinstance(result, dict) and result.get("error") and not final_response_text:
-                    agent_error = result["error"]
+                if isinstance(result, dict):
+                    run_failed = bool(result.get("failed")) or not bool(
+                        result.get("completed", True)
+                    )
+                    if run_failed:
+                        agent_error = str(
+                            result.get("error")
+                            or "Agent run did not complete"
+                        )
+                    elif result.get("error") and not final_response_text:
+                        agent_error = str(result["error"])
             except Exception as e:  # noqa: BLE001
                 logger.error("Error running agent for streaming responses: %s", e, exc_info=True)
                 agent_error = str(e)
@@ -6625,11 +6591,14 @@ class APIServerAdapter(
             result,
         )
         output_items = self._extract_output_items(result, start_index=output_start_index)
+        response_failed = bool(result.get("failed")) or not bool(
+            result.get("completed", True)
+        )
 
         response_data = {
             "id": response_id,
             "object": "response",
-            "status": "completed",
+            "status": "failed" if response_failed else "completed",
             "created_at": created_at,
             "model": body.get("model", self._model_name),
             "output": output_items,
@@ -6639,6 +6608,13 @@ class APIServerAdapter(
                 "total_tokens": usage.get("total_tokens", 0),
             },
         }
+        if response_failed:
+            response_data["error"] = {
+                "message": str(
+                    result.get("error") or "Agent run did not complete"
+                ),
+                "type": "server_error",
+            }
 
         # Store the complete response object for future chaining / GET retrieval
         if store:
@@ -7004,6 +6980,36 @@ class APIServerAdapter(
         current_user = {"role": "user", "content": user_message}
         agent_messages = result.get("messages") if isinstance(result, dict) else None
 
+        if _has_system_receipt_projection(result):
+            # A system receipt is visible delivery/status text, not Xiaoban's
+            # speech. Preserve canonical tool calls/results for audit and
+            # follow-up reasoning, but never persist either the rejected model
+            # candidate or the server receipt as an assistant history message.
+            safe_turn: List[Dict[str, Any]] = []
+            if isinstance(agent_messages, list) and agent_messages:
+                turn_start = (
+                    APIServerAdapter._response_messages_turn_start_index(
+                        conversation_history,
+                        user_message,
+                        result,
+                    )
+                )
+                current_turn = (
+                    agent_messages[turn_start:]
+                    if turn_start
+                    else agent_messages
+                )
+                for message in current_turn:
+                    if not isinstance(message, dict):
+                        continue
+                    role = message.get("role")
+                    if role == "tool" or (
+                        role == "assistant"
+                        and message.get("tool_calls")
+                    ):
+                        safe_turn.append(dict(message))
+            return [*prior, current_user, *safe_turn]
+
         if isinstance(agent_messages, list) and agent_messages:
             turn_start = APIServerAdapter._response_messages_turn_start_index(
                 conversation_history,
@@ -7073,10 +7079,17 @@ class APIServerAdapter(
         )
         turn = agent_messages[start:]
         out: List[Dict[str, Any]] = []
+        system_receipt = _has_system_receipt_projection(result)
         for msg in turn:
             if not isinstance(msg, dict):
                 continue
             if msg.get("role") not in {"assistant", "tool"}:
+                continue
+            if (
+                system_receipt
+                and msg.get("role") == "assistant"
+                and not msg.get("tool_calls")
+            ):
                 continue
             out.append(cls._message_response(msg))
         return out

@@ -42,6 +42,12 @@ from gateway.platforms.api_server import (
     cors_middleware,
     security_headers_middleware,
 )
+from xiaoban.trusted_runtime.protocol_contract import (
+    TRUSTED_RUNTIME_CONTRACT_DIGEST,
+    TRUSTED_RUNTIME_CONTRACT_DIGEST_HEADER,
+    TRUSTED_RUNTIME_CONTRACT_REVISION,
+    TRUSTED_RUNTIME_CONTRACT_REVISION_HEADER,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -696,6 +702,10 @@ def _mystand_idempotent_headers(
         "X-Xiaoban-Request-Fingerprint": request_fingerprint or hashlib.sha256(
             f"request:{key}".encode("utf-8")
         ).hexdigest(),
+        TRUSTED_RUNTIME_CONTRACT_REVISION_HEADER: (
+            TRUSTED_RUNTIME_CONTRACT_REVISION
+        ),
+        TRUSTED_RUNTIME_CONTRACT_DIGEST_HEADER: TRUSTED_RUNTIME_CONTRACT_DIGEST,
     }
 
 
@@ -1575,7 +1585,20 @@ class TestChatCompletionsEndpoint:
         assert response_data["error"] == "invalid_memory_scope"
 
     @pytest.mark.asyncio
-    async def test_stop_interrupts_matching_mystand_delivery(self, auth_adapter):
+    async def test_stop_interrupts_matching_mystand_delivery(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+    ):
+        durable_cache = _IdempotencyCache(
+            durable_path=str(tmp_path / "stop-running.sqlite"),
+            outcome_keys={"test-v1": b"\x31" * 32},
+        )
+        monkeypatch.setattr(
+            "gateway.platforms.api_server._idem_cache",
+            durable_cache,
+        )
         app = _create_app(auth_adapter)
         gate = asyncio.Event()
         started = asyncio.Event()
@@ -1631,7 +1654,20 @@ class TestChatCompletionsEndpoint:
         assert mock_run.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_stop_before_completion_request_prevents_agent_start(self, auth_adapter):
+    async def test_stop_before_completion_request_prevents_agent_start(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+    ):
+        durable_cache = _IdempotencyCache(
+            durable_path=str(tmp_path / "stop-before-start.sqlite"),
+            outcome_keys={"test-v1": b"\x31" * 32},
+        )
+        monkeypatch.setattr(
+            "gateway.platforms.api_server._idem_cache",
+            durable_cache,
+        )
         app = _create_app(auth_adapter)
         key = f"delivery-stop-before-start-{uuid.uuid4().hex}"
         headers = _mystand_idempotent_headers(key)
@@ -2660,6 +2696,55 @@ class TestResponsesEndpoint:
             assert data["output"][0]["content"][0]["text"] == "Paris is the capital of France."
 
     @pytest.mark.asyncio
+    async def test_failed_run_with_human_explanation_is_not_marked_completed(
+        self,
+        adapter,
+    ):
+        mock_result = {
+            "final_response": (
+                "资料读取没有取得可用结果，仍缺少完成请求所需的内容。"
+            ),
+            "messages": [],
+            "api_calls": 1,
+            "completed": False,
+            "failed": True,
+            "error": "trusted work did not complete",
+        }
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                adapter,
+                "_run_agent",
+                new_callable=AsyncMock,
+            ) as mock_run:
+                mock_run.return_value = (
+                    mock_result,
+                    {
+                        "input_tokens": 1,
+                        "output_tokens": 2,
+                        "total_tokens": 3,
+                    },
+                )
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={
+                        "model": "xiaoban-agent",
+                        "input": "读取资料并给建议",
+                    },
+                )
+
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["status"] == "failed"
+                assert data["error"]["message"] == (
+                    "trusted work did not complete"
+                )
+                assert data["output"][-1]["content"][0]["text"] == (
+                    mock_result["final_response"]
+                )
+
+    @pytest.mark.asyncio
     async def test_successful_response_with_array_input(self, adapter):
         """Array input with role/content objects."""
         mock_result = {"final_response": "Done", "messages": [], "api_calls": 1}
@@ -3117,6 +3202,59 @@ class TestResponsesStreaming:
                 assert '"logprobs": []' in body
                 assert "Hello" in body
                 assert " world" in body
+
+    @pytest.mark.asyncio
+    async def test_stream_failed_run_keeps_human_text_and_failed_terminal(
+        self,
+        adapter,
+    ):
+        explanation = (
+            "读取已经尝试过，但服务仍不可用，所需资料没有取得。"
+        )
+
+        async def _mock_run_agent(**kwargs):
+            return (
+                {
+                    "final_response": explanation,
+                    "messages": [],
+                    "api_calls": 1,
+                    "completed": False,
+                    "failed": True,
+                    "error": "trusted work did not complete",
+                },
+                {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "total_tokens": 3,
+                },
+            )
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                adapter,
+                "_run_agent",
+                side_effect=_mock_run_agent,
+            ):
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={
+                        "model": "xiaoban-agent",
+                        "input": "读取资料",
+                        "stream": True,
+                    },
+                )
+                body = await resp.text()
+
+        assert resp.status == 200
+        decoded_events = [
+            json.loads(line.removeprefix("data: "))
+            for line in body.splitlines()
+            if line.startswith("data: ")
+        ]
+        assert explanation in json.dumps(decoded_events, ensure_ascii=False)
+        assert "event: response.failed" in body
+        assert "event: response.completed" not in body
 
     @pytest.mark.asyncio
     async def test_stream_string_false_returns_json_response(self, adapter):

@@ -1316,11 +1316,14 @@ def test_no_progress_outcome_seals_recovers_acks_and_rejects_foreign_owner(
     decision = check_completion(reply, turn)
     assert decision.allowed is True
     assert decision.verification["failure_class"] == "no_progress"
+    public_reply = decision.text
     outcome = {
         "schema": TRUE_MOA_COMPLETED_OUTCOME_SCHEMA,
         "completed": True,
-        "finalResponse": reply,
-        "outputDigest": hashlib.sha256(reply.encode("utf-8")).hexdigest(),
+        "finalResponse": public_reply,
+        "outputDigest": hashlib.sha256(
+            public_reply.encode("utf-8")
+        ).hexdigest(),
         "factGuardRequired": False,
         "completionProtocol": "dynamic-evidence-v2",
         "trustedVerification": decision.verification,
@@ -1357,7 +1360,7 @@ def test_no_progress_outcome_seals_recovers_acks_and_rejects_foreign_owner(
     with pytest.raises(TrueMoAOutcomeBindingError):
         store.recover_completed_outcome(key, binding=foreign)
     recovered = store.recover_completed_outcome(key, binding=binding)
-    assert recovered["finalResponse"] == reply
+    assert recovered["finalResponse"] == public_reply
     assert recovered["trustedVerification"] == decision.verification
     assert store.acknowledge_completed_outcome(
         key,
@@ -1436,7 +1439,7 @@ def test_cancelled_dynamic_outcome_survives_restart_and_ack(
     assert decision.allowed is True
     assert decision.verification["failure_class"] == "cancelled"
     outcome = _dynamic_completed_outcome(
-        reply,
+        decision.text,
         decision.verification,
     )
 
@@ -1459,7 +1462,7 @@ def test_cancelled_dynamic_outcome_survives_restart_and_ack(
         outcome_keys=_OUTCOME_KEYS,
     )
     recovered = store.recover_completed_outcome(key, binding=binding)
-    assert recovered["finalResponse"] == reply
+    assert recovered["finalResponse"] == decision.text
     assert recovered["trustedVerification"] == decision.verification
     assert store.acknowledge_completed_outcome(
         key,

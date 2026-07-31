@@ -39,6 +39,9 @@ from xiaoban.trusted_runtime.true_moa_durable import (
     project_true_moa_completed_outcome,
 )
 from xiaoban.trusted_runtime.dynamic_completion import (
+    render_dynamic_failure_report,
+)
+from xiaoban.trusted_runtime.dynamic_completion import (
     dynamic_finalization_mode,
 )
 from xiaoban.trusted_runtime.paid_call_policy import (
@@ -222,6 +225,99 @@ def test_dynamic_parking_projects_only_structured_fact_and_full_receipt():
     assert decision.verification["index_has_more"] is False
 
 
+@pytest.mark.parametrize(
+    ("module_id", "resource_type", "safe_label", "fact_kind", "value"),
+    [
+        (
+            "profile",
+            "profile-card",
+            "客户沟通资料",
+            "profile.follow_up",
+            "客户希望先核对需求再安排下一次沟通",
+        ),
+        (
+            "finance",
+            "finance-record",
+            "本月回款摘要",
+            "finance.summary",
+            "本月已确认两笔回款，仍有一笔待核对",
+        ),
+        (
+            "property",
+            "property-note",
+            "房源跟进笔记",
+            "property.follow_up",
+            "客户更看重通勤时间，价格仍需进一步确认",
+        ),
+        (
+            "owner",
+            "owner-profile",
+            "业主沟通摘要",
+            "owner.follow_up",
+            "业主愿意继续沟通，但希望先看完整反馈",
+        ),
+    ],
+)
+def test_dynamic_read_completion_is_business_module_agnostic(
+    module_id,
+    resource_type,
+    safe_label,
+    fact_kind,
+    value,
+):
+    turn = _turn()
+    item = _index_item(
+        f"resource-{module_id}",
+        safe_label,
+        resource_type=resource_type,
+    )
+    item["moduleId"] = module_id
+    _record_index(turn, [item])
+    _record(
+        turn,
+        "mystand_query",
+        {
+            "operation": "read",
+            "resource": {
+                "name": safe_label,
+                "type_hint": resource_type,
+            },
+            "entities": [],
+            "fact_needs": [fact_kind],
+            "mode": "facts",
+        },
+        {
+            "schema": "mystand.query-result.v1",
+            "ok": True,
+            "status": "matched",
+            "missing_facts": [],
+            "resource": {
+                "resourceUid": f"resource-{module_id}",
+                "display_name": safe_label,
+                "type": resource_type,
+            },
+            "recordRefs": [f"resource-{module_id}"],
+            "facts": [
+                {
+                    "kind": fact_kind,
+                    "label": "关键信息",
+                    "value": value,
+                }
+            ],
+            "content": value,
+        },
+        f"call-{module_id}",
+    )
+
+    reply = f"资料中的关键信息是“{value}”。我的建议是先据此核对下一步条件，再推进。"
+    decision = check_completion(reply, turn)
+
+    assert decision.allowed is True
+    assert decision.text == reply
+    assert decision.verification["completion_kind"] == "evidence-bound"
+    assert decision.verification["record_refs"] == [f"resource-{module_id}"]
+
+
 def test_explicit_linked_record_refs_are_nonempty_complete_index_subset():
     turn = _turn()
     _record_index(
@@ -393,7 +489,12 @@ def test_dynamic_gate_does_not_hardcode_module_specific_fact_shapes(facts):
     decision = check_completion(model_reply, turn)
 
     assert decision.allowed is True
-    assert decision.text == model_reply
+    assert decision.text == (
+        "资料已经读取成功，但最终回答没有使用本轮资料中的具体内容，"
+        "无法确认它真正完成了你的要求。本次任务仍按未完成处理。"
+    )
+    assert decision.verification["output_presentation"] == "system-receipt"
+    assert decision.verification["answer_status"] == "incomplete"
     assert decision.verification["semantic_verified"] is False
 
 
@@ -445,7 +546,9 @@ def test_v2_authorization_read_is_a_valid_registered_read_chain():
         },
         "call-auth",
     )
-    model_reply = "我已从这份授权资料中读到对应内容。"
+    model_reply = (
+        "授权资料原文是“legacy raw content”，我会以这段实际内容为准。"
+    )
     dynamic = check_completion(model_reply, dynamic_turn)
     assert dynamic.allowed is True
     assert dynamic.text == model_reply
@@ -490,20 +593,23 @@ def test_multiple_registered_reads_share_one_verified_index_chain():
             _index_item("res-b", "资料乙"),
         ],
     )
-    for suffix in ("a", "b"):
+    for suffix, label in (("a", "甲"), ("b", "乙")):
         _record(
             turn,
             "mystand_authorization",
             {"operation": "resolve", "resource_uid": f"res-{suffix}"},
             {
                 "ok": True,
-                "content": f"资料{suffix}的真实内容",
+                "content": f"资料{label}的真实内容",
                 "resourceUid": f"res-{suffix}",
             },
             f"call-auth-{suffix}",
         )
 
-    model_reply = "我已读取两份目标资料，并根据它们一起说明。"
+    model_reply = (
+        "我已读取资料甲和资料乙；其中分别写着“资料甲的真实内容”和"
+        "“资料乙的真实内容”，下面会合并说明。"
+    )
     decision = check_completion(model_reply, turn)
 
     assert decision.allowed is True
@@ -543,7 +649,10 @@ def test_ordinary_failed_attempt_does_not_poison_later_valid_read_chain():
         "call-auth-success",
     )
 
-    model_reply = "前一次定位方式不合适，但随后我已从目标资料中读取成功。"
+    model_reply = (
+        "前一次定位方式不合适，但随后读到了“真实读取内容”，"
+        "下面会以这个结果为准。"
+    )
     decision = check_completion(model_reply, turn)
 
     assert turn.pre_action_denials == 1
@@ -828,7 +937,8 @@ def test_failure_bound_reply_requires_finalize_only_runtime_state():
     ).hexdigest()
     allowed = check_completion(model_reply, turn)
     assert allowed.allowed is True
-    assert allowed.text == model_reply
+    assert allowed.text == render_dynamic_failure_report(turn)
+    assert allowed.verification["output_presentation"] == "system-receipt"
     assert allowed.verification is not None
     assert allowed.verification["completion_kind"] == "failure-bound"
     assert allowed.verification["semantic_verified"] is False
@@ -1338,7 +1448,7 @@ def test_dynamic_completion_bypasses_legacy_fixed_tool_group_gate():
         },
         "call-auth",
     )
-    model_reply = "我已从目标资料中读取成功，下面按资料内容说明。"
+    model_reply = "我已读到“真实读取内容”，下面按这段实际内容说明。"
     result = {
         "final_response": model_reply,
         "messages": [],
@@ -1497,12 +1607,18 @@ def test_failed_dynamic_read_delivers_model_failure_with_bound_receipt():
         conversation_history=[],
     )
 
-    assert final_text == model_reply
+    assert final_text == render_dynamic_failure_report(turn)
     assert result["_mystand_completion_protocol"] == PROTOCOL
     verification = result["_mystand_trusted_verification"]
     assert verification["completion_kind"] == "failure-bound"
     assert verification["decision"] == "execution_status_bound"
     assert verification["failure_class"] == "error"
     assert verification["failed_action_count"] == 1
-    payload = _IdempotencyCache._completed_outcome_payload(result)
-    assert payload["trustedVerification"] == verification
+    assert verification["output_presentation"] == "system-receipt"
+    assert result["completed"] is False
+    assert result["failed"] is True
+    with pytest.raises(
+        RuntimeError,
+        match="completed outcome was not finalized",
+    ):
+        _IdempotencyCache._completed_outcome_payload(result)

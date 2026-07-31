@@ -52,6 +52,20 @@ AGENT_RUNTIME_POST_HOOK_TOOL_NAMES = frozenset(
     {"todo", "session_search", "memory", "clarify", "read_terminal", "delegate_task"}
 )
 
+POST_RESPONSE_HOUSEKEEPING_TOOL_NAMES = frozenset(
+    {"memory", "todo", "skill_manage"}
+)
+
+
+def is_post_response_housekeeping_tool(function_name: str) -> bool:
+    """Return whether a tool only maintains agent/session state after an answer.
+
+    This is execution-role metadata, not business-task matching.  Keeping it in
+    one place prevents a successful memory/todo side effect from being mistaken
+    for recovery of an earlier failed user-facing action.
+    """
+    return function_name in POST_RESPONSE_HOUSEKEEPING_TOOL_NAMES
+
 
 def agent_runtime_owns_post_tool_hook(agent: Any, function_name: str) -> bool:
     """Return True when an agent-level tool path emits its own post hook."""

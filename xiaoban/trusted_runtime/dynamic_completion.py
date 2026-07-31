@@ -77,6 +77,11 @@ _TRANSIENT_UNAVAILABLE_CODES = frozenset(
 _TRANSIENT_RECOVERY_CODES = (
     _TRANSIENT_TIMEOUT_CODES | _TRANSIENT_UNAVAILABLE_CODES
 )
+_CORRECTABLE_QUERY_CODES = frozenset(
+    {
+        "invalid_mystand_query_arguments",
+    }
+)
 _PRESENTATION_UNAVAILABLE_CODES = _TRANSIENT_UNAVAILABLE_CODES | frozenset(
     {
         # These codes are safe to explain as an unavailable site-data
@@ -89,272 +94,13 @@ _PRESENTATION_UNAVAILABLE_CODES = _TRANSIENT_UNAVAILABLE_CODES | frozenset(
         "mystand_resource_index_unavailable",
     }
 )
-_FAILURE_INCOMPLETE_RE = re.compile(
+_ANSWER_DEFERRAL_RE = re.compile(
     r"(?:"
-    r"(?:没有|没能|未能|无法|不能|尚未|还没有|还没|暂时无法|暂时不能)"
-    r"[^。！？；，,]{0,24}"
-    r"(?:完成|办完|处理完|查完|读完|继续|回答|拿到|查到|读到|读取|返回)"
-    r"|(?:失败|中断|超时|没成功|未成功|被拒绝|无权读取|没有读取权限)"
-    r"|(?:未完成|没有完成|还未完成|还没完成)"
+    r"(?:先不|暂不|暂时不|稍后|晚点|之后|下次).{0,12}"
+    r"(?:分析|建议|判断|回答|再说)|"
+    r"(?:分析|建议|判断|回答).{0,12}(?:稍后|晚点|之后|下次|再说)"
     r")"
 )
-_FAILURE_INTERNAL_RE = re.compile(
-    r"(?:"
-    r"系统提示|固定回复|动态证据|证据回执|回执|内部协议|协议校验|"
-    r"实例|运行环境|状态码|错误码|明确点击重试|点击重试|"
-    r"mystand_(?:query|resource_index|authorization)|"
-    r"\b(?:tool|function|api|gateway|delivery|receipt|protocol|"
-    r"status(?:\s*code)?|error(?:_code)?|exception|traceback)\b|"
-    r"(?:^|[\s(])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]+|"
-    r"<[/!]?[a-zA-Z][^>]*>|```|[{}]"
-    r")",
-    re.IGNORECASE,
-)
-_FAILURE_UNBOUND_FACT_RE = re.compile(
-    r"(?:"
-    r"[0-9０-９]|[￥¥$€£%％]|"
-    r"[零〇一二三四五六七八九十百千万亿两]+(?:多|余)?"
-    r"(?:元|块|个|位|名|套|份|笔|条|项|户|人|家)|"
-    r"(?:查询结果|数据|资料|事实|结论|答案)"
-    r"[^。！？；，,]{0,12}(?:显示|表明|是|为)|"
-    r"(?:还有|共有|总共|合计|总计)"
-    r")"
-)
-_FAILURE_BUSINESS_SUBJECT_RE = re.compile(
-    r"(?:"
-    r"提成|佣金|业绩|金额|余额|结算|到账|房源|客源|客户|业主|"
-    r"手机号|电话号码?|成交|合同|账本|流水"
-    r")"
-)
-_FAILURE_POSITIVE_RESULT_RE = re.compile(
-    r"(?:"
-    r"(?:已经|已)(?:查到|读到|拿到|取得|完成|办完|处理完|"
-    r"读取完成|查询完成|成功|确认)|"
-    r"(?:工资|薪资|商铺|店铺|房源|记录|老板|领导|客户|业主)"
-    r"[^。！？；，,]{0,16}"
-    r"(?:发放|出租|删除|批准|成交|到账|完成|成功)"
-    r")"
-)
-_FAILURE_NEGATED_CAUSE_RE = re.compile(
-    r"(?:"
-    r"(?:没有|没|并无|不存在)(?:任何)?(?:问题|错误|失败|异常)|"
-    r"(?:一切|状态|结果)?(?:正常|无误|没问题)|"
-    r"(?:已经|已)(?:确认|核实)"
-    r")"
-)
-_FAILURE_PERMISSION_CAUSE_RE = re.compile(
-    r"(?:权限|授权|无权|拒绝|禁止|访问条件)"
-)
-_FAILURE_TIMEOUT_CAUSE_RE = re.compile(
-    r"(?:超时|网络|连接|断线|服务不可用|服务中断)"
-)
-_FAILURE_NOT_FOUND_RE = re.compile(
-    r"(?:没有找到|没找到|未找到|找不到|无法定位|不能确定|"
-    r"不够明确|唯一匹配|存在歧义)"
-)
-_FAILURE_NO_PROGRESS_RE = re.compile(
-    r"(?:"
-    r"(?:定位|找到|核对).{0,18}(?:资料|范围|目录|候选)"
-    r"|(?:资料|范围|目录|候选).{0,18}(?:定位|找到|核对)"
-    r")"
-)
-_FAILURE_NO_READ_RE = re.compile(
-    r"(?:"
-    r"没有|没能|未能|尚未|还没|无法"
-    r").{0,20}(?:继续读取|读取|读到|拿到|取得|完成查询|查完)"
-)
-_FAILURE_NOT_STARTED_RE = re.compile(
-    r"(?:"
-    r"(?:没有|没能|未能|尚未|还没).{0,18}"
-    r"(?:开始|发起|实际处理|执行)"
-    r"|(?:实际处理|执行).{0,18}(?:没有|没能|未能)(?:开始|发起)"
-    r")"
-)
-_FAILURE_FIRST_PERSON_PREFIX = (
-    r"(?:抱歉[，,]|不好意思[，,])?"
-    r"(?:我(?:这次|本轮)?|(?:这次|本轮)我)"
-)
-_FAILURE_INCOMPLETE_TAIL = (
-    r"(?:所以|因此|目前|现在)?"
-    r"(?:"
-    r"(?:这项|这次|本轮)?(?:任务|查询)"
-    r"(?:还|仍然|仍|尚)?(?:没有|没|没能|未能|未)"
-    r"(?:完成|办完|处理完|查完)"
-    r"|(?:我)?(?:目前|暂时|现在)?(?:还)?(?:无法|不能|没法)"
-    r"(?:完成(?:这项|这次|本轮)?任务|"
-    r"给(?:你)?(?:可靠|准确|明确)?(?:答复|结果|答案)|"
-    r"确认(?:最终)?结果|继续回答)"
-    r")"
-)
-_FAILURE_NO_PROGRESS_INDEX_FULL_RE = re.compile(
-    rf"^{_FAILURE_FIRST_PERSON_PREFIX}"
-    r"(?:已经|已)?(?:完成|做完)(?:了)?资料目录"
-    r"(?:查询|核对)"
-    r"[，,；;。](?:但|不过)?(?:这次|本轮)?我?"
-    r"(?:没有|没能|未能|还没|尚未)继续"
-    r"(?:读取|读到|拿到|取得)(?:到)?"
-    r"(?:能回答问题的|可用于回答的|可回答的)?"
-    r"(?:内容|正文|结果)"
-    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
-)
-_FAILURE_NOT_STARTED_FULL_RE = re.compile(
-    rf"^{_FAILURE_FIRST_PERSON_PREFIX}"
-    r"(?:没有|没能|未能|还没|尚未)"
-    r"(?:发起|开始)(?:实际)?(?:处理|执行)"
-    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
-)
-_FAILURE_NOT_FOUND_FULL_RE = re.compile(
-    rf"^{_FAILURE_FIRST_PERSON_PREFIX}"
-    r"(?:没有找到|没找到|未找到|找不到|无法定位|不能确定)"
-    r"(?:能够|可以)?(?:唯一)?(?:匹配的)?(?:相关)?"
-    r"(?:目标|资料|记录|对象|候选|内容)"
-    r"(?:"
-    r"[，,；;。](?:需要|请)你补充(?:更)?(?:准确|具体|明确)的"
-    r"(?:名称|范围|信息)"
-    rf"|[，,；;。]{_FAILURE_INCOMPLETE_TAIL}"
-    r")[。！？!?]?$"
-)
-_FAILURE_DENIED_FULL_RE = re.compile(
-    rf"^{_FAILURE_FIRST_PERSON_PREFIX}"
-    r"(?:没有|没能|未能|无法)"
-    r"(?:取得|获得|通过)?(?:完成任务所需的)?"
-    r"(?:读取|访问)?(?:权限|授权|访问条件)"
-    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
-)
-_FAILURE_EMPTY_FULL_RE = re.compile(
-    rf"^{_FAILURE_FIRST_PERSON_PREFIX}(?:已经|已)?"
-    r"(?:发起|完成)?(?:了)?(?:读取|查询|处理)"
-    r"[，,；;。](?:但|不过)?我?"
-    r"(?:没有|没能|未能|无法)"
-    r"(?:读到|拿到|取得)(?:可用|有效|完整)?(?:的)?"
-    r"(?:内容|结果|正文|资料)"
-    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
-)
-_FAILURE_GENERIC_FULL_RE = re.compile(
-    rf"^{_FAILURE_FIRST_PERSON_PREFIX}(?:已经|已)?"
-    r"(?:(?:发起|开始|尝试)(?:了)?(?:实际)?(?:处理|执行|查询|读取)|处理)"
-    r"[，,；;。](?:但|不过)?(?:处理|执行|查询|读取)?"
-    r"(?:没有成功|未成功|失败|出了问题|返回了错误)"
-    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
-)
-_FAILURE_TIMEOUT_FULL_RE = re.compile(
-    rf"^{_FAILURE_FIRST_PERSON_PREFIX}(?:已经|已)?"
-    r"(?:发起|开始|尝试)(?:了)?(?:实际)?(?:处理|执行|查询|读取)"
-    r"[，,；;。](?:但|不过)?(?:等待|处理|执行|查询|读取)?"
-    r"(?:结果)?(?:超时|超过等待时间)(?:了)?"
-    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
-)
-_FAILURE_UNAVAILABLE_FULL_RE = re.compile(
-    rf"^{_FAILURE_FIRST_PERSON_PREFIX}(?:已经|已)?"
-    r"(?:发起|开始|尝试)(?:了)?(?:实际)?(?:处理|执行|查询|读取)"
-    r"[，,；;。](?:但|不过)?"
-    r"(?:连接失败|网络中断|服务暂时不可用|读取服务暂时不可用)"
-    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
-)
-_FAILURE_CANCELLED_FULL_RE = re.compile(
-    rf"^{_FAILURE_FIRST_PERSON_PREFIX}(?:已经|已)?"
-    r"(?:发起|开始)(?:了)?(?:实际)?(?:处理|执行|查询|读取)"
-    r"[，,；;。](?:但|不过)?(?:随后)?"
-    r"(?:被停止|被取消|已经停止|已经取消)"
-    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
-)
-_FAILURE_READ_PRECONDITION_FULL_RE = re.compile(
-    rf"^{_FAILURE_FIRST_PERSON_PREFIX}"
-    r"(?:没有|没能|未能)先(?:完成|做好)"
-    r"(?:资料)?(?:目录查询|资料定位|前置准备)"
-    r"[，,；;。](?:所以|因此)?(?:正文)?读取"
-    r"(?:没有|没能|未能)(?:发起|开始)"
-    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
-)
-_FAILURE_RESULT_MISSING_FULL_RE = re.compile(
-    rf"^{_FAILURE_FIRST_PERSON_PREFIX}(?:的)?(?:处理|查询|读取)请求"
-    r"(?:已经|已)(?:生成|准备好|登记)"
-    r"[，,；;。](?:但|不过)?(?:没有|没能|未能)"
-    r"(?:形成|收到|拿到|取得)(?:完整|最终|可以确认|可确认)?"
-    r"(?:的)?(?:结果|返回内容)"
-    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
-)
-_FAILURE_INDEX_INCOMPLETE_FULL_RE = re.compile(
-    rf"^{_FAILURE_FIRST_PERSON_PREFIX}(?:已经|已)?"
-    r"(?:发起|完成)(?:了)?资料目录(?:查询|核对)"
-    r"[，,；;。](?:但|不过)?(?:返回|拿到|取得)(?:的)?"
-    r"(?:目录|结果|内容)(?:不完整|无法确认)"
-    rf"[，,；;。]{_FAILURE_INCOMPLETE_TAIL}[。！？!?]?$"
-)
-_FAILURE_NEGATIVE_CLAUSE_RE = re.compile(
-    r"(?:"
-    r"失败|错误|出错|问题|异常|超时|不完整|"
-    r"(?:没有|无)响应|"
-    r"(?:服务|网络|连接).{0,8}(?:不可用|中断|失败)|"
-    r"(?:停止|取消)|权限|授权|无权|拒绝|禁止|"
-    r"(?:还)?(?:没有|没|未)(?:找到|查到|读到|等到|拿到|"
-    r"取得|完成|成功|通过)|"
-    r"(?:无法|不能|没法|没能|未能).{0,12}"
-    r"(?:完成|继续|答复|确认|回答|读取|查询|发起|开始)"
-    r")"
-)
-_FAILURE_DIRECT_ASSERTION_RE = re.compile(
-    r"(?:"
-    r"(?:遇到|遇到了|出现|出现了|发生|发生了)"
-    r"(?:错误|问题|异常)|"
-    r"失败|出错|错误|有问题|出了?问题|异常|超时|不完整|"
-    r"(?:没有|无)响应|(?:暂时)?不可用|被(?:停止|取消)|"
-    r"(?:还)?(?:没有|没|未)(?:成功|找到|查到|读到|等到|拿到|"
-    r"取得|完成|通过)|"
-    r"(?:暂时)?(?:没能|未能|无法|不能|没法)"
-    r"(?:完成|继续|答复|确认|回答|读取|查询|发起|开始|确定|定位)|"
-    r"(?:没有|没能|未能|无法|不能|没法)?(?:权限|授权)"
-    r")"
-)
-_FAILURE_DIRECT_ASSERTION_PREFIX_RE = re.compile(
-    r"(?:"
-    r"(?:这次|本轮)?我(?:这次|本轮)?|"
-    r"(?:处理|执行|查询|读取|读|查|连接|网络|服务|目录|索引|"
-    r"任务|请求)(?:时|后来|随后)?|"
-    r"(?:等待(?:结果)?|遇到|遇到了|出现|出现了|发生|发生了|"
-    r"出了|返回|返回了)"
-    r")$"
-)
-_FAILURE_FIRST_PERSON_EXECUTION_BINDING_RE = re.compile(
-    r"(?:(?:这次|本轮)?我|我(?:这次|本轮)?)"
-    r"[^，,；;。！？!?]{0,14}"
-    r"(?:"
-    r"(?:已经|已)?(?:发起|开始|尝试|处理|执行|查询|查|读取|"
-    r"读|等待)|"
-    r"(?:还)?(?:没有|没|未)(?:找到|查到|读到|等到|拿到|"
-    r"取得|完成|成功|权限)|"
-    r"(?:没能|未能|无法|不能|没法)(?:取得|获得|找到|定位|"
-    r"确定|完成|继续|答复|确认|回答|读取|查询|发起|开始|给)|"
-    r"(?:权限|授权)"
-    r")"
-)
-_FAILURE_CURRENT_EXECUTION_BINDING_RE = re.compile(
-    r"^(?:这次|本轮)(?:的)?(?:实际)?"
-    r"(?:处理|执行|查询|读取|任务|请求)"
-)
-_FAILURE_UNBOUND_SCOPE_RE = re.compile(
-    r"(?:项目|计划|申请|订单|工单|审批)"
-)
-_FAILURE_SAFE_CONTINUATION_FULL_RE = re.compile(
-    r"^(?:"
-    r"(?:等待(?:结果)?|连接|网络|(?:读取)?服务|处理|执行|查询|"
-    r"读取).{0,10}(?:超时|失败|中断|不可用|(?:没有|无)响应|"
-    r"没成功|未成功|出了?问题|返回了?错误|被停止|被取消)|"
-    r"(?:一直)?(?:没有|没|没能|未能)(?:继续)?"
-    r"(?:等到|查到|读到|拿到|取得).{0,18}"
-    r"(?:结果|内容|正文|资料)|"
-    r"(?:暂时)?(?:无法|不能|没法|没能|未能)(?:继续)?"
-    r"(?:完成(?:你的请求|这项任务|任务)?|"
-    r"给你(?:可靠|准确|明确)?(?:答复|结果|答案)|"
-    r"确认(?:最终)?(?:结果)?|回答(?:你的问题)?|继续回答)|"
-    r"(?:这项|这次|本轮)?(?:任务|查询|请求)"
-    r"(?:还|仍然|仍|尚)?(?:没有|没|未能|未)?完成|"
-    r"(?:没能|未能)(?:继续)?完成|"
-    r"(?:处理|执行|查询|读取)(?:后来)?被(?:停止|取消)"
-    r")了?$"
-)
-
-
 def _mapping(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         return value
@@ -592,208 +338,106 @@ def _validated_terminal_text(final_text: str) -> str:
     return text
 
 
-def _natural_failure_clauses_are_execution_bound(
-    clauses: Sequence[str],
-) -> bool:
-    """Reject negative facts that are not about this turn's own execution."""
-    execution_bound = False
-    semantic_units = [
-        unit
-        for clause in clauses
-        for unit in re.split(r"(?=(?:但|不过|所以|因此))", clause)
-        if unit
-    ]
-    for clause in semantic_units:
-        body = re.sub(
-            r"^(?:抱歉|不好意思|但|不过|所以|因此|目前|现在)",
-            "",
-            clause,
-        )
-        explicitly_bound = bool(
-            _FAILURE_FIRST_PERSON_EXECUTION_BINDING_RE.search(body)
-            or _FAILURE_CURRENT_EXECUTION_BINDING_RE.search(body)
-        )
-        has_negative_status = bool(_FAILURE_NEGATIVE_CLAUSE_RE.search(body))
-        if explicitly_bound:
-            if (
-                has_negative_status
-                and _FAILURE_UNBOUND_SCOPE_RE.search(body)
-            ):
-                return False
-            for assertion in _FAILURE_DIRECT_ASSERTION_RE.finditer(body):
-                if not _FAILURE_DIRECT_ASSERTION_PREFIX_RE.search(
-                    body[:assertion.start()]
-                ):
-                    return False
-            execution_bound = True
-            continue
-        if not has_negative_status:
-            continue
+def _grounding_fact_texts(turn: WorkTurn) -> tuple[list[str], list[str]]:
+    """Return trusted business values and field labels, never tool metadata."""
+    values: list[str] = []
+    labels: list[str] = []
+    for evidence in turn.evidence:
         if (
-            not execution_bound
-            or _FAILURE_UNBOUND_SCOPE_RE.search(body)
-            or not _FAILURE_SAFE_CONTINUATION_FULL_RE.fullmatch(body)
+            evidence.status != "success"
+            or evidence.verification_status != "verified"
+            or not evidence.allowed_facts
         ):
-            return False
-    return True
+            continue
+        try:
+            projected = json.loads(evidence.allowed_facts)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(projected, Mapping):
+            continue
+        content = projected.get("content")
+        if isinstance(content, str) and content.strip():
+            values.append(content)
+        facts = projected.get("facts")
+        if isinstance(facts, Sequence) and not isinstance(
+            facts,
+            (str, bytes, bytearray),
+        ):
+            for fact in facts:
+                if not isinstance(fact, Mapping):
+                    continue
+                label = fact.get("label")
+                if isinstance(label, str) and label.strip():
+                    labels.append(label)
+                value = fact.get("value")
+                if isinstance(value, str) and value.strip():
+                    values.append(value)
+                elif isinstance(value, (int, float)) and not isinstance(
+                    value,
+                    bool,
+                ):
+                    values.append(str(value))
+        collection = projected.get("collection")
+        if isinstance(collection, Mapping):
+            for value in collection.values():
+                if isinstance(value, str) and value.strip():
+                    values.append(value)
+                elif isinstance(value, (int, float)) and not isinstance(
+                    value,
+                    bool,
+                ):
+                    values.append(str(value))
+        index_labels = projected.get("items[].safeLabel")
+        if isinstance(index_labels, Sequence) and not isinstance(
+            index_labels,
+            (str, bytes, bytearray),
+        ):
+            labels.extend(
+                str(item)
+                for item in index_labels
+                if isinstance(item, str) and item.strip()
+            )
+    return values, labels
 
 
-def _validated_natural_failure_text(
-    final_text: str,
-    *,
-    failure_class: str,
-    failure_reason: str = "",
-) -> bool:
-    """Accept only a whole, status-bound explanation with no free-form tail."""
-    text = re.sub(r"\s+", "", str(final_text or "").strip())
+def _answer_uses_bound_evidence(turn: WorkTurn, output: str) -> bool:
+    """Require a content anchor, not a prescribed answer shape.
+
+    The runtime verifies provenance and the model chooses the language.  A
+    successful work reply must nevertheless contain at least one concrete
+    value or phrase from the verified material, so a bare "lookup completed"
+    receipt cannot masquerade as the requested answer.
+    """
+    values, labels = _grounding_fact_texts(turn)
+    source = " ".join(values).casefold()[:200_000]
+    text = str(output or "").casefold()
     if (
-        not text
-        or _FAILURE_INTERNAL_RE.search(text)
-        or _FAILURE_UNBOUND_FACT_RE.search(text)
-        or _FAILURE_BUSINESS_SUBJECT_RE.search(text)
+        (not source and not labels)
+        or not text
+        or _ANSWER_DEFERRAL_RE.search(text)
     ):
         return False
-    if failure_class == "no_progress":
-        patterns = {
-            DYNAMIC_ACTION_NOT_DISPATCHED: _FAILURE_NOT_STARTED_FULL_RE,
-            DYNAMIC_READ_NOT_DISPATCHED: _FAILURE_NO_PROGRESS_INDEX_FULL_RE,
-            DYNAMIC_READ_PRECONDITION_NOT_MET:
-                _FAILURE_READ_PRECONDITION_FULL_RE,
-            DYNAMIC_ACTION_RESULT_MISSING: _FAILURE_RESULT_MISSING_FULL_RE,
-            DYNAMIC_INDEX_INCOMPLETE: _FAILURE_INDEX_INCOMPLETE_FULL_RE,
-        }
-        pattern = patterns.get(failure_reason)
-    elif failure_class in {"not_found", "ambiguous"}:
-        pattern = _FAILURE_NOT_FOUND_FULL_RE
-    elif failure_class == "denied":
-        pattern = _FAILURE_DENIED_FULL_RE
-    elif failure_class == "empty":
-        pattern = _FAILURE_EMPTY_FULL_RE
-    elif failure_reason == "timeout":
-        pattern = _FAILURE_TIMEOUT_FULL_RE
-    elif failure_reason == "unavailable":
-        pattern = _FAILURE_UNAVAILABLE_FULL_RE
-    elif failure_class == "cancelled":
-        pattern = _FAILURE_CANCELLED_FULL_RE
-    else:
-        pattern = _FAILURE_GENERIC_FULL_RE
-    if pattern and pattern.fullmatch(text):
-        return True
-
-    # Models naturally vary word order and connective words.  Keep the
-    # category and safety binding strict, but do not require one memorized
-    # sentence grammar.
-    if (
-        len(text) > 180
-        or "我" not in text
-        or _FAILURE_POSITIVE_RESULT_RE.search(text)
-        or _FAILURE_NEGATED_CAUSE_RE.search(text)
-    ):
-        return False
-    clauses = [
-        clause
-        for clause in re.split(r"[，,；;。！？!?]+", text)
-        if clause
-    ]
-    if not 1 <= len(clauses) <= 4:
-        return False
-    if not _natural_failure_clauses_are_execution_bound(clauses):
-        return False
-
-    incomplete = bool(
-        _FAILURE_INCOMPLETE_RE.search(text)
-        or re.search(
-            r"(?:无法|不能|没法|没能).{0,16}"
-            r"(?:答复|确认|完成|继续)",
-            text,
-        )
-    )
-    needs_detail = bool(
-        re.search(
-            r"(?:请|需要).{0,10}"
-            r"(?:(?:补充|提供).{0,12}(?:名称|范围|信息|资料|对象)"
-            r"|(?:再)?说(?:得)?(?:更)?具体(?:一点)?)",
-            text,
-        )
-    )
-    if not incomplete and not needs_detail:
-        return False
-
-    category_checks = {
-        DYNAMIC_ACTION_NOT_DISPATCHED: lambda: bool(
-            _FAILURE_NOT_STARTED_RE.search(text)
-        ),
-        DYNAMIC_READ_NOT_DISPATCHED: lambda: bool(
-            _FAILURE_NO_PROGRESS_RE.search(text)
-            and _FAILURE_NO_READ_RE.search(text)
-        ),
-        DYNAMIC_READ_PRECONDITION_NOT_MET: lambda: bool(
-            re.search(r"(?:定位|目录|前置)", text)
-            and re.search(
-                r"(?:读取|查询).{0,12}(?:没有|没能|未能|无法)"
-                r"(?:发起|开始|继续)",
-                text,
-            )
-        ),
-        DYNAMIC_ACTION_RESULT_MISSING: lambda: bool(
-            re.search(r"(?:请求|处理).{0,12}(?:生成|登记|发起)", text)
-            and re.search(
-                r"(?:没有|没能|未能).{0,12}(?:结果|返回)",
-                text,
-            )
-        ),
-        DYNAMIC_INDEX_INCOMPLETE: lambda: bool(
-            re.search(r"(?:目录|索引).{0,12}(?:不完整|无法确认)", text)
-        ),
-        "not_found": lambda: bool(_FAILURE_NOT_FOUND_RE.search(text)),
-        "ambiguous": lambda: bool(_FAILURE_NOT_FOUND_RE.search(text)),
-        "denied": lambda: bool(_FAILURE_PERMISSION_CAUSE_RE.search(text)),
-        "empty": lambda: bool(
-            _FAILURE_NO_READ_RE.search(text)
-            or re.search(
-                r"(?:没有|没能|未能).{0,12}"
-                r"(?:查到|读到|拿到).{0,12}"
-                r"(?:回答|答复|确认|内容|结果|资料)",
-                text,
-            )
-        ),
-        "timeout": lambda: bool(
-            re.search(r"(?:超时|等待时间|没等到|没有等到)", text)
-        ),
-        "unavailable": lambda: bool(
-            re.search(
-                r"(?:连接失败|网络中断|服务(?:暂时)?不可用|"
-                r"读取服务不可用|服务(?:没有|无)响应)",
-                text,
-            )
-        ),
-        "cancelled": lambda: bool(re.search(r"(?:停止|取消)", text)),
-        "execution_error": lambda: bool(
-            re.search(r"(?:失败|错误|问题|没成功|未成功)", text)
-        ),
-        "mixed": lambda: bool(
-            re.search(r"(?:失败|错误|问题|没成功|未成功)", text)
-        ),
-    }
-    category = (
-        failure_reason if failure_class == "no_progress" else failure_reason
-    )
-    category_check = category_checks.get(category)
-    if category_check is None or not category_check():
-        return False
-
-    common_clause = re.compile(
-        r"(?:"
-        r"^(?:抱歉|不好意思)$|"
-        r"(?:我|这次|本轮).{0,28}"
-        r"(?:发起|开始|尝试|处理|执行|查询|查|读取)|"
-        r"(?:没有|没|没能|未能|无法|不能|尚未|还没|暂时无法|暂时不能)|"
-        r"(?:失败|错误|问题|超时|停止|取消|权限|授权|连接|网络|"
-        r"服务不可用|服务暂时不可用|响应|不完整|找不到|未找到|没找到)|"
-        r"(?:请|需要).{0,12}(?:补充|提供|再说|说得)"
-        r")"
-    )
-    return all(common_clause.search(clause) for clause in clauses)
+    for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9._%-]{1,}", text):
+        if token in source:
+            return True
+    for run in re.findall(r"[\u3400-\u9fff]{6,}", text):
+        for width in range(min(12, len(run)), 5, -1):
+            if any(
+                run[start : start + width] in source
+                for start in range(0, len(run) - width + 1)
+            ):
+                return True
+    # Some typed facts intentionally use structured values (for example a
+    # boolean or a small object).  Natural language will not quote their JSON
+    # bytes, so bind it to the trusted field/resource label instead. Requiring
+    # a non-trivial answer prevents a bare two-word label from becoming a
+    # completion receipt.
+    if len(text.strip()) >= 12:
+        for label in labels:
+            normalized = str(label).strip().casefold()
+            if len(normalized) >= 2 and normalized in text:
+                return True
+    return False
 
 
 def _failure_reason_category(
@@ -812,17 +456,219 @@ def _failure_reason_category(
         return "timeout"
     if error_codes and error_codes <= _PRESENTATION_UNAVAILABLE_CODES:
         return "unavailable"
+    if error_codes and error_codes <= _CORRECTABLE_QUERY_CODES:
+        return "invalid_arguments"
     return "execution_error"
+
+
+def _validated_failure_recovery_reason(
+    turn: WorkTurn,
+    failures: Sequence[Any],
+) -> str:
+    """Bind one failed recovery to the physical call that caused it."""
+    if len(failures) != 2:
+        return ""
+    first_result, terminal_result = failures
+    calls = {
+        call.call_id: call
+        for call in turn.action_calls
+    }
+    first_call = calls.get(first_result.call_id)
+    terminal_call = calls.get(terminal_result.call_id)
+    if (
+        first_call is None
+        or terminal_call is None
+        or first_result.status != "error"
+        or terminal_result.status == "success"
+        or first_call.action_id != terminal_call.action_id
+        or first_call.version != terminal_call.version
+    ):
+        return ""
+    positions = {
+        call.call_id: index
+        for index, call in enumerate(turn.action_calls)
+    }
+    first_position = positions.get(first_call.call_id, -1)
+    terminal_position = positions.get(terminal_call.call_id, -1)
+    if (
+        first_position < 0
+        or terminal_position <= first_position
+        or sum(
+            1
+            for call in turn.action_calls
+            if positions.get(call.call_id, -1) > first_position
+        )
+        != 1
+    ):
+        return ""
+    recovery_reason = _failure_reason_category(
+        "error",
+        [first_result],
+    )
+    if recovery_reason == "invalid_arguments":
+        if first_call.action_id != "mystand_query":
+            return ""
+        corrected_arguments = _corrected_semantic_query_arguments(
+            first_call
+        )
+        if corrected_arguments is None or (
+            _canonical_digest(terminal_call.arguments)
+            != _canonical_digest(corrected_arguments)
+        ):
+            return ""
+        return recovery_reason
+    if recovery_reason in {"timeout", "unavailable"} and (
+        _canonical_digest(first_call.arguments)
+        == _canonical_digest(terminal_call.arguments)
+    ):
+        return recovery_reason
+    return ""
+
+
+def _failure_lifecycle_projection(
+    turn: WorkTurn,
+    failures: Sequence[Any],
+) -> tuple[str, str, str]:
+    """Project ordered first-recovery and terminal causes without flattening."""
+    recovery_reason = _validated_failure_recovery_reason(turn, failures)
+    considered = [failures[-1]] if recovery_reason else list(failures)
+    statuses = sorted({str(result.status) for result in considered})
+    failure_class = statuses[0] if len(statuses) == 1 else "mixed"
+    failure_reason = _failure_reason_category(
+        failure_class,
+        considered,
+    )
+    return failure_class, failure_reason, recovery_reason
+
+
+def _corrected_semantic_query_arguments(
+    failed_call: Any,
+) -> Optional[dict[str, Any]]:
+    """Deterministically remove typed-only fields without changing target."""
+    raw = _mapping(getattr(failed_call, "arguments", None))
+    if raw.get("operation") != "read":
+        return None
+    candidate: dict[str, Any] = {"operation": "read"}
+    for field in ("resource", "entities"):
+        if field in raw:
+            candidate[field] = json.loads(
+                json.dumps(raw[field], ensure_ascii=False)
+            )
+    if "resource" not in candidate and "entities" not in candidate:
+        return None
+    if "fact_needs" in raw:
+        candidate["fact_needs"] = json.loads(
+            json.dumps(raw["fact_needs"], ensure_ascii=False)
+        )
+    else:
+        # The current stage is a read-only material retrieval. These are the
+        # narrow facts required to answer, not a new target selected by a model.
+        candidate["fact_needs"] = [
+            "document.content",
+            "resource.summary",
+        ]
+    candidate["mode"] = raw.get("mode", "summary")
+    try:
+        from tools.mystand_query_tool import (
+            validate_mystand_semantic_query_plan,
+        )
+
+        return validate_mystand_semantic_query_plan(candidate)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_recovery_tool_result(
+    failure: Any,
+    *,
+    reason: str,
+    correction: Optional[Mapping[str, Any]] = None,
+) -> dict[str, Any]:
+    """Project one model-visible error object without replaying private text."""
+    if reason == "invalid_arguments":
+        status = 400
+        code = "invalid_mystand_query_arguments"
+        error = "查询参数里混入了当前阶段不允许的字段。"
+    elif reason == "timeout":
+        status = 504
+        code = "read_timeout"
+        error = "这次正文读取等待超时。"
+    else:
+        status = 503
+        code = "service_unavailable"
+        error = "这次正文读取服务暂时不可用。"
+    return {
+        "ok": False,
+        "is_error": True,
+        "status": status,
+        "code": code,
+        "error": error,
+        "retryable": True,
+        **(
+            {"correction": dict(correction)}
+            if isinstance(correction, Mapping)
+            else {}
+        ),
+    }
+
+
+def _recovery_grant(
+    turn: WorkTurn,
+    failed_call: Any,
+    *,
+    allowed_mutation: str,
+) -> dict[str, Any]:
+    """Issue one target-bound, request-local recovery capability."""
+    arguments = _mapping(getattr(failed_call, "arguments", None))
+    target = {
+        key: arguments[key]
+        for key in (
+            "resource",
+            "entities",
+            "resource_uid",
+            "authorization_id",
+        )
+        if key in arguments
+    }
+    grant = {
+        "schema": "xiaoban.recovery-grant.v1",
+        "retry_of_event_id": str(failed_call.call_id),
+        "max_uses": 1,
+        "tool": str(failed_call.action_id),
+        "operation": str(arguments.get("operation") or ""),
+        "intent_binding": str(
+            turn.completion_binding.get("request_fingerprint") or ""
+        ),
+        "target_binding": _canonical_digest(target),
+        "required_facts_binding": _canonical_digest(
+            arguments.get("fact_needs") or []
+        ),
+        "immutable": [
+            "tool",
+            "operation",
+            "intent_binding",
+            "target_binding",
+            "required_facts_binding",
+        ],
+        "allowed_mutation": allowed_mutation,
+        "expires": "turn_end",
+    }
+    return {
+        **grant,
+        "grant_id": _canonical_digest(grant),
+    }
 
 
 def dynamic_transient_recovery_plan(
     turn: WorkTurn,
 ) -> Optional[dict[str, Any]]:
-    """Allow one caller-controlled recovery turn for a transient read failure.
+    """Allow one bounded recovery for a safe, server-classified read failure.
 
     This function only authenticates the current failure.  The conversation
     loop owns the one-shot budget, so a second failed physical call always
-    proceeds to the normal failure finalizer.
+    proceeds to the normal failure finalizer. Transient failures replay the
+    exact owner-bound read. A query-shape failure is rebuilt against the
+    semantic-only schema instead of replaying the known-bad arguments.
     """
     if (
         turn.completion_protocol != MYSTAND_COMPLETION_PROTOCOL_V2
@@ -853,6 +699,10 @@ def dynamic_transient_recovery_plan(
     error_code = str(failure.error_code or "").strip().lower()
     contract = ACTION_OUTPUT_CONTRACTS.get(failure.action_id)
     _, index_items = _dynamic_index_binding(turn)
+    correctable_arguments = bool(
+        failure.action_id == "mystand_query"
+        and error_code in _CORRECTABLE_QUERY_CODES
+    )
     if (
         failure.status != "error"
         or contract is None
@@ -862,9 +712,70 @@ def dynamic_transient_recovery_plan(
         # after a complete owner-bound index.
         or contract.kind != "read"
         or not index_items
-        or error_code not in _TRANSIENT_RECOVERY_CODES
+        or (
+            error_code not in _TRANSIENT_RECOVERY_CODES
+            and not correctable_arguments
+        )
     ):
         return None
+    if correctable_arguments:
+        corrected_arguments = _corrected_semantic_query_arguments(
+            failed_call
+        )
+        if corrected_arguments is None:
+            return None
+        correction = {
+            "action_id": failed_call.action_id,
+            "version": failed_call.version,
+            "arguments": corrected_arguments,
+            "arguments_digest": _canonical_digest(corrected_arguments),
+            "allowed_fields": [
+                "operation",
+                "resource",
+                "entities",
+                "fact_needs",
+                "mode",
+            ],
+            "required_fields": ["operation", "resource", "fact_needs"],
+            "locator_rule": (
+                "preserve the original resource or subject entities"
+            ),
+            "max_calls": 1,
+        }
+        grant = _recovery_grant(
+            turn,
+            failed_call,
+            allowed_mutation="schema_only",
+        )
+        return {
+            "grant": grant,
+            "reason": "invalid_arguments",
+            "mode": "correct_arguments",
+            "state": "正文读取参数混入了当前阶段不允许的字段",
+            # A semantic recovery needs only human-readable, current-user
+            # scope. Internal resource identifiers remain server-side.
+            "safe_scope": [
+                {
+                    "safeLabel": str(item["safeLabel"]),
+                    "resourceType": str(item["resourceType"]),
+                    "canRead": bool(item["canRead"]),
+                    "locked": bool(item["locked"]),
+                }
+                for item in index_items
+            ],
+            "failed_tool_call": {
+                "call_id": failed_call.call_id,
+                "action_id": failed_call.action_id,
+                "version": failed_call.version,
+                "arguments": dict(failed_call.arguments),
+            },
+            "tool_result": _safe_recovery_tool_result(
+                failure,
+                reason="invalid_arguments",
+                correction=correction,
+            ),
+            "correction": correction,
+        }
     reason = (
         "timeout"
         if error_code in _TRANSIENT_TIMEOUT_CODES
@@ -914,7 +825,13 @@ def dynamic_transient_recovery_plan(
         != retry_refs
     ):
         return None
+    grant = _recovery_grant(
+        turn,
+        failed_call,
+        allowed_mutation="exact_replay",
+    )
     return {
+        "grant": grant,
         "reason": reason,
         "state": (
             "上一次只读处理等待超时"
@@ -922,6 +839,16 @@ def dynamic_transient_recovery_plan(
             else "上一次只读处理遇到暂时不可用"
         ),
         "safe_scope": safe_scope,
+        "failed_tool_call": {
+            "call_id": failed_call.call_id,
+            "action_id": failed_call.action_id,
+            "version": failed_call.version,
+            "arguments": dict(failed_call.arguments),
+        },
+        "tool_result": _safe_recovery_tool_result(
+            failure,
+            reason=reason,
+        ),
         "retry": {
             "action_id": failed_call.action_id,
             "version": failed_call.version,
@@ -939,8 +866,37 @@ def dynamic_transient_recovery_tool_call_valid(
     action_id: str,
     arguments: Mapping[str, Any],
 ) -> bool:
-    """Accept only the exact server-recorded read selected for one recovery."""
+    """Validate the single physical read selected for one recovery."""
     plan = dynamic_transient_recovery_plan(turn)
+    if (
+        isinstance(plan, Mapping)
+        and plan.get("mode") == "correct_arguments"
+    ):
+        correction = plan.get("correction")
+        if (
+            not isinstance(correction, Mapping)
+            or str(action_id or "")
+            != str(correction.get("action_id") or "")
+            or not isinstance(arguments, Mapping)
+        ):
+            return False
+        try:
+            from tools.mystand_query_tool import (
+                validate_mystand_semantic_query_plan,
+            )
+
+            normalized = validate_mystand_semantic_query_plan(
+                dict(arguments)
+            )
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            normalized
+            and _canonical_digest(normalized)
+            == str(correction.get("arguments_digest") or "")
+            and _canonical_digest(dict(arguments))
+            == str(correction.get("arguments_digest") or "")
+        )
     retry = plan.get("retry") if plan else None
     return bool(
         isinstance(retry, Mapping)
@@ -951,8 +907,10 @@ def dynamic_transient_recovery_tool_call_valid(
     )
 
 
-def dynamic_failure_presentation(turn: WorkTurn) -> Optional[dict[str, str]]:
-    """Project one truthful, prompt-safe failure state from runtime facts."""
+def dynamic_failure_presentation(turn: WorkTurn) -> Optional[dict[str, Any]]:
+    """Project one truthful failure state from the immutable action ledger."""
+    failures: list[Any] = []
+    recovery_reason = ""
     no_progress = _validated_no_progress_failure(turn)
     if no_progress is not None:
         failure_class = "no_progress"
@@ -965,90 +923,228 @@ def dynamic_failure_presentation(turn: WorkTurn) -> Optional[dict[str, str]]:
         if lifecycle is None:
             return None
         _, failures = lifecycle
-        statuses = sorted({str(result.status) for result in failures})
-        failure_class = statuses[0] if len(statuses) == 1 else "mixed"
-        failure_reason = _failure_reason_category(failure_class, failures)
-    presentations = {
+        (
+            failure_class,
+            failure_reason,
+            recovery_reason,
+        ) = _failure_lifecycle_projection(turn, failures)
+    # These are runtime status projections, not model prompt examples.  They
+    # describe generic execution stages and safe error categories shared by
+    # every My Stand read target; no business module, task wording, or Chinese
+    # answer pattern participates in completion.
+    process_states = {
         DYNAMIC_READ_NOT_DISPATCHED: (
-            "资料目录查询已完成，但没有继续读取正文",
-            "我完成了资料目录查询，但没有继续读取到能回答问题的内容，"
-            "所以这项任务还没有完成。",
+            "资料定位已完成，但没有继续读取完成请求所需的内容"
         ),
-        DYNAMIC_ACTION_NOT_DISPATCHED: (
-            "没有发起实际处理",
-            "我这次没有发起实际处理，所以这项任务还没有完成。",
-        ),
+        DYNAMIC_ACTION_NOT_DISPATCHED: "没有发起实际处理",
         DYNAMIC_READ_PRECONDITION_NOT_MET: (
-            "没有先完成资料定位，因此正文读取没有发起",
-            "我这次没能先完成资料定位，所以正文读取没有发起，"
-            "这项任务还没有完成。",
+            "资料定位没有完成，因此后续读取没有发起"
         ),
         DYNAMIC_ACTION_RESULT_MISSING: (
-            "处理请求已生成，但没有形成可确认结果",
-            "我这次的处理请求已经生成，但没有形成可以确认的结果，"
-            "所以这项任务还没有完成。",
+            "处理请求已生成，但没有形成可确认结果"
         ),
         DYNAMIC_INDEX_INCOMPLETE: (
-            "资料目录查询已发起，但返回的目录不完整",
-            "我这次发起了资料目录查询，但返回的目录不完整，"
-            "所以这项任务还没有完成。",
+            "资料定位已发起，但返回的目录不完整"
         ),
-        "empty": (
-            "读取已发起，但没有取得可回答内容",
-            "我这次已经发起读取，但没能读到可用内容，"
-            "所以这项任务还没有完成。",
+        "empty": "读取已发起，但没有取得可回答内容",
+        "not_found": "没有找到能够唯一匹配的资料",
+        "denied": "没有取得完成请求所需的读取权限",
+        "ambiguous": "读取目标无法唯一确认",
+        "timeout": "实际处理已发起，但等待结果超时",
+        "unavailable": "实际处理已发起，但读取服务暂时不可用",
+        "invalid_arguments": (
+            "资料定位已完成，但读取所需内容时，参数混入了"
+            "当前阶段不允许的字段"
         ),
-        "not_found": (
-            "没有找到能够唯一匹配的资料",
-            "我这次没有找到能够唯一匹配的资料，"
-            "需要你补充更准确的名称。",
-        ),
-        "denied": (
-            "没有取得完成任务所需的读取权限",
-            "我这次没能取得完成任务所需的读取权限，"
-            "所以这项任务还没有完成。",
-        ),
-        "ambiguous": (
-            "读取目标无法唯一确认",
-            "我这次不能确定唯一匹配的资料，"
-            "需要你补充更准确的名称。",
-        ),
-        "timeout": (
-            "实际处理已发起，但等待结果超时",
-            "我这次已经发起实际处理，但等待结果超时，"
-            "所以这项任务还没有完成。",
-        ),
-        "unavailable": (
-            "实际处理已发起，但读取服务暂时不可用",
-            "我这次已经发起实际处理，但读取服务暂时不可用，"
-            "所以这项任务还没有完成。",
-        ),
-        "cancelled": (
-            "实际处理已发起，但随后被停止",
-            "我这次已经发起实际处理，但随后被停止，"
-            "所以这项任务还没有完成。",
-        ),
-        "mixed": (
-            "实际处理已发起，但其中有步骤没有成功",
-            "我这次已经发起实际处理，但处理没有成功，"
-            "所以这项任务还没有完成。",
-        ),
+        "cancelled": "实际处理已发起，但随后被停止",
+        "mixed": "实际处理已发起，但其中有步骤没有形成可靠结果",
         "execution_error": (
-            "实际处理已发起，但执行返回了错误",
-            "我这次已经发起实际处理，但执行返回了错误，"
-            "所以这项任务还没有完成。",
+            "资料读取已发起，但返回了错误；"
+            "当前记录没有可安全确认的更细原因"
         ),
     }
-    state, example = presentations.get(
+    state = process_states.get(
         failure_reason,
-        presentations["execution_error"],
+        process_states["execution_error"],
     )
+    final_causes = {
+        DYNAMIC_READ_NOT_DISPATCHED: "资料目录查询后没有继续读取正文",
+        DYNAMIC_ACTION_NOT_DISPATCHED: "实际处理没有发起",
+        DYNAMIC_READ_PRECONDITION_NOT_MET: "正文读取的资料定位前提没有完成",
+        DYNAMIC_ACTION_RESULT_MISSING: "处理请求没有形成可确认结果",
+        DYNAMIC_INDEX_INCOMPLETE: "资料目录返回不完整",
+        "empty": "读取没有取得可回答内容",
+        "not_found": "没有找到能够唯一匹配的资料",
+        "denied": "没有取得完成任务所需的读取权限",
+        "ambiguous": "读取目标无法唯一确认",
+        "timeout": "等待读取结果超时",
+        "unavailable": "读取服务暂时不可用",
+        "invalid_arguments": "正文读取参数混入了当前阶段不允许的字段",
+        "cancelled": "实际处理随后被停止",
+        "mixed": "执行步骤没有形成可靠结果",
+        "execution_error": (
+            "资料读取返回错误，当前记录没有可安全确认的更细原因"
+        ),
+    }
+    final_cause = final_causes.get(
+        failure_reason,
+        final_causes["execution_error"],
+    )
+    failed_attempt_count = len(failures)
+    recovery_attempted = bool(recovery_reason)
+    missing = (
+        "完成请求所需的可靠资料内容"
+        if failure_reason in {
+            "empty",
+            "invalid_arguments",
+            "timeout",
+            "unavailable",
+        }
+        else "完成这项任务所需的可靠结果"
+    )
+    if recovery_attempted:
+        recovery_states = {
+            "invalid_arguments": (
+                "第一次读取所需内容时，参数混入了当前阶段不允许的字段；"
+                "去掉这些字段后又尝试了一次"
+            ),
+            "timeout": (
+                "第一次读取所需内容时等待超时；按原目标又尝试了一次"
+            ),
+            "unavailable": (
+                "第一次读取所需内容时服务暂时不可用；"
+                "按原目标又尝试了一次"
+            ),
+        }
+        terminal_states = {
+            "invalid_arguments": (
+                "第二次读取参数仍包含当前阶段不允许的字段，"
+                "所需内容没有取得"
+            ),
+            "timeout": "第二次等待结果仍然超时，所需内容没有取得",
+            "unavailable": "第二次读取服务仍不可用，所需内容没有取得",
+            "empty": "第二次读取仍没有取得可回答内容",
+            "not_found": "第二次读取没有找到匹配的资料",
+            "ambiguous": "第二次读取仍无法唯一确认目标",
+            "denied": "第二次读取没有取得所需权限",
+            "cancelled": "第二次读取随后被停止",
+            "execution_error": (
+                "第二次读取又返回错误，当前记录没有可安全确认的"
+                "更细原因"
+            ),
+            "mixed": "第二次读取仍没有形成可靠结果",
+        }
+        state = (
+            "资料目录定位已完成；"
+            f"{recovery_states[recovery_reason]}；"
+            f"{terminal_states.get(failure_reason, terminal_states['mixed'])}"
+        )
+        final_cause = terminal_states.get(
+            failure_reason,
+            terminal_states["mixed"],
+        )
     return {
         "failure_class": failure_class,
         "failure_reason": failure_reason,
+        "recovery_reason": recovery_reason,
         "state": state,
-        "example": example,
+        "final_cause": final_cause,
+        "failed_attempt_count": failed_attempt_count,
+        "recovery_attempted": recovery_attempted,
+        "missing": missing,
     }
+
+
+def dynamic_turn_outcome(turn: WorkTurn) -> Optional[dict[str, Any]]:
+    """Derive the terminal machine truth from calls/results, never prose."""
+    presentation = dynamic_failure_presentation(turn)
+    if presentation is None:
+        return None
+    matched = _matched_action_lifecycle(turn) or []
+    failed_event_ids = [
+        result.call_id
+        for _call, result in matched
+        if result.status != "success"
+    ]
+    successful_actions = [
+        call.action_id
+        for call, result in matched
+        if result.status == "success"
+    ]
+    final_event_id = failed_event_ids[-1] if failed_event_ids else ""
+    target_descriptors: list[dict[str, Any]] = []
+    for call, _result in matched:
+        arguments = _mapping(call.arguments)
+        locator = {
+            key: arguments[key]
+            for key in (
+                "resource",
+                "entities",
+                "resource_uid",
+                "authorization_id",
+            )
+            if key in arguments
+        }
+        if locator:
+            target_descriptors.append(
+                {
+                    "action_id": call.action_id,
+                    "locator": locator,
+                }
+            )
+    outcome = {
+        "schema": "xiaoban.turn-outcome.v1",
+        "turn_id": turn.turn_id,
+        "terminal_status": "failed",
+        "intent_binding": str(
+            turn.completion_binding.get("request_fingerprint") or ""
+        ),
+        "target_binding": (
+            _canonical_digest(target_descriptors)
+            if target_descriptors
+            else ""
+        ),
+        "attempt_event_ids": failed_event_ids,
+        "attempt_count": len(failed_event_ids),
+        "completed_stages": successful_actions,
+        "recovery": {
+            "attempted": bool(presentation["recovery_attempted"]),
+            "reason": str(presentation["recovery_reason"] or ""),
+        },
+        "final_cause": {
+            "event_id": final_event_id,
+            "code": str(presentation["failure_reason"]),
+            "safe_message": str(presentation["final_cause"]),
+        },
+        "obtained": {
+            "material": False,
+            "evidence_refs": [],
+        },
+        "missing": [str(presentation["missing"])],
+        "process_summary": str(presentation["state"]),
+    }
+    return {
+        **outcome,
+        "digest": _canonical_digest(outcome),
+    }
+
+
+def render_dynamic_failure_report(turn: WorkTurn) -> Optional[str]:
+    """Render one generic human report from TurnOutcome, without model claims."""
+    outcome = dynamic_turn_outcome(turn)
+    if outcome is None or outcome.get("terminal_status") != "failed":
+        return None
+    process = str(outcome.get("process_summary") or "").rstrip("。；; ")
+    missing_items = outcome.get("missing")
+    missing = (
+        str(missing_items[0])
+        if isinstance(missing_items, list) and missing_items
+        else "完成任务所需的可靠结果"
+    )
+    return (
+        f"{process}。由于仍缺少{missing}，"
+        "小伴这次无法给出可靠答复。"
+    )
 
 
 def _matched_action_lifecycle(
@@ -1069,8 +1165,8 @@ def _matched_action_lifecycle(
     if not calls or set(calls) != set(results):
         return None
     matched: list[tuple[Any, Any]] = []
-    for call_id in sorted(calls):
-        call = calls[call_id]
+    for call in turn.action_calls:
+        call_id = call.call_id
         result = results[call_id]
         contract = ACTION_OUTPUT_CONTRACTS.get(call.action_id)
         if (
@@ -1347,7 +1443,7 @@ def _validated_transient_recovery_results(
     turn: WorkTurn,
     matched: Sequence[tuple[Any, Any]],
 ) -> Optional[list[Any]]:
-    """Bind one transient failure to a later exact-target successful retry."""
+    """Bind one recoverable failure to one later successful safe read."""
     non_success = [
         (call, result)
         for call, result in matched
@@ -1360,11 +1456,18 @@ def _validated_transient_recovery_results(
     failed_call, failed_result = non_success[0]
     failed_contract = ACTION_OUTPUT_CONTRACTS.get(failed_call.action_id)
     error_code = str(failed_result.error_code or "").strip().lower()
+    correctable_arguments = bool(
+        failed_call.action_id == "mystand_query"
+        and error_code in _CORRECTABLE_QUERY_CODES
+    )
     if (
         failed_result.status != "error"
         or failed_contract is None
         or failed_contract.kind != "read"
-        or error_code not in _TRANSIENT_RECOVERY_CODES
+        or (
+            error_code not in _TRANSIENT_RECOVERY_CODES
+            and not correctable_arguments
+        )
     ):
         return None
     ordered_calls = {
@@ -1385,19 +1488,34 @@ def _validated_transient_recovery_results(
     if len(post_failure) != 1:
         return None
     recovered_call, recovered_result = post_failure[0]
-    recovered = (
+    same_action = (
         recovered_result.status == "success"
         and recovered_call.action_id == failed_call.action_id
         and recovered_call.version == failed_call.version
-        and _canonical_digest(recovered_call.arguments)
-        == failed_arguments_digest
     )
+    if correctable_arguments and same_action:
+        corrected_arguments = _corrected_semantic_query_arguments(
+            failed_call
+        )
+        recovered = bool(
+            corrected_arguments is not None
+            and _canonical_digest(recovered_call.arguments)
+            == _canonical_digest(corrected_arguments)
+        )
+    else:
+        recovered = bool(
+            same_action
+            and _canonical_digest(recovered_call.arguments)
+            == failed_arguments_digest
+        )
     return [failed_result] if recovered else None
 
 
 def _dynamic_evidence_completion(
     turn: WorkTurn,
     final_text: str,
+    *,
+    user_message: Any = None,
 ) -> CompletionDecision:
     """Authenticate successful reads while preserving the model's answer."""
     identity = turn.identity
@@ -1435,6 +1553,13 @@ def _dynamic_evidence_completion(
             NO_EVIDENCE_MESSAGE,
             "blocked_dynamic_recovery_binding",
         )
+    _ = user_message  # Intent is interpreted by the model, not a keyword list.
+    system_receipt = not _answer_uses_bound_evidence(turn, output)
+    if system_receipt:
+        output = (
+            "资料已经读取成功，但最终回答没有使用本轮资料中的具体内容，"
+            "无法确认它真正完成了你的要求。本次任务仍按未完成处理。"
+        )
     receipt = turn.index_receipt
     verification = {
         **_completion_receipt(
@@ -1452,6 +1577,14 @@ def _dynamic_evidence_completion(
         "record_refs": record_refs,
         "record_refs_digest": _canonical_digest(record_refs),
         "evidence_digest": evidence_receipt_digest(verified_evidence),
+        **(
+            {
+                "output_presentation": "system-receipt",
+                "answer_status": "incomplete",
+            }
+            if system_receipt
+            else {}
+        ),
     }
     if transient_failures:
         verification.update(
@@ -1478,7 +1611,11 @@ def _dynamic_evidence_completion(
     return CompletionDecision(
         True,
         output,
-        "evidence_access_verified",
+        (
+            "evidence_answer_incomplete_system_receipt"
+            if system_receipt
+            else "evidence_access_verified"
+        ),
         verification,
     )
 
@@ -1519,15 +1656,18 @@ def _dynamic_failure_completion(
     if no_progress_failure is not None:
         action_count = no_progress_failure["action_count"]
         failure_class = "no_progress"
+        recovery_reason = ""
         action_result_digest = _canonical_digest(no_progress_failure)
         failed_action_count = 0
     else:
         action_count, failures = failure_lifecycle
-        failure_statuses = sorted({result.status for result in failures})
-        failure_class = (
-            failure_statuses[0]
-            if len(failure_statuses) == 1
-            else "mixed"
+        (
+            failure_class,
+            _,
+            recovery_reason,
+        ) = _failure_lifecycle_projection(
+            turn,
+            failures,
         )
         action_result_digest = _canonical_digest(
             [
@@ -1557,16 +1697,18 @@ def _dynamic_failure_completion(
             "blocked_dynamic_failure_binding",
         )
     failure_reason = presentation["failure_reason"]
-    if not _validated_natural_failure_text(
-        output,
-        failure_class=failure_class,
-        failure_reason=failure_reason,
-    ):
+    outcome = dynamic_turn_outcome(turn)
+    runtime_output = render_dynamic_failure_report(turn)
+    if outcome is None or not runtime_output:
         return CompletionDecision(
             False,
             NO_EVIDENCE_MESSAGE,
-            "blocked_dynamic_failure_presentation",
+            "blocked_dynamic_failure_outcome",
         )
+    # Execution facts are authenticated by TurnOutcome.  The model's Chinese
+    # is never used as evidence for attempt count, cause, recovery or missing
+    # material; the public failure report is rendered from those machine facts.
+    output = runtime_output
     verification = {
         **_completion_receipt(
             turn,
@@ -1579,11 +1721,21 @@ def _dynamic_failure_completion(
         "action_result_digest": action_result_digest,
         "failed_action_count": failed_action_count,
         "failure_class": failure_class,
+        "failure_reason": failure_reason,
+        "turn_outcome": outcome,
+        "turn_outcome_digest": str(outcome["digest"]),
+        **(
+            {"recovery_reason": recovery_reason}
+            if recovery_reason
+            else {}
+        ),
+        "output_presentation": "system-receipt",
+        "answer_status": "incomplete",
     }
     return CompletionDecision(
         True,
         output,
-        "execution_status_bound",
+        "execution_status_system_receipt",
         verification,
     )
 
@@ -1608,13 +1760,13 @@ def _validated_failure_lifecycle(
     # A natural failure reply may describe only a handler that really ran and
     # returned a bound non-success result.  PreAction denials are protocol
     # errors/no-dispatch states, never user-facing execution evidence.
+    action_order = {
+        call.call_id: index
+        for index, call in enumerate(turn.action_calls)
+    }
     failures = sorted(
         matched_failures,
-        key=lambda result: (
-            str(result.call_id),
-            str(result.action_id),
-            str(result.error_code),
-        ),
+        key=lambda result: action_order.get(result.call_id, -1),
     )
     if not failures:
         return None
@@ -1846,6 +1998,7 @@ def check_dynamic_completion(
     *,
     final_text: str,
     failure_message: str,
+    user_message: Any = None,
 ) -> Optional[CompletionDecision]:
     """Return None when legacy completion routing must continue."""
     if turn.completion_protocol != MYSTAND_COMPLETION_PROTOCOL_V2:
@@ -1875,7 +2028,11 @@ def check_dynamic_completion(
     if not action_ids.intersection(_DYNAMIC_ACTION_IDS):
         return None
     if turn.evidence:
-        return _dynamic_evidence_completion(turn, final_text)
+        return _dynamic_evidence_completion(
+            turn,
+            final_text,
+            user_message=user_message,
+        )
     if getattr(turn, "completion_finalization", "") == "failure":
         return _dynamic_failure_completion(turn, final_text)
     if not turn.action_calls:

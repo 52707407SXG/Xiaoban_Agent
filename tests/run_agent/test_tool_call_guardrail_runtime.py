@@ -91,8 +91,12 @@ def test_default_sequential_path_warns_repeated_exact_failure_without_blocking_e
     args = {"query": "same"}
     _seed_exact_failures(agent, "web_search", args)
     starts = []
+    completes = []
     progress = []
     agent.tool_start_callback = lambda *a, **k: starts.append((a, k))
+    agent.tool_complete_callback = (
+        lambda *a, **k: completes.append((a, k))
+    )
     agent.tool_progress_callback = lambda *a, **k: progress.append((a, k))
     tc = _mock_tool_call("web_search", json.dumps(args), "c-soft")
     msg = SimpleNamespace(content="", tool_calls=[tc])
@@ -117,8 +121,12 @@ def test_config_enabled_hard_stop_blocks_repeated_exact_failure_before_execution
     args = {"query": "same"}
     _seed_exact_failures(agent, "web_search", args)
     starts = []
+    completes = []
     progress = []
     agent.tool_start_callback = lambda *a, **k: starts.append((a, k))
+    agent.tool_complete_callback = (
+        lambda *a, **k: completes.append((a, k))
+    )
     agent.tool_progress_callback = lambda *a, **k: progress.append((a, k))
     tc = _mock_tool_call("web_search", json.dumps(args), "c-block")
     msg = SimpleNamespace(content="", tool_calls=[tc])
@@ -128,8 +136,18 @@ def test_config_enabled_hard_stop_blocks_repeated_exact_failure_before_execution
         agent._execute_tool_calls_sequential(msg, messages, "task-1")
 
     mock_hfc.assert_not_called()
-    assert starts == []
-    assert progress == []
+    assert starts == [(("c-block", "web_search", args), {})]
+    assert len(completes) == 1
+    assert completes[0][0][:3] == ("c-block", "web_search", args)
+    streamed_result = json.loads(completes[0][0][3])
+    assert streamed_result["status"] == "failed"
+    assert streamed_result["phase"] == "preflight"
+    assert [event[0][0] for event in progress] == [
+        "tool.started",
+        "tool.completed",
+    ]
+    assert progress[-1][1]["is_error"] is True
+    assert progress[-1][1]["phase"] == "preflight"
     assert len(messages) == 1
     assert messages[0]["role"] == "tool"
     assert messages[0]["tool_call_id"] == "c-block"
@@ -149,8 +167,15 @@ def test_sequential_after_call_appends_guidance_to_tool_result_without_extra_mes
 
     assert [m["role"] for m in messages] == ["tool"]
     assert messages[0]["tool_call_id"] == "c-warn"
-    assert "Tool loop warning" in messages[0]["content"]
-    assert "repeated_exact_failure_warning" in messages[0]["content"]
+    content = messages[0]["content"]
+    structured = json.loads(
+        content[content.index("{"):content.rindex("}") + 1]
+    )
+    assert structured["error"] == "boom"
+    assert structured["guardrail_label"] == "Tool loop warning"
+    assert structured["guardrail"]["code"] == (
+        "repeated_exact_failure_warning"
+    )
 
 
 def test_same_tool_failure_warning_tells_model_to_recover_with_tools():
@@ -212,12 +237,158 @@ def test_config_enabled_hard_stop_concurrent_path_does_not_submit_blocked_calls_
     assert [m["tool_call_id"] for m in messages] == ["c-block", "c-allow"]
     assert "repeated_exact_failure_block" in messages[0]["content"]
     assert json.loads(messages[1]["content"]) == {"ok": "allowed"}
-    assert starts == [("c-allow", "web_search", allowed_args)]
+    assert starts == [
+        ("c-block", "web_search", blocked_args),
+        ("c-allow", "web_search", allowed_args),
+    ]
     started_events = [event for event in progress_events if event[0] == "tool.started"]
     completed_events = [event for event in progress_events if event[0] == "tool.completed"]
-    assert started_events == [("tool.started", "web_search", allowed_args, {})]
-    assert len(completed_events) == 1
+    assert started_events == [
+        ("tool.started", "web_search", blocked_args, {}),
+        ("tool.started", "web_search", allowed_args, {}),
+    ]
+    assert len(completed_events) == 2
     assert completed_events[0][1] == "web_search"
+    assert completed_events[0][3]["is_error"] is True
+    assert completed_events[0][3]["phase"] == "preflight"
+    assert completed_events[1][3]["is_error"] is False
+
+
+def test_dynamic_stage_rejects_raw_tool_call_bridge_before_unwrap():
+    bridge_arguments = json.dumps(
+        {
+            "name": "mystand_resource_index",
+            "arguments": {},
+        }
+    )
+
+    for mode in ("sequential", "concurrent"):
+        agent = _make_agent(
+            "tool_call",
+            "mystand_resource_index",
+        )
+        calls = [
+            _mock_tool_call(
+                "tool_call",
+                bridge_arguments,
+                f"{mode}-bridge-a",
+            ),
+            _mock_tool_call(
+                "tool_call",
+                bridge_arguments,
+                f"{mode}-bridge-b",
+            ),
+        ]
+        if mode == "sequential":
+            calls = calls[:1]
+        msg = SimpleNamespace(content="", tool_calls=calls)
+        messages = []
+
+        with (
+            patch(
+                "xiaoban.trusted_runtime.turns.current_turn",
+                return_value=SimpleNamespace(
+                    completion_protocol="dynamic-evidence-v2",
+                ),
+            ),
+            patch(
+                "xiaoban.trusted_runtime.tool_visibility."
+                "dynamic_evidence_allowed_tool_names",
+                return_value=frozenset({"mystand_resource_index"}),
+            ),
+            patch(
+                "run_agent.handle_function_call",
+                return_value="SHOULD_NOT_RUN",
+            ) as mock_hfc,
+        ):
+            if mode == "sequential":
+                agent._execute_tool_calls_sequential(
+                    msg,
+                    messages,
+                    "dynamic-task",
+                    api_call_count=1,
+                )
+            else:
+                agent._execute_tool_calls_concurrent(
+                    msg,
+                    messages,
+                    "dynamic-task",
+                    api_call_count=1,
+                )
+
+        mock_hfc.assert_not_called()
+        assert len(messages) == len(calls)
+        assert all(
+            "dynamic_tool_not_allowed" in str(item.get("content") or "")
+            for item in messages
+        )
+        assert [
+            item["tool_call_id"]
+            for item in agent._turn_tool_outcomes
+        ] == [call.id for call in calls]
+        assert all(
+            item["failed"] is True
+            for item in agent._turn_tool_outcomes
+        )
+
+
+def test_dynamic_stage_visibility_error_fails_closed_before_bridge_unwrap():
+    for mode in ("sequential", "concurrent"):
+        agent = _make_agent(
+            "tool_call",
+            "mystand_resource_index",
+        )
+        call = _mock_tool_call(
+            "tool_call",
+            json.dumps(
+                {
+                    "name": "mystand_resource_index",
+                    "arguments": {},
+                }
+            ),
+            f"{mode}-visibility-error",
+        )
+        msg = SimpleNamespace(content="", tool_calls=[call])
+        messages = []
+
+        with (
+            patch(
+                "xiaoban.trusted_runtime.turns.current_turn",
+                return_value=SimpleNamespace(
+                    completion_protocol="dynamic-evidence-v2",
+                ),
+            ),
+            patch(
+                "xiaoban.trusted_runtime.tool_visibility."
+                "dynamic_evidence_allowed_tool_names",
+                side_effect=RuntimeError("visibility unavailable"),
+            ),
+            patch(
+                "run_agent.handle_function_call",
+                return_value="SHOULD_NOT_RUN",
+            ) as mock_hfc,
+        ):
+            if mode == "sequential":
+                agent._execute_tool_calls_sequential(
+                    msg,
+                    messages,
+                    "dynamic-task",
+                    api_call_count=1,
+                )
+            else:
+                agent._execute_tool_calls_concurrent(
+                    msg,
+                    messages,
+                    "dynamic-task",
+                    api_call_count=1,
+                )
+
+        mock_hfc.assert_not_called()
+        assert len(messages) == 1
+        assert "dynamic_tool_not_allowed" in str(
+            messages[0].get("content") or ""
+        )
+        assert agent._turn_tool_outcomes[-1]["failed"] is True
 
 
 def test_plugin_pre_tool_block_wins_without_counting_as_toolguard_block():
@@ -268,7 +439,7 @@ def test_default_run_conversation_warns_without_guardrail_halt():
     assert any("repeated_exact_failure_warning" in content for content in tool_contents)
 
 
-def test_config_enabled_hard_stop_run_conversation_returns_controlled_guardrail_halt_without_top_level_error():
+def test_config_enabled_hard_stop_run_conversation_returns_failed_human_outcome():
     agent = _make_agent("web_search", max_iterations=10, config=_hard_stop_config())
     same_args = {"query": "same"}
     responses = [
@@ -293,9 +464,14 @@ def test_config_enabled_hard_stop_run_conversation_returns_controlled_guardrail_
     assert result["api_calls"] == 3
     assert result["api_calls"] < agent.max_iterations
     assert result["turn_exit_reason"] == "guardrail_halt"
-    assert "error" not in result
-    assert result["completed"] is True
-    assert "stopped retrying" in result["final_response"]
+    assert result["error"] == "tool execution did not produce a usable result"
+    assert result["completed"] is False
+    assert result["failed"] is True
+    assert result["tool_outcome"]["terminal_status"] == "failed"
+    assert result["tool_outcome"]["attempt_count"] == 1
+    assert result["tool_outcome"]["event_ids"] == ["c3"]
+    assert "连续 2 次采用同一处理方式" in result["final_response"]
+    assert "仍缺少可靠结果" in result["final_response"]
     assert result["guardrail"]["code"] == "repeated_exact_failure_block"
     assert result["guardrail"]["tool_name"] == "web_search"
 
@@ -344,7 +520,7 @@ def test_guardrail_halt_emits_final_response_through_stream_delta_callback():
 
     assert result["turn_exit_reason"] == "guardrail_halt"
     halt_text = result["final_response"]
-    assert "stopped retrying" in halt_text
+    assert "仍缺少可靠结果" in halt_text
 
     # The halt message must have been pushed through the callback at least
     # once.  Empty-queue SSE writers were the bug — clients saw no content

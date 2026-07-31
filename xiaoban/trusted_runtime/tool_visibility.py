@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Mapping, Optional
 
 from xiaoban.trusted_runtime.types import MYSTAND_COMPLETION_PROTOCOL_V2, WorkTurn
@@ -10,6 +11,23 @@ from xiaoban.trusted_runtime.types import MYSTAND_COMPLETION_PROTOCOL_V2, WorkTu
 _RESOURCE_INDEX_TOOL = "mystand_resource_index"
 _DYNAMIC_READ_TOOLS = frozenset(
     {"mystand_query", "mystand_authorization"}
+)
+_SEMANTIC_QUERY_FIELDS = (
+    "operation",
+    "resource",
+    "entities",
+    "fact_needs",
+    "mode",
+)
+_SEMANTIC_QUERY_DESCRIPTION = (
+    "Read the current user's authorized My Stand material with exactly one "
+    "semantic query. Understand the latest request as a whole. Use a "
+    "human-readable resource anchor from the safe index for the requested "
+    "material; subject entities may further narrow that same target. Request "
+    "only the fact categories needed for the answer. Use "
+    "only the fields exposed in this schema and call this tool at most once in "
+    "the current model turn. Do not supply identity, ownership, internal IDs, "
+    "backend modules, typed plans, lookup steps, or query text."
 )
 
 
@@ -39,6 +57,49 @@ def _choice_names(choice: Any) -> set[str]:
             names.update(_choice_names(item))
         return names
     return set()
+
+
+def _semantic_query_tool(tool: Any) -> Optional[Any]:
+    """Return a request-local semantic-only query definition.
+
+    The canonical registry has to support both server-signed typed reads and
+    unsigned semantic reads.  Strict providers strip the canonical top-level
+    union, so exposing that combined shape makes mutually exclusive fields
+    look mixable.  Dynamic v2 reads therefore receive one concrete schema,
+    matching the handler branch they are allowed to execute.
+    """
+    if not isinstance(tool, Mapping) or _tool_name(tool) != "mystand_query":
+        return None
+    projected = copy.deepcopy(dict(tool))
+    function = projected.get("function")
+    if not isinstance(function, dict):
+        return None
+    parameters = function.get("parameters")
+    properties = (
+        parameters.get("properties")
+        if isinstance(parameters, Mapping)
+        else None
+    )
+    if not isinstance(properties, Mapping):
+        return None
+    semantic_properties = {
+        field: copy.deepcopy(properties[field])
+        for field in _SEMANTIC_QUERY_FIELDS
+        if field in properties
+    }
+    if set(semantic_properties) != set(_SEMANTIC_QUERY_FIELDS):
+        return None
+    function["description"] = _SEMANTIC_QUERY_DESCRIPTION
+    function["parameters"] = {
+        "type": "object",
+        "properties": semantic_properties,
+        # Strict backends reject a top-level anyOf. Dynamic reads happen only
+        # after the server index has supplied safe resource labels, so one
+        # concrete resource locator is mandatory here and in the handler.
+        "required": ["operation", "resource", "fact_needs"],
+        "additionalProperties": False,
+    }
+    return projected
 
 
 def dynamic_evidence_allowed_tool_names(
@@ -77,7 +138,25 @@ def filter_dynamic_evidence_tools(
     allowed_names = dynamic_evidence_allowed_tool_names(turn)
     if allowed_names is None or not isinstance(tools, list):
         return tools
-    return [tool for tool in tools if _tool_name(tool) in allowed_names]
+    post_index_read = (
+        "mystand_query" in allowed_names
+        and _RESOURCE_INDEX_TOOL not in allowed_names
+    )
+    filtered: list[Any] = []
+    for tool in tools:
+        name = _tool_name(tool)
+        if name not in allowed_names:
+            continue
+        if post_index_read and name == "mystand_query":
+            projected = _semantic_query_tool(tool)
+            if projected is None:
+                # Never fall back to the canonical mixed typed/semantic union
+                # when a strict stage projection cannot be built.
+                continue
+            filtered.append(projected)
+        else:
+            filtered.append(tool)
+    return filtered
 
 
 def filter_dynamic_evidence_api_kwargs(
@@ -126,6 +205,12 @@ def filter_dynamic_evidence_api_kwargs(
         filtered.pop("tool_choice", None)
     if not filtered_tools:
         filtered.pop("parallel_tool_calls", None)
+    else:
+        # The trusted runtime executes and records one read at a time. This
+        # gives the model the result (including a safe error) before it chooses
+        # a correction, and prevents a single response from dispatching several
+        # speculative reads.
+        filtered["parallel_tool_calls"] = False
     return filtered
 
 

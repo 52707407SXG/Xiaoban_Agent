@@ -107,6 +107,24 @@ _TYPED_QUERY_KINDS = {
     "list",
     "aggregate",
 }
+_TYPED_QUERY_FIELDS = frozenset(
+    {
+        "query_kind",
+        "module_id",
+        "fact_paths",
+        "query_args",
+        "coverage_required",
+    }
+)
+_SEMANTIC_QUERY_FIELDS = frozenset(
+    {
+        "operation",
+        "resource",
+        "entities",
+        "fact_needs",
+        "mode",
+    }
+)
 _FORBIDDEN_TYPED_KEYS = {
     "owner",
     "owner_user",
@@ -199,15 +217,20 @@ def _error(
     *,
     code: str = "mystand_query_failed",
     status: int = 400,
+    retryable: bool | None = None,
+    correction: dict | None = None,
 ) -> str:
-    return _json_result(
-        {
-            "ok": False,
-            "status": status,
-            "code": code,
-            "error": message,
-        }
-    )
+    payload = {
+        "ok": False,
+        "status": status,
+        "code": code,
+        "error": message,
+    }
+    if isinstance(retryable, bool):
+        payload["retryable"] = retryable
+    if isinstance(correction, dict) and correction:
+        payload["correction"] = correction
+    return _json_result(payload)
 
 
 def _safe_header(value: str, limit: int = 200) -> str:
@@ -625,6 +648,8 @@ def _validate_plan(args) -> dict:
         if set(args) != typed_fields:
             raise ValueError("typed 查询参数包含不允许的字段")
         return _validate_typed_plan(args)
+    if _TYPED_QUERY_FIELDS.intersection(args):
+        raise ValueError("semantic 查询参数包含 typed 字段")
 
     resource = args.get("resource")
     normalized_resource = None
@@ -712,6 +737,62 @@ def _validate_plan(args) -> dict:
     }
 
 
+def validate_mystand_query_plan(args) -> dict:
+    """Validate and normalize one provider-visible query call.
+
+    Recovery validation deliberately reuses the handler's exact parser so the
+    model-facing schema, the pre-dispatch correction gate, and physical
+    execution cannot drift into three different definitions of "valid".
+    """
+    return _validate_plan(args)
+
+
+def validate_mystand_semantic_query_plan(args) -> dict:
+    """Validate the exact semantic-only shape exposed in dynamic reads."""
+    if not isinstance(args, dict):
+        raise ValueError("查询参数必须是对象")
+    if set(args) - _SEMANTIC_QUERY_FIELDS:
+        raise ValueError("semantic 查询参数包含不允许的字段")
+    if "resource" not in args:
+        raise ValueError("semantic 查询参数缺少 resource")
+    payload = _validate_plan(args)
+    if "query_kind" in payload:
+        raise ValueError("dynamic read requires semantic 查询参数")
+    return payload
+
+
+def _dynamic_semantic_query_active() -> bool:
+    try:
+        from xiaoban.trusted_runtime.turns import current_turn
+        from xiaoban.trusted_runtime.types import (
+            MYSTAND_COMPLETION_PROTOCOL_V2,
+        )
+
+        turn = current_turn()
+    except Exception:
+        return False
+    return bool(
+        turn is not None
+        and turn.completion_protocol == MYSTAND_COMPLETION_PROTOCOL_V2
+        and turn.fact_requirement is None
+        and not str(turn.completion_finalization or "")
+    )
+
+
+_SEMANTIC_CORRECTION = {
+    "allowed_fields": [
+        "operation",
+        "resource",
+        "entities",
+        "fact_needs",
+        "mode",
+    ],
+    "required_fields": ["operation", "resource", "fact_needs"],
+    "locator_rule": "preserve the indexed resource; entities may only narrow it",
+    "max_calls": 1,
+}
+
+
 def mystand_query_tool_handler(args, **_kwargs):
     session = _current_session()
     if session["platform"] != "api_server" or not session["user_id"]:
@@ -720,10 +801,24 @@ def mystand_query_tool_handler(args, **_kwargs):
             code="mystand_session_required",
             status=403,
         )
+    dynamic_semantic = _dynamic_semantic_query_active()
     try:
-        payload = _validate_plan(args)
+        payload = (
+            validate_mystand_semantic_query_plan(args)
+            if dynamic_semantic
+            else validate_mystand_query_plan(args)
+        )
     except ValueError as exc:
-        return _error(str(exc), code="invalid_mystand_query_arguments")
+        return _error(
+            str(exc),
+            code="invalid_mystand_query_arguments",
+            retryable=dynamic_semantic,
+            correction=(
+                dict(_SEMANTIC_CORRECTION)
+                if dynamic_semantic
+                else None
+            ),
+        )
     mark_mystand_private_query_turn()
     if "query_kind" in payload:
         try:

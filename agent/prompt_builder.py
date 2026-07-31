@@ -328,7 +328,16 @@ TASK_COMPLETION_GUIDANCE = (
     "approach, ask the user). NEVER substitute plausible-looking fabricated "
     "output (made-up data, invented file contents, synthesised API responses) "
     "for results you couldn't actually produce. Reporting a blocker honestly "
-    "is always better than inventing a result."
+    "is always better than inventing a result.\n"
+    "After every tool result, judge the original goal rather than the tool call: "
+    "continue with a safe, materially useful next action when the goal is still "
+    "reachable. A final response must deliver the requested outcome, not merely "
+    "acknowledge that a lookup or action ran. If the goal remains blocked, ground "
+    "the explanation in the actual attempts and final cause, and say what required "
+    "result is still missing.\n"
+    "The runtime links identical retries itself. A different fallback settles "
+    "a failed action only when the trusted runtime has issued a target-bound "
+    "recovery grant; independent actions never settle one another."
 )
 
 # Universal parallel-tool-call guidance — applied to ALL models.
