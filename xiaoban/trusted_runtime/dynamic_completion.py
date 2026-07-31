@@ -677,10 +677,7 @@ def dynamic_transient_recovery_plan(
         or _hard_runtime_violation(turn)
     ):
         return None
-    lifecycle = _validated_failure_lifecycle(
-        turn,
-        include_single_preaction=True,
-    )
+    lifecycle = _validated_failure_lifecycle(turn)
     if lifecycle is None:
         return None
     _, failures = lifecycle
@@ -916,10 +913,7 @@ def dynamic_failure_presentation(turn: WorkTurn) -> Optional[dict[str, Any]]:
         failure_class = "no_progress"
         failure_reason = str(no_progress["reason"])
     else:
-        lifecycle = _validated_failure_lifecycle(
-            turn,
-            include_single_preaction=True,
-        )
+        lifecycle = _validated_failure_lifecycle(turn)
         if lifecycle is None:
             return None
         _, failures = lifecycle
@@ -1626,10 +1620,7 @@ def _dynamic_failure_completion(
 ) -> CompletionDecision:
     """Bind a natural explanation to real non-success execution state."""
     output = _validated_terminal_text(final_text)
-    failure_lifecycle = _validated_failure_lifecycle(
-        turn,
-        include_single_preaction=True,
-    )
+    failure_lifecycle = _validated_failure_lifecycle(turn)
     no_progress_failure = _validated_no_progress_failure(turn)
     if (
         getattr(turn, "completion_finalization", "") != "failure"
@@ -1705,10 +1696,10 @@ def _dynamic_failure_completion(
             NO_EVIDENCE_MESSAGE,
             "blocked_dynamic_failure_outcome",
         )
-    # Execution facts are authenticated by TurnOutcome.  The model's Chinese
-    # is never used as evidence for attempt count, cause, recovery or missing
-    # material; the public failure report is rendered from those machine facts.
-    output = runtime_output
+    system_receipt = output == runtime_output
+    # TurnOutcome authenticates execution facts. The final model text only
+    # explains those facts; an exact runtime projection is reserved for the
+    # no-model fallback path and stays outside assistant history.
     verification = {
         **_completion_receipt(
             turn,
@@ -1729,28 +1720,35 @@ def _dynamic_failure_completion(
             if recovery_reason
             else {}
         ),
-        "output_presentation": "system-receipt",
-        "answer_status": "incomplete",
+        **(
+            {
+                "output_presentation": "system-receipt",
+                "answer_status": "incomplete",
+            }
+            if system_receipt
+            else {}
+        ),
     }
     return CompletionDecision(
         True,
         output,
-        "execution_status_system_receipt",
+        (
+            "execution_status_system_receipt"
+            if system_receipt
+            else "execution_status_bound"
+        ),
         verification,
     )
 
 
 def _validated_failure_lifecycle(
     turn: WorkTurn,
-    *,
-    include_single_preaction: bool,
 ) -> Optional[tuple[int, list[Any]]]:
     """Return server-recorded failures without treating zero work as failure."""
     matched = _matched_action_lifecycle(turn)
     if turn.action_calls and matched is None:
         return None
     matched = matched or []
-    _ = include_single_preaction  # retained for call-site compatibility
     matched_failures = [
         result
         for call, result in matched
@@ -1961,11 +1959,7 @@ def mark_dynamic_execution_no_progress(turn: WorkTurn) -> bool:
     return False
 
 
-def dynamic_finalization_mode(
-    turn: WorkTurn,
-    *,
-    include_single_preaction: bool = False,
-) -> str:
+def dynamic_finalization_mode(turn: WorkTurn) -> str:
     """Derive whether the next paid call must be the no-tool final reply."""
     if (
         turn.completion_protocol != MYSTAND_COMPLETION_PROTOCOL_V2
@@ -1983,10 +1977,10 @@ def dynamic_finalization_mode(
             is not None
         ):
             return "evidence"
-    if not turn.evidence and _validated_failure_lifecycle(
-        turn,
-        include_single_preaction=include_single_preaction,
-    ) is not None:
+    if (
+        not turn.evidence
+        and _validated_failure_lifecycle(turn) is not None
+    ):
         return "failure"
     if not turn.evidence and _validated_no_progress_failure(turn) is not None:
         return "failure"

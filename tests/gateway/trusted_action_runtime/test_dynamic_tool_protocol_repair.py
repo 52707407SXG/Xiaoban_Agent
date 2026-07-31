@@ -176,14 +176,14 @@ def test_complete_index_without_read_enters_bound_natural_failure():
     allowed = check_completion(model_reply, turn)
 
     assert allowed.allowed is True
-    assert allowed.text == render_dynamic_failure_report(turn)
-    assert allowed.reason == "execution_status_system_receipt"
+    assert allowed.text == model_reply
+    assert allowed.reason == "execution_status_bound"
     assert allowed.verification["completion_kind"] == "failure-bound"
     assert allowed.verification["failure_class"] == "no_progress"
     assert allowed.verification["failed_action_count"] == 0
     assert allowed.verification["action_count"] == 1
     assert allowed.verification["evidence_count"] == 0
-    assert allowed.verification["output_presentation"] == "system-receipt"
+    assert "output_presentation" not in allowed.verification
     assert allowed.verification["turn_outcome"]["attempt_count"] == 0
 
     natural_variant = (
@@ -192,7 +192,7 @@ def test_complete_index_without_read_enters_bound_natural_failure():
     )
     variant = _complete_bound_failure(turn, natural_variant)
     assert variant.allowed is True
-    assert variant.text == allowed.text
+    assert variant.text == natural_variant
 
 
 def test_zero_action_work_enters_bound_natural_failure():
@@ -204,8 +204,8 @@ def test_zero_action_work_enters_bound_natural_failure():
     allowed = _complete_bound_failure(turn, reply)
 
     assert allowed.allowed is True
-    assert allowed.text == render_dynamic_failure_report(turn)
-    assert allowed.reason == "execution_status_system_receipt"
+    assert allowed.text == reply
+    assert allowed.reason == "execution_status_bound"
     assert allowed.verification["failure_class"] == "no_progress"
     assert allowed.verification["action_count"] == 0
     assert allowed.verification["failed_action_count"] == 0
@@ -215,7 +215,7 @@ def test_zero_action_work_enters_bound_natural_failure():
     )
     variant = _complete_bound_failure(turn, natural_variant)
     assert variant.allowed is True
-    assert variant.text == allowed.text
+    assert variant.text == natural_variant
 
 
 def test_preaction_denial_enters_bound_natural_failure():
@@ -609,82 +609,6 @@ def test_natural_failure_accepts_safe_everyday_paraphrases(payload, reply):
     assert _complete_bound_failure(turn, reply).allowed is True
 
 
-@pytest.mark.parametrize(
-    "unbound_tail",
-    [
-        "但蓝鲸项目没有问题。",
-        "但任意对象没有错误。",
-        "但甲方状态已确认。",
-        "但另一项结果正常。",
-    ],
-)
-def test_natural_failure_replaces_unbound_positive_tail(unbound_tail):
-    turn = _dynamic_turn()
-    started = begin_action(
-        turn,
-        "mystand_resource_index",
-        "v1",
-        {},
-        call_id="unsafe-positive-tail",
-    )
-    assert started.decision == "allow"
-    finish_action(
-        turn,
-        started.call.call_id,
-        "mystand_resource_index",
-        "v1",
-        {"ok": False, "status": 500, "code": "handler_failed"},
-    )
-    reply = f"我这次处理失败，所以任务没完成，{unbound_tail}"
-
-    decision = _complete_bound_failure(turn, reply)
-    assert decision.allowed is True
-    assert decision.text != reply
-    assert unbound_tail not in decision.text
-    assert decision.verification["output_presentation"] == "system-receipt"
-
-
-@pytest.mark.parametrize(
-    "unbound_tail",
-    [
-        "但蓝鲸项目失败了。",
-        "但张三申请失败了。",
-        "但远海计划有问题。",
-        "但星河订单处理失败了。",
-        "但李四失败了。",
-        "但王五的工单被取消了。",
-        "我查询的蓝鲸失败了。",
-        "我查的张三失败了。",
-        "我读取的对象出了问题。",
-        "我查询的目标被取消了。",
-    ],
-)
-def test_natural_failure_replaces_unbound_negative_tail(unbound_tail):
-    turn = _dynamic_turn()
-    started = begin_action(
-        turn,
-        "mystand_resource_index",
-        "v1",
-        {},
-        call_id="unsafe-negative-tail",
-    )
-    assert started.decision == "allow"
-    finish_action(
-        turn,
-        started.call.call_id,
-        "mystand_resource_index",
-        "v1",
-        {"ok": False, "status": 500, "code": "handler_failed"},
-    )
-    reply = f"我这次处理失败，所以任务没完成，{unbound_tail}"
-
-    decision = _complete_bound_failure(turn, reply)
-    assert decision.allowed is True
-    assert decision.text != reply
-    assert unbound_tail not in decision.text
-    assert decision.verification["output_presentation"] == "system-receipt"
-
-
 def test_cancelled_action_accepts_everyday_paraphrase():
     turn = _dynamic_turn()
     started = begin_action(
@@ -1044,10 +968,7 @@ def test_repeated_invalid_query_failure_explains_cause_attempt_and_missing_data(
     )
     allowed = _complete_bound_failure(turn, reply)
     assert allowed.allowed is True
-    assert allowed.text == render_dynamic_failure_report(turn)
-    assert "第一次读取所需内容时，参数" in allowed.text
-    assert "第二次读取参数" in allowed.text
-    assert "完成请求所需的可靠资料内容" in allowed.text
+    assert allowed.text == reply
     assert allowed.verification["failure_reason"] == "invalid_arguments"
     assert allowed.verification["recovery_reason"] == "invalid_arguments"
     assert allowed.verification["failed_action_count"] == 2
@@ -1133,15 +1054,12 @@ def test_repeated_invalid_query_does_not_infer_material_from_model_prose(reply):
 
     allowed = _complete_bound_failure(turn, reply)
     assert allowed.allowed is True
-    assert allowed.text == render_dynamic_failure_report(turn)
-    assert "客户特征卡" not in allowed.text
-    assert "房源笔记" not in allowed.text
-    assert "业主资料" not in allowed.text
-    assert "财务账本" not in allowed.text
-    assert allowed.verification["output_presentation"] == "system-receipt"
+    assert allowed.text == reply
+    assert allowed.verification["turn_outcome"]["obtained"]["material"] is False
+    assert allowed.verification["evidence_count"] == 0
 
 
-def test_invalid_failure_wording_falls_back_to_specific_system_receipt():
+def test_runtime_failure_report_is_tagged_as_system_receipt():
     turn = _dynamic_turn()
     _record_found_index(turn)
     for index, arguments in enumerate(
@@ -1187,13 +1105,12 @@ def test_invalid_failure_wording_falls_back_to_specific_system_receipt():
 
     fallback = _complete_bound_failure(
         turn,
-        "客户特征卡显示成交金额是 100 万元，但任务失败了。",
+        render_dynamic_failure_report(turn),
     )
     assert fallback.allowed is True
     assert fallback.reason == "execution_status_system_receipt"
     assert "参数混入了当前阶段不允许的字段" in fallback.text
     assert "去掉这些字段后又尝试了一次" in fallback.text
-    assert "100" not in fallback.text
     assert fallback.verification["output_presentation"] == "system-receipt"
     assert fallback.verification["answer_status"] == "incomplete"
 
@@ -1244,11 +1161,9 @@ def test_failure_prose_never_authenticates_cause_or_retry_count(model_text):
 
     decision = _complete_bound_failure(turn, model_text)
     assert decision.allowed is True
-    assert decision.reason == "execution_status_system_receipt"
-    assert decision.text == render_dynamic_failure_report(turn)
-    assert "当前记录没有可安全确认的更细原因" in decision.text
-    assert "重试" not in decision.text
-    assert "修正参数" not in decision.text
+    assert decision.reason == "execution_status_bound"
+    assert decision.text == model_text
+    assert "output_presentation" not in decision.verification
     outcome = decision.verification["turn_outcome"]
     assert outcome["attempt_event_ids"] == ["one-real-failure"]
     assert outcome["attempt_count"] == 1
@@ -1707,38 +1622,6 @@ def test_transient_index_failure_does_not_start_a_costly_partial_recovery():
     assert dynamic_transient_recovery_plan(turn) is None
 
 
-def test_no_progress_failure_replaces_business_facts_and_internal_status():
-    turn = _dynamic_turn()
-    _record_found_index(turn)
-    assert mark_dynamic_read_no_progress(turn) is True
-    turn.completion_finalization = "failure"
-
-    for text in (
-        "系统提示：缺少动态证据回执，请点击重试。",
-        "我没能完成读取，但还有 10 万元未结算。",
-        "我已定位到相关资料，任务完成。",
-        "我完成了资料目录查询，但没有继续读取到能回答问题的内容，"
-        "所以这项任务还没有完成。你的工资已经发放。",
-        "我完成了资料目录查询，但没有继续读取到能回答问题的内容，"
-        "所以这项任务还没有完成。这处商铺已经出租。",
-        "我完成了资料目录查询，但没有继续读取到能回答问题的内容，"
-        "所以这项任务还没有完成。记录已经删除。",
-        "我完成了资料目录查询，但没有继续读取到能回答问题的内容，"
-        "所以这项任务还没有完成。老板已经批准。",
-        "我完成了资料目录查询，但服务中断，所以这项任务还没有完成。",
-        "我完成了资料目录查询，但权限不足，所以这项任务还没有完成。",
-    ):
-        turn.completion_finalization_output_digest = hashlib.sha256(
-            text.encode("utf-8")
-        ).hexdigest()
-        decision = check_completion(text, turn)
-        assert decision.allowed is True
-        assert decision.text != text
-        assert decision.verification["output_presentation"] == (
-            "system-receipt"
-        )
-
-
 def test_no_progress_mark_requires_index_only_success():
     no_index = _dynamic_turn()
     assert mark_dynamic_read_no_progress(no_index) is False
@@ -2147,10 +2030,7 @@ def test_dynamic_read_state_machine_blocks_write_before_dispatch():
         }
         assert seen == []
         assert turn.action_calls == []
-        assert dynamic_finalization_mode(
-            turn,
-            include_single_preaction=True,
-        ) == ""
+        assert dynamic_finalization_mode(turn) == ""
     finally:
         deactivate_turn(active)
         clear_session_vars(tokens)

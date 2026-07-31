@@ -425,6 +425,12 @@ class TrueMoARunnerFinalMixin:
                     initial_tool_choice
                 )
             ]
+        if request.mystand_request:
+            _finalize_mystand_egress_result(
+                result,
+                user_message=request.user_message,
+                conversation_history=request.conversation_history,
+            )
         usage = {
             "input_tokens": (
                 getattr(self.agent, "session_prompt_tokens", 0) or 0

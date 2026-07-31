@@ -3,7 +3,7 @@
 边界只由服务器可信意图和真实执行生命周期构成：
 - WORK 的公开业务回答由 ChannelProjection 从本轮 EvidenceEnvelope
   允许的字段路径生成，模型自然语言不能新增实体、关系或状态；
-- 没有本轮 EvidenceEnvelope，WORK 只能输出固定安全失败/追问文案；
+- 失败 finalizer 可按 TurnOutcome 自然说明但不成为机器事实；无合法 failure-bound 才输出固定安全文案；
 - CHAT 完全保留模型的自然表达，不扫描词语、数字、日期或历史内容；
 - 是否属于 WORK 由服务端意图或真实 ActionCall 决定，不能从回答倒推；
 - Guard 自身异常 fail closed。

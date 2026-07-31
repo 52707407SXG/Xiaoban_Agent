@@ -5515,18 +5515,24 @@ class TestRunConversation:
         finally:
             deactivate_turn(active)
 
-        assert len(observed_requests) == 2
+        assert len(observed_requests) == 3
         retry_system = observed_requests[1]["messages"][0]["content"]
         assert "no completed current-turn My Stand evidence" in str(
             retry_system
         )
         assert observed_requests[0].get("tools")
         assert observed_requests[1].get("tools")
-        assert result["final_response"] == render_dynamic_failure_report(
-            trusted_turn
+        assert not observed_requests[2].get("tools")
+        assert (
+            "Explain the failed work naturally"
+            in observed_requests[2]["messages"][0]["content"]
         )
-        assert "这次我还没开始实际处理" not in result["final_response"]
-        assert result["api_calls"] == 2
+        assert result["final_response"] == final.choices[0].message.content
+        assert "这次我还没开始实际处理" in result["final_response"]
+        assert result["api_calls"] == 3
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert result["partial"] is False
         assert "我已经查到资料" not in json.dumps(
             result["messages"],
             ensure_ascii=False,
@@ -5536,6 +5542,8 @@ class TestRunConversation:
             trusted_turn,
         )
         assert decision.allowed is True
+        assert decision.reason == "execution_status_bound"
+        assert "output_presentation" not in decision.verification
         assert decision.verification["failure_class"] == "no_progress"
         assert decision.verification["action_count"] == 0
 
@@ -5619,18 +5627,21 @@ class TestRunConversation:
         finally:
             deactivate_turn(active)
 
-        assert len(observed_requests) == 2
+        assert len(observed_requests) == 3
         assert observed_requests[0].get("tools")
         assert observed_requests[1].get("tools")
-        assert result["api_calls"] == 2
-        assert result["final_response"] == render_dynamic_failure_report(
-            trusted_turn
-        )
+        assert not observed_requests[2].get("tools")
+        assert result["api_calls"] == 3
+        assert result["final_response"] == final.choices[0].message.content
+        assert result["completed"] is True
+        assert result["failed"] is False
         decision = check_completion(
             result["final_response"],
             trusted_turn,
         )
         assert decision.allowed is True
+        assert decision.reason == "execution_status_bound"
+        assert "output_presentation" not in decision.verification
         assert decision.verification["failure_class"] == "no_progress"
         assert decision.verification["action_count"] == 0
 
@@ -5824,26 +5835,25 @@ class TestRunConversation:
         finally:
             deactivate_turn(active)
 
-        assert len(observed_requests) == 2
+        assert len(observed_requests) == 3
         assert observed_requests[0].get("tools")
         assert observed_requests[1].get("tools")
-        assert result["api_calls"] == 2
-        assert result["final_response"] == render_dynamic_failure_report(
-            trusted_turn
-        )
-        assert "资料定位已完成，但没有继续读取完成请求所需的内容" in (
-            result["final_response"]
-        )
+        assert not observed_requests[2].get("tools")
+        assert result["api_calls"] == 3
+        assert result["final_response"] == responses[2].choices[0].message.content
+        assert "没有继续读取到能回答问题的内容" in result["final_response"]
         assert "我已经看过资料" not in result["final_response"]
         assert "我仍然不调用后续读取" not in result["final_response"]
-        assert result["completed"] is False
-        assert result["failed"] is True
+        assert result["completed"] is True
+        assert result["failed"] is False
         assert trusted_turn.completion_finalization == "failure"
         decision = check_completion(
             result["final_response"],
             trusted_turn,
         )
         assert decision.allowed is True
+        assert decision.reason == "execution_status_bound"
+        assert "output_presentation" not in decision.verification
         assert decision.verification["failure_class"] == "no_progress"
         assert decision.verification["action_count"] == 1
 
@@ -6202,19 +6212,23 @@ class TestRunConversation:
         finally:
             deactivate_turn(active)
 
-        assert len(observed_requests) == 1
-        assert result["api_calls"] == 1
+        assert len(observed_requests) == 2
+        assert result["api_calls"] == 2
         assert observed_requests[0].get("tools")
+        assert not observed_requests[1].get("tools")
         assert handler_calls == 1
-        assert result["final_response"] == render_dynamic_failure_report(
-            trusted_turn
-        )
+        assert result["final_response"] == responses[1].choices[0].message.content
         assert "等待结果超时" in result["final_response"]
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert result["partial"] is False
         decision = check_completion(
             result["final_response"],
             trusted_turn,
         )
         assert decision.allowed is True
+        assert decision.reason == "execution_status_bound"
+        assert "output_presentation" not in decision.verification
         assert decision.verification["failure_class"] == "error"
         assert decision.verification["action_count"] == 2
         assert decision.verification["failed_action_count"] == 1
@@ -6419,21 +6433,28 @@ class TestRunConversation:
         finally:
             deactivate_turn(active)
 
-        assert len(observed_requests) == 1
+        assert len(observed_requests) == 2
         assert observed_requests[0].get("tools")
+        assert not observed_requests[1].get("tools")
         assert "resource-protocol-failure" in json.dumps(
             observed_requests[0],
             ensure_ascii=False,
         )
-        assert result["api_calls"] == 1
-        assert result["final_response"] == render_dynamic_failure_report(
-            trusted_turn
+        assert "resource-protocol-failure" not in json.dumps(
+            observed_requests[1],
+            ensure_ascii=False,
         )
+        assert result["api_calls"] == 2
+        assert result["final_response"] == responses[1].choices[0].message.content
+        assert result["completed"] is True
+        assert result["failed"] is False
         decision = check_completion(
             result["final_response"],
             trusted_turn,
         )
         assert decision.allowed is True
+        assert decision.reason == "execution_status_bound"
+        assert "output_presentation" not in decision.verification
         assert decision.verification["failure_class"] == "error"
 
     def test_transient_read_recovery_succeeds_and_accounts_every_call(
@@ -7097,21 +7118,27 @@ class TestRunConversation:
         finally:
             deactivate_turn(active)
 
-        assert result["completed"] is False, result
-        assert result["failed"] is True
-        assert result["api_calls"] == 1
-        assert result["final_response"] == render_dynamic_failure_report(
-            trusted_turn
-        )
-        assert "第一次读取所需内容时，参数" in result["final_response"]
-        assert "第二次读取参数" in result["final_response"]
-        assert len(observed_requests) == 1
+        assert result["completed"] is True, result
+        assert result["failed"] is False
+        assert result["api_calls"] == 2
+        assert result["final_response"] == final_reply
+        assert "读取特征卡正文时发现查询格式" in result["final_response"]
+        assert "调整后又尝试了一次" in result["final_response"]
+        assert len(observed_requests) == 2
+        assert observed_requests[0].get("tools")
+        assert not observed_requests[1].get("tools")
         first_wire = json.dumps(observed_requests[0], ensure_ascii=False)
+        final_wire = json.dumps(observed_requests[1], ensure_ascii=False)
         assert "PRIVATE_FIRST_FAILURE" not in first_wire
         assert "private-feature-card-id" not in first_wire
+        assert "PRIVATE_FIRST_FAILURE" not in final_wire
+        assert "PRIVATE_SECOND_FAILURE" not in final_wire
+        assert "private-feature-card-id" not in final_wire
         assert "PRIVATE_SECOND_FAILURE" not in result["final_response"]
         completion = check_completion(result["final_response"], trusted_turn)
         assert completion.allowed is True
+        assert completion.reason == "execution_status_bound"
+        assert "output_presentation" not in completion.verification
         assert completion.verification["completion_kind"] == "failure-bound"
         assert completion.verification["failure_reason"] == (
             "invalid_arguments"
@@ -7343,31 +7370,53 @@ class TestRunConversation:
         finally:
             deactivate_turn(active)
 
-        assert len(observed_requests) == 3
-        assert result["api_calls"] == 3
+        assert len(observed_requests) == 4
+        assert result["api_calls"] == 4
         assert handler_calls == 3
         assert observed_requests[0].get("tools")
         assert observed_requests[1].get("tools")
         assert observed_requests[2].get("tools")
+        assert not observed_requests[3].get("tools")
         assert len(trusted_turn.action_calls) == 3
         assert len(trusted_turn.action_results) == 3
-        assert result["final_response"] == render_dynamic_failure_report(
-            trusted_turn
-        )
+        assert result["final_response"] == responses[3].choices[0].message.content
         assert "PRIVATE_FAILURE_1" not in result["final_response"]
         assert "PRIVATE_FAILURE_2" not in result["final_response"]
-        assert "又尝试了一次" in result["final_response"]
+        assert "读取服务暂时不可用" in result["final_response"]
+        assert "PRIVATE_FAILURE_" not in json.dumps(
+            observed_requests[3],
+            ensure_ascii=False,
+        )
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert result["partial"] is False
+        assert (
+            result["input_tokens"],
+            result["output_tokens"],
+            result["total_tokens"],
+            result["last_prompt_tokens"],
+        ) == (35, 11, 46, 8)
         decision = check_completion(
             result["final_response"],
             trusted_turn,
         )
         assert decision.allowed is True
+        assert decision.reason == "execution_status_bound"
+        assert "output_presentation" not in decision.verification
         assert decision.verification["action_count"] == 3
         assert decision.verification["failed_action_count"] == 2
         call_receipts = ledger.to_dict()["calls"]
-        assert len(call_receipts) == 3
-        assert [call["ordinal"] for call in call_receipts] == [1, 2, 3]
-        assert len({call["callId"] for call in call_receipts}) == 3
+        assert len(call_receipts) == 4
+        assert [call["ordinal"] for call in call_receipts] == [1, 2, 3, 4]
+        assert [
+            (
+                call["inputTokens"],
+                call["outputTokens"],
+                call["totalTokens"],
+            )
+            for call in call_receipts
+        ] == [(8, 2, 10), (9, 2, 11), (10, 2, 12), (8, 5, 13)]
+        assert len({call["callId"] for call in call_receipts}) == 4
         assert all(call["status"] == "completed" for call in call_receipts)
         assert all(call["usageStatus"] == "reported" for call in call_receipts)
 
@@ -7405,13 +7454,20 @@ class TestRunConversation:
         finally:
             deactivate_turn(active)
 
-        assert provider.call_count == 0
+        assert provider.call_count == 1
+        assert not provider.call_args.args[0].get("tools")
         assert result["completed"] is False
         assert result["failed"] is True
         assert result["final_response"] == render_dynamic_failure_report(
             trusted_turn
         )
-        assert result["api_calls"] == 0
+        assert result["api_calls"] == 1
+        completion = check_completion(result["final_response"], trusted_turn)
+        assert completion.reason == "execution_status_system_receipt"
+        assert (
+            completion.verification["output_presentation"]
+            == "system-receipt"
+        )
 
     def test_failure_finalizer_rejects_codex_intermediate_ack_once(
         self,
@@ -7473,13 +7529,20 @@ class TestRunConversation:
         finally:
             deactivate_turn(active)
 
-        assert provider.call_count == 0
+        assert provider.call_count == 1
+        assert not provider.call_args.args[0].get("tools")
         assert result["completed"] is False
         assert result["failed"] is True
         assert result["final_response"] == render_dynamic_failure_report(
             trusted_turn
         )
-        assert result["api_calls"] == 0
+        assert result["api_calls"] == 1
+        completion = check_completion(result["final_response"], trusted_turn)
+        assert completion.reason == "execution_status_system_receipt"
+        assert (
+            completion.verification["output_presentation"]
+            == "system-receipt"
+        )
 
     def test_failure_finalizer_does_not_retry_response_processing_error(
         self,
@@ -7527,14 +7590,107 @@ class TestRunConversation:
         finally:
             deactivate_turn(active)
 
-        assert provider.call_count == 0
-        assert normalize.call_count == 0, result
+        assert provider.call_count == 1
+        assert not provider.call_args.args[0].get("tools")
+        assert normalize.call_count == 1, result
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["error"] == (
+            "Finalize-only response processing failed; "
+            "automatic retry is disabled"
+        )
+        assert result["final_response"] == render_dynamic_failure_report(
+            trusted_turn
+        )
+        assert result["api_calls"] == 1
+        completion = check_completion(result["final_response"], trusted_turn)
+        assert completion.reason == "execution_status_system_receipt"
+        assert (
+            completion.verification["output_presentation"]
+            == "system-receipt"
+        )
+
+    @pytest.mark.parametrize(
+        "bad_response_kind",
+        [
+            "provider_error",
+            "malformed_response",
+            "truncated_response",
+            "content_filter",
+        ],
+    )
+    def test_failure_finalizer_transport_failure_uses_system_receipt(
+        self,
+        agent,
+        bad_response_kind,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent.max_iterations = 2
+        agent.tools = _make_tool_defs("mystand_resource_index")
+        agent.valid_tool_names = {"mystand_resource_index"}
+        trusted_turn = _dynamic_work_turn(
+            f"finalizer-{bad_response_kind}"
+        )
+        assert mark_dynamic_execution_no_progress(trusted_turn) is True
+        if bad_response_kind == "malformed_response":
+            response = SimpleNamespace(choices=[])
+        elif bad_response_kind == "truncated_response":
+            response = _mock_response(
+                content="未完成的截断内容",
+                finish_reason="length",
+            )
+        else:
+            response = _mock_response(
+                content="",
+                finish_reason="content_filter",
+            )
+        observed_requests = []
+
+        def provider(payload):
+            observed_requests.append(payload)
+            if bad_response_kind == "provider_error":
+                raise RuntimeError("simulated finalizer provider failure")
+            return response
+
+        active = activate_turn(trusted_turn)
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_api_call",
+                    side_effect=provider,
+                ),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation("请处理这件事")
+        finally:
+            deactivate_turn(active)
+
+        assert len(observed_requests) == 1
+        assert not observed_requests[0].get("tools")
+        assert result["api_calls"] == 1
         assert result["completed"] is False
         assert result["failed"] is True
         assert result["final_response"] == render_dynamic_failure_report(
             trusted_turn
         )
-        assert result["api_calls"] == 0
+        assert all(
+            message.get("role") != "assistant"
+            for message in result["messages"]
+        )
+        completion = check_completion(result["final_response"], trusted_turn)
+        assert completion.allowed is True
+        assert completion.reason == "execution_status_system_receipt"
+        assert completion.verification["completion_kind"] == "failure-bound"
+        assert (
+            completion.verification["output_presentation"]
+            == "system-receipt"
+        )
+        assert completion.verification["answer_status"] == "incomplete"
 
     def test_dynamic_finalize_budget_keeps_single_call_usable(self):
         trusted_turn = SimpleNamespace(

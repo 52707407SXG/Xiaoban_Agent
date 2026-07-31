@@ -65,7 +65,7 @@ from agent.true_moa_conversation_policy import (
     execute_llm_request as _execute_llm_request,
     initialize_session_side_effects as _initialize_session_side_effects,
     prepare_llm_request as _prepare_llm_request,
-    strict_failure_result as _strict_failure_result,
+    strict_failure_result as _base_strict_failure_result,
     strict_mode as _strict_true_moa_mode,
 )
 from agent.paid_call_accounting import (
@@ -327,10 +327,7 @@ def _failure_finalize_summary(trusted_turn: Any) -> str:
     )
 
 
-def _dynamic_terminal_fallback_text(
-    *,
-    failure_only: bool = False,
-) -> str:
+def _dynamic_terminal_fallback_text() -> str:
     """Return a server-owned terminal projection from the trusted ledger."""
     try:
         from xiaoban.trusted_runtime.dynamic_completion import (
@@ -355,7 +352,7 @@ def _dynamic_terminal_fallback_text(
             text = str(render_dynamic_failure_report(trusted_turn) or "")
         except Exception:
             return ""
-    elif mode == "evidence" and not failure_only:
+    elif mode == "evidence":
         text = (
             "资料已经读取成功，但最终回答没有使用本轮资料中的具体内容，"
             "无法确认它真正完成了你的要求。本次任务仍按未完成处理。"
@@ -369,6 +366,28 @@ def _dynamic_terminal_fallback_text(
             hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
     return text
+
+
+def _strict_failure_result(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Keep trusted finalizer failures visible as a system receipt."""
+    fallback_exit_reason = kwargs.pop(
+        "fallback_exit_reason",
+        "text_response(finalize_fallback)",
+    )
+    failure_exit_reason = kwargs.pop(
+        "failure_exit_reason",
+        "strict_iteration_budget_reached(finalize_failure)",
+    )
+    result = _base_strict_failure_result(*args, **kwargs)
+    if result.get("final_response") is None:
+        terminal_projection = _dynamic_terminal_fallback_text()
+        if terminal_projection:
+            result["final_response"] = terminal_projection
+            result["partial"] = False
+            result["turn_exit_reason"] = fallback_exit_reason
+        else:
+            result["turn_exit_reason"] = failure_exit_reason
+    return result
 
 
 def _reject_finalize_only_protocol_candidate(
@@ -391,15 +410,7 @@ def _reject_finalize_only_protocol_candidate(
         )
     ):
         return None
-    terminal_projection = _dynamic_terminal_fallback_text()
-    if terminal_projection:
-        return {
-            "_dynamic_terminal_projection": terminal_projection,
-            "turn_exit_reason": (
-                "text_response(finalize_protocol_content_rejected)"
-            ),
-        }
-    failure = _strict_failure_result(
+    return _strict_failure_result(
         agent,
         messages,
         conversation_history,
@@ -407,11 +418,14 @@ def _reject_finalize_only_protocol_candidate(
         error="Finalize-only model returned raw tool protocol content",
         partial=True,
         drop_scaffolding=True,
+        fallback_exit_reason=(
+            "text_response(finalize_protocol_content_rejected)"
+        ),
+        failure_exit_reason=(
+            "strict_iteration_budget_reached"
+            "(finalize_protocol_content_rejected)"
+        ),
     )
-    failure["turn_exit_reason"] = (
-        "strict_iteration_budget_reached(finalize_protocol_content_rejected)"
-    )
-    return failure
 
 
 def _dynamic_incomplete_work_fingerprint() -> str:
@@ -530,12 +544,7 @@ def _prepare_finalize_only_call(
         except Exception:
             pass
     try:
-        finalization_mode = dynamic_finalization_mode(
-            trusted_turn,
-            include_single_preaction=(
-                api_call_count >= agent.max_iterations
-            ),
-        )
+        finalization_mode = dynamic_finalization_mode(trusted_turn)
     except Exception:
         finalization_mode = ""
     if api_call_count < agent.max_iterations and not finalization_mode:
@@ -938,16 +947,10 @@ def _reserve_dynamic_terminal_finalizer(
             != "dynamic-evidence-v2"
         ):
             return False
-        finalization_mode = dynamic_finalization_mode(
-            trusted_turn,
-            include_single_preaction=True,
-        )
+        finalization_mode = dynamic_finalization_mode(trusted_turn)
         if not finalization_mode:
             mark_dynamic_execution_no_progress(trusted_turn)
-            finalization_mode = dynamic_finalization_mode(
-                trusted_turn,
-                include_single_preaction=True,
-            )
+            finalization_mode = dynamic_finalization_mode(trusted_turn)
         return finalization_mode in {"evidence", "failure"}
     except Exception:
         return False
@@ -1706,27 +1709,6 @@ def run_conversation(
                 api_messages,
                 original_user_message=original_user_message,
             )
-            runtime_failure = (
-                _dynamic_terminal_fallback_text(failure_only=True)
-                if _finalize_only_call
-                else ""
-            )
-            if runtime_failure:
-                # Failure facts are already complete in TurnOutcome.  Do not
-                # spend another provider call asking a model to restate them,
-                # and do not guess their meaning from Chinese prose.
-                final_response = runtime_failure
-                failed = True
-                _turn_exit_reason = (
-                    "text_response(runtime_failure_outcome)"
-                )
-                api_call_count -= 1
-                agent._api_call_count = api_call_count
-                try:
-                    agent.iteration_budget.refund()
-                except Exception:
-                    pass
-                break
 
         # Apply Anthropic prompt caching for Claude models on native
         # Anthropic, OpenRouter, and third-party Anthropic-compatible
@@ -4769,16 +4751,6 @@ def run_conversation(
                 
                 agent._buffer_vprint(f"⚠️  Incomplete <REASONING_SCRATCHPAD> detected (opened but never closed)")
                 if _finalize_only_call:
-                    terminal_projection = (
-                        _dynamic_terminal_fallback_text()
-                    )
-                    if terminal_projection:
-                        final_response = terminal_projection
-                        failed = True
-                        _turn_exit_reason = (
-                            "text_response(finalize_incomplete_scratchpad)"
-                        )
-                        break
                     return _strict_failure_result(
                         agent,
                         messages,
@@ -4790,6 +4762,9 @@ def run_conversation(
                         ),
                         partial=True,
                         cleanup_task_id=effective_task_id,
+                        fallback_exit_reason=(
+                            "text_response(finalize_incomplete_scratchpad)"
+                        ),
                     )
                 
                 if agent._incomplete_scratchpad_retries <= 2:
@@ -4820,16 +4795,6 @@ def run_conversation(
 
             if agent.api_mode == "codex_responses" and finish_reason == "incomplete":
                 if _finalize_only_call:
-                    terminal_projection = (
-                        _dynamic_terminal_fallback_text()
-                    )
-                    if terminal_projection:
-                        final_response = terminal_projection
-                        failed = True
-                        _turn_exit_reason = (
-                            "text_response(finalize_incomplete_response)"
-                        )
-                        break
                     return _strict_failure_result(
                         agent,
                         messages,
@@ -4841,6 +4806,9 @@ def run_conversation(
                         ),
                         partial=True,
                         cleanup_task_id=effective_task_id,
+                        fallback_exit_reason=(
+                            "text_response(finalize_incomplete_response)"
+                        ),
                     )
                 agent._codex_incomplete_retries += 1
 
@@ -4903,27 +4871,21 @@ def run_conversation(
             # A finalize-only request never executes a model-emitted tool call,
             # even if a provider returns one despite receiving no tool schema.
             if _finalize_only_call and assistant_message.tool_calls:
-                terminal_projection = _dynamic_terminal_fallback_text()
-                if terminal_projection:
-                    final_response = terminal_projection
-                    failed = True
-                    _turn_exit_reason = (
-                        "text_response(finalize_tool_call_rejected)"
-                    )
-                    break
-                finalize_failure = _strict_failure_result(
+                return _strict_failure_result(
                     agent,
                     messages,
                     conversation_history,
                     api_call_count=api_call_count,
                     error="Model attempted a tool call after tool access closed",
                     partial=True,
+                    fallback_exit_reason=(
+                        "text_response(finalize_tool_call_rejected)"
+                    ),
+                    failure_exit_reason=(
+                        "strict_iteration_budget_reached"
+                        "(finalize_tool_call_rejected)"
+                    ),
                 )
-                finalize_failure["turn_exit_reason"] = (
-                    "strict_iteration_budget_reached"
-                    "(finalize_tool_call_rejected)"
-                )
-                return finalize_failure
 
             # Check for tool calls
             if assistant_message.tool_calls:
@@ -5577,17 +5539,7 @@ def run_conversation(
                         break
 
                     if _finalize_only_call:
-                        terminal_projection = (
-                            _dynamic_terminal_fallback_text()
-                        )
-                        if terminal_projection:
-                            final_response = terminal_projection
-                            failed = True
-                            _turn_exit_reason = (
-                                "text_response(finalize_empty_content)"
-                            )
-                            break
-                        finalize_failure = _strict_failure_result(
+                        return _strict_failure_result(
                             agent,
                             messages,
                             conversation_history,
@@ -5598,12 +5550,14 @@ def run_conversation(
                             ),
                             partial=True,
                             drop_scaffolding=True,
+                            fallback_exit_reason=(
+                                "text_response(finalize_empty_content)"
+                            ),
+                            failure_exit_reason=(
+                                "strict_iteration_budget_reached"
+                                "(finalize_empty_content)"
+                            ),
                         )
-                        finalize_failure["turn_exit_reason"] = (
-                            "strict_iteration_budget_reached"
-                            "(finalize_empty_content)"
-                        )
-                        return finalize_failure
 
                     # If the previous turn already delivered real content alongside
                     # HOUSEKEEPING tool calls (e.g. "You're welcome!" + memory save),
@@ -5876,17 +5830,7 @@ def run_conversation(
                     )
                 )
                 if _finalize_only_call and codex_intermediate_ack:
-                    terminal_projection = (
-                        _dynamic_terminal_fallback_text()
-                    )
-                    if terminal_projection:
-                        final_response = terminal_projection
-                        failed = True
-                        _turn_exit_reason = (
-                            "text_response(finalize_intermediate_ack)"
-                        )
-                        break
-                    finalize_failure = _strict_failure_result(
+                    return _strict_failure_result(
                         agent,
                         messages,
                         conversation_history,
@@ -5897,12 +5841,14 @@ def run_conversation(
                         ),
                         partial=True,
                         drop_scaffolding=True,
+                        fallback_exit_reason=(
+                            "text_response(finalize_intermediate_ack)"
+                        ),
+                        failure_exit_reason=(
+                            "strict_iteration_budget_reached"
+                            "(finalize_intermediate_ack)"
+                        ),
                     )
-                    finalize_failure["turn_exit_reason"] = (
-                        "strict_iteration_budget_reached"
-                        "(finalize_intermediate_ack)"
-                    )
-                    return finalize_failure
                 if (
                     codex_intermediate_ack
                     and codex_ack_continuations < 2
@@ -5939,16 +5885,6 @@ def run_conversation(
                     finalize_only=_finalize_only_call,
                 )
                 if protocol_failure is not None:
-                    terminal_projection = protocol_failure.get(
-                        "_dynamic_terminal_projection"
-                    )
-                    if terminal_projection:
-                        final_response = str(terminal_projection)
-                        failed = True
-                        _turn_exit_reason = str(
-                            protocol_failure["turn_exit_reason"]
-                        )
-                        break
                     return protocol_failure
 
                 final_response = agent._strip_think_blocks(final_response).strip()
@@ -6079,14 +6015,6 @@ def run_conversation(
             # traceback automatically and emits at ERROR.
             logger.exception("Outer loop error in API call #%d", api_call_count)
             if _finalize_only_call:
-                terminal_projection = _dynamic_terminal_fallback_text()
-                if terminal_projection:
-                    final_response = terminal_projection
-                    failed = True
-                    _turn_exit_reason = (
-                        "text_response(finalize_processing_error)"
-                    )
-                    break
                 return _strict_failure_result(
                     agent,
                     messages,
@@ -6098,6 +6026,9 @@ def run_conversation(
                     ),
                     partial=True,
                     cleanup_task_id=effective_task_id,
+                    fallback_exit_reason=(
+                        "text_response(finalize_processing_error)"
+                    ),
                 )
             
             # If an assistant message with tool_calls was already appended,

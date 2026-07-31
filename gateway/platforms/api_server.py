@@ -2009,6 +2009,17 @@ def _guard_evidence_backed_response(
                 result["failed"] = True
                 result["partial"] = False
                 result["error"] = "trusted work did not complete"
+            elif (
+                completion.verification.get("completion_kind")
+                == "failure-bound"
+            ):
+                # The business task failed, but the Agent successfully closed
+                # the turn with a bound final reply. Keep task truth in the
+                # receipt instead of misreporting a transport/runtime failure.
+                result["completed"] = True
+                result["failed"] = False
+                result["partial"] = False
+                result.pop("error", None)
         elif (
             result.get("_mystand_completion_protocol")
             == _MYSTAND_COMPLETION_PROTOCOL_V2

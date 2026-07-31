@@ -29,6 +29,7 @@ from xiaoban.trusted_runtime import (
     begin_action,
     begin_turn,
     check_completion,
+    current_turn,
     deactivate_turn,
     finish_action,
 )
@@ -937,8 +938,8 @@ def test_failure_bound_reply_requires_finalize_only_runtime_state():
     ).hexdigest()
     allowed = check_completion(model_reply, turn)
     assert allowed.allowed is True
-    assert allowed.text == render_dynamic_failure_report(turn)
-    assert allowed.verification["output_presentation"] == "system-receipt"
+    assert allowed.text == model_reply
+    assert "output_presentation" not in allowed.verification
     assert allowed.verification is not None
     assert allowed.verification["completion_kind"] == "failure-bound"
     assert allowed.verification["semantic_verified"] is False
@@ -980,10 +981,6 @@ def test_dynamic_finalization_uses_only_real_dispatched_failure():
     )
     assert first.reason == "missing_index_receipt"
     assert dynamic_finalization_mode(denied) == ""
-    assert dynamic_finalization_mode(
-        denied,
-        include_single_preaction=True,
-    ) == ""
     second = begin_action(
         denied,
         "mystand_query",
@@ -1063,6 +1060,36 @@ class _RetryFenceAgent:
         }
 
 
+class _FailureFenceAgent(_RetryFenceAgent):
+    model_reply = "特征卡正文没拿到，读取返回了错误，所以现在不能可靠分析。"
+
+    def run_conversation(self, **_kwargs):
+        turn = current_turn()
+        assert turn is not None
+        _record_index(
+            turn,
+            [_index_item("res-selected", "目标特征卡")],
+        )
+        _record(
+            turn,
+            "mystand_query",
+            _query_arguments(),
+            {},
+            "call-query-invalid-normal",
+        )
+        turn.completion_finalization = "failure"
+        turn.completion_finalization_output_digest = hashlib.sha256(
+            self.model_reply.encode("utf-8")
+        ).hexdigest()
+        return {
+            "final_response": self.model_reply,
+            "messages": [],
+            "completed": False,
+            "failed": True,
+            "error": "tool execution did not produce a usable result",
+        }
+
+
 def _normal_request_headers() -> dict[str, str]:
     return {
         "X-Xiaoban-User-Id": IDENTITY.account_id,
@@ -1114,6 +1141,55 @@ async def test_normal_dynamic_evidence_uses_strict_paid_call_fence(
 
     assert result["completed"] is True
     assert create_kwargs["strict_no_automatic_paid_retry"] is True
+
+
+@pytest.mark.asyncio
+async def test_normal_signed_failure_reply_settles_before_idempotency(
+    monkeypatch,
+):
+    adapter = APIServerAdapter(
+        PlatformConfig(enabled=True, extra={"key": "sk-test-only"}),
+    )
+    headers = _normal_request_headers()
+    headers.update(
+        {
+            "X-Xiaoban-Attempt": "1",
+            "X-Xiaoban-Delivery-Attempt": "1",
+            "X-Xiaoban-Request-Fingerprint": REQUEST_FINGERPRINT,
+            "X-Xiaoban-Invocation-Fingerprint": INVOCATION_FINGERPRINT,
+        },
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_create_agent",
+        lambda **_kwargs: _FailureFenceAgent(),
+    )
+
+    result, usage = await adapter._run_agent(
+        user_message="查一下特征卡，分析后给我建议",
+        conversation_history=[],
+        session_id=SESSION_ID,
+        request_headers=headers,
+        completion_protocol=PROTOCOL,
+        completion_binding=_mystand_completion_expected_binding(
+            headers,
+            session_id=SESSION_ID,
+        ),
+        dynamic_evidence_required=True,
+    )
+
+    assert result["final_response"] == _FailureFenceAgent.model_reply
+    assert result["completed"] is True
+    assert result["failed"] is False
+    assert "error" not in result
+    assert result["_mystand_trusted_verification"]["completion_kind"] == (
+        "failure-bound"
+    )
+    assert result["_agent_call_usage"]["status"] == "completed"
+    assert usage["agent_calls"]["status"] == "completed"
+    assert _IdempotencyCache._completed_outcome_payload(result)[
+        "finalResponse"
+    ] == _FailureFenceAgent.model_reply
 
 
 @pytest.mark.asyncio
@@ -1554,71 +1630,3 @@ def test_zero_call_work_claim_is_not_persisted_as_fixed_fallback():
     )
 
     assert persisted == [[{"role": "user", "content": "请处理这件事"}]]
-
-
-def test_failed_dynamic_read_delivers_model_failure_with_bound_receipt():
-    turn = _turn()
-    _record_index(
-        turn,
-        [_index_item("res-selected", "中海城南一号2-1-1001")],
-    )
-    query_call = begin_action(
-        turn,
-        "mystand_query",
-        "v1",
-        _query_arguments(),
-        call_id="call-query-invalid",
-    )
-    assert query_call.decision == "allow"
-    query_result = finish_action(
-        turn,
-        "call-query-invalid",
-        "mystand_query",
-        "v1",
-        "{}",
-    )
-    assert query_result is not None
-    assert query_result.status == "error"
-    turn.completion_finalization = "failure"
-    model_reply = (
-        "我这次已经发起实际处理，但执行返回了错误，"
-        "所以这项任务还没有完成。"
-    )
-    turn.completion_finalization_output_digest = hashlib.sha256(
-        model_reply.encode("utf-8")
-    ).hexdigest()
-
-    result = {
-        "final_response": model_reply,
-        "messages": [],
-        "completed": True,
-        "failed": False,
-        "_mystand_request": True,
-        "_mystand_user_id": IDENTITY.account_id,
-        "_mystand_request_id": DELIVERY_ID,
-        "_mystand_message_id": MESSAGE_ID,
-        "_mystand_completion_protocol": PROTOCOL,
-        "_mystand_completion_binding": dict(turn.completion_binding),
-        "_trusted_turn": turn,
-    }
-    final_text = _finalize_mystand_egress_result(
-        result,
-        user_message="这套房有车位吗",
-        conversation_history=[],
-    )
-
-    assert final_text == render_dynamic_failure_report(turn)
-    assert result["_mystand_completion_protocol"] == PROTOCOL
-    verification = result["_mystand_trusted_verification"]
-    assert verification["completion_kind"] == "failure-bound"
-    assert verification["decision"] == "execution_status_bound"
-    assert verification["failure_class"] == "error"
-    assert verification["failed_action_count"] == 1
-    assert verification["output_presentation"] == "system-receipt"
-    assert result["completed"] is False
-    assert result["failed"] is True
-    with pytest.raises(
-        RuntimeError,
-        match="completed outcome was not finalized",
-    ):
-        _IdempotencyCache._completed_outcome_payload(result)
