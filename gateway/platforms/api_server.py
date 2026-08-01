@@ -187,6 +187,7 @@ _MYSTAND_REQUEST_TOOLSETS = {
         "mystand_query",
         "mystand_authorization",
         "mystand_authorization_write",
+        "file_readonly",
     ],
     "mystand-owner-research": [
         "web",
@@ -212,6 +213,8 @@ _MYSTAND_REQUEST_TOOL_NAMES = {
         "mystand_query",
         "mystand_authorization",
         "mystand_authorization_write",
+        "read_file",
+        "search_files",
     },
     "mystand-owner-research": {
         "web_search",

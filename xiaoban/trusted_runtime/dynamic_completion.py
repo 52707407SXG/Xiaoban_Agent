@@ -1247,6 +1247,20 @@ def _argument_resource_binding_valid(
     payload: Mapping[str, Any],
     arguments: Mapping[str, Any],
 ) -> bool:
+    requested_many = arguments.get("resource_uids")
+    if requested_many is not None:
+        if (
+            not isinstance(requested_many, list)
+            or not requested_many
+            or any(not isinstance(value, str) or not value for value in requested_many)
+        ):
+            return False
+        returned_many = payload.get("recordRefs")
+        if (
+            not isinstance(returned_many, list)
+            or sorted(set(requested_many)) != returned_many
+        ):
+            return False
     bindings = (
         (
             "resource_uid",
@@ -1288,6 +1302,8 @@ def _required_index_refs(
     refs = _record_refs_for_paths(index_paths, payload)
     if arguments.get("resource_uid"):
         refs.append(str(arguments["resource_uid"]))
+    if isinstance(arguments.get("resource_uids"), list):
+        refs.extend(str(value) for value in arguments["resource_uids"] if value)
     return sorted(set(refs))
 
 

@@ -333,6 +333,7 @@ def begin_turn(
     completion_protocol: str = "",
     completion_binding: Optional[Mapping[str, Any]] = None,
     business_tools_disabled: bool = False,
+    resource_module_id: str = "",
 ) -> WorkTurn:
     """服务端开回合：稳定 request/message ID + 服务端解析身份。"""
     turn_id = hashlib.sha256(
@@ -397,6 +398,7 @@ def begin_turn(
             )
         ),
         index_receipt=None,
+        resource_module_id=str(resource_module_id or "")[:80],
         completion_protocol=protocol,
         completion_binding=bound_completion,
         business_tools_disabled=bool(business_tools_disabled),
@@ -999,6 +1001,11 @@ def gate_registry_action(
             turn is not None
             and turn.completion_protocol == MYSTAND_COMPLETION_PROTOCOL_V2
             and turn.fact_requirement is None
+            and (
+                bool(getattr(turn, "business_tools_disabled", False))
+                or str(getattr(turn, "interaction_kind", "") or "")
+                == INTERACTION_WORK
+            )
         )
         from xiaoban.trusted_runtime.tool_visibility import (
             dynamic_evidence_allowed_tool_names,
@@ -1068,10 +1075,15 @@ def gate_registry_action(
                     name,
                     "dynamic_index_stage_closed",
                 )
-            # In open dynamic discovery the model may suggest a module name,
-            # but only the server-owned index result may establish location.
-            gated_args.pop("module_id", None)
+            # The trusted intent owns the module scope. Natural business wording
+            # is not a safe resource-title locator and must never turn a populated
+            # module index into a false empty result.
             gated_args.pop("moduleId", None)
+            gated_args.pop("query", None)
+            if turn.resource_module_id:
+                gated_args["module_id"] = turn.resource_module_id
+            else:
+                gated_args.pop("module_id", None)
         pending = next(
             (
                 call

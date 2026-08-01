@@ -114,7 +114,7 @@
       "kind": "角色感",
       "file": "agent/xiaoban_operating_policy.py",
       "symbol": "XIAOBAN_MYSTAND_FEATURE_REASONING_POLICY",
-      "sha256": "a986b8cf27f0486cb4b3d639ae71fc4093e951edc0335a7eaa6653a4ccfc4fd2",
+      "sha256": "728d84af15954ab869bcbb028466c7da415a77db29835740f3c11e9a5a7b12bb",
       "consumers": [
         "agent/system_prompt.py::build_system_prompt_parts"
       ],
@@ -127,7 +127,7 @@
       "kind": "角色感",
       "file": "agent/xiaoban_operating_policy.py",
       "symbol": "XIAOBAN_MYSTAND_SECURITY_BOUNDARY_POLICY",
-      "sha256": "f1d52b212dba8c5e158cdddeb729fdb3277771f2e861eb47c965c583d808b4c7",
+      "sha256": "d3f0ab24b7f88d2945ed91958a7a492fd9ba2c0143109b7eb19fe1afc9937cc4",
       "consumers": [
         "agent/system_prompt.py::build_system_prompt_parts"
       ],

@@ -100,6 +100,34 @@ _BLOCKED_DEVICE_PATHS = frozenset({
     "/dev/fd/0", "/dev/fd/1", "/dev/fd/2",
 })
 
+_MYSTAND_SITE_READ_ROOTS = (
+    Path("/srv/websites/zyj028-dev/repo"),
+    Path("/opt/mystand-api"),
+    Path("/opt/xiaoban-agent"),
+    Path("/var/www/zyj028.com"),
+)
+
+
+def _mystand_site_read_error(path: str, task_id: str = "default") -> str:
+    """Keep My Stand's read-only code tools inside My Stand code assets."""
+    try:
+        from gateway.session_context import get_session_env
+
+        if get_session_env("XIAOBAN_SESSION_PLATFORM", "") != "api_server":
+            return ""
+        if not get_session_env("XIAOBAN_SESSION_USER_ID", ""):
+            return "My Stand 网页会话缺少登录身份，不能读取站内源码。"
+        resolved = _resolve_path_for_task(path, task_id)
+        for root in _MYSTAND_SITE_READ_ROOTS:
+            try:
+                resolved.relative_to(root.resolve())
+                return ""
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return "My Stand 网页只允许读取站内源码目录。"
+
 
 def _resolve_path(filepath: str, task_id: str = "default") -> Path:
     """Resolve a path relative to TERMINAL_CWD (the worktree base directory)
@@ -873,6 +901,10 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
     try:
         offset, limit = normalize_read_pagination(offset, limit)
 
+        site_read_error = _mystand_site_read_error(path, task_id)
+        if site_read_error:
+            return json.dumps({"error": site_read_error}, ensure_ascii=False)
+
         # ── Device path guard ─────────────────────────────────────────
         # Block paths that would hang the process (infinite output,
         # blocking on input).  Pure path check — no I/O.
@@ -1523,6 +1555,10 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
     """Search for content or files."""
     try:
         offset, limit = normalize_search_pagination(offset, limit)
+
+        site_read_error = _mystand_site_read_error(path, task_id)
+        if site_read_error:
+            return json.dumps({"error": site_read_error}, ensure_ascii=False)
 
         # Track searches to detect *consecutive* repeated search loops.
         # Include pagination args so users can page through truncated

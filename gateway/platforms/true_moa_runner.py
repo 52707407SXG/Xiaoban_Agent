@@ -13,6 +13,7 @@ from gateway.platforms.api_server import (
     _mystand_tool_result_failed,
     _resolve_mystand_initial_tool_choice,
     _run_mystand_preexecuted_evidence,
+    _trusted_mystand_module_id,
     logger,
 )
 from gateway.platforms.true_moa_runner_workflow import (
@@ -37,7 +38,11 @@ def _mystand_index_followup_tool(
         completion_protocol == MYSTAND_COMPLETION_PROTOCOL
         and fact_requirement is None
     ):
-        return "mystand_query" if "mystand_query" in valid_tool_names else ""
+        return (
+            "mystand_authorization"
+            if "mystand_authorization" in valid_tool_names
+            else ""
+        )
     if (
         resource_index_required
         and "mystand_authorization" in valid_tool_names
@@ -250,6 +255,9 @@ class TrueMoARunnerMixin:
             completion_binding=completion_binding or {},
             dynamic_evidence_required=dynamic_evidence_required,
             business_tools_disabled=business_tools_disabled,
+            resource_module_id=_trusted_mystand_module_id(
+                effective_system_prompt,
+            ),
             true_moa_snapshot=true_moa_snapshot,
             paid_call_usage_callback=paid_call_usage_callback,
             request_user_id=request_user_id,

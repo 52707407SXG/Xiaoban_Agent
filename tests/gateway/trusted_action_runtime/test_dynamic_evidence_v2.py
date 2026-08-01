@@ -585,6 +585,57 @@ def test_v2_authorization_read_is_a_valid_registered_read_chain():
     assert legacy.verification is None
 
 
+def test_v2_authorization_batch_binds_every_result_to_the_found_index():
+    turn = _turn()
+    _record_index(
+        turn,
+        [
+            _index_item("res-a", "资料甲"),
+            _index_item("res-b", "资料乙"),
+        ],
+    )
+    _record(
+        turn,
+        "mystand_authorization",
+        {
+            "operation": "resolve_many",
+            "resource_uids": ["res-b", "res-a"],
+        },
+        {
+            "ok": True,
+            "content": '{"resources":[{"resourceUid":"res-b","content":"乙"},{"resourceUid":"res-a","content":"甲"}]}',
+            "recordRefs": ["res-a", "res-b"],
+        },
+        "call-auth-batch",
+    )
+
+    decision = check_completion("资料甲为甲，资料乙为乙。", turn)
+
+    assert decision.allowed is True
+    assert decision.verification["record_refs"] == ["res-a", "res-b"]
+
+
+def test_v2_authorization_batch_rejects_one_unindexed_result():
+    turn = _turn()
+    _record_index(turn, [_index_item("res-a", "资料甲")])
+    _record(
+        turn,
+        "mystand_authorization",
+        {"operation": "resolve_many", "resource_uids": ["res-a", "res-hidden"]},
+        {
+            "ok": True,
+            "content": "不应公开",
+            "recordRefs": ["res-a", "res-hidden"],
+        },
+        "call-auth-batch",
+    )
+
+    decision = check_completion("不应公开", turn)
+
+    assert decision.allowed is False
+    assert decision.verification is None
+
+
 def test_multiple_registered_reads_share_one_verified_index_chain():
     turn = _turn()
     _record_index(
@@ -1302,19 +1353,19 @@ async def test_normal_signed_chat_uses_one_dispatch_per_durable_receipt(
     assert create_kwargs["strict_no_automatic_paid_retry"] is True
 
 
-def test_dynamic_index_followup_is_query_only_and_never_falls_back_to_auth():
+def test_dynamic_index_followup_uses_authorized_id_read_for_model_analysis():
     assert _mystand_index_followup_tool(
         completion_protocol=PROTOCOL,
         fact_requirement=None,
         resource_index_required=True,
         valid_tool_names={"mystand_query", "mystand_authorization"},
-    ) == "mystand_query"
+    ) == "mystand_authorization"
     assert _mystand_index_followup_tool(
         completion_protocol=PROTOCOL,
         fact_requirement=None,
         resource_index_required=True,
         valid_tool_names={"mystand_authorization"},
-    ) == ""
+    ) == "mystand_authorization"
     assert _mystand_index_followup_tool(
         completion_protocol="",
         fact_requirement={"schema": "legacy-signed"},

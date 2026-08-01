@@ -6,8 +6,10 @@ handling without requiring a running terminal environment.
 
 import json
 import logging
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from gateway.session_context import clear_session_vars, set_session_vars
 from tools.file_tools import (
     PATCH_SCHEMA,
 )
@@ -63,6 +65,35 @@ class TestReadFileHandler:
         result = json.loads(read_file_tool("/tmp/test.txt"))
         assert "error" in result
         assert "terminal not available" in result["error"]
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_mystand_web_read_is_limited_to_site_code_roots(
+        self,
+        mock_get,
+        monkeypatch,
+        tmp_path,
+    ):
+        from tools import file_tools
+
+        site_root = tmp_path / "site"
+        site_root.mkdir()
+        source = site_root / "feature.py"
+        source.write_text("FEATURE = True\n", encoding="utf-8")
+        monkeypatch.setattr(file_tools, "_MYSTAND_SITE_READ_ROOTS", (Path(site_root),))
+        result_obj = MagicMock()
+        result_obj.content = "FEATURE = True"
+        result_obj.to_dict.return_value = {"content": "FEATURE = True", "total_lines": 1}
+        mock_get.return_value.read_file.return_value = result_obj
+        tokens = set_session_vars(platform="api_server", user_id="owner")
+        try:
+            allowed = json.loads(file_tools.read_file_tool(str(source)))
+            denied = json.loads(file_tools.read_file_tool("/etc/passwd"))
+        finally:
+            clear_session_vars(tokens)
+
+        assert allowed["content"] == "FEATURE = True"
+        assert denied == {"error": "My Stand 网页只允许读取站内源码目录。"}
+        mock_get.return_value.read_file.assert_called_once()
 
 
 class TestWriteFileHandler:
@@ -327,6 +358,32 @@ class TestSearchHandler:
         from tools.file_tools import search_tool
         result = json.loads(search_tool(pattern="x"))
         assert "error" in result
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_mystand_web_search_is_limited_to_site_code_roots(
+        self,
+        mock_get,
+        monkeypatch,
+        tmp_path,
+    ):
+        from tools import file_tools
+
+        site_root = tmp_path / "site"
+        site_root.mkdir()
+        monkeypatch.setattr(file_tools, "_MYSTAND_SITE_READ_ROOTS", (Path(site_root),))
+        result_obj = MagicMock()
+        result_obj.to_dict.return_value = {"matches": []}
+        mock_get.return_value.search.return_value = result_obj
+        tokens = set_session_vars(platform="api_server", user_id="owner")
+        try:
+            allowed = json.loads(file_tools.search_tool("knowledge", path=str(site_root)))
+            denied = json.loads(file_tools.search_tool("password", path="/root"))
+        finally:
+            clear_session_vars(tokens)
+
+        assert allowed == {"matches": []}
+        assert denied == {"error": "My Stand 网页只允许读取站内源码目录。"}
+        mock_get.return_value.search.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

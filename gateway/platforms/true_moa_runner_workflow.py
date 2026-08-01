@@ -53,6 +53,7 @@ class TrueMoARunRequest:
     completion_binding: Dict[str, Any]
     dynamic_evidence_required: bool
     business_tools_disabled: bool
+    resource_module_id: str
     true_moa_snapshot: Any
     paid_call_usage_callback: Any
     request_user_id: str
@@ -239,6 +240,11 @@ class TrueMoARunWorkflow(
                     completion_binding=request.completion_binding,
                     business_tools_disabled=(
                         business_tools_disabled
+                    ),
+                    resource_module_id=getattr(
+                        request,
+                        "resource_module_id",
+                        "",
                     ),
                 )
                 trusted_turn_token = activate_turn(trusted_turn)

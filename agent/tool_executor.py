@@ -150,7 +150,9 @@ def _dynamic_raw_tool_denial(name: str) -> str | None:
         allowed = dynamic_evidence_allowed_tool_names(turn)
     except Exception:
         return denial()
-    if allowed is None or str(name or "") not in allowed:
+    if allowed is None:
+        return None
+    if str(name or "") not in allowed:
         return denial()
     return None
 

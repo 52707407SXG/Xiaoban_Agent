@@ -113,15 +113,18 @@ class TestApiServerAdapterToolset:
             "web",
             "mystand_parser",
         ]
-        assert owner == basic
+        assert owner == [*basic, "file_readonly"]
         assert owner_research == research
-        for toolsets in (basic, research, owner, owner_research):
+        for toolsets in (basic, research, owner_research):
             assert "terminal" not in toolsets
             assert "file" not in toolsets
             assert "file_readonly" not in toolsets
             assert "skills" not in toolsets
             assert "memory" not in toolsets
             assert "session_search" not in toolsets
+        assert "file_readonly" in owner
+        assert "file" not in owner
+        assert "terminal" not in owner
         assert "mystand_resource_index" in basic
         assert "mystand_resource_index" in owner
         assert "mystand_authorization" in basic
@@ -177,10 +180,8 @@ class TestApiServerAdapterToolset:
             "terminal",
             "process",
             "read_terminal",
-            "read_file",
             "write_file",
             "patch",
-            "search_files",
             "execute_code",
             "cronjob",
             "computer_use",
@@ -190,6 +191,10 @@ class TestApiServerAdapterToolset:
             "delegate_task",
         }
         assert resolved.isdisjoint(forbidden)
+        if policy == "mystand-owner":
+            assert {"read_file", "search_files"} <= resolved
+        else:
+            assert resolved.isdisjoint({"read_file", "search_files"})
 
     def test_mystand_policy_requires_authenticated_user_identity(self):
         from gateway.platforms.api_server import APIServerAdapter, InvalidToolsetPolicy

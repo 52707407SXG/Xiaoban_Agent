@@ -185,7 +185,7 @@ ACTION_OUTPUT_CONTRACTS: Dict[str, ActionOutputContract] = {
         "v1",
         "read",
         ("content",),
-        ("resourceUid", "authorizationId"),
+        ("resourceUid", "authorizationId", "recordRefs[]"),
     ),
     "mystand_query": ActionOutputContract(
         "mystand_query",
@@ -265,6 +265,7 @@ class WorkTurn:
     identity: Optional[TrustedIdentity]
     interaction_kind: str
     index_receipt: Optional[IndexReceipt]
+    resource_module_id: str = ""
     completion_protocol: str = ""
     completion_binding: Dict[str, Any] = field(default_factory=dict)
     business_tools_disabled: bool = False

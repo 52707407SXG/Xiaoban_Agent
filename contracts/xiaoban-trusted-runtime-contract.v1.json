@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "contract": "mystand.xiaoban-trusted-runtime-contract.v1",
-  "revision": "2026-07-31.3",
+  "revision": "2026-07-31.5",
   "compatibility": {
     "mode": "exact-match",
     "silentFallbackAllowed": false,
@@ -22,7 +22,6 @@
       "failure-bound"
     ],
     "evidenceBinding": "valid-read-subchain",
-    "failureBinding": "finalize-only-execution-status",
     "legacyEvidenceDecision": "projected_evidence",
     "currentEvidenceDecision": "evidence_access_verified",
     "evidenceRequiredHeader": "x-xiaoban-evidence-required",
@@ -120,7 +119,7 @@
   "tools": {
     "resourceIndex": {
       "contract": "mystand.resource-index-tool.v1",
-      "sha256": "5456e9eebab7822a0c7645c2e3c5956f988b25172e09d8bb16769e59bc199138"
+      "sha256": "792878baedc75e07aaa1e0faea7816500f5cc1b4236a6093599104e54702d6e5"
     },
     "query": {
       "contract": "mystand.query-tool.v1",

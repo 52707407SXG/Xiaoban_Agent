@@ -114,6 +114,11 @@ def dynamic_evidence_allowed_tool_names(
         return None
     if bool(getattr(turn, "business_tools_disabled", False)):
         return frozenset()
+    if str(getattr(turn, "interaction_kind", "") or "") != "WORK":
+        # Product help and other trusted CHAT turns do not need a business-data
+        # index. Their request toolset remains authoritative (the owner policy
+        # includes read-only My Stand source inspection; brokers do not).
+        return None
     if str(getattr(turn, "completion_finalization", "") or ""):
         return frozenset()
     receipt = getattr(turn, "index_receipt", None)

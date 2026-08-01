@@ -74,7 +74,11 @@ def _binding() -> dict:
     }
 
 
-def _dynamic_turn(*, business_tools_disabled: bool = False):
+def _dynamic_turn(
+    *,
+    business_tools_disabled: bool = False,
+    resource_module_id: str = "",
+):
     return begin_turn(
         channel="web",
         user_message="读取目标资料",
@@ -85,6 +89,7 @@ def _dynamic_turn(*, business_tools_disabled: bool = False):
         completion_protocol=PROTOCOL,
         completion_binding=_binding(),
         business_tools_disabled=business_tools_disabled,
+        resource_module_id=resource_module_id,
     )
 
 
@@ -1808,6 +1813,9 @@ def test_diagnostic_turn_hides_and_rejects_all_business_tools():
             "mystand_resource_index",
             "mystand_query",
             "mystand_authorization",
+            "read_file",
+            "search_files",
+            "terminal",
         ),
         "tool_choice": "required",
         "parallel_tool_calls": True,
@@ -1869,6 +1877,37 @@ def test_diagnostic_turn_hides_and_rejects_all_business_tools():
         clear_session_vars(tokens)
 
 
+def test_module_help_chat_keeps_owner_readonly_code_tools_without_index_gate():
+    turn = begin_turn(
+        channel="web",
+        user_message="查一下知识图谱代码，看看怎么用",
+        identity=IDENTITY,
+        request_id="delivery-protocol",
+        message_id="message-protocol",
+        evidence_required=False,
+        completion_protocol=PROTOCOL,
+        completion_binding=_binding(),
+    )
+    payload = {
+        "tools": _tools(
+            "mystand_resource_index",
+            "mystand_authorization",
+            "read_file",
+            "search_files",
+        ),
+    }
+
+    filtered = filter_dynamic_evidence_api_kwargs(payload, turn=turn)
+
+    assert filtered is payload
+    assert _tool_names(filtered) == [
+        "mystand_resource_index",
+        "mystand_authorization",
+        "read_file",
+        "search_files",
+    ]
+
+
 @pytest.mark.parametrize(
     "reference_id",
     ["AUTH-ABCDEFG", "OUT-ABCDEFG"],
@@ -1924,13 +1963,13 @@ def test_signed_fact_turn_keeps_provider_tools_unchanged():
     assert filter_dynamic_evidence_api_kwargs(payload, turn=signed) is payload
 
 
-def test_dynamic_registry_discards_untrusted_module_hint_before_dispatch():
+def test_dynamic_registry_uses_trusted_module_and_discards_natural_title_query():
     tokens = set_session_vars(
         platform="api_server",
         user_id=IDENTITY.account_id,
         message_id="message-protocol",
     )
-    turn = _dynamic_turn()
+    turn = _dynamic_turn(resource_module_id="finance-ledger")
     active = activate_turn(turn)
     try:
         registry = ToolRegistry()
@@ -1967,12 +2006,10 @@ def test_dynamic_registry_discards_untrusted_module_hint_before_dispatch():
         )
 
         assert result["ok"] is True
-        assert seen == [
-            {
-                "operation": "list_resources",
-                "query": "目标资料",
-            }
-        ]
+        assert seen == [{
+            "operation": "list_resources",
+            "module_id": "finance-ledger",
+        }]
         assert turn.action_calls[0].arguments == seen[0]
 
         closed = json.loads(
