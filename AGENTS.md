@@ -63,6 +63,6 @@ dependencies is available.
 ## Key Docs
 
 - `XIAOBAN_TRANSFORMATION_TRACKER.md`
+- `docs/xiaoban-agent-first-runtime-2026-08-01.md`
 - `docs/xiaoban-xiaoban-fork-strategy.md`
 - `docs/mmcc-v0.1-agent-plugin-alignment.md`
-
