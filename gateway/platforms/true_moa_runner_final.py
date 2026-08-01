@@ -102,9 +102,28 @@ class TrueMoARunnerFinalMixin:
             raise CompletionStoppedError(
                 "true MoA final stage stopped after evidence",
             )
-        if request.fact_requirement is not None:
+        successful_evidence_names = {
+            str(item.get("name") or "")
+            for item in preexecuted_evidence
+            if _tool_result_looks_successful(item.get("content"))
+        }
+        required_evidence_groups = _required_mystand_evidence_groups(
+            initial_tool_choice,
+        )
+        preexecuted_read_complete = bool(
+            required_evidence_groups
+            and all(
+                group & successful_evidence_names
+                for group in required_evidence_groups
+            )
+        )
+        if (
+            request.fact_requirement is not None
+            or preexecuted_read_complete
+        ):
             # The signed plan already executed deterministically. The provider
-            # only writes prose and cannot branch into another business tool.
+            # only writes prose and cannot spend payload space or another turn
+            # rediscovering tools after the required evidence is already read.
             self.agent.tools = []
             self.agent.valid_tool_names = set()
             _install_mystand_completion_persistence_guard(

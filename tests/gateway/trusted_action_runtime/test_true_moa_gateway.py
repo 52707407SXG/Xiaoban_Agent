@@ -4333,6 +4333,136 @@ async def test_diagnostic_runner_never_resolves_or_dispatches_business_tools(
 
 
 @pytest.mark.asyncio
+async def test_normal_preexecuted_authorization_closes_tools_before_final_reply(
+    monkeypatch,
+):
+    from gateway.platforms import api_server
+    from gateway.platforms.api_server import (
+        _mystand_completion_expected_binding,
+    )
+    from xiaoban.trusted_runtime import completion_guard
+
+    tool_definitions = [
+        {
+            "type": "function",
+            "function": {"name": name, "parameters": {}},
+        }
+        for name in ("mystand_authorization", "read_file")
+    ]
+
+    class AuthorizationFinalAgent(_FakeFinalAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tools = list(tool_definitions)
+            self.valid_tool_names = {
+                "mystand_authorization",
+                "read_file",
+            }
+
+        def run_conversation(self, **kwargs):
+            assert self.tools == []
+            assert self.valid_tool_names == set()
+            assert self._ephemeral_tool_choice == ""
+            ledger = self._paid_call_usage_ledger
+            call_id = ledger.start_call()
+            ledger.mark_dispatched(call_id)
+            ledger.finish_call(
+                call_id,
+                status="completed",
+                usage={
+                    "input_tokens": self.session_prompt_tokens,
+                    "output_tokens": self.session_completion_tokens,
+                    "total_tokens": self.session_total_tokens,
+                    "cached_input_tokens": self.session_cached_input_tokens,
+                },
+            )
+            return super().run_conversation(**kwargs)
+
+    adapter = _adapter()
+    agent = AuthorizationFinalAgent()
+    monkeypatch.setattr(
+        adapter,
+        "_create_agent",
+        lambda **_kwargs: agent,
+    )
+    monkeypatch.setattr(
+        api_server,
+        "_resolve_mystand_initial_tool_choice",
+        lambda *_args, **_kwargs: "mystand_authorization",
+    )
+    monkeypatch.setattr(
+        api_server,
+        "_run_mystand_preexecuted_evidence",
+        lambda *_args, **_kwargs: [
+            {
+                "call_id": "index-read",
+                "name": "mystand_resource_index",
+                "args": {},
+                "content": '{"ok":true,"items":[]}',
+            },
+            {
+                "call_id": "authorization-read",
+                "name": "mystand_authorization",
+                "args": {},
+                "content": '{"ok":true,"content":"authorized facts"}',
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        completion_guard,
+        "check_mystand_final_answer",
+        lambda *_args, **_kwargs: types.SimpleNamespace(
+            allowed=True,
+            text="授权资料说明",
+            reason="projected_test",
+            verification=None,
+        ),
+    )
+
+    headers = _mystand_headers("normal-authorization-finalizer")
+    for name in (
+        MODE_EPOCH_HEADER,
+        MOA_PRESET_ID_HEADER,
+        MOA_PRESET_REVISION_HEADER,
+    ):
+        headers.pop(name)
+    headers[REASONING_MODE_HEADER] = "normal"
+    headers[SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER] = (
+        SIGNED_MYSTAND_AGENT_POLICY_REVISION
+    )
+    delivery_id = "xbd_" + ("c3" * 20)
+    headers.update({
+        "Idempotency-Key": delivery_id,
+        "X-Xiaoban-Delivery-Id": delivery_id,
+        "X-Xiaoban-Delivery-Attempt": headers["X-Xiaoban-Attempt"],
+        "X-Xiaoban-Completion-Protocol": "dynamic-evidence-v2",
+        "X-Xiaoban-Evidence-Required": "1",
+        "X-Xiaoban-Invocation-Fingerprint": "c" * 64,
+    })
+    completion_binding = _mystand_completion_expected_binding(
+        headers,
+        session_id="gateway-test-session",
+    )
+
+    result, usage = await adapter._run_agent(
+        user_message="读取 AUTH-ABC12345 并说明用途",
+        conversation_history=[],
+        session_id="gateway-test-session",
+        gateway_session_key="gateway-test-channel",
+        request_headers=headers,
+        agent_ref=[None, False, None],
+        completion_protocol="dynamic-evidence-v2",
+        completion_binding=completion_binding,
+        dynamic_evidence_required=True,
+        true_moa_snapshot=None,
+    )
+
+    assert len(agent.run_calls) == 1
+    assert result["completed"] is True
+    assert usage["agent_calls"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_dynamic_v2_true_moa_no_tool_chat_keeps_legacy_outcome(
     monkeypatch,
 ):
