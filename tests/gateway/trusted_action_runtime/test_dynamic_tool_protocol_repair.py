@@ -16,7 +16,10 @@ from agent.conversation_loop import (
 )
 from agent.chat_completion_helpers import build_api_kwargs
 from agent.transports.bedrock import BedrockTransport
-from agent.tool_executor import _trusted_preaction_denial
+from agent.tool_executor import (
+    _dynamic_raw_tool_denial,
+    _trusted_preaction_denial,
+)
 from gateway.session_context import clear_session_vars, set_session_vars
 from gateway.platforms.api_server import (
     APIServerAdapter,
@@ -1877,7 +1880,7 @@ def test_diagnostic_turn_hides_and_rejects_all_business_tools():
         clear_session_vars(tokens)
 
 
-def test_module_help_chat_keeps_owner_readonly_code_tools_without_index_gate():
+def test_chat_keeps_owner_code_tools_but_hides_business_data_tools():
     turn = begin_turn(
         channel="web",
         user_message="查一下知识图谱代码，看看怎么用",
@@ -1899,13 +1902,24 @@ def test_module_help_chat_keeps_owner_readonly_code_tools_without_index_gate():
 
     filtered = filter_dynamic_evidence_api_kwargs(payload, turn=turn)
 
-    assert filtered is payload
     assert _tool_names(filtered) == [
-        "mystand_resource_index",
-        "mystand_authorization",
         "read_file",
         "search_files",
     ]
+
+    active = activate_turn(turn)
+    try:
+        for tool_name in (
+            "mystand_resource_index",
+            "mystand_query",
+            "mystand_authorization",
+        ):
+            denial = json.loads(_dynamic_raw_tool_denial(tool_name))
+            assert denial["code"] == "dynamic_tool_not_allowed"
+        assert _dynamic_raw_tool_denial("read_file") is None
+        assert _dynamic_raw_tool_denial("search_files") is None
+    finally:
+        deactivate_turn(active)
 
 
 @pytest.mark.parametrize(

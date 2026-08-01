@@ -5410,6 +5410,9 @@ class TestRunConversation:
 
         trusted_turn = SimpleNamespace(
             completion_protocol="dynamic-evidence-v2",
+            interaction_kind="WORK",
+            business_tools_disabled=False,
+            fact_requirement=None,
         )
         with (
             patch.object(

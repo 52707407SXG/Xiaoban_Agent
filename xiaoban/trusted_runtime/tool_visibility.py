@@ -12,6 +12,9 @@ _RESOURCE_INDEX_TOOL = "mystand_resource_index"
 _DYNAMIC_READ_TOOLS = frozenset(
     {"mystand_query", "mystand_authorization"}
 )
+_DYNAMIC_BUSINESS_TOOLS = frozenset(
+    {_RESOURCE_INDEX_TOOL, *_DYNAMIC_READ_TOOLS}
+)
 _SEMANTIC_QUERY_FIELDS = (
     "operation",
     "resource",
@@ -127,6 +130,25 @@ def dynamic_evidence_allowed_tool_names(
     return frozenset({_RESOURCE_INDEX_TOOL})
 
 
+def dynamic_evidence_tool_allowed(
+    turn: Optional[WorkTurn],
+    tool_name: str,
+) -> Optional[bool]:
+    """Return the request-local decision for one tool, if dynamic v2 applies."""
+    if (
+        turn is None
+        or turn.completion_protocol != MYSTAND_COMPLETION_PROTOCOL_V2
+        or getattr(turn, "fact_requirement", None) is not None
+    ):
+        return None
+    if bool(getattr(turn, "business_tools_disabled", False)):
+        return False
+    if str(getattr(turn, "interaction_kind", "") or "") != "WORK":
+        return str(tool_name or "") not in _DYNAMIC_BUSINESS_TOOLS
+    allowed_names = dynamic_evidence_allowed_tool_names(turn)
+    return bool(allowed_names is not None and tool_name in allowed_names)
+
+
 def filter_dynamic_evidence_tools(
     tools: list[Any],
     *,
@@ -140,6 +162,18 @@ def filter_dynamic_evidence_tools(
             turn = current_turn()
         except Exception:
             turn = None
+    if (
+        turn is not None
+        and turn.completion_protocol == MYSTAND_COMPLETION_PROTOCOL_V2
+        and getattr(turn, "fact_requirement", None) is None
+        and not bool(getattr(turn, "business_tools_disabled", False))
+        and str(getattr(turn, "interaction_kind", "") or "") != "WORK"
+    ):
+        return [
+            tool
+            for tool in tools
+            if dynamic_evidence_tool_allowed(turn, _tool_name(tool)) is not False
+        ]
     allowed_names = dynamic_evidence_allowed_tool_names(turn)
     if allowed_names is None or not isinstance(tools, list):
         return tools
@@ -221,6 +255,7 @@ def filter_dynamic_evidence_api_kwargs(
 
 __all__ = [
     "dynamic_evidence_allowed_tool_names",
+    "dynamic_evidence_tool_allowed",
     "filter_dynamic_evidence_api_kwargs",
     "filter_dynamic_evidence_tools",
 ]

@@ -144,17 +144,15 @@ def _dynamic_raw_tool_denial(name: str) -> str | None:
         return None
     try:
         from xiaoban.trusted_runtime.tool_visibility import (
-            dynamic_evidence_allowed_tool_names,
+            dynamic_evidence_tool_allowed,
         )
 
-        allowed = dynamic_evidence_allowed_tool_names(turn)
+        allowed = dynamic_evidence_tool_allowed(turn, str(name or ""))
     except Exception:
         return denial()
-    if allowed is None:
+    if allowed is not False:
         return None
-    if str(name or "") not in allowed:
-        return denial()
-    return None
+    return denial()
 
 
 def _emit_terminal_post_tool_call(
