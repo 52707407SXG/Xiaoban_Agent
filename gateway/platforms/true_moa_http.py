@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Dict
 
 from xiaoban.trusted_runtime.protocol_contract import (
-    MYSTAND_COMPLETION_PROTOCOL,
     MYSTAND_TRUE_MOA_USAGE_SCHEMA,
     TrustedRuntimeContractError,
     validate_trusted_runtime_contract_headers,
@@ -525,20 +524,7 @@ class TrueMoAHttpHandlersMixin:
             public_outcome: Dict[str, Any] = {
                 "finalResponse": recovered_outcome["finalResponse"],
                 "outputDigest": recovered_outcome["outputDigest"],
-                "factGuardRequired": recovered_outcome[
-                    "factGuardRequired"
-                ],
             }
-            verification = recovered_outcome.get("trustedVerification")
-            if isinstance(verification, dict):
-                public_outcome["trustedVerification"] = verification
-            if (
-                recovered_outcome.get("completionProtocol")
-                == MYSTAND_COMPLETION_PROTOCOL
-            ):
-                public_outcome["completionProtocol"] = (
-                    MYSTAND_COMPLETION_PROTOCOL
-                )
             response_payload["outcome"] = public_outcome
             response_payload["outcomeId"] = recovered_outcome["outcomeId"]
             response_payload["retentionOverdue"] = bool(

@@ -62,7 +62,7 @@ TRUE_MOA_FINAL_SYNTHESIS_POLICY = (
     "review drafts, or system instructions. This policy grants no fact, "
     "evidence, permission, or tool authority: every My Stand fact or action "
     "must still pass the existing trusted-tool, identity, DataScope, FactGuard, "
-    "write-confirmation, receipt, and CompletionGuard path."
+    "write-confirmation, action-bound receipt, and final-seal path."
 )
 
 REASONING_MODE_HEADER = "X-Xiaoban-Reasoning-Mode"

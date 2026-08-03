@@ -36,6 +36,15 @@ from xiaoban.trusted_runtime.paid_call_policy import (
     resolve_signed_mystand_agent_policy,
 )
 from xiaoban.trusted_runtime.true_moa_durable import TrueMoADurableStore
+from xiaoban.trusted_runtime.true_moa import (
+    FINAL_EXECUTOR_SLOT,
+    TRUE_MOA_MODE,
+    TRUE_MOA_PRESET_ID,
+    TRUE_MOA_PRESET_REVISION,
+    TrueMoACancelController,
+    TrueMoASnapshot,
+    TrueMoAUsageLedger,
+)
 
 
 def _usage(input_tokens: int, output_tokens: int):
@@ -181,8 +190,9 @@ def test_durable_callback_failure_prevents_provider_dispatch():
 
     assert provider_calls == 0
     receipt = ledger.to_dict()["calls"][0]
-    assert receipt["status"] == "reserved"
+    assert receipt["status"] == "not_dispatched"
     assert receipt["usageStatus"] == "unavailable"
+    assert receipt["errorCategory"] == "provider_dispatch_fence_closed"
 
 
 def test_dispatch_marker_confirmation_failure_never_calls_provider():
@@ -1246,6 +1256,67 @@ def test_true_moa_route_guard_is_independent_at_physical_dispatch():
     assert provider_calls == 0
 
 
+def test_true_moa_failed_call_reservation_closes_not_dispatched_before_provider():
+    provider_calls = 0
+
+    def fail_callback(_value):
+        raise OSError("fake durable writer unavailable")
+
+    ledger = TrueMoAUsageLedger(
+        TrueMoASnapshot(
+            mode=TRUE_MOA_MODE,
+            mode_epoch="1",
+            preset_id=TRUE_MOA_PRESET_ID,
+            preset_revision=TRUE_MOA_PRESET_REVISION,
+        ),
+        on_change=fail_callback,
+    )
+    ledger.start_slot(FINAL_EXECUTOR_SLOT, notify=False)
+    controller = TrueMoACancelController()
+    agent = SimpleNamespace(
+        _paid_call_usage_ledger=ledger,
+        _true_moa_usage_ledger=ledger,
+        _true_moa_cancel_controller=controller,
+        _interrupt_requested=False,
+        provider="deepseek",
+        model="deepseek-v4-pro",
+    )
+
+    def provider(_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        return SimpleNamespace(usage=_usage(1, 1))
+
+    with pytest.raises(RuntimeError, match="durable reservation failed"):
+        execute_llm_request(
+            agent,
+            {
+                "model": "deepseek-v4-pro",
+                "messages": [],
+                "max_tokens": 4_096,
+            },
+            provider,
+            strict=True,
+            original_request={},
+            middleware_trace=[],
+            task_id="task",
+            turn_id="turn",
+            api_request_id="true-moa-reservation-failure",
+            api_call_count=1,
+        )
+
+    final_calls = [
+        call for call in ledger.to_dict()["calls"]
+        if call["role"] == "final_executor"
+    ]
+    assert provider_calls == 0
+    assert controller.state == "failed"
+    assert len(final_calls) == 1
+    assert final_calls[0]["status"] == "not_dispatched"
+    assert final_calls[0]["usageStatus"] == "unavailable"
+    assert final_calls[0]["errorCategory"] == "provider_dispatch_fence_closed"
+
+
 def test_billing_policy_revision_is_in_idempotency_fingerprint():
     body = {"model": "test", "messages": []}
     headers = {
@@ -1328,9 +1399,6 @@ def test_agent_constructor_failure_settles_prebound_zero_call_ledger():
             ),
         },
         async_delivery=False,
-        fact_requirement=None,
-        completion_protocol="",
-        completion_binding={},
         true_moa_snapshot=None,
         paid_call_usage_callback=snapshots.append,
         request_user_id="",
@@ -1342,10 +1410,6 @@ def test_agent_constructor_failure_settles_prebound_zero_call_ledger():
         memory_identity=None,
         metadata_trace=None,
         trace_state=SimpleNamespace(tool_count=0),
-        resolve_mystand_initial_tool_choice=(
-            lambda *_args, **_kwargs: ""
-        ),
-        run_mystand_preexecuted_evidence=lambda **_kwargs: None,
     )
 
     result, usage = TrueMoARunWorkflow(request).run()

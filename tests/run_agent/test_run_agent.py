@@ -21,30 +21,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agent.codex_responses_adapter import _normalize_codex_response
-from agent.conversation_loop import (
-    _prepare_dynamic_transient_recovery_call,
-    _prepare_finalize_only_call,
-)
+from agent.agent_runtime_helpers import append_trusted_steer_to_tool_message
 
 import run_agent
 from run_agent import AIAgent
 from agent.error_classifier import FailoverReason
 from agent.memory_manager import MemoryManager
-from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
+from agent.prompt_builder import DEFAULT_AGENT_IDENTITY, STEER_MARKER_OPEN
 from agent.transports.types import NormalizedResponse
-from xiaoban.trusted_runtime import (
-    TrustedIdentity,
-    activate_turn,
-    begin_action,
-    begin_turn,
-    deactivate_turn,
-    finish_action,
-)
-from xiaoban.trusted_runtime.completion_guard import check_completion
-from xiaoban.trusted_runtime.dynamic_completion import (
-    mark_dynamic_execution_no_progress,
-    render_dynamic_failure_report,
-)
+from gateway.session_context import clear_session_vars, set_session_vars
 
 
 # ---------------------------------------------------------------------------
@@ -65,39 +50,6 @@ def _make_tool_defs(*names: str) -> list:
         }
         for n in names
     ]
-
-
-def _dynamic_work_turn(seed: str):
-    identity = TrustedIdentity(
-        account_id=f"owner-{seed}",
-        data_scope="mystand",
-        source="server_session",
-    )
-    delivery_id = f"delivery-{seed}"
-    message_id = f"message-{seed}"
-    return begin_turn(
-        channel="web",
-        user_message="请处理这项站内任务",
-        identity=identity,
-        request_id=delivery_id,
-        message_id=message_id,
-        evidence_required=True,
-        completion_protocol="dynamic-evidence-v2",
-        completion_binding={
-            "user_id": identity.account_id,
-            "session_id": f"session-{seed}",
-            "delivery_id": delivery_id,
-            "attempt": 1,
-            "message_id": message_id,
-            "request_fingerprint": hashlib.sha256(
-                f"request-{seed}".encode("utf-8")
-            ).hexdigest(),
-            "invocation_fingerprint": hashlib.sha256(
-                f"invocation-{seed}".encode("utf-8")
-            ).hexdigest(),
-            "datascope_fingerprint": identity.datascope_fingerprint,
-        },
-    )
 
 
 def test_is_destructive_command_treats_cp_as_mutating():
@@ -1090,6 +1042,7 @@ class TestHydrateTodoStore:
             {"role": "assistant", "content": "ok"},
             {
                 "role": "tool",
+                "name": "todo",
                 "content": json.dumps({"todos": todos}),
                 "tool_call_id": "c1",
             },
@@ -1110,10 +1063,48 @@ class TestHydrateTodoStore:
             agent._hydrate_todo_store(history)
         assert not agent._todo_store.has_items()
 
+    def test_other_tool_with_todos_key_cannot_poison_plan(self, agent):
+        history = [
+            {
+                "role": "tool",
+                "name": "web_search",
+                "content": json.dumps({
+                    "todos": [
+                        {"id": "spoof", "content": "Wrong", "status": "pending"},
+                    ],
+                }),
+                "tool_call_id": "c1",
+            },
+        ]
+
+        agent._hydrate_todo_store(history)
+
+        assert not agent._todo_store.has_items()
+
+    def test_invalid_historical_plan_is_ignored(self, agent):
+        history = [
+            {
+                "role": "tool",
+                "name": "todo",
+                "content": json.dumps({
+                    "todos": [
+                        {"id": "1", "content": "One", "status": "in_progress"},
+                        {"id": "2", "content": "Two", "status": "in_progress"},
+                    ],
+                }),
+                "tool_call_id": "c1",
+            },
+        ]
+
+        agent._hydrate_todo_store(history)
+
+        assert not agent._todo_store.has_items()
+
     def test_invalid_json_skipped(self, agent):
         history = [
             {
                 "role": "tool",
+                "name": "todo",
                 "content": 'not valid json "todos" oops',
                 "tool_call_id": "c1",
             },
@@ -1975,6 +1966,41 @@ class TestBuildAssistantMessage:
         assert len(result["tool_calls"]) == 1
         assert result["tool_calls"][0]["function"]["name"] == "web_search"
 
+    @pytest.mark.parametrize("raw_id", [None, 42])
+    def test_generated_tool_call_id_binds_history_execution_and_result(
+        self,
+        agent,
+        raw_id,
+    ):
+        tc = SimpleNamespace(
+            id=raw_id,
+            type="function",
+            function=SimpleNamespace(name="web_search", arguments="{}"),
+        )
+        response = _mock_assistant_msg(content="", tool_calls=[tc])
+
+        stored_assistant = agent._build_assistant_message(
+            response, "tool_calls"
+        )
+        canonical_id = stored_assistant["tool_calls"][0]["id"]
+
+        assert canonical_id
+        assert isinstance(canonical_id, str)
+        assert tc.id == canonical_id
+
+        messages = [stored_assistant]
+        with patch("run_agent.handle_function_call", return_value="BOUND-RESULT"):
+            agent._execute_tool_calls_sequential(
+                response, messages, "task-bind"
+            )
+
+        provider_messages = agent._sanitize_api_messages(messages)
+        provider_result = provider_messages[-1]
+        assert provider_result["tool_call_id"] == canonical_id
+        assert json.loads(provider_result["content"])["modelResult"] == (
+            "BOUND-RESULT"
+        )
+
     def test_with_reasoning_details(self, agent):
         details = [{"type": "reasoning.summary", "text": "step1", "signature": "sig1"}]
         msg = _mock_assistant_msg(content="ans", reasoning_details=details)
@@ -2160,6 +2186,18 @@ class TestExecuteToolCalls:
         assert messages[0]["role"] == "tool"
         assert "search result" in messages[0]["content"]
 
+    def test_sequential_handler_exception_is_dispatched_unknown(self, agent):
+        tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+
+        with patch("run_agent.handle_function_call", side_effect=RuntimeError("boom")):
+            agent._execute_tool_calls_sequential(mock_msg, messages, "task-1")
+
+        metadata = messages[0]["_xiaoban_tool_result"]
+        assert metadata["dispatchState"] == "dispatched"
+        assert metadata["outcome"] == "unknown"
+
     def test_sequential_memory_remove_notifies_provider_with_tool_result(self, agent):
         old_text = "stale preference entry"
         tc = _mock_tool_call(
@@ -2229,6 +2267,82 @@ class TestExecuteToolCalls:
         assert post_calls[0]["error_type"] == "keyboard_interrupt"
         assert json.loads(post_calls[0]["result"])["status"] == "cancelled"
 
+    def test_concurrent_keyboard_interrupt_loses_result_fence_as_unknown(
+        self,
+        agent,
+    ):
+        tc = _mock_tool_call(
+            name="web_search",
+            arguments='{"q":"test"}',
+            call_id="keyboard-fence",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+        agent._strict_no_automatic_paid_retry = True
+
+        with (
+            patch.object(agent, "_invoke_tool", side_effect=KeyboardInterrupt),
+            patch("run_agent._set_interrupt"),
+            patch(
+                "agent.tool_executor._claim_strict_tool_result",
+                return_value=False,
+            ) as result_fence,
+            patch(
+                "agent.tool_executor._emit_cancelled_terminal_post_tool_call"
+            ) as cancelled_post,
+        ):
+            agent._execute_tool_calls_concurrent(
+                mock_msg, messages, "task-keyboard-fence"
+            )
+
+        result_fence.assert_called_once_with(agent, tc.id)
+        cancelled_post.assert_not_called()
+        assert len(messages) == 1
+        metadata = messages[0]["_xiaoban_tool_result"]
+        assert metadata["callId"] == tc.id
+        assert metadata["dispatchState"] == "dispatched"
+        assert metadata["outcome"] == "unknown"
+
+    @pytest.mark.parametrize("quiet_mode", [False, True])
+    def test_sequential_keyboard_interrupt_commits_before_propagating(
+        self,
+        agent,
+        quiet_mode,
+    ):
+        tc = _mock_tool_call(
+            name="web_search",
+            arguments='{"q":"test"}',
+            call_id=f"keyboard-sequential-{quiet_mode}",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+        agent.quiet_mode = quiet_mode
+        agent._strict_no_automatic_paid_retry = True
+
+        with (
+            patch("run_agent.handle_function_call", side_effect=KeyboardInterrupt),
+            patch("run_agent._set_interrupt"),
+            patch(
+                "agent.tool_executor._claim_strict_tool_result",
+                return_value=False,
+            ) as result_fence,
+            patch(
+                "agent.tool_executor._emit_cancelled_terminal_post_tool_call"
+            ) as cancelled_post,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            agent._execute_tool_calls_sequential(
+                mock_msg, messages, "task-keyboard-sequential"
+            )
+
+        result_fence.assert_called_once_with(agent, tc.id)
+        cancelled_post.assert_not_called()
+        assert len(messages) == 1
+        metadata = messages[0]["_xiaoban_tool_result"]
+        assert metadata["callId"] == tc.id
+        assert metadata["dispatchState"] == "dispatched"
+        assert metadata["outcome"] == "unknown"
+
     def test_interrupt_skips_remaining(self, agent):
         tc1 = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
         tc2 = _mock_tool_call(name="web_search", arguments="{}", call_id="c2")
@@ -2244,6 +2358,15 @@ class TestExecuteToolCalls:
         assert (
             "cancelled" in messages[0]["content"].lower()
             or "interrupted" in messages[0]["content"].lower()
+        )
+        assert all(
+            message["_xiaoban_tool_result"]["dispatchState"]
+            == "not_dispatched"
+            for message in messages
+        )
+        assert all(
+            message["_xiaoban_tool_result"]["outcome"] == "cancelled"
+            for message in messages
         )
 
     def test_strict_cancelled_controller_blocks_sequential_tool_handler(
@@ -2275,12 +2398,6 @@ class TestExecuteToolCalls:
                     "cancelled sequential tool dispatched"
                 ),
             ) as handler,
-            patch(
-                "agent.tool_executor._trusted_preaction_denial",
-                side_effect=AssertionError(
-                    "cancelled sequential tool reached trusted PreAction"
-                ),
-            ) as preaction,
             patch.object(
                 agent._tool_guardrails,
                 "before_call",
@@ -2301,7 +2418,6 @@ class TestExecuteToolCalls:
             )
 
         handler.assert_not_called()
-        preaction.assert_not_called()
         guardrail.assert_not_called()
         checkpoint.assert_not_called()
         agent.tool_progress_callback.assert_not_called()
@@ -2310,6 +2426,8 @@ class TestExecuteToolCalls:
         activity.assert_not_called()
         assert len(messages) == 1
         assert '"status": "cancelled"' in messages[0]["content"]
+        assert messages[0]["_xiaoban_tool_result"]["dispatchState"] == "not_dispatched"
+        assert messages[0]["_xiaoban_tool_result"]["outcome"] == "cancelled"
 
     def test_strict_cancelled_controller_blocks_concurrent_tool_handler(
         self,
@@ -2341,12 +2459,6 @@ class TestExecuteToolCalls:
                     "cancelled concurrent tool dispatched"
                 ),
             ) as handler,
-            patch(
-                "agent.tool_executor._trusted_preaction_denial",
-                side_effect=AssertionError(
-                    "cancelled concurrent tool reached trusted PreAction"
-                ),
-            ) as preaction,
             patch.object(
                 agent._tool_guardrails,
                 "before_call",
@@ -2367,7 +2479,6 @@ class TestExecuteToolCalls:
             )
 
         handler.assert_not_called()
-        preaction.assert_not_called()
         guardrail.assert_not_called()
         checkpoint.assert_not_called()
         agent.tool_progress_callback.assert_not_called()
@@ -2376,6 +2487,8 @@ class TestExecuteToolCalls:
         activity.assert_not_called()
         assert len(messages) == 1
         assert '"status": "cancelled"' in messages[0]["content"]
+        assert messages[0]["_xiaoban_tool_result"]["dispatchState"] == "not_dispatched"
+        assert messages[0]["_xiaoban_tool_result"]["outcome"] == "cancelled"
 
     @pytest.mark.parametrize("concurrent", [False, True])
     def test_strict_stop_after_admission_blocks_handler_start_callbacks(
@@ -2503,8 +2616,15 @@ class TestExecuteToolCalls:
 
         assert not worker.is_alive()
         handler.assert_not_called()
-        agent.tool_complete_callback.assert_not_called()
+        agent.tool_complete_callback.assert_called_once()
+        terminal_call = agent.tool_complete_callback.call_args.args
+        assert terminal_call[:3] == (tc.id, "web_search", {})
+        assert terminal_call[4]["dispatchState"] == "not_dispatched"
+        assert terminal_call[4]["outcome"] == "cancelled"
         assert "cancelled" in json.dumps(messages).lower()
+        metadata = messages[0]["_xiaoban_tool_result"]
+        assert metadata["dispatchState"] == "not_dispatched"
+        assert metadata["outcome"] == "cancelled"
 
     @pytest.mark.parametrize("concurrent", [False, True])
     def test_strict_stop_before_result_commit_discards_private_tool_result(
@@ -2517,6 +2637,8 @@ class TestExecuteToolCalls:
         controller = TrueMoACancelController()
         agent._strict_no_automatic_paid_retry = True
         agent._true_moa_cancel_controller = controller
+        agent._current_request_id = f"request-late-{concurrent}"
+        agent._current_turn_id = f"turn-late-{concurrent}"
         agent.tool_progress_callback = MagicMock()
         agent.tool_start_callback = MagicMock()
         agent.tool_complete_callback = MagicMock()
@@ -2579,7 +2701,24 @@ class TestExecuteToolCalls:
         post_guardrail.assert_not_called()
         subdir.assert_not_called()
         agent.tool_start_callback.assert_called_once()
-        agent.tool_complete_callback.assert_not_called()
+        agent.tool_complete_callback.assert_called_once()
+        terminal_call = agent.tool_complete_callback.call_args.args
+        assert terminal_call[:3] == (
+            tc.id,
+            "web_search",
+            {},
+        )
+        assert "PRIVATE_LATE_TOOL_RESULT" not in str(terminal_call[3])
+        assert terminal_call[4] == {
+            "schema": "xiaoban.tool-result.v1",
+            "requestId": agent._current_request_id,
+            "turnId": agent._current_turn_id,
+            "callId": tc.id,
+            "toolName": "web_search",
+            "dispatchState": "dispatched",
+            "outcome": "unknown",
+            "retrySafe": False,
+        }
         progress_events = [
             call.args[0]
             for call in agent.tool_progress_callback.call_args_list
@@ -2588,6 +2727,9 @@ class TestExecuteToolCalls:
         serialized = json.dumps(messages, ensure_ascii=False)
         assert "PRIVATE_LATE_TOOL_RESULT" not in serialized
         assert "cancelled" in serialized
+        metadata = messages[0]["_xiaoban_tool_result"]
+        assert metadata["dispatchState"] == "dispatched"
+        assert metadata["outcome"] == "unknown"
 
     def test_invalid_json_args_defaults_empty(self, agent):
         tc = _mock_tool_call(
@@ -2605,6 +2747,46 @@ class TestExecuteToolCalls:
         assert messages[0]["role"] == "tool"
         assert messages[0]["tool_call_id"] == "c1"
 
+    @pytest.mark.parametrize(
+        ("tool_name", "arguments"),
+        [
+            ("todo", '{"todos": []}'),
+            ("session_search", '{"query": "x"}'),
+            ("memory", '{"action": "view"}'),
+            ("clarify", '{"question": "x"}'),
+            ("read_terminal", "{}"),
+            ("delegate_task", '{"goal": "x"}'),
+        ],
+    )
+    def test_inline_handler_exception_returns_call_bound_unknown(
+        self,
+        agent,
+        tool_name,
+        arguments,
+    ):
+        tc = _mock_tool_call(
+            name=tool_name,
+            arguments=arguments,
+            call_id=f"inline-error-{tool_name}",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+
+        with patch(
+            "agent.tool_executor._run_agent_tool_execution_middleware",
+            side_effect=RuntimeError("inline boom"),
+        ):
+            agent._execute_tool_calls_sequential(
+                mock_msg, messages, "task-inline-error"
+            )
+
+        assert len(messages) == 1
+        assert messages[0]["tool_call_id"] == tc.id
+        metadata = messages[0]["_xiaoban_tool_result"]
+        assert metadata["callId"] == tc.id
+        assert metadata["dispatchState"] == "dispatched"
+        assert metadata["outcome"] == "unknown"
+
     def test_result_truncation_over_100k(self, agent, tmp_path, monkeypatch):
         monkeypatch.setenv("XIAOBAN_HOME", str(tmp_path / ".xiaoban"))
         (tmp_path / ".xiaoban").mkdir()
@@ -2617,6 +2799,68 @@ class TestExecuteToolCalls:
         # Content should be replaced with persisted-output or truncation
         assert len(messages[0]["content"]) < 150_000
         assert ("Truncated" in messages[0]["content"] or "<persisted-output>" in messages[0]["content"])
+
+    @pytest.mark.parametrize("concurrent", [False, True])
+    def test_budget_rewrite_delivers_runtime_steer_once(
+        self,
+        agent,
+        concurrent,
+    ):
+        from tools.budget_config import BudgetConfig
+
+        tc = _mock_tool_call(
+            name="web_search",
+            arguments="{}",
+            call_id=f"budget-steer-{concurrent}",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+        agent.steer("只读，不再执行")
+        tiny_turn_budget = BudgetConfig(
+            default_result_size=10_000,
+            turn_budget=1,
+            preview_size=10_000,
+        )
+
+        with (
+            patch(
+                "agent.tool_executor._budget_for_agent",
+                return_value=tiny_turn_budget,
+            ),
+            patch("run_agent.handle_function_call", return_value="RESULT"),
+        ):
+            if concurrent:
+                agent._execute_tool_calls_concurrent(
+                    mock_msg, messages, "task-1"
+                )
+            else:
+                agent._execute_tool_calls_sequential(
+                    mock_msg, messages, "task-1"
+                )
+
+        provider_messages = agent._sanitize_api_messages(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": "web_search",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                },
+                *messages,
+            ]
+        )
+        wire_content = provider_messages[-1]["content"]
+        assert wire_content.count(STEER_MARKER_OPEN) == 1
+        assert wire_content.count("只读，不再执行") == 1
+        assert agent._pending_steer is None
 
     def test_quiet_tool_output_suppressed_when_progress_callback_present(self, agent):
         tc = _mock_tool_call(name="web_search", arguments='{"q":"test"}', call_id="c1")
@@ -2912,6 +3156,10 @@ class TestConcurrentToolExecution:
         # Second tool should succeed
         assert messages[1]["tool_call_id"] == "c2"
         assert "success" in messages[1]["content"]
+        assert messages[0]["_xiaoban_tool_result"]["dispatchState"] == "dispatched"
+        assert messages[0]["_xiaoban_tool_result"]["outcome"] == "unknown"
+        assert messages[1]["_xiaoban_tool_result"]["dispatchState"] == "dispatched"
+        assert messages[1]["_xiaoban_tool_result"]["outcome"] == "success"
 
     def test_concurrent_interrupt_before_start(self, agent):
         """If interrupt is requested before concurrent execution, all tools are skipped."""
@@ -2927,6 +3175,15 @@ class TestConcurrentToolExecution:
         assert len(messages) == 2
         assert "cancelled" in messages[0]["content"].lower() or "skipped" in messages[0]["content"].lower()
         assert "cancelled" in messages[1]["content"].lower() or "skipped" in messages[1]["content"].lower()
+        assert all(
+            message["_xiaoban_tool_result"]["dispatchState"]
+            == "not_dispatched"
+            for message in messages
+        )
+        assert all(
+            message["_xiaoban_tool_result"]["outcome"] == "cancelled"
+            for message in messages
+        )
 
     def test_concurrent_truncates_large_results(self, agent, tmp_path, monkeypatch):
         """Concurrent path should save oversized results to file."""
@@ -3790,9 +4047,25 @@ class TestHandleMaxIterations:
                 "tool_calls": [{"id": "call_1", "function": {"name": "execute_code", "arguments": "{}"}}],
                 "codex_reasoning_items": [{"id": "rs_1"}],
             },
-            {"role": "tool", "tool_call_id": "call_1", "content": "result", "tool_name": "execute_code"},
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "PRIVATE_DENIED_RESULT",
+                "tool_name": "execute_code",
+                "_xiaoban_tool_result": {
+                    "schema": "xiaoban.tool-result.v1",
+                    "requestId": "request-1",
+                    "turnId": "turn-1",
+                    "callId": "call_1",
+                    "toolName": "execute_code",
+                    "dispatchState": "not_dispatched",
+                    "outcome": "denied",
+                    "retrySafe": False,
+                },
+            },
             {"role": "assistant", "content": "Done.", "_empty_recovery_synthetic": True},
         ]
+        append_trusted_steer_to_tool_message(messages[2], "改成只读")
 
         result = agent._handle_max_iterations(messages, 60)
 
@@ -3803,8 +4076,26 @@ class TestHandleMaxIterations:
             assert "codex_reasoning_items" not in m, m
             assert "codex_message_items" not in m, m
             assert not any(isinstance(k, str) and k.startswith("_") for k in m), m
+        projected_tool = next(
+            message for message in sent_msgs
+            if message.get("role") == "tool"
+            and message.get("tool_call_id") == "call_1"
+        )
+        projected_json, marker, steer = projected_tool["content"].partition(
+            f"\n\n{STEER_MARKER_OPEN}"
+        )
+        projected = json.loads(projected_json)
+        assert projected["schema"] == "xiaoban.tool-result.v1"
+        assert projected["dispatchState"] == "not_dispatched"
+        assert projected["outcome"] == "denied"
+        assert projected["modelError"] == {"code": "denied"}
+        assert "PRIVATE_DENIED_RESULT" not in projected_tool["content"]
+        assert marker
+        assert steer.count("改成只读") == 1
         # Internal history is untouched — the path copies each message.
         assert messages[2]["tool_name"] == "execute_code"
+        assert messages[2]["_xiaoban_tool_result"]["outcome"] == "denied"
+        assert messages[2]["_xiaoban_trusted_steer"]
         assert messages[1]["codex_reasoning_items"] == [{"id": "rs_1"}]
 
     def test_summary_omits_provider_preferences_for_non_openrouter(self, agent):
@@ -3973,797 +4264,269 @@ class TestRunConversation:
         assert result["api_calls"] == 2
         assert mock_handle_function_call.call_args.kwargs["tool_call_id"] == "c1"
         assert mock_handle_function_call.call_args.kwargs["session_id"] == agent.session_id
+        second_call_messages = (
+            agent.client.chat.completions.create.call_args_list[1]
+            .kwargs["messages"]
+        )
+        projected_tool_results = [
+            message
+            for message in second_call_messages
+            if message.get("role") == "tool"
+        ]
+        assert len(projected_tool_results) == 1
+        projected = json.loads(projected_tool_results[0]["content"])
+        assert projected["callId"] == "c1"
+        assert projected["requestId"]
+        assert projected["turnId"]
+        assert projected["dispatchState"] == "dispatched"
+        assert projected["outcome"] == "success"
+        assert projected["modelResult"] == "search result"
+        assert "_xiaoban_tool_result" not in projected_tool_results[0]
 
-    def test_unresolved_material_tool_failure_marks_natural_reply_failed(
+    @pytest.mark.parametrize(
+        (
+            "receipt_verified",
+            "expected_outcome",
+            "expected_projection_key",
+            "final_text",
+        ),
+        [
+            pytest.param(
+                True,
+                "success",
+                "modelResult",
+                "已经按你的确认完成写入，并核验了保存结果。",
+                id="verified-v2-receipt-is-success",
+            ),
+            pytest.param(
+                False,
+                "failed",
+                "modelError",
+                "这次没有取得有效写入回执，我不会把它报告为成功。",
+                id="unverified-receipt-is-not-success",
+            ),
+        ],
+    )
+    def test_authorization_write_receipt_returns_to_same_model_loop(
         self,
         agent,
+        monkeypatch,
+        receipt_verified,
+        expected_outcome,
+        expected_projection_key,
+        final_text,
     ):
+        """A fake Provider must see the commit ToolResult before its final."""
+        from tools import mystand_authorization_tool as authorization_bridge
+        from tools import mystand_authorization_write_tool as write_bridge
+
         self._setup_agent(agent)
-        tool_turn = _mock_response(
-            content="",
-            finish_reason="tool_calls",
-            tool_calls=[
-                _mock_tool_call(
-                    name="web_search",
-                    arguments='{"q":"current listing"}',
-                    call_id="failed-search",
-                )
-            ],
+        agent.tools = _make_tool_defs("mystand_authorization_write")
+        agent.valid_tool_names = {"mystand_authorization_write"}
+        commit_args = {
+            "operation": "commit_write",
+            "preview_token": "preview-token-e4",
+            "idempotency_key": "same-key-from-preview-e4",
+        }
+        serialized_preview_token = json.dumps(
+            commit_args["preview_token"],
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
-        natural_failure = _mock_response(
-            content=(
-                "没有查到最新资料：搜索服务返回了 503 上游超时。"
-                "我这轮没有拿到可用于判断的结果，所以现在不能给出可靠建议。"
+        preview_token_hash = hashlib.sha256(
+            serialized_preview_token.encode("utf-8")
+        ).hexdigest()
+        confirmation_context = (
+            "ZYJ005\u001fsession-confirm-e4\u001fmsg-confirm-e4"
+        )
+        confirmation_id = "xiaoban-write-" + hashlib.sha256(
+            confirmation_context.encode("utf-8")
+        ).hexdigest()
+        upstream_result = {
+            "ok": True,
+            "status": 200,
+            "receiptVersion": "authorization-write-receipt-v2",
+            "verified": receipt_verified,
+            "audit": {
+                "recorded": True,
+                "auditId": "audit-e4-same-loop-0001",
+            },
+            "confirmationId": confirmation_id,
+            "action": "knowledge-graph.add-node",
+            "target": {
+                "graphId": "graph-e4",
+                "nodeId": "node-e4-verified",
+            },
+            "expectedVersion": "graph-version-1",
+            "nextVersion": "graph-version-2",
+            "idempotencyKey": commit_args["idempotency_key"],
+            "requestFingerprint": "a" * 64,
+            "previewTokenHash": preview_token_hash,
+            "changeDigest": "c" * 64,
+            "committedAt": "2026-08-03T12:00:00.000Z",
+        }
+        tool_call = _mock_tool_call(
+            name="mystand_authorization_write",
+            arguments=json.dumps(commit_args),
+            call_id="authorization-write-e4",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[tool_call],
             ),
+            _mock_response(content=final_text, finish_reason="stop"),
+        ]
+        internal_calls = []
+
+        def fake_internal(path, payload, **kwargs):
+            internal_calls.append((path, payload, kwargs))
+            return json.dumps(upstream_result, ensure_ascii=False)
+
+        def execute_write(function_name, function_args, *_args, **_kwargs):
+            assert function_name == "mystand_authorization_write"
+            return write_bridge.mystand_authorization_write_tool_handler(
+                function_args
+            )
+
+        monkeypatch.setattr(
+            write_bridge,
+            "mark_mystand_private_query_turn",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            authorization_bridge,
+            "_post_internal",
+            fake_internal,
+        )
+        session_tokens = set_session_vars(
+            platform="api_server",
+            user_id="ZYJ005",
+            user_message="确认写入",
+            message_id="msg-confirm-e4",
+            session_id="session-confirm-e4",
+            session_key="key-confirm-e4",
+            async_delivery=False,
+        )
+        try:
+            with (
+                patch("run_agent.handle_function_call", side_effect=execute_write),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation("确认写入")
+        finally:
+            clear_session_vars(session_tokens)
+
+        assert result["final_response"] == final_text
+        assert result["api_calls"] == 2
+        assert internal_calls == [
+            (
+                "/api/xiaoban/internal/authorization/write/commit",
+                {
+                    "previewToken": "preview-token-e4",
+                    "idempotencyKey": "same-key-from-preview-e4",
+                    "confirmationPhrase": "确认写入",
+                },
+                {
+                    "session": {
+                        "platform": "api_server",
+                        "user_id": "ZYJ005",
+                        "message_id": "msg-confirm-e4",
+                        "session_id": "session-confirm-e4",
+                    },
+                    "explicit_confirmation": True,
+                },
+            )
+        ]
+        second_call_messages = (
+            agent.client.chat.completions.create.call_args_list[1]
+            .kwargs["messages"]
+        )
+        projected_messages = [
+            message
+            for message in second_call_messages
+            if message.get("role") == "tool"
+        ]
+        assert len(projected_messages) == 1
+        projected = json.loads(projected_messages[0]["content"])
+        assert projected["callId"] == "authorization-write-e4"
+        assert projected["toolName"] == "mystand_authorization_write"
+        assert projected["dispatchState"] == "dispatched"
+        assert projected["outcome"] == expected_outcome
+        assert expected_projection_key in projected
+
+        if expected_outcome == "success":
+            receipt = projected["modelResult"]
+            assert receipt["verified"] is True
+            assert (
+                receipt["receiptVersion"]
+                == "authorization-write-receipt-v2"
+            )
+            assert receipt["audit"] == {
+                "recorded": True,
+                "auditId": "audit-e4-same-loop-0001",
+            }
+            assert receipt["idempotencyKey"] == commit_args["idempotency_key"]
+            assert receipt["previewTokenHash"] == preview_token_hash
+            assert receipt["confirmationId"] == confirmation_id
+            assert "完成写入" in result["final_response"]
+        else:
+            assert "modelResult" not in projected
+            assert projected["modelError"]["code"] == (
+                "authorization_write_receipt_invalid"
+            )
+            assert projected["modelError"]["details"]["ok"] is False
+            assert "完成写入" not in result["final_response"]
+            assert "写入成功" not in result["final_response"]
+            assert "已写入" not in result["final_response"]
+
+    def test_todo_tool_result_still_requires_model_owned_final(self, agent):
+        """A plan update is substantive, not a post-response final shortcut."""
+        self._setup_agent(agent)
+        tc = _mock_tool_call(
+            name="todo",
+            arguments=(
+                '{"todos":[{"id":"1","content":"核对结果",'
+                '"status":"in_progress"}]}'
+            ),
+            call_id="todo-1",
+        )
+        plan_turn = _mock_response(
+            content="我先整理步骤。",
+            finish_reason="tool_calls",
+            tool_calls=[tc],
+        )
+        empty_follow_up = _mock_response(content="", finish_reason="stop")
+        natural_final = _mock_response(
+            content="已根据计划结果完成核对。",
             finish_reason="stop",
         )
         agent.client.chat.completions.create.side_effect = [
-            tool_turn,
-            natural_failure,
+            plan_turn,
+            empty_follow_up,
+            natural_final,
         ]
 
         with (
             patch(
-                "run_agent.handle_function_call",
-                return_value=json.dumps(
-                    {
-                        "ok": False,
-                        "status": 503,
-                        "error": "upstream timeout",
-                    }
+                "tools.todo_tool.todo_tool",
+                return_value=(
+                    '{"todos":[{"id":"1","content":"核对结果",'
+                    '"status":"in_progress"}]}'
                 ),
             ),
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
         ):
-            result = agent.run_conversation("查一下最新资料并给我建议")
+            result = agent.run_conversation("处理一个复杂任务")
 
-        assert result["final_response"] == natural_failure.choices[0].message.content
-        assert result["completed"] is False
-        assert result["failed"] is True
-        assert result["tool_outcome"] == {
-            "schema": "xiaoban.tool-turn-outcome.v1",
-            "terminal_status": "failed",
-            "batch_id": 1,
-            "attempt_count": 1,
-            "failed_tools": ["web_search"],
-            "event_ids": ["failed-search"],
-        }
-
-    def test_exact_material_retry_recovers_earlier_tool_failure(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        failed_turn = _mock_response(
-            content="",
-            finish_reason="tool_calls",
-            tool_calls=[
-                _mock_tool_call(
-                    name="web_search",
-                    arguments='{"q":"primary"}',
-                    call_id="primary-failed",
-                )
-            ],
-        )
-        alternate_turn = _mock_response(
-            content="",
-            finish_reason="tool_calls",
-            tool_calls=[
-                _mock_tool_call(
-                    name="web_search",
-                    arguments='{"q":"primary"}',
-                    call_id="retry-succeeded",
-                )
-            ],
-        )
-        final = _mock_response(
-            content="备用来源拿到了资料。我的建议是先核对更新时间，再采用第二项。",
-            finish_reason="stop",
-        )
-        agent.client.chat.completions.create.side_effect = [
-            failed_turn,
-            alternate_turn,
-            final,
-        ]
-
-        _attempts = 0
-
-        def _tool_result(_name, args, _task_id, **_kwargs):
-            nonlocal _attempts
-            _attempts += 1
-            if _attempts == 1:
-                return json.dumps(
-                    {
-                        "ok": False,
-                        "status": 503,
-                        "error": "primary upstream timeout",
-                    }
-                )
-            return json.dumps(
-                {
-                    "ok": True,
-                    "source": "retry",
-                    "items": [{"name": "second option"}],
-                }
-            )
-
-        with (
-            patch("run_agent.handle_function_call", side_effect=_tool_result),
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("查资料并给建议")
-
-        assert result["completed"] is True
-        assert result["failed"] is False
-        assert "tool_outcome" not in result
-        assert result["final_response"] == final.choices[0].message.content
-
-    def test_housekeeping_success_does_not_clear_material_tool_failure(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        agent.tools = _make_tool_defs("web_search", "memory")
-        agent.valid_tool_names = {"web_search", "memory"}
-        agent.client.chat.completions.create.side_effect = [
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="web_search",
-                        arguments="{}",
-                        call_id="material-failed",
-                    )
-                ],
-            ),
-            _mock_response(
-                content=(
-                    "搜索上游超时，资料还没有拿到；我先把这次情况记入会话。"
-                ),
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="memory",
-                        arguments="{}",
-                        call_id="housekeeping-succeeded",
-                    )
-                ],
-            ),
-            _mock_response(
-                content="搜索上游超时，资料没有拿到；记忆整理成功不代表任务成功。",
-                finish_reason="stop",
-            ),
-        ]
-
-        def _record_without_dispatch(
-            assistant_message,
-            messages,
-            _task_id,
-            api_call_count=0,
-        ):
-            for tool_call in assistant_message.tool_calls:
-                failed = tool_call.function.name == "web_search"
-                agent._record_turn_tool_outcome(
-                    tool_call.function.name,
-                    failed=failed,
-                    batch_id=api_call_count,
-                    tool_call_id=tool_call.id,
-                )
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": json.dumps(
-                            {
-                                "ok": not failed,
-                                "error": (
-                                    "upstream timeout"
-                                    if failed
-                                    else None
-                                ),
-                            }
-                        ),
-                    }
-                )
-
-        with (
-            patch.object(
-                agent,
-                "_execute_tool_calls",
-                side_effect=_record_without_dispatch,
-            ),
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("查资料并给建议")
-
-        assert result["completed"] is False
-        assert result["failed"] is True
-        assert result["tool_outcome"]["event_ids"] == ["material-failed"]
-        assert result["tool_outcome"]["failed_tools"] == ["web_search"]
-
-    def test_model_declared_parallel_any_of_cannot_hide_a_real_failure(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        agent.client.chat.completions.create.side_effect = [
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="web_search",
-                        arguments=json.dumps(
-                            {
-                                "q": "unavailable-source",
-                                "_xiaoban_runtime": {
-                                    "attempt_group_id": "source-options",
-                                    "completion_policy": "any_of",
-                                },
-                            }
-                        ),
-                        call_id="parallel-failed",
-                    ),
-                    _mock_tool_call(
-                        name="web_search",
-                        arguments=json.dumps(
-                            {
-                                "q": "working-source",
-                                "_xiaoban_runtime": {
-                                    "attempt_group_id": "source-options",
-                                    "completion_policy": "any_of",
-                                },
-                            }
-                        ),
-                        call_id="parallel-succeeded",
-                    ),
-                ],
-            ),
-            _mock_response(
-                content="第二个来源返回了资料，我已据此完成比较并给出建议。",
-                finish_reason="stop",
-            ),
-        ]
-
-        def _parallel_result(_name, args, _task_id, **_kwargs):
-            if args.get("q") == "unavailable-source":
-                return json.dumps(
-                    {
-                        "ok": False,
-                        "status": 503,
-                        "error": "source unavailable",
-                    }
-                )
-            return json.dumps(
-                {
-                    "ok": True,
-                    "items": [{"source": "working-source"}],
-                }
-            )
-
-        with (
-            patch("run_agent.handle_function_call", side_effect=_parallel_result),
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("并行查两个来源，拿到一个可靠来源即可")
-
-        assert result["completed"] is False
-        assert result["failed"] is True
-        assert result["tool_outcome"]["event_ids"] == ["parallel-failed"]
-
-    def test_mixed_batch_maintenance_success_cannot_clear_search_failure(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        agent.tools = _make_tool_defs("web_search", "memory")
-        agent.valid_tool_names = {"web_search", "memory"}
-        agent.client.chat.completions.create.side_effect = [
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="web_search",
-                        arguments='{"q":"required material"}',
-                        call_id="mixed-search-failed",
-                    ),
-                    _mock_tool_call(
-                        name="memory",
-                        arguments=json.dumps(
-                            {
-                                "action": "add",
-                                "target": "memory",
-                                "content": "search was attempted",
-                            }
-                        ),
-                        call_id="mixed-memory-succeeded",
-                    ),
-                ],
-            ),
-            _mock_response(
-                content=(
-                    "搜索服务上游超时，所需资料没有拿到；"
-                    "记忆写入成功不能替代这次查询结果。"
-                ),
-                finish_reason="stop",
-            ),
-        ]
-
-        with (
-            patch(
-                "run_agent.handle_function_call",
-                return_value=json.dumps(
-                    {
-                        "ok": False,
-                        "status": 503,
-                        "error": "search upstream timeout",
-                    }
-                ),
-            ),
-            patch(
-                "tools.memory_tool.memory_tool",
-                return_value=json.dumps({"success": True}),
-            ),
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("查资料并给建议")
-
-        assert result["completed"] is False
-        assert result["failed"] is True
-        assert result["tool_outcome"]["event_ids"] == [
-            "mixed-search-failed"
-        ]
-        outcomes = {
-            item["tool_call_id"]: item
-            for item in agent._turn_tool_outcomes
-        }
-        assert outcomes["mixed-search-failed"]["execution_role"] == (
-            "user-task"
-        )
-        assert outcomes["mixed-search-failed"]["material"] is True
-        assert outcomes["mixed-memory-succeeded"]["execution_role"] == (
-            "maintenance-side-effect"
-        )
-        assert outcomes["mixed-memory-succeeded"]["material"] is False
-
-    def test_session_search_failure_is_a_user_task_failure(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        agent.tools = _make_tool_defs("session_search")
-        agent.valid_tool_names = {"session_search"}
-        agent.client.chat.completions.create.side_effect = [
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="session_search",
-                        arguments='{"query":"昨天的发布"}',
-                        call_id="session-search-failed",
-                    )
-                ],
-            ),
-            _mock_response(
-                content="会话库当前不可用，所以没有拿到昨天的记录。",
-                finish_reason="stop",
-            ),
-        ]
-
-        with (
-            patch.object(agent, "_get_session_db_for_recall", return_value=None),
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("查一下昨天的发布对话")
-
-        assert result["completed"] is False
-        assert result["failed"] is True
-        assert result["tool_outcome"]["failed_tools"] == ["session_search"]
-        assert agent._turn_tool_outcomes[-1]["execution_role"] == "user-task"
-        assert agent._turn_tool_outcomes[-1]["material"] is True
-
-    def test_server_grant_recovers_failed_source_with_different_tool(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        agent.tools = _make_tool_defs("web_search", "session_search")
-        agent.valid_tool_names = {"web_search", "session_search"}
-        responses = [
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="web_search",
-                        arguments=json.dumps({"q": "primary"}),
-                        call_id="primary-source-failed",
-                    )
-                ],
-            ),
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="session_search",
-                        arguments=json.dumps({"query": "同一资料"}),
-                        call_id="session-source-succeeded",
-                    )
-                ],
-            ),
-            _mock_response(
-                content="外部来源超时，但历史会话拿到了同一资料，我已据此整理建议。",
-                finish_reason="stop",
-            ),
-        ]
-        response_index = 0
-
-        def _next_response(*_args, **_kwargs):
-            nonlocal response_index
-            if response_index == 1:
-                issued = agent._issue_turn_tool_recovery_grant(
-                    target_call_id="primary-source-failed",
-                    tool_name="session_search",
-                    function_args={"query": "同一资料"},
-                    grant_id="server-issued-source-fallback",
-                )
-                assert issued == "server-issued-source-fallback"
-            response = responses[response_index]
-            response_index += 1
-            return response
-
-        agent.client.chat.completions.create.side_effect = _next_response
-
-        with (
-            patch(
-                "run_agent.handle_function_call",
-                return_value=json.dumps(
-                    {
-                        "ok": False,
-                        "status": 503,
-                        "error": "primary source timeout",
-                    }
-                ),
-            ),
-            patch.object(
-                agent,
-                "_get_session_db_for_recall",
-                return_value=object(),
-            ),
-            patch(
-                "tools.session_search_tool.session_search",
-                return_value=json.dumps(
-                    {
-                        "success": True,
-                        "sessions": [
-                            {
-                                "session_id": "prior-session",
-                                "snippet": "同一资料的实际内容",
-                            }
-                        ],
-                    }
-                ),
-            ),
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("先查外部来源，失败就查历史会话")
-
-        assert result["completed"] is True
-        assert result["failed"] is False
-        assert "tool_outcome" not in result
-        assert agent._turn_tool_outcomes[-1]["tool_name"] == "session_search"
-        assert agent._turn_tool_outcomes[-1]["material"] is True
-        assert agent._turn_tool_outcomes[-1]["recovery_of"] == (
-            "primary-source-failed"
-        )
-        assert agent._turn_tool_outcomes[-1][
-            "recovery_authority"
-        ] == "server-grant"
-        assert agent._turn_tool_outcomes[-1][
-            "recovery_grant_id"
-        ] == "server-issued-source-fallback"
-
-    def test_user_requested_memory_failure_is_not_background_success(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        agent.tools = _make_tool_defs("memory")
-        agent.valid_tool_names = {"memory"}
-        agent.client.chat.completions.create.side_effect = [
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="memory",
-                        arguments=json.dumps(
-                            {
-                                "action": "add",
-                                "target": "memory",
-                                "content": "优先使用成熟体系",
-                            }
-                        ),
-                        call_id="memory-write-failed",
-                    )
-                ],
-            ),
-            _mock_response(
-                content="记忆写入失败，内容没有保存。",
-                finish_reason="stop",
-            ),
-        ]
-
-        with (
-            patch(
-                "tools.memory_tool.memory_tool",
-                return_value=json.dumps(
-                    {
-                        "success": False,
-                        "error": "memory store unavailable",
-                    }
-                ),
-            ),
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("记住：优先使用成熟体系")
-
-        assert result["completed"] is False
-        assert result["failed"] is True
-        assert result["tool_outcome"]["failed_tools"] == ["memory"]
-        assert agent._turn_tool_outcomes[-1]["execution_role"] == "user-task"
-        assert agent._turn_tool_outcomes[-1]["material"] is True
-
-    def test_user_task_memory_retry_success_recovers_prior_failure(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        agent.tools = _make_tool_defs("memory")
-        agent.valid_tool_names = {"memory"}
-        agent.client.chat.completions.create.side_effect = [
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="memory",
-                        arguments=json.dumps(
-                            {
-                                "action": "add",
-                                "target": "memory",
-                                "content": "优先使用成熟体系",
-                            }
-                        ),
-                        call_id="memory-first-failed",
-                    )
-                ],
-            ),
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="memory",
-                        arguments=json.dumps(
-                            {
-                                "action": "add",
-                                "target": "memory",
-                                "content": "优先使用成熟体系",
-                                "_xiaoban_runtime": {
-                                    "recovery_of": "forged-old-call-id",
-                                    "attempt_group_id": "model-group",
-                                    "completion_policy": "any_of",
-                                },
-                            }
-                        ),
-                        call_id="memory-retry-succeeded",
-                    )
-                ],
-            ),
-            _mock_response(
-                content="第一次写入失败后重试成功，这条要求现在已经保存。",
-                finish_reason="stop",
-            ),
-        ]
-
-        with (
-            patch(
-                "tools.memory_tool.memory_tool",
-                side_effect=[
-                    json.dumps(
-                        {
-                            "success": False,
-                            "error": "memory store temporarily unavailable",
-                        }
-                    ),
-                    json.dumps({"success": True}),
-                ],
-            ),
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("记住这条要求，失败就重试一次")
-
-        assert result["completed"] is True
-        assert result["failed"] is False
-        assert "tool_outcome" not in result
-        outcomes = {
-            item["tool_call_id"]: item
-            for item in agent._turn_tool_outcomes
-        }
-        assert outcomes["memory-first-failed"]["execution_role"] == (
-            "user-task"
-        )
-        assert outcomes["memory-retry-succeeded"]["execution_role"] == (
-            "task-recovery"
-        )
-        assert outcomes["memory-retry-succeeded"]["recovery_of"] == (
-            "memory-first-failed"
-        )
-        assert outcomes["memory-retry-succeeded"][
-            "recovery_authority"
-        ] == "exact-action"
-        assert outcomes["memory-retry-succeeded"]["material"] is True
-
-    def test_different_memory_action_cannot_recover_prior_failure(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        agent.tools = _make_tool_defs("memory")
-        agent.valid_tool_names = {"memory"}
-        agent.client.chat.completions.create.side_effect = [
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="memory",
-                        arguments=json.dumps(
-                            {
-                                "action": "add",
-                                "target": "user",
-                                "content": "偏好 A",
-                            }
-                        ),
-                        call_id="memory-a-failed",
-                    )
-                ],
-            ),
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="memory",
-                        arguments=json.dumps(
-                            {
-                                "action": "add",
-                                "target": "memory",
-                                "content": "环境事实 B",
-                                "_xiaoban_runtime": {
-                                    "recovery_of": "memory-a-failed",
-                                },
-                            }
-                        ),
-                        call_id="memory-b-succeeded",
-                    )
-                ],
-            ),
-            _mock_response(
-                content="偏好 A 没有保存；环境事实 B 已保存。",
-                finish_reason="stop",
-            ),
-        ]
-
-        with (
-            patch(
-                "tools.memory_tool.memory_tool",
-                side_effect=[
-                    json.dumps(
-                        {
-                            "success": False,
-                            "error": "memory store unavailable",
-                        }
-                    ),
-                    json.dumps({"success": True}),
-                ],
-            ),
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("保存偏好 A 和环境事实 B")
-
-        assert result["completed"] is False
-        assert result["failed"] is True
-        assert result["tool_outcome"]["event_ids"] == [
-            "memory-a-failed"
-        ]
-        outcomes = {
-            item["tool_call_id"]: item
-            for item in agent._turn_tool_outcomes
-        }
-        assert outcomes["memory-b-succeeded"]["execution_role"] == (
-            "user-task"
-        )
-        assert "recovery_of" not in outcomes["memory-b-succeeded"]
-
-    def test_concurrent_worker_baseexceptions_are_recorded_as_failures(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        agent.client.chat.completions.create.side_effect = [
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="web_search",
-                        arguments='{"q":"source-a"}',
-                        call_id="worker-a-died",
-                    ),
-                    _mock_tool_call(
-                        name="web_search",
-                        arguments='{"q":"source-b"}',
-                        call_id="worker-b-died",
-                    ),
-                ],
-            ),
-            _mock_response(
-                content=(
-                    "两个查询线程都异常退出，没有取得任何来源资料，"
-                    "所以这次无法给出可靠建议。"
-                ),
-                finish_reason="stop",
-            ),
-        ]
-
-        with (
-            patch(
-                "run_agent.handle_function_call",
-                side_effect=SystemExit("synthetic worker exit"),
-            ),
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("并行查两个来源后给建议")
-
-        assert result["completed"] is False
-        assert result["failed"] is True
-        assert result["tool_outcome"]["attempt_count"] == 2
-        assert result["tool_outcome"]["event_ids"] == [
-            "worker-a-died",
-            "worker-b-died",
-        ]
-        assert [
-            item["failed"]
-            for item in agent._turn_tool_outcomes
-        ] == [True, True]
+        assert result["final_response"] == "已根据计划结果完成核对。"
+        assert result["turn_exit_reason"] != "fallback_prior_turn_content"
+        assert result["api_calls"] == 3
 
     def test_request_scoped_api_hooks_fire_for_each_api_call(self, agent):
         self._setup_agent(agent)
@@ -5160,7 +4923,20 @@ class TestRunConversation:
         assert "PRIVATE_LATE_TOOL_RESULT" not in serialized
         assert "PRIVATE_FORBIDDEN_NEXT_RESPONSE" not in serialized
         assert all("PRIVATE_LATE_TOOL_RESULT" not in item for item in persisted)
-        agent.tool_complete_callback.assert_not_called()
+        agent.tool_complete_callback.assert_called_once()
+        terminal_call = agent.tool_complete_callback.call_args.args
+        assert terminal_call[:3] == (tc.id, "web_search", {})
+        assert "PRIVATE_LATE_TOOL_RESULT" not in str(terminal_call[3])
+        assert terminal_call[4] == {
+            "schema": "xiaoban.tool-result.v1",
+            "requestId": agent._current_request_id,
+            "turnId": agent._current_turn_id,
+            "callId": tc.id,
+            "toolName": "web_search",
+            "dispatchState": "dispatched",
+            "outcome": "unknown",
+            "retrySafe": False,
+        }
         assert [
             call.args[0]
             for call in agent.tool_progress_callback.call_args_list
@@ -5353,2411 +5129,6 @@ class TestRunConversation:
         assert result["turn_exit_reason"].startswith(
             "strict_iteration_budget_reached",
         )
-
-    def test_strict_paid_turn_reserves_last_call_for_toolless_final_reply(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        agent._strict_no_automatic_paid_retry = True
-        agent._disable_streaming = True
-        agent._use_prompt_caching = True
-        agent.max_iterations = 8
-        agent.tools = [{
-            "type": "function",
-            "function": {
-                "name": "mystand_resource_index",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        }]
-        agent.valid_tool_names = {"mystand_resource_index"}
-        first = _mock_response(
-            content="",
-            finish_reason="tool_calls",
-            tool_calls=[
-                _mock_tool_call(
-                    name="mystand_resource_index",
-                    arguments="{}",
-                    call_id="strict-finalize-tool",
-                )
-            ],
-        )
-        final = _mock_response(
-            content="我已经根据这次真实执行结果说明情况。",
-            finish_reason="stop",
-        )
-        observed_requests = []
-
-        def _provider(payload):
-            observed_requests.append(payload)
-            return [first, final][len(observed_requests) - 1]
-
-        def _cache_system_blocks(messages, **_kwargs):
-            cached = [dict(message) for message in messages]
-            if (
-                cached
-                and cached[0].get("role") == "system"
-                and "Runtime finalization:"
-                in str(cached[0].get("content") or "")
-            ):
-                assert isinstance(cached[0]["content"], str)
-                cached[0]["content"] = [{
-                    "type": "text",
-                    "text": cached[0]["content"],
-                    "cache_control": {"type": "ephemeral"},
-                }]
-            return cached
-
-        trusted_turn = SimpleNamespace(
-            completion_protocol="dynamic-evidence-v2",
-            interaction_kind="WORK",
-            business_tools_disabled=False,
-            fact_requirement=None,
-        )
-        with (
-            patch.object(
-                agent,
-                "_interruptible_api_call",
-                side_effect=_provider,
-            ),
-            patch("run_agent.handle_function_call", return_value="tool result"),
-            patch(
-                "xiaoban.trusted_runtime.turns.current_turn",
-                return_value=trusted_turn,
-            ),
-            patch(
-                "xiaoban.trusted_runtime.dynamic_completion."
-                "dynamic_finalization_mode",
-                side_effect=["", "failure"],
-            ),
-            patch(
-                "agent.conversation_loop.apply_anthropic_cache_control",
-                side_effect=_cache_system_blocks,
-            ),
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("先查，再自然回复")
-
-        assert len(observed_requests) == 2
-        assert observed_requests[0].get("tools")
-        assert not observed_requests[1].get("tools")
-        assert "tool_choice" not in observed_requests[1]
-        final_system_content = observed_requests[1]["messages"][0]["content"]
-        assert isinstance(final_system_content, list)
-        assert "Runtime finalization:" in final_system_content[0]["text"]
-        final_request_text = json.dumps(
-            observed_requests[1]["messages"],
-            ensure_ascii=False,
-        )
-        assert "完整执行结果" in final_request_text
-        assert all(
-            message.get("role") != "tool"
-            for message in observed_requests[1]["messages"]
-        )
-        assert all(
-            not message.get("tool_calls")
-            for message in observed_requests[1]["messages"]
-        )
-        assert result["api_calls"] == 2
-        assert result["final_response"] == "我已经根据这次真实执行结果说明情况。"
-        assert result["completed"] is True
-        assert trusted_turn.completion_finalization == "failure"
-        assert trusted_turn.completion_finalization_output_digest == (
-            hashlib.sha256(
-                result["final_response"].encode("utf-8")
-            ).hexdigest()
-        )
-
-    def test_dynamic_work_discards_first_zero_action_answer_and_retries(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        agent._strict_no_automatic_paid_retry = True
-        agent._disable_streaming = True
-        agent.max_iterations = 3
-        agent.tools = _make_tool_defs("mystand_resource_index")
-        agent.valid_tool_names = {"mystand_resource_index"}
-        first = _mock_response(
-            content="我已经查到资料，答案是肯定的。",
-            finish_reason="stop",
-        )
-        second = _mock_response(
-            content="我仍然没有调用站内工具。",
-            finish_reason="stop",
-        )
-        final = _mock_response(
-            content=(
-                "这次我还没开始实际处理，"
-                "因此我暂时无法完成这项任务。"
-            ),
-            finish_reason="stop",
-        )
-        observed_requests = []
-
-        def _provider(payload):
-            observed_requests.append(payload)
-            return [first, second, final][len(observed_requests) - 1]
-
-        trusted_turn = _dynamic_work_turn("zero-action-finalizer")
-        active = activate_turn(trusted_turn)
-        try:
-            with (
-                patch.object(
-                    agent,
-                    "_interruptible_api_call",
-                    side_effect=_provider,
-                ),
-                patch.object(agent, "_persist_session"),
-                patch.object(agent, "_save_trajectory"),
-                patch.object(agent, "_cleanup_task_resources"),
-            ):
-                result = agent.run_conversation("请处理这件事")
-        finally:
-            deactivate_turn(active)
-
-        assert len(observed_requests) == 3
-        retry_system = observed_requests[1]["messages"][0]["content"]
-        assert "no completed current-turn My Stand evidence" in str(
-            retry_system
-        )
-        assert observed_requests[0].get("tools")
-        assert observed_requests[1].get("tools")
-        assert not observed_requests[2].get("tools")
-        assert (
-            "Explain the failed work naturally"
-            in observed_requests[2]["messages"][0]["content"]
-        )
-        assert result["final_response"] == final.choices[0].message.content
-        assert "这次我还没开始实际处理" in result["final_response"]
-        assert result["api_calls"] == 3
-        assert result["completed"] is True
-        assert result["failed"] is False
-        assert result["partial"] is False
-        assert "我已经查到资料" not in json.dumps(
-            result["messages"],
-            ensure_ascii=False,
-        )
-        decision = check_completion(
-            result["final_response"],
-            trusted_turn,
-        )
-        assert decision.allowed is True
-        assert decision.reason == "execution_status_bound"
-        assert "output_presentation" not in decision.verification
-        assert decision.verification["failure_class"] == "no_progress"
-        assert decision.verification["action_count"] == 0
-
-    @pytest.mark.parametrize(
-        "bad_response_kind",
-        [
-            "provider_error",
-            "malformed_response",
-            "truncated_response",
-            "content_filter",
-        ],
-    )
-    def test_zero_action_continuation_failure_still_gets_final_reply(
-        self,
-        agent,
-        bad_response_kind,
-    ):
-        self._setup_agent(agent)
-        agent._strict_no_automatic_paid_retry = True
-        agent._disable_streaming = True
-        agent.max_iterations = 3
-        agent.tools = _make_tool_defs("mystand_resource_index")
-        agent.valid_tool_names = {"mystand_resource_index"}
-        first = _mock_response(
-            content="我已经查到资料，答案是肯定的。",
-            finish_reason="stop",
-        )
-        if bad_response_kind == "malformed_response":
-            bad_response = SimpleNamespace(choices=[])
-        elif bad_response_kind == "truncated_response":
-            bad_response = _mock_response(
-                content="未完成的截断内容",
-                finish_reason="length",
-            )
-        elif bad_response_kind == "content_filter":
-            bad_response = _mock_response(
-                content="",
-                finish_reason="content_filter",
-            )
-        else:
-            bad_response = None
-        final = _mock_response(
-            content=(
-                "这次我还没开始实际处理，"
-                "因此我暂时无法完成这项任务。"
-            ),
-            finish_reason="stop",
-        )
-        observed_requests = []
-
-        def provider(payload):
-            observed_requests.append(payload)
-            call_number = len(observed_requests)
-            if call_number == 1:
-                return first
-            if (
-                bad_response_kind == "provider_error"
-                and call_number == 2
-            ):
-                raise RuntimeError("simulated continuation provider failure")
-            if call_number == 2:
-                return bad_response
-            return final
-
-        trusted_turn = _dynamic_work_turn(
-            f"zero-action-{bad_response_kind}"
-        )
-        active = activate_turn(trusted_turn)
-        try:
-            with (
-                patch.object(
-                    agent,
-                    "_interruptible_api_call",
-                    side_effect=provider,
-                ),
-                patch.object(agent, "_persist_session"),
-                patch.object(agent, "_save_trajectory"),
-                patch.object(agent, "_cleanup_task_resources"),
-            ):
-                result = agent.run_conversation("请处理这件事")
-        finally:
-            deactivate_turn(active)
-
-        assert len(observed_requests) == 3
-        assert observed_requests[0].get("tools")
-        assert observed_requests[1].get("tools")
-        assert not observed_requests[2].get("tools")
-        assert result["api_calls"] == 3
-        assert result["final_response"] == final.choices[0].message.content
-        assert result["completed"] is True
-        assert result["failed"] is False
-        decision = check_completion(
-            result["final_response"],
-            trusted_turn,
-        )
-        assert decision.allowed is True
-        assert decision.reason == "execution_status_bound"
-        assert "output_presentation" not in decision.verification
-        assert decision.verification["failure_class"] == "no_progress"
-        assert decision.verification["action_count"] == 0
-
-    def test_indeterminate_transient_worker_does_not_start_finalizer(
-        self,
-        agent,
-    ):
-        from agent.chat_completion_helpers import (
-            StrictPaidWorkerShutdownTimeout,
-        )
-
-        self._setup_agent(agent)
-        agent._strict_no_automatic_paid_retry = True
-        agent._disable_streaming = True
-        agent.max_iterations = 3
-        agent.tools = _make_tool_defs("mystand_authorization")
-        agent.valid_tool_names = {"mystand_authorization"}
-        trusted_turn = _dynamic_work_turn(
-            "transient-indeterminate-worker"
-        )
-        index = begin_action(
-            trusted_turn,
-            "mystand_resource_index",
-            "v1",
-            {},
-            call_id="indeterminate-index",
-        )
-        assert index.decision == "allow"
-        finish_action(
-            trusted_turn,
-            index.call.call_id,
-            "mystand_resource_index",
-            "v1",
-            {
-                "schema": "mystand.resource-index.complete.v1",
-                "ok": True,
-                "items": [
-                    {
-                        "resourceUid": "resource-indeterminate",
-                        "safeLabel": "目标资料",
-                        "resourceType": "generic-record",
-                        "canRead": True,
-                        "locked": False,
-                    }
-                ],
-                "hasMore": False,
-                "nextCursor": "",
-            },
-        )
-        failed = begin_action(
-            trusted_turn,
-            "mystand_authorization",
-            "v1",
-            {
-                "operation": "resolve",
-                "resource_uid": "resource-indeterminate",
-            },
-            call_id="indeterminate-timeout",
-        )
-        assert failed.decision == "allow"
-        finish_action(
-            trusted_turn,
-            failed.call.call_id,
-            "mystand_authorization",
-            "v1",
-            {
-                "ok": False,
-                "status": 503,
-                "code": "mystand_authorization_transport_failed",
-            },
-        )
-        observed_requests = []
-
-        def provider(payload):
-            observed_requests.append(payload)
-            raise StrictPaidWorkerShutdownTimeout(
-                reason="stale_call_kill",
-                grace_seconds=10,
-            )
-
-        active = activate_turn(trusted_turn)
-        try:
-            with (
-                patch.object(
-                    agent,
-                    "_interruptible_api_call",
-                    side_effect=provider,
-                ),
-                patch.object(agent, "_persist_session"),
-                patch.object(agent, "_save_trajectory"),
-                patch.object(agent, "_cleanup_task_resources"),
-            ):
-                result = agent.run_conversation("读取目标资料")
-        finally:
-            deactivate_turn(active)
-
-        assert len(observed_requests) == 1
-        assert observed_requests[0].get("tools")
-        assert result["api_calls"] == 1
-        assert result["completed"] is False
-        assert result["failed"] is True
-        assert result["final_response"] is None
-        assert "Provider call failed" in result["error"]
-
-    def test_dynamic_index_no_read_uses_one_clean_failure_finalizer(
-        self,
-        agent,
-    ):
-        from tools.mystand_query_tool import MYSTAND_QUERY_SCHEMA
-
-        self._setup_agent(agent)
-        agent._strict_no_automatic_paid_retry = True
-        agent._disable_streaming = True
-        agent.max_iterations = 4
-        agent.tools = [
-            {
-                "type": "function",
-                "function": json.loads(
-                    json.dumps(MYSTAND_QUERY_SCHEMA, ensure_ascii=False)
-                ),
-            }
-        ]
-        agent.valid_tool_names = {"mystand_query"}
-        responses = [
-            _mock_response(
-                content="我已经看过资料，直接回答。",
-                finish_reason="stop",
-            ),
-            _mock_response(
-                content="我仍然不调用后续读取。",
-                finish_reason="stop",
-            ),
-            _mock_response(
-                content=(
-                    "我完成了资料目录查询，"
-                    "但没有继续读取到能回答问题的内容，"
-                    "所以这项任务还没有完成。"
-                ),
-                finish_reason="stop",
-            ),
-        ]
-        observed_requests = []
-
-        def _provider(payload):
-            observed_requests.append(payload)
-            return responses[len(observed_requests) - 1]
-
-        trusted_turn = _dynamic_work_turn("index-no-read-finalizer")
-        index = begin_action(
-            trusted_turn,
-            "mystand_resource_index",
-            "v1",
-            {},
-            call_id="index-call",
-        )
-        assert index.decision == "allow"
-        finish_action(
-            trusted_turn,
-            index.call.call_id,
-            "mystand_resource_index",
-            "v1",
-            {
-                "schema": "mystand.resource-index.complete.v1",
-                "ok": True,
-                "items": [
-                    {
-                        "resourceUid": "resource-run-agent",
-                        "safeLabel": "目标资料",
-                        "resourceType": "generic-record",
-                        "canRead": True,
-                        "locked": False,
-                    }
-                ],
-                "hasMore": False,
-                "nextCursor": "",
-            },
-        )
-        active = activate_turn(trusted_turn)
-        try:
-            with (
-                patch.object(
-                    agent,
-                    "_interruptible_api_call",
-                    side_effect=_provider,
-                ),
-                patch.object(agent, "_persist_session"),
-                patch.object(agent, "_save_trajectory"),
-                patch.object(agent, "_cleanup_task_resources"),
-            ):
-                result = agent.run_conversation("读取目标资料")
-        finally:
-            deactivate_turn(active)
-
-        assert len(observed_requests) == 3
-        assert observed_requests[0].get("tools")
-        assert observed_requests[1].get("tools")
-        assert not observed_requests[2].get("tools")
-        assert result["api_calls"] == 3
-        assert result["final_response"] == responses[2].choices[0].message.content
-        assert "没有继续读取到能回答问题的内容" in result["final_response"]
-        assert "我已经看过资料" not in result["final_response"]
-        assert "我仍然不调用后续读取" not in result["final_response"]
-        assert result["completed"] is True
-        assert result["failed"] is False
-        assert trusted_turn.completion_finalization == "failure"
-        decision = check_completion(
-            result["final_response"],
-            trusted_turn,
-        )
-        assert decision.allowed is True
-        assert decision.reason == "execution_status_bound"
-        assert "output_presentation" not in decision.verification
-        assert decision.verification["failure_class"] == "no_progress"
-        assert decision.verification["action_count"] == 1
-
-    def test_transient_recovery_request_drops_failed_tool_body(self):
-        trusted_turn = _dynamic_work_turn("transient-redaction")
-        index = begin_action(
-            trusted_turn,
-            "mystand_resource_index",
-            "v1",
-            {},
-            call_id="redaction-index",
-        )
-        assert index.decision == "allow"
-        finish_action(
-            trusted_turn,
-            index.call.call_id,
-            "mystand_resource_index",
-            "v1",
-            {
-                "schema": "mystand.resource-index.complete.v1",
-                "ok": True,
-                "items": [
-                    {
-                        "resourceUid": "resource-redaction",
-                        "safeLabel": "目标资料",
-                        "resourceType": "generic-record",
-                        "canRead": True,
-                        "locked": False,
-                    }
-                ],
-                "hasMore": False,
-                "nextCursor": "",
-            },
-        )
-        failed = begin_action(
-            trusted_turn,
-            "mystand_authorization",
-            "v1",
-            {
-                "operation": "resolve",
-                "resource_uid": "resource-redaction",
-            },
-            call_id="redaction-timeout",
-        )
-        assert failed.decision == "allow"
-        finish_action(
-            trusted_turn,
-            failed.call.call_id,
-            "mystand_authorization",
-            "v1",
-            {
-                "ok": False,
-                "status": 503,
-                "code": "provider_timeout",
-                "detail": "PRIVATE_ERROR_BODY",
-            },
-        )
-        agent = SimpleNamespace(
-            _strict_no_automatic_paid_retry=True,
-            max_iterations=3,
-            iteration_budget=SimpleNamespace(remaining=1),
-        )
-        api_messages = [
-            {"role": "system", "content": "stable policy"},
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{"id": "failed-call"}],
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "failed-call",
-                "content": "PRIVATE_ERROR_BODY",
-            },
-        ]
-        active = activate_turn(trusted_turn)
-        try:
-            prepared = _prepare_dynamic_transient_recovery_call(
-                agent,
-                2,
-                api_messages,
-                recovery_used=False,
-                original_user_message="读取目标资料",
-            )
-        finally:
-            deactivate_turn(active)
-
-        assert prepared is True
-        encoded = json.dumps(api_messages, ensure_ascii=False)
-        assert "PRIVATE_ERROR_BODY" not in encoded
-        assert "provider_timeout" not in encoded
-        assert "resource-redaction" in encoded
-        assert "读取目标资料" in encoded
-        tool_messages = [
-            message
-            for message in api_messages
-            if message["role"] == "tool"
-        ]
-        assert len(tool_messages) == 1
-        assert json.loads(tool_messages[0]["content"]) == {
-            "ok": False,
-            "is_error": True,
-            "status": 504,
-            "code": "read_timeout",
-            "error": "这次正文读取等待超时。",
-            "retryable": True,
-        }
-
-    def test_invalid_query_recovery_rebuilds_one_semantic_call(self):
-        trusted_turn = _dynamic_work_turn("query-shape-correction")
-        index = begin_action(
-            trusted_turn,
-            "mystand_resource_index",
-            "v1",
-            {},
-            call_id="query-shape-index",
-        )
-        assert index.decision == "allow"
-        finish_action(
-            trusted_turn,
-            index.call.call_id,
-            "mystand_resource_index",
-            "v1",
-            {
-                "schema": "mystand.resource-index.complete.v1",
-                "ok": True,
-                "items": [
-                    {
-                        "resourceUid": "private-resource-uid",
-                        "safeLabel": "目标特征卡",
-                        "resourceType": "profile-card",
-                        "canRead": True,
-                        "locked": False,
-                    }
-                ],
-                "hasMore": False,
-                "nextCursor": "",
-            },
-        )
-        failed = begin_action(
-            trusted_turn,
-            "mystand_query",
-            "v1",
-            {
-                "operation": "read",
-                "query_kind": "resource-read",
-                "module_id": "profile",
-                "fact_paths": ["resource.summary"],
-                "query_args": {},
-                "coverage_required": False,
-                "resource": {
-                    "name": "目标特征卡",
-                    "type_hint": "profile-card",
-                },
-                "entities": [],
-                "fact_needs": [
-                    "document.content",
-                    "resource.summary",
-                ],
-                "mode": "summary",
-            },
-            call_id="query-shape-invalid",
-        )
-        assert failed.decision == "allow"
-        finish_action(
-            trusted_turn,
-            failed.call.call_id,
-            "mystand_query",
-            "v1",
-            {
-                "ok": False,
-                "status": 400,
-                "code": "invalid_mystand_query_arguments",
-                "error": "PRIVATE_BAD_ARGUMENT_BODY",
-            },
-        )
-        agent = SimpleNamespace(
-            _strict_no_automatic_paid_retry=True,
-            max_iterations=4,
-            iteration_budget=SimpleNamespace(remaining=2),
-        )
-        api_messages = [
-            {"role": "system", "content": "stable policy"},
-            {"role": "tool", "content": "PRIVATE_BAD_ARGUMENT_BODY"},
-        ]
-        active = activate_turn(trusted_turn)
-        try:
-            prepared = _prepare_dynamic_transient_recovery_call(
-                agent,
-                2,
-                api_messages,
-                recovery_used=False,
-                original_user_message="查一下特征卡，分析后给我建议",
-            )
-        finally:
-            deactivate_turn(active)
-
-        assert prepared is True
-        encoded = json.dumps(api_messages, ensure_ascii=False)
-        assert "PRIVATE_BAD_ARGUMENT_BODY" not in encoded
-        assert "private-resource-uid" not in encoded
-        assert "目标特征卡" in encoded
-        assert "查一下特征卡，分析后给我建议" in encoded
-        assert "allowed_fields" in encoded
-        assert "mystand_query" in encoded
-        assert "exactly the one" in encoded
-        tool_messages = [
-            message
-            for message in api_messages
-            if message["role"] == "tool"
-        ]
-        assert len(tool_messages) == 1
-        projected_error = json.loads(tool_messages[0]["content"])
-        assert projected_error["ok"] is False
-        assert projected_error["is_error"] is True
-        assert projected_error["code"] == (
-            "invalid_mystand_query_arguments"
-        )
-        assert projected_error["correction"]["arguments"]["resource"] == {
-            "name": "目标特征卡",
-            "type_hint": "profile-card",
-        }
-
-    def test_zero_future_slot_skips_recovery_and_uses_failure_finalizer(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        agent._strict_no_automatic_paid_retry = True
-        agent._disable_streaming = True
-        agent.max_iterations = 2
-        agent.tools = _make_tool_defs("mystand_authorization")
-        agent.valid_tool_names = {"mystand_authorization"}
-        trusted_turn = _dynamic_work_turn("transient-final-slot")
-        index = begin_action(
-            trusted_turn,
-            "mystand_resource_index",
-            "v1",
-            {},
-            call_id="final-slot-index",
-        )
-        assert index.decision == "allow"
-        finish_action(
-            trusted_turn,
-            index.call.call_id,
-            "mystand_resource_index",
-            "v1",
-            {
-                "schema": "mystand.resource-index.complete.v1",
-                "ok": True,
-                "items": [
-                    {
-                        "resourceUid": "resource-final-slot",
-                        "safeLabel": "目标资料",
-                        "resourceType": "generic-record",
-                        "canRead": True,
-                        "locked": False,
-                    }
-                ],
-                "hasMore": False,
-                "nextCursor": "",
-            },
-        )
-        failed_arguments = {
-            "operation": "resolve",
-            "resource_uid": "resource-final-slot",
-        }
-        responses = [
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="mystand_authorization",
-                        arguments=json.dumps(failed_arguments),
-                        call_id="final-slot-timeout",
-                    )
-                ],
-            ),
-            _mock_response(
-                content=(
-                    "我这次已经发起实际处理，但等待结果超时，"
-                    "所以这项任务还没有完成。"
-                ),
-                finish_reason="stop",
-            ),
-        ]
-        observed_requests = []
-        handler_calls = 0
-
-        def provider(payload):
-            observed_requests.append(payload)
-            return responses[len(observed_requests) - 1]
-
-        def execute_failed_read(
-            assistant_message,
-            messages,
-            _task_id,
-            _api_call_count,
-        ):
-            nonlocal handler_calls
-            handler_calls += 1
-            tool_call = assistant_message.tool_calls[0]
-            started = begin_action(
-                trusted_turn,
-                tool_call.function.name,
-                "v1",
-                json.loads(tool_call.function.arguments),
-                call_id=tool_call.id,
-            )
-            assert started.decision == "allow"
-            finish_action(
-                trusted_turn,
-                tool_call.id,
-                tool_call.function.name,
-                "v1",
-                {
-                    "ok": False,
-                    "status": 504,
-                    "code": "provider_timeout",
-                },
-            )
-            messages.append(
-                {
-                    "role": "tool",
-                    "name": tool_call.function.name,
-                    "tool_call_id": tool_call.id,
-                    "content": json.dumps(
-                        {
-                            "ok": False,
-                            "status": 504,
-                            "code": "provider_timeout",
-                        }
-                    ),
-                }
-            )
-
-        active = activate_turn(trusted_turn)
-        try:
-            with (
-                patch.object(
-                    agent,
-                    "_interruptible_api_call",
-                    side_effect=provider,
-                ),
-                patch.object(
-                    agent,
-                    "_execute_tool_calls",
-                    side_effect=execute_failed_read,
-                ),
-                patch.object(agent, "_persist_session"),
-                patch.object(agent, "_save_trajectory"),
-                patch.object(agent, "_cleanup_task_resources"),
-            ):
-                result = agent.run_conversation("读取目标资料")
-        finally:
-            deactivate_turn(active)
-
-        assert len(observed_requests) == 2
-        assert result["api_calls"] == 2
-        assert observed_requests[0].get("tools")
-        assert not observed_requests[1].get("tools")
-        assert handler_calls == 1
-        assert result["final_response"] == responses[1].choices[0].message.content
-        assert "等待结果超时" in result["final_response"]
-        assert result["completed"] is True
-        assert result["failed"] is False
-        assert result["partial"] is False
-        decision = check_completion(
-            result["final_response"],
-            trusted_turn,
-        )
-        assert decision.allowed is True
-        assert decision.reason == "execution_status_bound"
-        assert "output_presentation" not in decision.verification
-        assert decision.verification["failure_class"] == "error"
-        assert decision.verification["action_count"] == 2
-        assert decision.verification["failed_action_count"] == 1
-
-    @pytest.mark.parametrize(
-        "bad_response_kind",
-        [
-            "invalid_tool",
-            "invalid_json",
-            "empty",
-            "provider_error",
-            "malformed_response",
-            "truncated_response",
-            "content_filter",
-            "duplicate_retry",
-            "exact_plus_unrelated",
-        ],
-    )
-    def test_transient_recovery_protocol_failure_still_gets_final_reply(
-        self,
-        agent,
-        bad_response_kind,
-    ):
-        self._setup_agent(agent)
-        agent._strict_no_automatic_paid_retry = True
-        agent._disable_streaming = True
-        agent.max_iterations = 3
-        agent.tools = _make_tool_defs("mystand_authorization")
-        agent.valid_tool_names = {"mystand_authorization"}
-        trusted_turn = _dynamic_work_turn(
-            f"transient-protocol-{bad_response_kind}"
-        )
-        index = begin_action(
-            trusted_turn,
-            "mystand_resource_index",
-            "v1",
-            {},
-            call_id=f"{bad_response_kind}-index",
-        )
-        assert index.decision == "allow"
-        finish_action(
-            trusted_turn,
-            index.call.call_id,
-            "mystand_resource_index",
-            "v1",
-            {
-                "schema": "mystand.resource-index.complete.v1",
-                "ok": True,
-                "items": [
-                    {
-                        "resourceUid": "resource-protocol-failure",
-                        "safeLabel": "目标资料",
-                        "resourceType": "generic-record",
-                        "canRead": True,
-                        "locked": False,
-                    }
-                ],
-                "hasMore": False,
-                "nextCursor": "",
-            },
-        )
-        failed = begin_action(
-            trusted_turn,
-            "mystand_authorization",
-            "v1",
-            {
-                "operation": "resolve",
-                "resource_uid": "resource-protocol-failure",
-            },
-            call_id=f"{bad_response_kind}-timeout",
-        )
-        assert failed.decision == "allow"
-        finish_action(
-            trusted_turn,
-            failed.call.call_id,
-            "mystand_authorization",
-            "v1",
-            {
-                "ok": False,
-                "status": 503,
-                "code": "mystand_authorization_transport_failed",
-            },
-        )
-        if bad_response_kind == "invalid_tool":
-            bad_response = _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="invented_tool",
-                        arguments="{}",
-                        call_id="bad-tool-call",
-                    )
-                ],
-            )
-        elif bad_response_kind == "invalid_json":
-            bad_response = _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="mystand_authorization",
-                        arguments="{",
-                        call_id="bad-json-call",
-                    )
-                ],
-            )
-        elif bad_response_kind in {
-            "duplicate_retry",
-            "exact_plus_unrelated",
-        }:
-            exact_arguments = json.dumps(
-                {
-                    "operation": "resolve",
-                    "resource_uid": "resource-protocol-failure",
-                }
-            )
-            second_arguments = exact_arguments
-            if bad_response_kind == "exact_plus_unrelated":
-                second_arguments = json.dumps(
-                    {
-                        "operation": "resolve",
-                        "resource_uid": "resource-other",
-                    }
-                )
-            bad_response = _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="mystand_authorization",
-                        arguments=exact_arguments,
-                        call_id="parallel-retry-a",
-                    ),
-                    _mock_tool_call(
-                        name="mystand_authorization",
-                        arguments=second_arguments,
-                        call_id="parallel-retry-b",
-                    ),
-                ],
-            )
-        elif bad_response_kind == "provider_error":
-            bad_response = None
-        elif bad_response_kind == "malformed_response":
-            bad_response = SimpleNamespace(choices=[])
-        elif bad_response_kind == "truncated_response":
-            bad_response = _mock_response(
-                content="未完成的截断内容",
-                finish_reason="length",
-            )
-        elif bad_response_kind == "content_filter":
-            bad_response = _mock_response(
-                content="",
-                finish_reason="content_filter",
-            )
-        else:
-            bad_response = _mock_response(
-                content="",
-                finish_reason="stop",
-            )
-        responses = [
-            bad_response,
-            _mock_response(
-                content=(
-                    "我这次已经发起实际处理，但读取服务暂时不可用，"
-                    "所以这项任务还没有完成。"
-                ),
-                finish_reason="stop",
-            ),
-        ]
-        observed_requests = []
-
-        def provider(payload):
-            observed_requests.append(payload)
-            if (
-                bad_response_kind == "provider_error"
-                and len(observed_requests) == 1
-            ):
-                raise RuntimeError("simulated recovery provider failure")
-            return responses[len(observed_requests) - 1]
-
-        active = activate_turn(trusted_turn)
-        try:
-            with (
-                patch.object(
-                    agent,
-                    "_interruptible_api_call",
-                    side_effect=provider,
-                ),
-                patch.object(
-                    agent,
-                    "_execute_tool_calls",
-                    side_effect=AssertionError(
-                        "invalid recovery output reached tool execution"
-                    ),
-                ),
-                patch.object(agent, "_persist_session"),
-                patch.object(agent, "_save_trajectory"),
-                patch.object(agent, "_cleanup_task_resources"),
-            ):
-                result = agent.run_conversation("读取目标资料")
-        finally:
-            deactivate_turn(active)
-
-        assert len(observed_requests) == 2
-        assert observed_requests[0].get("tools")
-        assert not observed_requests[1].get("tools")
-        assert "resource-protocol-failure" in json.dumps(
-            observed_requests[0],
-            ensure_ascii=False,
-        )
-        assert "resource-protocol-failure" not in json.dumps(
-            observed_requests[1],
-            ensure_ascii=False,
-        )
-        assert result["api_calls"] == 2
-        assert result["final_response"] == responses[1].choices[0].message.content
-        assert result["completed"] is True
-        assert result["failed"] is False
-        decision = check_completion(
-            result["final_response"],
-            trusted_turn,
-        )
-        assert decision.allowed is True
-        assert decision.reason == "execution_status_bound"
-        assert "output_presentation" not in decision.verification
-        assert decision.verification["failure_class"] == "error"
-
-    def test_transient_read_recovery_succeeds_and_accounts_every_call(
-        self,
-        agent,
-    ):
-        from xiaoban.trusted_runtime.agent_call_usage import (
-            AgentCallUsageLedger,
-        )
-        from xiaoban.trusted_runtime.paid_call_policy import (
-            SIGNED_MYSTAND_AGENT_POLICY,
-            SIGNED_MYSTAND_AGENT_POLICY_REVISION,
-        )
-
-        self._setup_agent(agent)
-        agent._strict_no_automatic_paid_retry = True
-        agent._disable_streaming = True
-        agent.max_iterations = 2
-        agent.provider = SIGNED_MYSTAND_AGENT_POLICY.provider
-        agent.model = SIGNED_MYSTAND_AGENT_POLICY.model
-        agent.max_tokens = min(
-            4_096,
-            SIGNED_MYSTAND_AGENT_POLICY.output_max_tokens,
-        )
-        agent._api_max_retries = 1
-        agent._fallback_chain = []
-        agent._fallback_index = 0
-        agent.tools = _make_tool_defs("mystand_authorization")
-        agent.valid_tool_names = {"mystand_authorization"}
-        ledger = AgentCallUsageLedger(
-            provider=str(agent.provider),
-            model=str(agent.model),
-            execution_id="9" * 32,
-        )
-        agent._paid_call_usage_ledger = ledger
-        agent._true_moa_usage_ledger = None
-        agent._paid_call_policy_revision = (
-            SIGNED_MYSTAND_AGENT_POLICY_REVISION
-        )
-
-        trusted_turn = _dynamic_work_turn("transient-loop-success")
-        index = begin_action(
-            trusted_turn,
-            "mystand_resource_index",
-            "v1",
-            {},
-            call_id="loop-index",
-        )
-        assert index.decision == "allow"
-        finish_action(
-            trusted_turn,
-            index.call.call_id,
-            "mystand_resource_index",
-            "v1",
-            {
-                "schema": "mystand.resource-index.complete.v1",
-                "ok": True,
-                "items": [
-                    {
-                        "resourceUid": "resource-loop",
-                        "safeLabel": "目标资料",
-                        "resourceType": "generic-record",
-                        "canRead": True,
-                        "locked": False,
-                    }
-                ],
-                "hasMore": False,
-                "nextCursor": "",
-            },
-        )
-        failed_arguments = {
-            "operation": "resolve",
-            "resource_uid": "resource-loop",
-        }
-        failed = begin_action(
-            trusted_turn,
-            "mystand_authorization",
-            "v1",
-            failed_arguments,
-            call_id="loop-read-timeout",
-        )
-        assert failed.decision == "allow"
-        finish_action(
-            trusted_turn,
-            failed.call.call_id,
-            "mystand_authorization",
-            "v1",
-            {
-                "ok": False,
-                "status": 502,
-                "code": "mystand_authorization_transport_failed",
-                "detail": "PRIVATE_ERROR_BODY",
-            },
-        )
-        responses = [
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="mystand_authorization",
-                        arguments=json.dumps(failed_arguments),
-                        call_id="loop-read-retry",
-                    )
-                ],
-                usage={
-                    "prompt_tokens": 11,
-                    "completion_tokens": 2,
-                    "total_tokens": 13,
-                    "cached_input_tokens": 0,
-                },
-            ),
-            _mock_response(
-                content="我重新读取成功，目标资料内容是“恢复后的内容”。",
-                finish_reason="stop",
-                usage={
-                    "prompt_tokens": 13,
-                    "completion_tokens": 5,
-                    "total_tokens": 18,
-                    "cached_input_tokens": 0,
-                },
-            ),
-        ]
-        observed_requests = []
-
-        def provider(payload):
-            observed_requests.append(payload)
-            return responses[len(observed_requests) - 1]
-
-        def execute_recovery(
-            assistant_message,
-            messages,
-            _task_id,
-            _api_call_count,
-        ):
-            tool_call = assistant_message.tool_calls[0]
-            arguments = json.loads(tool_call.function.arguments)
-            started = begin_action(
-                trusted_turn,
-                tool_call.function.name,
-                "v1",
-                arguments,
-                call_id=tool_call.id,
-            )
-            assert started.decision == "allow"
-            finish_action(
-                trusted_turn,
-                tool_call.id,
-                tool_call.function.name,
-                "v1",
-                {
-                    "ok": True,
-                    "content": "恢复后的内容",
-                    "resourceUid": "resource-loop",
-                },
-            )
-            messages.append(
-                {
-                    "role": "tool",
-                    "name": tool_call.function.name,
-                    "tool_call_id": tool_call.id,
-                    "content": "TAMPERED_TRANSCRIPT_BODY",
-                }
-            )
-
-        active = activate_turn(trusted_turn)
-        try:
-            with (
-                patch.object(
-                    agent,
-                    "_interruptible_api_call",
-                    side_effect=provider,
-                ),
-                patch.object(
-                    agent,
-                    "_execute_tool_calls",
-                    side_effect=execute_recovery,
-                ),
-                patch.object(agent, "_persist_session"),
-                patch.object(agent, "_save_trajectory"),
-                patch.object(agent, "_cleanup_task_resources"),
-            ):
-                result = agent.run_conversation(
-                    "读取目标资料",
-                    conversation_history=[
-                        {
-                            "role": "assistant",
-                            "content": "",
-                            "tool_calls": [
-                                {
-                                    "id": "loop-read-retry",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "mystand_authorization",
-                                        "arguments": "{}",
-                                    },
-                                }
-                            ],
-                        },
-                        {
-                            "role": "tool",
-                            "name": "mystand_authorization",
-                            "tool_call_id": "loop-read-retry",
-                            "content": "PRIVATE_OLD_BODY",
-                        },
-                    ],
-                )
-        finally:
-            deactivate_turn(active)
-
-        assert result["completed"] is True, result
-        assert result["failed"] is False
-        assert result["api_calls"] == 2
-        assert len(observed_requests) == 2
-        assert "PRIVATE_ERROR_BODY" not in json.dumps(
-            observed_requests[0],
-            ensure_ascii=False,
-        )
-        assert "PRIVATE_ERROR_BODY" not in json.dumps(
-            observed_requests[1],
-            ensure_ascii=False,
-        )
-        assert "PRIVATE_OLD_BODY" not in json.dumps(
-            observed_requests[1],
-            ensure_ascii=False,
-        )
-        assert "TAMPERED_TRANSCRIPT_BODY" not in json.dumps(
-            observed_requests[1],
-            ensure_ascii=False,
-        )
-        assert "恢复后的内容" in json.dumps(
-            observed_requests[1],
-            ensure_ascii=False,
-        )
-        assert observed_requests[0].get("tools")
-        assert not observed_requests[1].get("tools")
-        assert len(trusted_turn.action_calls) == 3
-        assert len(trusted_turn.action_results) == 3
-        completion = check_completion(
-            result["final_response"],
-            trusted_turn,
-        )
-        assert completion.allowed is True
-        assert completion.verification["action_count"] == 3
-        assert completion.verification["transient_failure_count"] == 1
-        call_receipts = ledger.to_dict()["calls"]
-        assert len(call_receipts) == 2
-        assert all(call["status"] == "completed" for call in call_receipts)
-        assert all(call["usageStatus"] == "reported" for call in call_receipts)
-
-    def test_invalid_query_correction_succeeds_then_analyzes_feature_card(
-        self,
-        agent,
-    ):
-        from tools.mystand_query_tool import MYSTAND_QUERY_SCHEMA
-
-        self._setup_agent(agent)
-        agent._strict_no_automatic_paid_retry = True
-        agent._disable_streaming = True
-        agent.max_iterations = 4
-        agent.tools = [
-            {
-                "type": "function",
-                "function": json.loads(
-                    json.dumps(MYSTAND_QUERY_SCHEMA, ensure_ascii=False)
-                ),
-            }
-        ]
-        agent.valid_tool_names = {"mystand_query"}
-        trusted_turn = _dynamic_work_turn("feature-card-correction-success")
-        index = begin_action(
-            trusted_turn,
-            "mystand_resource_index",
-            "v1",
-            {},
-            call_id="feature-card-index",
-        )
-        assert index.decision == "allow"
-        finish_action(
-            trusted_turn,
-            index.call.call_id,
-            "mystand_resource_index",
-            "v1",
-            {
-                "schema": "mystand.resource-index.complete.v1",
-                "ok": True,
-                "items": [
-                    {
-                        "resourceUid": "feature-card-resource",
-                        "safeLabel": "目标特征卡",
-                        "resourceType": "profile-card",
-                        "canRead": True,
-                        "locked": False,
-                    }
-                ],
-                "hasMore": False,
-                "nextCursor": "",
-            },
-        )
-        bad = begin_action(
-            trusted_turn,
-            "mystand_query",
-            "v1",
-            {
-                "operation": "read",
-                "query_kind": "resource-read",
-                "module_id": "profile",
-                "fact_paths": ["resource.summary"],
-                "query_args": {},
-                "coverage_required": False,
-                "resource": {
-                    "name": "目标特征卡",
-                    "type_hint": "profile-card",
-                },
-                "entities": [],
-                "fact_needs": [
-                    "document.content",
-                    "resource.summary",
-                ],
-                "mode": "summary",
-            },
-            call_id="feature-card-invalid-query",
-        )
-        assert bad.decision == "allow"
-        finish_action(
-            trusted_turn,
-            bad.call.call_id,
-            "mystand_query",
-            "v1",
-            {
-                "ok": False,
-                "status": 400,
-                "code": "invalid_mystand_query_arguments",
-                "error": "PRIVATE_BAD_QUERY_BODY",
-            },
-        )
-        corrected_arguments = {
-            "operation": "read",
-            "resource": {
-                "name": "目标特征卡",
-                "type_hint": "profile-card",
-            },
-            "entities": [],
-            "fact_needs": ["document.content", "resource.summary"],
-            "mode": "summary",
-        }
-        responses = [
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="mystand_query",
-                        arguments=json.dumps(
-                            corrected_arguments,
-                            ensure_ascii=False,
-                        ),
-                        call_id="feature-card-corrected-query",
-                    )
-                ],
-            ),
-            _mock_response(
-                content=(
-                    "资料依据：沟通重点清晰，下一步先核对需求。\n"
-                    "分析：沟通重点清晰，说明方向明确，但需求仍要核准。\n"
-                    "建议：围绕沟通重点逐项核对需求，再安排下一步跟进。"
-                ),
-                finish_reason="stop",
-            ),
-        ]
-        observed_requests = []
-
-        def provider(payload):
-            observed_requests.append(payload)
-            return responses[len(observed_requests) - 1]
-
-        def execute_corrected(
-            assistant_message,
-            messages,
-            _task_id,
-            _api_call_count,
-        ):
-            tool_call = assistant_message.tool_calls[0]
-            arguments = json.loads(tool_call.function.arguments)
-            assert arguments == corrected_arguments
-            started = begin_action(
-                trusted_turn,
-                tool_call.function.name,
-                "v1",
-                arguments,
-                call_id=tool_call.id,
-            )
-            assert started.decision == "allow"
-            finish_action(
-                trusted_turn,
-                tool_call.id,
-                tool_call.function.name,
-                "v1",
-                {
-                    "schema": "mystand.query-result.v1",
-                    "ok": True,
-                    "status": "matched",
-                    "missing_facts": [],
-                    "resource": {
-                        "resourceUid": "feature-card-resource",
-                        "display_name": "目标特征卡",
-                        "type": "profile-card",
-                    },
-                    "recordRefs": ["feature-card-resource"],
-                    "facts": [
-                        {
-                            "kind": "resource.summary",
-                            "label": "资料摘要",
-                            "value": "沟通重点清晰，下一步先核对需求。",
-                        }
-                    ],
-                    "content": "沟通重点清晰，下一步先核对需求。",
-                },
-            )
-            messages.append(
-                {
-                    "role": "tool",
-                    "name": tool_call.function.name,
-                    "tool_call_id": tool_call.id,
-                    "content": "TAMPERED_TOOL_TRANSCRIPT",
-                }
-            )
-
-        active = activate_turn(trusted_turn)
-        try:
-            with (
-                patch.object(
-                    agent,
-                    "_interruptible_api_call",
-                    side_effect=provider,
-                ),
-                patch.object(
-                    agent,
-                    "_execute_tool_calls",
-                    side_effect=execute_corrected,
-                ),
-                patch.object(agent, "_persist_session"),
-                patch.object(agent, "_save_trajectory"),
-                patch.object(agent, "_cleanup_task_resources"),
-            ):
-                result = agent.run_conversation(
-                    "查一下特征卡，分析后给我一个建议"
-                )
-        finally:
-            deactivate_turn(active)
-
-        assert result["completed"] is True, result
-        assert result["api_calls"] == 2
-        assert result["final_response"] == responses[1].choices[0].message.content
-        assert len(observed_requests) == 2
-        first_wire = json.dumps(observed_requests[0], ensure_ascii=False)
-        assert "PRIVATE_BAD_QUERY_BODY" not in first_wire
-        assert "feature-card-resource" not in first_wire
-        assert "目标特征卡" in first_wire
-        visible_query = next(
-            item
-            for item in observed_requests[0]["tools"]
-            if item["function"]["name"] == "mystand_query"
-        )
-        assert set(
-            visible_query["function"]["parameters"]["properties"]
-        ) == {
-            "operation",
-            "resource",
-            "entities",
-            "fact_needs",
-            "mode",
-        }
-        assert observed_requests[0]["parallel_tool_calls"] is False
-        assert not observed_requests[1].get("tools")
-        finalizer_wire = json.dumps(observed_requests[1], ensure_ascii=False)
-        assert "TAMPERED_TOOL_TRANSCRIPT" not in finalizer_wire
-        assert "沟通重点清晰" in finalizer_wire
-        completion = check_completion(
-            result["final_response"],
-            trusted_turn,
-        )
-        assert completion.allowed is True
-        assert completion.verification["completion_kind"] == "evidence-bound"
-        assert completion.verification["action_count"] == 3
-
-    def test_invalid_query_correction_failure_explains_real_process(
-        self,
-        agent,
-    ):
-        from tools.mystand_query_tool import MYSTAND_QUERY_SCHEMA
-
-        self._setup_agent(agent)
-        agent._strict_no_automatic_paid_retry = True
-        agent._disable_streaming = True
-        agent.max_iterations = 4
-        agent.tools = [
-            {
-                "type": "function",
-                "function": json.loads(
-                    json.dumps(MYSTAND_QUERY_SCHEMA, ensure_ascii=False)
-                ),
-            }
-        ]
-        agent.valid_tool_names = {"mystand_query"}
-        trusted_turn = _dynamic_work_turn("feature-card-correction-failure")
-        index = begin_action(
-            trusted_turn,
-            "mystand_resource_index",
-            "v1",
-            {},
-            call_id="feature-card-failure-index",
-        )
-        assert index.decision == "allow"
-        finish_action(
-            trusted_turn,
-            index.call.call_id,
-            "mystand_resource_index",
-            "v1",
-            {
-                "schema": "mystand.resource-index.complete.v1",
-                "ok": True,
-                "items": [
-                    {
-                        "resourceUid": "private-feature-card-id",
-                        "safeLabel": "目标特征卡",
-                        "resourceType": "profile-card",
-                        "canRead": True,
-                        "locked": False,
-                    }
-                ],
-                "hasMore": False,
-                "nextCursor": "",
-            },
-        )
-        bad = begin_action(
-            trusted_turn,
-            "mystand_query",
-            "v1",
-            {
-                "operation": "read",
-                "query_kind": "resource-read",
-                "module_id": "profile",
-                "fact_paths": ["resource.summary"],
-                "query_args": {},
-                "coverage_required": False,
-                "resource": {"name": "目标特征卡"},
-            },
-            call_id="feature-card-first-invalid",
-        )
-        assert bad.decision == "allow"
-        finish_action(
-            trusted_turn,
-            bad.call.call_id,
-            "mystand_query",
-            "v1",
-            {
-                "ok": False,
-                "status": 400,
-                "code": "invalid_mystand_query_arguments",
-                "error": "PRIVATE_FIRST_FAILURE",
-            },
-        )
-        corrected_arguments = {
-            "operation": "read",
-            "resource": {"name": "目标特征卡"},
-            "entities": [],
-            "fact_needs": ["document.content", "resource.summary"],
-            "mode": "summary",
-        }
-        final_reply = (
-            "我这次先查询了资料目录，但读取特征卡正文时发现查询格式和"
-            "当前规则不一致。我按规则调整后又尝试了一次，还是没拿到"
-            "这次要用的特征卡正文，所以现在不能根据正文给你可靠建议。"
-        )
-        responses = [
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="mystand_query",
-                        arguments=json.dumps(
-                            corrected_arguments,
-                            ensure_ascii=False,
-                        ),
-                        call_id="feature-card-second-invalid",
-                    )
-                ],
-            ),
-            _mock_response(content=final_reply, finish_reason="stop"),
-        ]
-        observed_requests = []
-
-        def provider(payload):
-            observed_requests.append(payload)
-            return responses[len(observed_requests) - 1]
-
-        def execute_corrected_failure(
-            assistant_message,
-            messages,
-            _task_id,
-            _api_call_count,
-        ):
-            tool_call = assistant_message.tool_calls[0]
-            arguments = json.loads(tool_call.function.arguments)
-            assert arguments == corrected_arguments
-            started = begin_action(
-                trusted_turn,
-                tool_call.function.name,
-                "v1",
-                arguments,
-                call_id=tool_call.id,
-            )
-            assert started.decision == "allow"
-            failure_body = {
-                "ok": False,
-                "status": 400,
-                "code": "invalid_mystand_query_arguments",
-                "error": "PRIVATE_SECOND_FAILURE",
-            }
-            finish_action(
-                trusted_turn,
-                tool_call.id,
-                tool_call.function.name,
-                "v1",
-                failure_body,
-            )
-            messages.append(
-                {
-                    "role": "tool",
-                    "name": tool_call.function.name,
-                    "tool_call_id": tool_call.id,
-                    "content": json.dumps(
-                        failure_body,
-                        ensure_ascii=False,
-                    ),
-                }
-            )
-
-        active = activate_turn(trusted_turn)
-        try:
-            with (
-                patch.object(
-                    agent,
-                    "_interruptible_api_call",
-                    side_effect=provider,
-                ),
-                patch.object(
-                    agent,
-                    "_execute_tool_calls",
-                    side_effect=execute_corrected_failure,
-                ),
-                patch.object(agent, "_persist_session"),
-                patch.object(agent, "_save_trajectory"),
-                patch.object(agent, "_cleanup_task_resources"),
-            ):
-                result = agent.run_conversation(
-                    "查一下特征卡，分析后给我一个建议"
-                )
-        finally:
-            deactivate_turn(active)
-
-        assert result["completed"] is True, result
-        assert result["failed"] is False
-        assert result["api_calls"] == 2
-        assert result["final_response"] == final_reply
-        assert "读取特征卡正文时发现查询格式" in result["final_response"]
-        assert "调整后又尝试了一次" in result["final_response"]
-        assert len(observed_requests) == 2
-        assert observed_requests[0].get("tools")
-        assert not observed_requests[1].get("tools")
-        first_wire = json.dumps(observed_requests[0], ensure_ascii=False)
-        final_wire = json.dumps(observed_requests[1], ensure_ascii=False)
-        assert "PRIVATE_FIRST_FAILURE" not in first_wire
-        assert "private-feature-card-id" not in first_wire
-        assert "PRIVATE_FIRST_FAILURE" not in final_wire
-        assert "PRIVATE_SECOND_FAILURE" not in final_wire
-        assert "private-feature-card-id" not in final_wire
-        assert "PRIVATE_SECOND_FAILURE" not in result["final_response"]
-        completion = check_completion(result["final_response"], trusted_turn)
-        assert completion.allowed is True
-        assert completion.reason == "execution_status_bound"
-        assert "output_presentation" not in completion.verification
-        assert completion.verification["completion_kind"] == "failure-bound"
-        assert completion.verification["failure_reason"] == (
-            "invalid_arguments"
-        )
-        assert completion.verification["failed_action_count"] == 2
-        assert completion.verification["turn_outcome"]["attempt_count"] == 2
-
-    def test_transient_read_retry_failure_finalizes_and_accounts_all_calls(
-        self,
-        agent,
-    ):
-        from xiaoban.trusted_runtime.agent_call_usage import (
-            AgentCallUsageLedger,
-        )
-        from xiaoban.trusted_runtime.paid_call_policy import (
-            SIGNED_MYSTAND_AGENT_POLICY,
-            SIGNED_MYSTAND_AGENT_POLICY_REVISION,
-        )
-
-        self._setup_agent(agent)
-        agent._strict_no_automatic_paid_retry = True
-        agent._disable_streaming = True
-        agent.max_iterations = 4
-        agent.provider = SIGNED_MYSTAND_AGENT_POLICY.provider
-        agent.model = SIGNED_MYSTAND_AGENT_POLICY.model
-        agent.max_tokens = min(
-            4_096,
-            SIGNED_MYSTAND_AGENT_POLICY.output_max_tokens,
-        )
-        agent._api_max_retries = 1
-        agent._fallback_chain = []
-        agent._fallback_index = 0
-        agent.tools = _make_tool_defs(
-            "mystand_resource_index",
-            "mystand_authorization",
-        )
-        agent.valid_tool_names = {
-            "mystand_resource_index",
-            "mystand_authorization",
-        }
-        ledger = AgentCallUsageLedger(
-            provider=str(agent.provider),
-            model=str(agent.model),
-            execution_id="8" * 32,
-        )
-        agent._paid_call_usage_ledger = ledger
-        agent._true_moa_usage_ledger = None
-        agent._paid_call_policy_revision = (
-            SIGNED_MYSTAND_AGENT_POLICY_REVISION
-        )
-        trusted_turn = _dynamic_work_turn("transient-loop-failed")
-        arguments = {
-            "operation": "resolve",
-            "resource_uid": "resource-failed-loop",
-        }
-        responses = [
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="mystand_resource_index",
-                        arguments="{}",
-                        call_id="failed-loop-index",
-                    )
-                ],
-                usage={
-                    "prompt_tokens": 8,
-                    "completion_tokens": 2,
-                    "total_tokens": 10,
-                    "cached_input_tokens": 0,
-                },
-            ),
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="mystand_authorization",
-                        arguments=json.dumps(arguments),
-                        call_id="failed-loop-first-read",
-                    )
-                ],
-                usage={
-                    "prompt_tokens": 9,
-                    "completion_tokens": 2,
-                    "total_tokens": 11,
-                    "cached_input_tokens": 0,
-                },
-            ),
-            _mock_response(
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[
-                    _mock_tool_call(
-                        name="mystand_authorization",
-                        arguments=json.dumps(arguments),
-                        call_id="failed-loop-retry-read",
-                    )
-                ],
-                usage={
-                    "prompt_tokens": 10,
-                    "completion_tokens": 2,
-                    "total_tokens": 12,
-                    "cached_input_tokens": 0,
-                },
-            ),
-            _mock_response(
-                content=(
-                    "我这次已经发起实际处理，但读取服务暂时不可用，"
-                    "所以这项任务还没有完成。"
-                ),
-                finish_reason="stop",
-                usage={
-                    "prompt_tokens": 8,
-                    "completion_tokens": 5,
-                    "total_tokens": 13,
-                    "cached_input_tokens": 0,
-                },
-            ),
-        ]
-        observed_requests = []
-        handler_calls = 0
-
-        def provider(payload):
-            observed_requests.append(payload)
-            return responses[len(observed_requests) - 1]
-
-        def execute_failed_read(
-            assistant_message,
-            messages,
-            _task_id,
-            _api_call_count,
-        ):
-            nonlocal handler_calls
-            handler_calls += 1
-            tool_call = assistant_message.tool_calls[0]
-            parsed_arguments = json.loads(tool_call.function.arguments)
-            if tool_call.function.name == "mystand_resource_index":
-                assert parsed_arguments == {}
-                started = begin_action(
-                    trusted_turn,
-                    tool_call.function.name,
-                    "v1",
-                    parsed_arguments,
-                    call_id=tool_call.id,
-                )
-                assert started.decision == "allow"
-                index_result = {
-                    "schema": "mystand.resource-index.complete.v1",
-                    "ok": True,
-                    "items": [
-                        {
-                            "resourceUid": "resource-failed-loop",
-                            "safeLabel": "目标资料",
-                            "resourceType": "generic-record",
-                            "canRead": True,
-                            "locked": False,
-                        }
-                    ],
-                    "hasMore": False,
-                    "nextCursor": "",
-                }
-                finish_action(
-                    trusted_turn,
-                    tool_call.id,
-                    tool_call.function.name,
-                    "v1",
-                    index_result,
-                )
-                messages.append(
-                    {
-                        "role": "tool",
-                        "name": tool_call.function.name,
-                        "tool_call_id": tool_call.id,
-                        "content": json.dumps(index_result),
-                    }
-                )
-                return
-            assert parsed_arguments == arguments
-            started = begin_action(
-                trusted_turn,
-                tool_call.function.name,
-                "v1",
-                parsed_arguments,
-                call_id=tool_call.id,
-            )
-            assert started.decision == "allow"
-            private_detail = f"PRIVATE_FAILURE_{handler_calls - 1}"
-            finish_action(
-                trusted_turn,
-                tool_call.id,
-                tool_call.function.name,
-                "v1",
-                {
-                    "ok": False,
-                    "status": 502,
-                    "code": "mystand_authorization_transport_failed",
-                    "detail": private_detail,
-                },
-            )
-            messages.append(
-                {
-                    "role": "tool",
-                    "name": tool_call.function.name,
-                    "tool_call_id": tool_call.id,
-                    "content": private_detail,
-                }
-            )
-
-        active = activate_turn(trusted_turn)
-        try:
-            with (
-                patch.object(
-                    agent,
-                    "_interruptible_api_call",
-                    side_effect=provider,
-                ),
-                patch.object(
-                    agent,
-                    "_execute_tool_calls",
-                    side_effect=execute_failed_read,
-                ),
-                patch.object(agent, "_persist_session"),
-                patch.object(agent, "_save_trajectory"),
-                patch.object(agent, "_cleanup_task_resources"),
-            ):
-                result = agent.run_conversation("读取目标资料")
-        finally:
-            deactivate_turn(active)
-
-        assert len(observed_requests) == 4
-        assert result["api_calls"] == 4
-        assert handler_calls == 3
-        assert observed_requests[0].get("tools")
-        assert observed_requests[1].get("tools")
-        assert observed_requests[2].get("tools")
-        assert not observed_requests[3].get("tools")
-        assert len(trusted_turn.action_calls) == 3
-        assert len(trusted_turn.action_results) == 3
-        assert result["final_response"] == responses[3].choices[0].message.content
-        assert "PRIVATE_FAILURE_1" not in result["final_response"]
-        assert "PRIVATE_FAILURE_2" not in result["final_response"]
-        assert "读取服务暂时不可用" in result["final_response"]
-        assert "PRIVATE_FAILURE_" not in json.dumps(
-            observed_requests[3],
-            ensure_ascii=False,
-        )
-        assert result["completed"] is True
-        assert result["failed"] is False
-        assert result["partial"] is False
-        assert (
-            result["input_tokens"],
-            result["output_tokens"],
-            result["total_tokens"],
-            result["last_prompt_tokens"],
-        ) == (35, 11, 46, 8)
-        decision = check_completion(
-            result["final_response"],
-            trusted_turn,
-        )
-        assert decision.allowed is True
-        assert decision.reason == "execution_status_bound"
-        assert "output_presentation" not in decision.verification
-        assert decision.verification["action_count"] == 3
-        assert decision.verification["failed_action_count"] == 2
-        call_receipts = ledger.to_dict()["calls"]
-        assert len(call_receipts) == 4
-        assert [call["ordinal"] for call in call_receipts] == [1, 2, 3, 4]
-        assert [
-            (
-                call["inputTokens"],
-                call["outputTokens"],
-                call["totalTokens"],
-            )
-            for call in call_receipts
-        ] == [(8, 2, 10), (9, 2, 11), (10, 2, 12), (8, 5, 13)]
-        assert len({call["callId"] for call in call_receipts}) == 4
-        assert all(call["status"] == "completed" for call in call_receipts)
-        assert all(call["usageStatus"] == "reported" for call in call_receipts)
-
-    def test_failure_finalizer_does_not_retry_incomplete_scratchpad(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        agent._strict_no_automatic_paid_retry = True
-        agent._disable_streaming = True
-        agent.max_iterations = 2
-        agent.tools = _make_tool_defs("mystand_resource_index")
-        agent.valid_tool_names = {"mystand_resource_index"}
-        trusted_turn = _dynamic_work_turn("finalizer-scratchpad")
-        assert mark_dynamic_execution_no_progress(trusted_turn) is True
-        provider = MagicMock(
-            return_value=_mock_response(
-                content="<REASONING_SCRATCHPAD>unfinished",
-                finish_reason="stop",
-            )
-        )
-        active = activate_turn(trusted_turn)
-        try:
-            with (
-                patch.object(
-                    agent,
-                    "_interruptible_api_call",
-                    side_effect=provider,
-                ),
-                patch.object(agent, "_persist_session"),
-                patch.object(agent, "_save_trajectory"),
-                patch.object(agent, "_cleanup_task_resources"),
-            ):
-                result = agent.run_conversation("请处理这件事")
-        finally:
-            deactivate_turn(active)
-
-        assert provider.call_count == 1
-        assert not provider.call_args.args[0].get("tools")
-        assert result["completed"] is False
-        assert result["failed"] is True
-        assert result["final_response"] == render_dynamic_failure_report(
-            trusted_turn
-        )
-        assert result["api_calls"] == 1
-        completion = check_completion(result["final_response"], trusted_turn)
-        assert completion.reason == "execution_status_system_receipt"
-        assert (
-            completion.verification["output_presentation"]
-            == "system-receipt"
-        )
-
-    def test_failure_finalizer_rejects_codex_intermediate_ack_once(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        agent._strict_no_automatic_paid_retry = True
-        agent._disable_streaming = True
-        agent.max_iterations = 2
-        agent.tools = _make_tool_defs("mystand_resource_index")
-        agent.valid_tool_names = {"mystand_resource_index"}
-        agent.api_mode = "chat_completions"
-        trusted_turn = _dynamic_work_turn("finalizer-codex-ack")
-        assert mark_dynamic_execution_no_progress(trusted_turn) is True
-        provider = MagicMock(
-            return_value=_mock_response(
-                content="明白，我马上处理。",
-                finish_reason="stop",
-            )
-        )
-        transport = agent._get_transport()
-
-        def _normalize_as_codex(_response, **_kwargs):
-            agent.api_mode = "codex_responses"
-            return NormalizedResponse(
-                content="明白，我马上处理。",
-                tool_calls=[],
-                finish_reason="stop",
-            )
-
-        active = activate_turn(trusted_turn)
-        try:
-            with (
-                patch.object(
-                    agent,
-                    "_interruptible_api_call",
-                    side_effect=provider,
-                ),
-                patch.object(
-                    transport,
-                    "normalize_response",
-                    side_effect=_normalize_as_codex,
-                ),
-                patch.object(
-                    agent,
-                    "_get_transport",
-                    return_value=transport,
-                ),
-                patch.object(
-                    agent,
-                    "_looks_like_codex_intermediate_ack",
-                    return_value=True,
-                ),
-                patch.object(agent, "_persist_session"),
-                patch.object(agent, "_save_trajectory"),
-                patch.object(agent, "_cleanup_task_resources"),
-            ):
-                result = agent.run_conversation("请处理这件事")
-        finally:
-            deactivate_turn(active)
-
-        assert provider.call_count == 1
-        assert not provider.call_args.args[0].get("tools")
-        assert result["completed"] is False
-        assert result["failed"] is True
-        assert result["final_response"] == render_dynamic_failure_report(
-            trusted_turn
-        )
-        assert result["api_calls"] == 1
-        completion = check_completion(result["final_response"], trusted_turn)
-        assert completion.reason == "execution_status_system_receipt"
-        assert (
-            completion.verification["output_presentation"]
-            == "system-receipt"
-        )
-
-    def test_failure_finalizer_does_not_retry_response_processing_error(
-        self,
-        agent,
-    ):
-        self._setup_agent(agent)
-        agent._strict_no_automatic_paid_retry = True
-        agent._disable_streaming = True
-        agent.max_iterations = 2
-        agent.tools = _make_tool_defs("mystand_resource_index")
-        agent.valid_tool_names = {"mystand_resource_index"}
-        agent.api_mode = "chat_completions"
-        trusted_turn = _dynamic_work_turn("finalizer-processing-error")
-        assert mark_dynamic_execution_no_progress(trusted_turn) is True
-        provider = MagicMock(
-            return_value=_mock_response(
-                content="不会公开的占位回复",
-                finish_reason="stop",
-            )
-        )
-        transport = agent._get_transport()
-        active = activate_turn(trusted_turn)
-        try:
-            with (
-                patch.object(
-                    agent,
-                    "_interruptible_api_call",
-                    side_effect=provider,
-                ),
-                patch.object(
-                    transport,
-                    "normalize_response",
-                    side_effect=RuntimeError("synthetic normalize failure"),
-                ) as normalize,
-                patch.object(
-                    agent,
-                    "_get_transport",
-                    return_value=transport,
-                ),
-                patch.object(agent, "_persist_session"),
-                patch.object(agent, "_save_trajectory"),
-                patch.object(agent, "_cleanup_task_resources"),
-            ):
-                result = agent.run_conversation("请处理这件事")
-        finally:
-            deactivate_turn(active)
-
-        assert provider.call_count == 1
-        assert not provider.call_args.args[0].get("tools")
-        assert normalize.call_count == 1, result
-        assert result["completed"] is False
-        assert result["failed"] is True
-        assert result["error"] == (
-            "Finalize-only response processing failed; "
-            "automatic retry is disabled"
-        )
-        assert result["final_response"] == render_dynamic_failure_report(
-            trusted_turn
-        )
-        assert result["api_calls"] == 1
-        completion = check_completion(result["final_response"], trusted_turn)
-        assert completion.reason == "execution_status_system_receipt"
-        assert (
-            completion.verification["output_presentation"]
-            == "system-receipt"
-        )
-
-    @pytest.mark.parametrize(
-        "bad_response_kind",
-        [
-            "provider_error",
-            "malformed_response",
-            "truncated_response",
-            "content_filter",
-        ],
-    )
-    def test_failure_finalizer_transport_failure_uses_system_receipt(
-        self,
-        agent,
-        bad_response_kind,
-    ):
-        self._setup_agent(agent)
-        agent._strict_no_automatic_paid_retry = True
-        agent._disable_streaming = True
-        agent.max_iterations = 2
-        agent.tools = _make_tool_defs("mystand_resource_index")
-        agent.valid_tool_names = {"mystand_resource_index"}
-        trusted_turn = _dynamic_work_turn(
-            f"finalizer-{bad_response_kind}"
-        )
-        assert mark_dynamic_execution_no_progress(trusted_turn) is True
-        if bad_response_kind == "malformed_response":
-            response = SimpleNamespace(choices=[])
-        elif bad_response_kind == "truncated_response":
-            response = _mock_response(
-                content="未完成的截断内容",
-                finish_reason="length",
-            )
-        else:
-            response = _mock_response(
-                content="",
-                finish_reason="content_filter",
-            )
-        observed_requests = []
-
-        def provider(payload):
-            observed_requests.append(payload)
-            if bad_response_kind == "provider_error":
-                raise RuntimeError("simulated finalizer provider failure")
-            return response
-
-        active = activate_turn(trusted_turn)
-        try:
-            with (
-                patch.object(
-                    agent,
-                    "_interruptible_api_call",
-                    side_effect=provider,
-                ),
-                patch.object(agent, "_persist_session"),
-                patch.object(agent, "_save_trajectory"),
-                patch.object(agent, "_cleanup_task_resources"),
-            ):
-                result = agent.run_conversation("请处理这件事")
-        finally:
-            deactivate_turn(active)
-
-        assert len(observed_requests) == 1
-        assert not observed_requests[0].get("tools")
-        assert result["api_calls"] == 1
-        assert result["completed"] is False
-        assert result["failed"] is True
-        assert result["final_response"] == render_dynamic_failure_report(
-            trusted_turn
-        )
-        assert all(
-            message.get("role") != "assistant"
-            for message in result["messages"]
-        )
-        completion = check_completion(result["final_response"], trusted_turn)
-        assert completion.allowed is True
-        assert completion.reason == "execution_status_system_receipt"
-        assert completion.verification["completion_kind"] == "failure-bound"
-        assert (
-            completion.verification["output_presentation"]
-            == "system-receipt"
-        )
-        assert completion.verification["answer_status"] == "incomplete"
-
-    def test_dynamic_finalize_budget_keeps_single_call_usable(self):
-        trusted_turn = SimpleNamespace(
-            completion_protocol="dynamic-evidence-v2",
-        )
-        one_call_agent = SimpleNamespace(
-            _strict_no_automatic_paid_retry=True,
-            max_iterations=1,
-        )
-        messages = [{"role": "system", "content": "system"}]
-        with (
-            patch(
-                "xiaoban.trusted_runtime.turns.current_turn",
-                return_value=trusted_turn,
-            ),
-            patch(
-                "xiaoban.trusted_runtime.dynamic_completion."
-                "dynamic_finalization_mode",
-                return_value="failure",
-            ),
-        ):
-            assert _prepare_finalize_only_call(
-                one_call_agent,
-                1,
-                messages,
-            ) is False
-        assert messages == [{"role": "system", "content": "system"}]
-
-        two_call_agent = SimpleNamespace(
-            _strict_no_automatic_paid_retry=True,
-            max_iterations=2,
-        )
-        block_messages = [{
-            "role": "system",
-            "content": [{
-                "type": "text",
-                "text": "cached system",
-                "cache_control": {"type": "ephemeral"},
-            }],
-        }]
-        with (
-            patch(
-                "xiaoban.trusted_runtime.turns.current_turn",
-                return_value=trusted_turn,
-            ),
-            patch(
-                "xiaoban.trusted_runtime.dynamic_completion."
-                "dynamic_finalization_mode",
-                return_value="failure",
-            ),
-        ):
-            assert _prepare_finalize_only_call(
-                two_call_agent,
-                2,
-                block_messages,
-            ) is True
-        assert [message["role"] for message in block_messages] == [
-            "system",
-            "user",
-            "user",
-        ]
-        assert "Runtime finalization:" in block_messages[0]["content"]
-        assert "cached system" not in json.dumps(block_messages)
-        assert "完整执行结果" in block_messages[-1]["content"]
 
     def test_strict_paid_length_is_terminal_and_preserves_usage(self, agent):
         self._setup_agent(agent)

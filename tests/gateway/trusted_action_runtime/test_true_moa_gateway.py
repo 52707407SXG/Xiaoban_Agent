@@ -127,6 +127,75 @@ def _normal_direct_headers() -> dict[str, str]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("metadata_aware", [False, True])
+async def test_mystand_traced_tool_terminal_callback_is_arity_compatible(
+    monkeypatch,
+    metadata_aware,
+):
+    """The My Stand tracing wrapper preserves old callbacks and new metadata."""
+    adapter = _adapter()
+    canonical = {
+        "schema": "xiaoban.tool-result.v1",
+        "requestId": "request-e1a-runner",
+        "turnId": "turn-e1a-runner",
+        "callId": "call-e1a-runner",
+        "toolName": "mystand_query",
+        "dispatchState": "dispatched",
+        "outcome": "unknown",
+        "retrySafe": False,
+    }
+    observed = []
+
+    if metadata_aware:
+        def _complete(call_id, name, args, result, metadata):
+            observed.append((call_id, name, args, result, metadata))
+    else:
+        def _complete(call_id, name, args, result):
+            observed.append((call_id, name, args, result))
+
+    def _fake_run_agent_sync(request):
+        request.traced_tool_start(
+            "call-e1a-runner",
+            "mystand_query",
+            {"query": "safe"},
+        )
+        request.traced_tool_complete(
+            "call-e1a-runner",
+            "mystand_query",
+            {"query": "safe"},
+            "PRIVATE_CALLBACK_RESULT",
+            canonical,
+        )
+        return (
+            {"final_response": "done", "messages": [], "api_calls": 1},
+            {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        )
+
+    monkeypatch.setattr(
+        "gateway.platforms.true_moa_runner.run_agent_sync",
+        _fake_run_agent_sync,
+    )
+
+    await adapter._run_agent(
+        user_message="run",
+        conversation_history=[],
+        request_headers=_normal_direct_headers(),
+        tool_start_callback=lambda *_args: None,
+        tool_complete_callback=_complete,
+    )
+
+    assert len(observed) == 1
+    assert observed[0][:4] == (
+        "call-e1a-runner",
+        "mystand_query",
+        {"query": "safe"},
+        "PRIVATE_CALLBACK_RESULT",
+    )
+    if metadata_aware:
+        assert observed[0][4] == canonical
+
+
+@pytest.mark.asyncio
 async def test_mystand_contract_mismatch_stops_before_provider_dispatch():
     adapter = _adapter()
     headers = _mystand_headers("contract-mismatch")
@@ -1051,92 +1120,6 @@ async def test_completed_sse_buffers_until_sealed_and_emits_outcome_receipt(
     cache._durable.close()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [True, False])
-async def test_true_moa_diagnostic_tool_mode_reaches_stream_and_nonstream_runner(
-    monkeypatch,
-    tmp_path,
-    stream,
-):
-    from gateway.platforms import api_server
-
-    adapter = _adapter()
-    delivery_id = "xbd_" + ("a1" if stream else "a2") * 20
-    headers = _mystand_headers(
-        f"diagnostic-{stream}",
-        epoch="74" if stream else "75",
-    )
-    headers.update({
-        "Idempotency-Key": delivery_id,
-        "X-Xiaoban-Delivery-Id": delivery_id,
-        "X-Xiaoban-Delivery-Attempt": headers["X-Xiaoban-Attempt"],
-        "X-Xiaoban-Completion-Protocol": "dynamic-evidence-v2",
-        "X-Xiaoban-Evidence-Required": "0",
-        "X-Xiaoban-Business-Tool-Mode": "disabled",
-        "X-Xiaoban-Invocation-Fingerprint": "a" * 64,
-    })
-    if stream:
-        headers.pop("Idempotency-Key")
-    snapshot = validate_true_moa_headers(
-        headers,
-        mystand_request=True,
-        api_authenticated=True,
-    )
-    completed_usage = _completed_usage(
-        snapshot,
-        wave_id=("a" if stream else "b") * 32,
-    )
-    mock_run = AsyncMock(
-        return_value=(
-            _sealed_mystand_result({
-                "final_response": "上一轮没有形成可用结果。",
-                "completed": True,
-                "failed": False,
-                "messages": [],
-                "_mystand_request": True,
-                "_true_moa_usage": completed_usage,
-            }),
-            {
-                "input_tokens": 10,
-                "output_tokens": 4,
-                "total_tokens": 14,
-                "true_moa": completed_usage,
-            },
-        ),
-    )
-    monkeypatch.setattr(adapter, "_run_agent", mock_run)
-    cache = api_server._IdempotencyCache(
-        durable_path=str(tmp_path / f"moa-diagnostic-{stream}.sqlite"),
-        outcome_keys=_OUTCOME_KEYS,
-    )
-    monkeypatch.setattr(api_server, "_idem_cache", cache)
-
-    async with TestClient(TestServer(_app(adapter))) as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            headers=headers,
-            json={
-                "model": "xiaoban-agent",
-                "stream": stream,
-                "messages": [{
-                    "role": "user",
-                    "content": (
-                        "刚才查 OUT-ABCDEFG 为什么失败？"
-                        "不要索引，直接读库"
-                    ),
-                }],
-            },
-        )
-        await response.read()
-    cache._durable.close()
-
-    assert response.status == 200
-    mock_run.assert_awaited_once()
-    runner_kwargs = mock_run.await_args.kwargs
-    assert runner_kwargs["business_tools_disabled"] is True
-    assert runner_kwargs["dynamic_evidence_required"] is False
-    assert runner_kwargs["true_moa_snapshot"] == snapshot
-
 
 @pytest.mark.asyncio
 async def test_normal_signed_sse_has_distinct_usage_recovery_and_no_redispatch(
@@ -1842,110 +1825,6 @@ async def test_normal_signed_legacy_http_needs_no_durable_headers(
     assert len(final_agent.run_calls) == 1
     assert create_kwargs["strict_no_automatic_paid_retry"] is False
     assert "agent_call_usage" not in payload.get("xiaoban", {})
-
-
-def test_preexecuted_stop_after_index_never_dispatches_authorization(
-    monkeypatch,
-):
-    from gateway.platforms.api_server import (
-        CompletionStoppedError,
-        _run_mystand_preexecuted_evidence,
-    )
-    from xiaoban.trusted_runtime.true_moa import TrueMoACancelController
-
-    controller = TrueMoACancelController()
-    calls: list[str] = []
-
-    def _index(_args):
-        calls.append("index")
-        controller.cancel()
-        return '{"ok":true,"items":[]}'
-
-    def _authorization(_args):
-        calls.append("authorization")
-        return '{"ok":true}'
-
-    monkeypatch.setattr(
-        "tools.mystand_resource_index_tool.mystand_resource_index_tool_handler",
-        _index,
-    )
-    monkeypatch.setattr(
-        "tools.mystand_authorization_tool.mystand_authorization_tool_handler",
-        _authorization,
-    )
-
-    with pytest.raises(CompletionStoppedError):
-        _run_mystand_preexecuted_evidence(
-            "mystand_authorization",
-            user_message="读取 AUTH-ABC12345",
-            system_prompt="",
-            tool_start_callback=lambda *_args: None,
-            tool_complete_callback=lambda *_args: None,
-            terminal_controller=controller,
-        )
-
-    assert calls == ["index"]
-
-
-def test_preexecuted_cancel_wins_before_trusted_preaction(monkeypatch):
-    from gateway.platforms.api_server import (
-        CompletionStoppedError,
-        _run_mystand_preexecuted_evidence,
-    )
-    from xiaoban.trusted_runtime import TrustedIdentity, begin_turn
-    from xiaoban.trusted_runtime.true_moa import TrueMoACancelController
-
-    controller = TrueMoACancelController()
-    original_gate = controller.try_begin_dispatch
-    handler_calls: list[str] = []
-    starts = MagicMock()
-    completes = MagicMock()
-    turn = begin_turn(
-        channel="web",
-        user_message="读取 AUTH-ABC12345",
-        identity=TrustedIdentity(
-            account_id="user-a",
-            data_scope="mystand",
-            source="server_session",
-        ),
-        request_id="req-preaction-race",
-        message_id="msg-preaction-race",
-    )
-
-    def _cancel_before_gate(key):
-        controller.cancel()
-        return original_gate(key)
-
-    monkeypatch.setattr(
-        controller,
-        "try_begin_dispatch",
-        _cancel_before_gate,
-    )
-    monkeypatch.setattr(
-        "tools.mystand_resource_index_tool.mystand_resource_index_tool_handler",
-        lambda _args: handler_calls.append("index") or '{"ok":true}',
-    )
-    monkeypatch.setattr(
-        "tools.mystand_authorization_tool.mystand_authorization_tool_handler",
-        lambda _args: handler_calls.append("authorization") or '{"ok":true}',
-    )
-
-    with pytest.raises(CompletionStoppedError):
-        _run_mystand_preexecuted_evidence(
-            "mystand_authorization",
-            user_message="读取 AUTH-ABC12345",
-            system_prompt="",
-            tool_start_callback=starts,
-            tool_complete_callback=completes,
-            trusted_turn=turn,
-            terminal_controller=controller,
-        )
-
-    assert handler_calls == []
-    assert turn.action_calls == []
-    assert turn.action_results == []
-    starts.assert_not_called()
-    completes.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -4109,239 +3988,11 @@ async def _run_gateway_case(case, **kwargs):
     )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("reasoning_mode", ["normal", TRUE_MOA_MODE])
-async def test_diagnostic_runner_never_resolves_or_dispatches_business_tools(
-    monkeypatch,
-    reasoning_mode,
-):
-    from gateway.platforms import api_server
-    from gateway.platforms.api_server import (
-        _mystand_completion_expected_binding,
-    )
-    from run_agent import AIAgent
-    from tools.registry import ToolRegistry
-    from xiaoban.trusted_runtime.turns import current_turn
-
-    tool_names = (
-        "mystand_resource_index",
-        "mystand_query",
-        "mystand_authorization",
-    )
-    tool_definitions = [
-        {
-            "type": "function",
-            "function": {"name": name, "parameters": {}},
-        }
-        for name in tool_names
-    ]
-    provider_payloads: list[dict[str, object]] = []
-    handler_seen: list[str] = []
-    registry_codes: list[str] = []
-    turn_snapshots: list[dict[str, object]] = []
-    advisor_tools: list[tuple[object, ...]] = []
-
-    class DiagnosticProbeAgent(_FakeFinalAgent):
-        valid_tool_names = set(tool_names)
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.tools = list(tool_definitions)
-
-        def run_conversation(self, **kwargs):
-            turn = current_turn()
-            assert turn is not None
-            provider_payload = AIAgent._build_api_kwargs(
-                object.__new__(AIAgent),
-                [{"role": "user", "content": "诊断上一轮"}],
-            )
-            provider_payloads.append(provider_payload)
-
-            registry = ToolRegistry()
-            for name in tool_names:
-                registry.register(
-                    name,
-                    name,
-                    {"name": name, "parameters": {}},
-                    lambda _args, tool_name=name: (
-                        handler_seen.append(tool_name)
-                        or json.dumps({"ok": True})
-                    ),
-                )
-            for index, name in enumerate(tool_names):
-                denied = json.loads(
-                    registry.dispatch(
-                        name,
-                        {},
-                        tool_call_id=f"diagnostic-runner-{index}",
-                    )
-                )
-                registry_codes.append(str(denied.get("code") or ""))
-            turn_snapshots.append({
-                "business_tools_disabled": turn.business_tools_disabled,
-                "action_calls": list(turn.action_calls),
-            })
-
-            generic_ledger = getattr(
-                self,
-                "_paid_call_usage_ledger",
-                None,
-            )
-            if (
-                generic_ledger is not None
-                and getattr(self, "_true_moa_usage_ledger", None) is None
-            ):
-                call_id = generic_ledger.start_call()
-                generic_ledger.mark_dispatched(call_id)
-                generic_ledger.finish_call(
-                    call_id,
-                    status="completed",
-                    usage={
-                        "input_tokens": self.session_prompt_tokens,
-                        "output_tokens": self.session_completion_tokens,
-                        "total_tokens": self.session_total_tokens,
-                        "cached_input_tokens": (
-                            self.session_cached_input_tokens
-                        ),
-                    },
-                )
-            result = super().run_conversation(**kwargs)
-            result["final_response"] = "上一轮没有形成可用结果。"
-            return result
-
-    monkeypatch.setattr(
-        "agent.chat_completion_helpers.build_api_kwargs",
-        lambda _agent, _messages: {
-            "tools": list(tool_definitions),
-            "tool_choice": "required",
-            "parallel_tool_calls": True,
-        },
-    )
-    resolve_initial_choice = MagicMock(
-        side_effect=AssertionError(
-            "diagnostic turn parsed an initial business tool",
-        ),
-    )
-    run_preexecuted = MagicMock(
-        side_effect=AssertionError(
-            "diagnostic turn entered deterministic preexecution",
-        ),
-    )
-    monkeypatch.setattr(
-        api_server,
-        "_resolve_mystand_initial_tool_choice",
-        resolve_initial_choice,
-    )
-    monkeypatch.setattr(
-        api_server,
-        "_run_mystand_preexecuted_evidence",
-        run_preexecuted,
-    )
-
-    probe_agent = DiagnosticProbeAgent()
-    if reasoning_mode == TRUE_MOA_MODE:
-        from xiaoban.trusted_runtime import true_moa_providers
-
-        case = _gateway_case(
-            monkeypatch,
-            agent=probe_agent,
-            epoch="76",
-        )
-        adapter, headers, snapshot, _agent = case
-
-        def fake_advisor(*, slot, tools, dispatch_callback, **_kwargs):
-            advisor_tools.append(tuple(tools))
-            dispatch_callback()
-            return StrictAdvisorResult(content=f"safe {slot.slot_id}")
-
-        monkeypatch.setattr(
-            true_moa_providers,
-            "strict_advisor_call",
-            fake_advisor,
-        )
-    else:
-        adapter = _adapter()
-        headers = _mystand_headers("diagnostic-normal-runner")
-        headers.pop(MODE_EPOCH_HEADER)
-        headers.pop(MOA_PRESET_ID_HEADER)
-        headers.pop(MOA_PRESET_REVISION_HEADER)
-        headers[REASONING_MODE_HEADER] = "normal"
-        headers[SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER] = (
-            SIGNED_MYSTAND_AGENT_POLICY_REVISION
-        )
-        snapshot = None
-        monkeypatch.setattr(
-            adapter,
-            "_create_agent",
-            lambda **_kwargs: probe_agent,
-        )
-
-    delivery_id = "xbd_" + (
-        "b1" if reasoning_mode == "normal" else "b2"
-    ) * 20
-    headers.update({
-        "Idempotency-Key": delivery_id,
-        "X-Xiaoban-Delivery-Id": delivery_id,
-        "X-Xiaoban-Delivery-Attempt": headers["X-Xiaoban-Attempt"],
-        "X-Xiaoban-Completion-Protocol": "dynamic-evidence-v2",
-        "X-Xiaoban-Evidence-Required": "0",
-        "X-Xiaoban-Business-Tool-Mode": "disabled",
-        "X-Xiaoban-Invocation-Fingerprint": "b" * 64,
-    })
-    completion_binding = _mystand_completion_expected_binding(
-        headers,
-        session_id="gateway-test-session",
-    )
-
-    result, usage = await adapter._run_agent(
-        user_message=(
-            "刚才查 AUTH-ABCDEFG 和 OUT-ABCDEFG 为什么失败？"
-            "不要索引，直接读库"
-        ),
-        conversation_history=[],
-        session_id="gateway-test-session",
-        gateway_session_key="gateway-test-channel",
-        request_headers=headers,
-        agent_ref=[None, False, None],
-        completion_protocol="dynamic-evidence-v2",
-        completion_binding=completion_binding,
-        dynamic_evidence_required=False,
-        business_tools_disabled=True,
-        true_moa_snapshot=snapshot,
-    )
-
-    assert result["completed"] is True
-    assert result["final_response"] == "上一轮没有形成可用结果。"
-    assert resolve_initial_choice.call_count == 0
-    assert run_preexecuted.call_count == 0
-    assert len(provider_payloads) == 1
-    assert provider_payloads[0]["tools"] == []
-    assert "tool_choice" not in provider_payloads[0]
-    assert "parallel_tool_calls" not in provider_payloads[0]
-    assert registry_codes == ["business_tools_disabled"] * len(tool_names)
-    assert handler_seen == []
-    assert turn_snapshots == [{
-        "business_tools_disabled": True,
-        "action_calls": [],
-    }]
-    if reasoning_mode == TRUE_MOA_MODE:
-        assert advisor_tools == [(), ()]
-        assert usage["true_moa"]["status"] == "completed"
-    else:
-        assert advisor_tools == []
-        assert usage["agent_calls"]["status"] == "completed"
-
 
 @pytest.mark.asyncio
-async def test_normal_preexecuted_authorization_closes_tools_before_final_reply(
+async def test_normal_authorization_reaches_model_with_stable_tools(
     monkeypatch,
 ):
-    from gateway.platforms import api_server
-    from gateway.platforms.api_server import (
-        _mystand_completion_expected_binding,
-    )
-    from xiaoban.trusted_runtime import completion_guard
-
     tool_definitions = [
         {
             "type": "function",
@@ -4360,9 +4011,11 @@ async def test_normal_preexecuted_authorization_closes_tools_before_final_reply(
             }
 
         def run_conversation(self, **kwargs):
-            assert self.tools == []
-            assert self.valid_tool_names == set()
-            assert self._ephemeral_tool_choice == ""
+            assert self.tools == tool_definitions
+            assert self.valid_tool_names == {
+                "mystand_authorization",
+                "read_file",
+            }
             ledger = self._paid_call_usage_ledger
             call_id = ledger.start_call()
             ledger.mark_dispatched(call_id)
@@ -4385,40 +4038,6 @@ async def test_normal_preexecuted_authorization_closes_tools_before_final_reply(
         "_create_agent",
         lambda **_kwargs: agent,
     )
-    monkeypatch.setattr(
-        api_server,
-        "_resolve_mystand_initial_tool_choice",
-        lambda *_args, **_kwargs: "mystand_authorization",
-    )
-    monkeypatch.setattr(
-        api_server,
-        "_run_mystand_preexecuted_evidence",
-        lambda *_args, **_kwargs: [
-            {
-                "call_id": "index-read",
-                "name": "mystand_resource_index",
-                "args": {},
-                "content": '{"ok":true,"items":[]}',
-            },
-            {
-                "call_id": "authorization-read",
-                "name": "mystand_authorization",
-                "args": {},
-                "content": '{"ok":true,"content":"authorized facts"}',
-            },
-        ],
-    )
-    monkeypatch.setattr(
-        completion_guard,
-        "check_mystand_final_answer",
-        lambda *_args, **_kwargs: types.SimpleNamespace(
-            allowed=True,
-            text="授权资料说明",
-            reason="projected_test",
-            verification=None,
-        ),
-    )
-
     headers = _mystand_headers("normal-authorization-finalizer")
     for name in (
         MODE_EPOCH_HEADER,
@@ -4434,15 +4053,7 @@ async def test_normal_preexecuted_authorization_closes_tools_before_final_reply(
     headers.update({
         "Idempotency-Key": delivery_id,
         "X-Xiaoban-Delivery-Id": delivery_id,
-        "X-Xiaoban-Delivery-Attempt": headers["X-Xiaoban-Attempt"],
-        "X-Xiaoban-Completion-Protocol": "dynamic-evidence-v2",
-        "X-Xiaoban-Evidence-Required": "1",
-        "X-Xiaoban-Invocation-Fingerprint": "c" * 64,
     })
-    completion_binding = _mystand_completion_expected_binding(
-        headers,
-        session_id="gateway-test-session",
-    )
 
     result, usage = await adapter._run_agent(
         user_message="读取 AUTH-ABC12345 并说明用途",
@@ -4451,9 +4062,6 @@ async def test_normal_preexecuted_authorization_closes_tools_before_final_reply(
         gateway_session_key="gateway-test-channel",
         request_headers=headers,
         agent_ref=[None, False, None],
-        completion_protocol="dynamic-evidence-v2",
-        completion_binding=completion_binding,
-        dynamic_evidence_required=True,
         true_moa_snapshot=None,
     )
 
@@ -4462,49 +4070,6 @@ async def test_normal_preexecuted_authorization_closes_tools_before_final_reply(
     assert usage["agent_calls"]["status"] == "completed"
 
 
-@pytest.mark.asyncio
-async def test_dynamic_v2_true_moa_no_tool_chat_keeps_legacy_outcome(
-    monkeypatch,
-):
-    from gateway.platforms.api_server import (
-        _mystand_completion_expected_binding,
-    )
-    from gateway.platforms.true_moa_idempotency import _IdempotencyCache
-
-    case = _gateway_case(monkeypatch)
-    _adapter_instance, headers, _snapshot, _agent = case
-    delivery_id = "xbd_" + ("9" * 40)
-    headers.update(
-        {
-            "Idempotency-Key": delivery_id,
-            "X-Xiaoban-Delivery-Id": delivery_id,
-            "X-Xiaoban-Attempt": "1",
-            "X-Xiaoban-Delivery-Attempt": "1",
-            "X-Xiaoban-Completion-Protocol": "dynamic-evidence-v2",
-            "X-Xiaoban-Invocation-Fingerprint": "8" * 64,
-        }
-    )
-    completion_binding = _mystand_completion_expected_binding(
-        headers,
-        session_id="gateway-test-session",
-    )
-
-    result, usage = await _run_gateway_case(
-        case,
-        user_message="只聊一句，不查资料",
-        session_id="gateway-test-session",
-        completion_protocol="dynamic-evidence-v2",
-        completion_binding=completion_binding,
-    )
-
-    assert result["completed"] is True
-    assert result["final_response"] == "fake final synthesis"
-    assert usage["true_moa"]["status"] == "completed"
-    assert "_mystand_completion_protocol" not in result
-    assert "_mystand_trusted_verification" not in result
-    payload = _IdempotencyCache._completed_outcome_payload(result)
-    assert "completionProtocol" not in payload
-    assert "trustedVerification" not in payload
 
 
 def _final_slot(usage: dict) -> dict:
@@ -4583,234 +4148,8 @@ async def test_terminal_persistence_failures_stay_fail_closed(
         assert final_agent._defer_true_moa_final_commit is True
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("guard_kind", ["fact", "authorization"])
-async def test_only_guarded_public_transcript_is_persisted(
-    monkeypatch,
-    guard_kind,
-):
-    from gateway.platforms import api_server
-    from xiaoban.trusted_runtime import completion_guard
-
-    raw_text = f"PRIVATE_RAW_{guard_kind.upper()}_TEXT"
-    raw_tool = f"PRIVATE_RAW_{guard_kind.upper()}_TOOL"
-    public_text = f"PUBLIC_GUARDED_{guard_kind.upper()}_ANSWER"
-    case = _gateway_case(monkeypatch)
-    adapter, _headers, _snapshot, agent = case
-    tool_name = (
-        "mystand_resource_index"
-        if guard_kind == "fact"
-        else "mystand_authorization"
-    )
-    agent.valid_tool_names = {tool_name}
-    monkeypatch.setattr(
-        api_server,
-        "_run_mystand_preexecuted_evidence",
-        lambda *_args, **_kwargs: [{
-            "call_id": "trusted-read",
-            "name": tool_name,
-            "args": {},
-            "content": json.dumps({"ok": True, "privateRaw": raw_tool}),
-        }],
-    )
-    if guard_kind == "fact":
-        guard_inputs = []
-
-        def guard(text, _turn):
-            guard_inputs.append(str(text))
-            return types.SimpleNamespace(
-                allowed=True,
-                text=public_text,
-                reason="projected_test",
-                verification=None,
-            )
-
-        monkeypatch.setattr(completion_guard, "check_completion", guard)
-    else:
-        monkeypatch.setattr(
-            api_server,
-            "_resolve_mystand_initial_tool_choice",
-            lambda *_args, **_kwargs: tool_name,
-        )
-        monkeypatch.setattr(
-            completion_guard,
-            "check_mystand_final_answer",
-            lambda *_args, **_kwargs: types.SimpleNamespace(
-                allowed=True,
-                text=public_text,
-                reason="projected_test",
-                verification=None,
-            ),
-        )
-
-    def raw_final(**kwargs):
-        result = _FakeFinalAgent.run_conversation(agent, **kwargs)
-        result.update({
-            "final_response": raw_text,
-            "messages": [
-                {"role": "user", "content": "当前可信问题"},
-                {"role": "tool", "content": raw_tool},
-                {"role": "assistant", "content": raw_text},
-            ],
-        })
-        return result
-
-    agent.run_conversation = raw_final
-    run_kwargs = {
-        "user_message": "当前可信问题",
-        "conversation_history": [
-            {"role": "user", "content": "可信旧问题"},
-            {"role": "assistant", "content": "可信旧回答"},
-            {"role": "tool", "content": "PRIVATE_OLD_TOOL_BYTES"},
-        ],
-    }
-    if guard_kind == "fact":
-        run_kwargs["fact_requirement"] = {
-            "schema": "mystand.fact-requirement.v1",
-            "fact_kind": "collection",
-            "module_id": "finance-ledger",
-        }
-    result, usage = await _run_gateway_case(case, **run_kwargs)
-    persisted = "\n".join(
-        agent.saved_trajectories + agent.persisted_sessions,
-    )
-    assert result["final_response"] == public_text
-    assert result["completed"] is True
-    assert usage["true_moa"]["status"] == "completed"
-    assert all(x in persisted for x in (
-        public_text,
-        "当前可信问题",
-        "可信旧问题",
-        "可信旧回答",
-    ))
-    assert all(x not in persisted for x in (
-        raw_text,
-        raw_tool,
-        "PRIVATE_OLD_TOOL_BYTES",
-    ))
-    assert raw_text not in json.dumps(result, ensure_ascii=False, default=str)
-    assert raw_tool not in json.dumps(result, ensure_ascii=False, default=str)
-    if guard_kind == "fact":
-        assert guard_inputs == [raw_text, public_text]
-        assert result["messages"] == []
-    else:
-        assert result["_mystand_egress_finalized"] is True
-        assert result["_mystand_egress_output_digest"] == hashlib.sha256(
-            public_text.encode(),
-        ).hexdigest()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("guard_kind", ["fact", "egress"])
-async def test_guard_projection_is_watchdog_bounded_and_turn_isolated(
-    monkeypatch,
-    guard_kind,
-):
-    from gateway.platforms import api_server
-    from xiaoban.trusted_runtime import completion_guard, true_moa
-
-    case = _gateway_case(monkeypatch)
-    adapter, _headers, _snapshot, agent = case
-    monkeypatch.setattr(true_moa, "TRUE_MOA_FINAL_TIMEOUT_SECONDS", 0.03)
-    monkeypatch.setattr(
-        true_moa,
-        "TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS",
-        0.03,
-    )
-    tool_name = (
-        "mystand_resource_index"
-        if guard_kind == "fact"
-        else "mystand_authorization"
-    )
-    agent.valid_tool_names = {tool_name}
-    original_turns, projected_turns = [], []
-    started, release, finished = (
-        threading.Event(),
-        threading.Event(),
-        threading.Event(),
-    )
-    monkeypatch.setattr(
-        api_server,
-        "_run_mystand_preexecuted_evidence",
-        lambda *_args, **kwargs: (
-            original_turns.append(kwargs["trusted_turn"])
-            or [{"name": tool_name, "content": '{"ok":true}'}]
-        ),
-    )
-    late_text = "PRIVATE_LATE_GUARD_TEXT"
-    if guard_kind == "fact":
-        def blocking_guard(_text, turn):
-            projected_turns.append(turn)
-            started.set()
-            release.wait(1)
-            finished.set()
-            return types.SimpleNamespace(
-                allowed=True,
-                text=late_text,
-                reason="test",
-                verification=None,
-            )
-
-        monkeypatch.setattr(
-            completion_guard,
-            "check_completion",
-            blocking_guard,
-        )
-    else:
-        monkeypatch.setattr(
-            api_server,
-            "_resolve_mystand_initial_tool_choice",
-            lambda *_args, **_kwargs: tool_name,
-        )
-
-        def blocking_guard(_text, **kwargs):
-            projected_turns.append(kwargs["result"]["_trusted_turn"])
-            started.set()
-            release.wait(1)
-            finished.set()
-            return types.SimpleNamespace(
-                allowed=True,
-                text=late_text,
-                reason="test",
-                verification=None,
-            )
-
-        monkeypatch.setattr(
-            completion_guard,
-            "check_mystand_final_answer",
-            blocking_guard,
-        )
-    kwargs = {"user_message": "受保护事实请求"}
-    if guard_kind == "fact":
-        kwargs["fact_requirement"] = {
-            "schema": "mystand.fact-requirement.v1",
-            "fact_kind": "collection",
-            "module_id": "finance-ledger",
-        }
-    before = time.monotonic()
-    result, usage = await _run_gateway_case(case, **kwargs)
-    assert time.monotonic() - before < 0.5
-    assert started.is_set()
-    _assert_closed(
-        result,
-        usage,
-        slot="timed_out",
-        wave="failed",
-        error="true MoA final executor timed out",
-    )
-    assert len(original_turns) == len(projected_turns) == 1
-    assert projected_turns[0] is not original_turns[0]
-    original = original_turns[0]
-    state = (original.state, list(original.states), original.terminal_reason)
-    release.set()
-    assert finished.wait(1)
-    time.sleep(0.02)
-    assert (original.state, original.states, original.terminal_reason) == state
-    assert late_text not in json.dumps(
-        {"result": result, "usage": usage},
-        ensure_ascii=False,
-    )
-    assert agent.saved_trajectories == agent.persisted_sessions == []
 
 
 @pytest.mark.asyncio
@@ -4892,61 +4231,6 @@ async def test_final_deadline_fences_every_worker_and_interrupt_race(
     assert agent.saved_trajectories == agent.persisted_sessions == []
 
 
-@pytest.mark.asyncio
-async def test_final_deadline_includes_preexecuted_trusted_evidence(monkeypatch):
-    from gateway.platforms import api_server
-    from xiaoban.trusted_runtime import true_moa
-
-    case = _gateway_case(monkeypatch)
-    agent = case[3]
-    agent.valid_tool_names = {"mystand_resource_index"}
-    started, release, exited = (
-        threading.Event(),
-        threading.Event(),
-        threading.Event(),
-    )
-
-    def blocking_evidence(*_args, **_kwargs):
-        from gateway.session_context import get_session_env
-        from xiaoban.trusted_runtime.turns import current_turn
-
-        assert get_session_env("XIAOBAN_SESSION_USER_ID") == "test-user"
-        assert current_turn() is not None
-        started.set()
-        assert release.wait(1)
-        exited.set()
-        return [{"name": "mystand_resource_index", "content": '{"ok":true}'}]
-
-    monkeypatch.setattr(true_moa, "TRUE_MOA_FINAL_TIMEOUT_SECONDS", 0.03)
-    monkeypatch.setattr(
-        true_moa,
-        "TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS",
-        0.03,
-    )
-    monkeypatch.setattr(
-        api_server,
-        "_resolve_mystand_initial_tool_choice",
-        lambda *_args, **_kwargs: "mystand_resource_index",
-    )
-    monkeypatch.setattr(
-        api_server,
-        "_run_mystand_preexecuted_evidence",
-        blocking_evidence,
-    )
-    result, usage = await _run_gateway_case(case)
-    assert started.is_set()
-    _assert_closed(
-        result,
-        usage,
-        slot="timed_out",
-        wave="failed",
-        error="true MoA final executor timed out",
-    )
-    assert agent.run_calls == []
-    release.set()
-    assert exited.wait(1)
-    assert agent.run_calls == []
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("blocked_status", ["running", "timed_out"])
@@ -4978,13 +4262,24 @@ async def test_durable_callback_cannot_hold_final_watchdog(
     )
     assert time.monotonic() - before < 0.5
     assert started.is_set()
+    expected_slot = "failed" if blocked_status == "running" else "timed_out"
     _assert_closed(
         result,
         usage,
-        slot="timed_out",
+        slot=expected_slot,
         wave="failed",
         error="true MoA final settlement failed",
     )
+    final_slot = _final_slot(usage)
+    if blocked_status == "running":
+        assert final_slot["errorCategory"] == "durable_final_slot_confirmation_failed"
+        assert [
+            call for call in usage["true_moa"]["calls"]
+            if call["role"] == "final_executor"
+        ] == []
+        assert agent.run_calls == []
+    else:
+        assert final_slot["errorCategory"] == "final_executor_timeout"
     assert agent.saved_trajectories == agent.persisted_sessions == []
     release.set()
     agent.release_provider.set()
@@ -5237,43 +4532,6 @@ async def test_final_worker_baseexception_stays_inside_request(
     )
     assert agent.saved_trajectories == agent.persisted_sessions == []
 
-
-@pytest.mark.asyncio
-async def test_preexecuted_tool_keyboardinterrupt_becomes_cancelled(monkeypatch):
-    from gateway.platforms import api_server
-    from tools import mystand_resource_index_tool
-
-    case = _gateway_case(monkeypatch)
-    agent = case[3]
-    agent.valid_tool_names = {"mystand_authorization"}
-    monkeypatch.setattr(
-        api_server,
-        "_resolve_mystand_initial_tool_choice",
-        lambda *_args, **_kwargs: "mystand_authorization",
-    )
-
-    def stop_tool(_args):
-        raise KeyboardInterrupt("PRIVATE_TOOL_INTERRUPT")
-
-    monkeypatch.setattr(
-        mystand_resource_index_tool,
-        "mystand_resource_index_tool_handler",
-        stop_tool,
-    )
-    result, usage = await _run_gateway_case(
-        case,
-        user_message="读取 AUTH-ABCDEF1",
-    )
-    _assert_closed(
-        result,
-        usage,
-        slot="cancelled",
-        wave="cancelled",
-        error="completion stopped",
-    )
-    assert result["interrupted"] is True
-    assert agent.run_calls == []
-    assert agent._true_moa_cancel_controller.state == "cancelled"
 
 
 @pytest.mark.asyncio

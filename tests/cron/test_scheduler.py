@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt, _resolve_cron_enabled_toolsets, _merge_mcp_into_per_job_toolsets
+from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, run_one_job, SILENT_MARKER, _build_job_prompt, _resolve_cron_enabled_toolsets, _merge_mcp_into_per_job_toolsets
 from tools.env_passthrough import clear_env_passthrough
 from tools.credential_files import clear_credential_files
 
@@ -1072,6 +1072,51 @@ class TestRunJobSessionPersistence:
         assert final_response == ""
         assert "RuntimeError: boom" in error
         mock_agent.close.assert_called_once()
+
+    def test_broken_pipe_execution_settles_pipeline_once(self, tmp_path):
+        """Historical Broken pipe shape closes run, delivery, and mark once."""
+        job = {
+            "id": "broken-pipe-job",
+            "name": "broken pipe",
+            "prompt": "hello",
+        }
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._xiaoban_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("xiaoban_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "xiaoban_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "***",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls, \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out") as mock_save, \
+             patch("cron.scheduler._deliver_result", return_value=None) as mock_deliver, \
+             patch("cron.scheduler.mark_job_run") as mock_mark:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.side_effect = BrokenPipeError(
+                32,
+                "Broken pipe",
+            )
+            mock_agent_cls.return_value = mock_agent
+
+            processed = run_one_job(job)
+
+        assert processed is True
+        mock_agent.run_conversation.assert_called_once()
+        mock_agent.close.assert_called_once()
+        mock_save.assert_called_once()
+        mock_deliver.assert_called_once()
+        mock_mark.assert_called_once()
+        assert mock_mark.call_args.args[0:2] == ("broken-pipe-job", False)
+        assert "BrokenPipeError: [Errno 32] Broken pipe" in mock_mark.call_args.args[2]
+        assert mock_mark.call_args.kwargs == {"delivery_error": None}
 
     def test_run_job_reaps_stale_auxiliary_clients_per_tick(self, tmp_path):
         # Regression: auxiliary clients bound to the cron worker's dead

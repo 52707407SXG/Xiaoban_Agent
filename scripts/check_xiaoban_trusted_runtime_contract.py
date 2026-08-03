@@ -32,9 +32,6 @@ from xiaoban.trusted_runtime.paid_call_policy import (
     SIGNED_MYSTAND_AGENT_POLICY_REVISION,
 )
 from xiaoban.trusted_runtime.protocol_contract import (
-    MYSTAND_BUSINESS_TOOL_MODE_DISABLED_VALUE,
-    MYSTAND_BUSINESS_TOOL_MODE_ENABLED_VALUE,
-    MYSTAND_BUSINESS_TOOL_MODE_HEADER,
     TRUSTED_RUNTIME_CONTRACT,
     TRUSTED_RUNTIME_CONTRACT_DIGEST,
     TRUSTED_RUNTIME_CONTRACT_PATH,
@@ -57,11 +54,6 @@ from xiaoban.trusted_runtime.true_moa_durable_shared import (
     TRUE_MOA_COMPLETED_OUTCOME_SCHEMA,
     TRUE_MOA_OUTCOME_BINDING_SCHEMA,
 )
-from xiaoban.trusted_runtime.types import (
-    MYSTAND_COMPLETION_PROTOCOL_V2,
-    MYSTAND_COMPLETION_VERIFICATION_SCHEMA_V2,
-)
-
 def _expect(label: str, actual: Any, expected: Any) -> None:
     if actual != expected:
         raise SystemExit(
@@ -171,7 +163,6 @@ def check_local() -> None:
     _check_egress_seal_callers()
     _check_revision_history()
     contract = TRUSTED_RUNTIME_CONTRACT
-    completion = contract["completion"]
     usage = contract["usage"]
     normal = contract["billing"]["normal"]
     true_moa = contract["billing"]["trueMoa"]
@@ -182,55 +173,22 @@ def check_local() -> None:
         _sha256(TRUSTED_RUNTIME_CONTRACT_PATH),
         TRUSTED_RUNTIME_CONTRACT_DIGEST,
     )
-    _expect(
-        "completion protocol",
-        MYSTAND_COMPLETION_PROTOCOL_V2,
-        completion["protocol"],
-    )
-    _expect(
-        "completion verification",
-        MYSTAND_COMPLETION_VERIFICATION_SCHEMA_V2,
-        completion["verificationSchema"],
-    )
-    _expect(
-        "business tool mode header",
-        MYSTAND_BUSINESS_TOOL_MODE_HEADER,
-        completion["businessToolModeHeader"],
-    )
-    _expect(
-        "business tool mode enabled value",
-        MYSTAND_BUSINESS_TOOL_MODE_ENABLED_VALUE,
-        completion["businessToolModeEnabledValue"],
-    )
-    _expect(
-        "business tool mode disabled value",
-        MYSTAND_BUSINESS_TOOL_MODE_DISABLED_VALUE,
-        completion["businessToolModeDisabledValue"],
-    )
-    _expect(
-        "business tool mode required",
-        completion["businessToolModeRequired"],
-        True,
-    )
-    _expect(
-        "business tool mode source",
-        completion["businessToolModeSource"],
-        "server-trusted-intent",
-    )
     api_server_source = (
         REPO_ROOT / "gateway/platforms/api_server.py"
     ).read_text(encoding="utf-8")
-    if (
-        "MYSTAND_BUSINESS_TOOL_MODE_HEADER as "
-        "_MYSTAND_BUSINESS_TOOL_MODE_HEADER"
-        not in api_server_source
-        or "MYSTAND_BUSINESS_TOOL_MODE_VALUES"
-        not in api_server_source
-        or "_MYSTAND_BUSINESS_TOOL_MODE_HEADER = \""
-        in api_server_source
+    if any(
+        legacy_receiver in api_server_source
+        for legacy_receiver in (
+            "X-Xiaoban-Fact-Requirement",
+            "X-Xiaoban-Fact-Signature",
+            "X-Xiaoban-Completion-Protocol",
+            "dynamic-evidence-v2",
+            "_MYSTAND_BUSINESS_TOOL_MODE_HEADER",
+            "_MYSTAND_EVIDENCE_REQUIRED_HEADER",
+        )
     ):
         raise SystemExit(
-            "business tool mode is not bound to the runtime contract"
+            "legacy G1-G4 compatibility input is still active in API runtime"
         )
     _expect("agent usage schema", AGENT_CALL_USAGE_SCHEMA, usage["agentCallSchema"])
     _expect("agent call limit", AGENT_CALL_LIMIT, usage["normalCallLimit"])

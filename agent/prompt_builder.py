@@ -335,9 +335,9 @@ TASK_COMPLETION_GUIDANCE = (
     "acknowledge that a lookup or action ran. If the goal remains blocked, ground "
     "the explanation in the actual attempts and final cause, and say what required "
     "result is still missing.\n"
-    "The runtime links identical retries itself. A different fallback settles "
-    "a failed action only when the trusted runtime has issued a target-bound "
-    "recovery grant; independent actions never settle one another."
+    "After a failed action, reason from the actual result and choose a safe next "
+    "step. Never describe the failed action as successful; write success must be "
+    "grounded in its action-bound receipt."
 )
 
 # Universal parallel-tool-call guidance — applied to ALL models.

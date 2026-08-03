@@ -101,55 +101,6 @@ def validate_trusted_runtime_approved_policy(
 
 validate_trusted_runtime_approved_policy()
 
-_COMPLETION = _CONTRACT_RAW["completion"]
-MYSTAND_COMPLETION_PROTOCOL = str(_COMPLETION["protocol"])
-MYSTAND_COMPLETION_VERIFICATION_SCHEMA = str(
-    _COMPLETION["verificationSchema"]
-)
-MYSTAND_EVIDENCE_REQUIRED_HEADER = str(
-    _COMPLETION["evidenceRequiredHeader"]
-)
-MYSTAND_EVIDENCE_REQUIRED_VALUES = frozenset(
-    str(value) for value in _COMPLETION["evidenceRequiredValues"]
-)
-MYSTAND_BUSINESS_TOOL_MODE_HEADER = str(
-    _COMPLETION["businessToolModeHeader"]
-)
-MYSTAND_BUSINESS_TOOL_MODE_ENABLED_VALUE = str(
-    _COMPLETION["businessToolModeEnabledValue"]
-)
-MYSTAND_BUSINESS_TOOL_MODE_DISABLED_VALUE = str(
-    _COMPLETION["businessToolModeDisabledValue"]
-)
-MYSTAND_BUSINESS_TOOL_MODE_VALUES = frozenset(
-    {
-        MYSTAND_BUSINESS_TOOL_MODE_ENABLED_VALUE,
-        MYSTAND_BUSINESS_TOOL_MODE_DISABLED_VALUE,
-    }
-)
-MYSTAND_FACT_REQUIREMENT_SCHEMA = str(
-    _COMPLETION["factRequirementSchema"]
-)
-MYSTAND_FACT_QUERY_PLAN_SCHEMA = str(
-    _COMPLETION["factQueryPlanSchema"]
-)
-MYSTAND_FACT_REQUIREMENT_BINDING_SCHEMA = str(
-    _COMPLETION["factRequirementBindingSchema"]
-)
-MYSTAND_FACT_VERIFICATION_SCHEMA = str(
-    _COMPLETION["factVerificationSchema"]
-)
-MYSTAND_QUERY_RESULT_SCHEMA = str(_COMPLETION["queryResultSchema"])
-MYSTAND_COLLECTION_EVIDENCE_SCHEMA = str(
-    _COMPLETION["collectionEvidenceSchema"]
-)
-MYSTAND_RESOURCE_INDEX_PAGE_SCHEMA = str(
-    _COMPLETION["resourceIndexPageSchema"]
-)
-MYSTAND_RESOURCE_INDEX_COMPLETE_SCHEMA = str(
-    _COMPLETION["resourceIndexCompleteSchema"]
-)
-
 _USAGE = _CONTRACT_RAW["usage"]
 MYSTAND_AGENT_CALL_USAGE_SCHEMA = str(_USAGE["agentCallSchema"])
 MYSTAND_TRUE_MOA_USAGE_SCHEMA = str(_USAGE["trueMoaSchema"])

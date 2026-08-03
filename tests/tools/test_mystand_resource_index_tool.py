@@ -20,7 +20,11 @@ def test_schema_is_read_only_and_cannot_accept_owner():
     assert "operation" not in parameters.get("required", [])
     assert "owner_user" not in parameters["properties"]
     assert parameters["additionalProperties"] is False
-    assert "never narrate" in bridge.MYSTAND_RESOURCE_INDEX_SCHEMA["description"]
+    description = bridge.MYSTAND_RESOURCE_INDEX_SCHEMA["description"]
+    assert "never narrate" in description
+    assert "does not provide an exact AUTH, OUT, or resourceUid" in description
+    assert "skip this index" in description
+    assert "never bypass the index" not in description
 
 
 def test_current_session_identity_is_the_only_owner_source(monkeypatch):

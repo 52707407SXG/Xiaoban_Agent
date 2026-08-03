@@ -1,7 +1,7 @@
 """Process-local capability for one verified My Stand egress projection.
 
 Provider and tool payloads are ordinary JSON-compatible values.  A boolean
-marker and a matching text digest therefore cannot prove that CompletionGuard
+marker and a matching text digest therefore cannot prove that an earlier stage
 ran.  Only this module can attach the process-local capability used to reuse a
 projection.  Durable replay receives a fresh capability only after the
 encrypted outcome has been recovered and validated by the durable store.
@@ -44,8 +44,6 @@ def discard_untrusted_mystand_egress_projection(result: Any) -> None:
         "_mystand_egress_finalized",
         "_mystand_egress_output_digest",
         "_mystand_egress_seal",
-        "_mystand_completion_allowed",
-        "_mystand_trusted_verification",
     ):
         result.pop(field, None)
 

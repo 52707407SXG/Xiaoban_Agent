@@ -7,7 +7,6 @@ import time
 from typing import Any
 
 from gateway.platforms.api_server import (
-    _build_mystand_runtime_integrity_reminder,
     _true_moa_usage_summary,
     logger,
 )
@@ -150,17 +149,6 @@ class TrueMoARunnerPreflightMixin:
                 logger.warning(
                     "My Stand scoped memory recall unavailable",
                     exc_info=False,
-                )
-        if request.mystand_request:
-            integrity_reminder = _build_mystand_runtime_integrity_reminder(
-                request.user_message,
-                request.conversation_history,
-            )
-            if integrity_reminder:
-                run_system_prompt = "\n\n".join(
-                    part
-                    for part in (run_system_prompt, integrity_reminder)
-                    if part
                 )
         self.run_system_prompt = run_system_prompt
         if request.true_moa_snapshot is None:

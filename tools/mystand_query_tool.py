@@ -1,8 +1,10 @@
-"""High-level semantic query bridge for authenticated My Stand API sessions."""
+"""Authorized semantic and finance aggregate query bridge for My Stand."""
 
 from __future__ import annotations
 
+import copy
 import json
+import math
 import os
 import re
 import urllib.error
@@ -16,11 +18,6 @@ from gateway.session_context import (
     mark_mystand_private_query_turn,
 )
 from tools.registry import registry
-from xiaoban.trusted_runtime.fact_contract import (
-    build_fact_query_plan,
-    evidence_requirement_digest,
-    normalized_fact_query_text,
-)
 
 _DEFAULT_API_URL = "http://127.0.0.1:18081"
 _DEFAULT_ENV_FILE = "/opt/xiaoban-agent/.env"
@@ -36,7 +33,6 @@ _CONTRACT_PATH = (
     / "mystand-query-tool.v1.json"
 )
 MYSTAND_QUERY_CONTRACT = json.loads(_CONTRACT_PATH.read_text(encoding="utf-8"))
-MYSTAND_QUERY_SCHEMA = MYSTAND_QUERY_CONTRACT["tool"]
 
 _TOP_LEVEL_KEYS = {
     "operation",
@@ -99,15 +95,13 @@ _FACT_NEEDS = {
     "graph.nodes",
     "graph.relations",
 }
-_TYPED_QUERY_KINDS = {
-    "resource-read",
+_FINANCE_AGGREGATE_QUERY_KINDS = {
     "rank",
+    "list",
     "predicate",
     "count",
-    "list",
-    "aggregate",
 }
-_TYPED_QUERY_FIELDS = frozenset(
+_FINANCE_AGGREGATE_FIELDS = frozenset(
     {
         "query_kind",
         "module_id",
@@ -116,34 +110,14 @@ _TYPED_QUERY_FIELDS = frozenset(
         "coverage_required",
     }
 )
-_SEMANTIC_QUERY_FIELDS = frozenset(
-    {
-        "operation",
-        "resource",
-        "entities",
-        "fact_needs",
-        "mode",
-    }
-)
-_FORBIDDEN_TYPED_KEYS = {
-    "owner",
-    "owner_user",
-    "user",
-    "user_id",
-    "authorization_id",
-    "auth_id",
-    "resource_uid",
-    "source_id",
-    "scope_fingerprint",
-    "requirement_digest",
-    "plan_id",
-    "queryText",
-}
-_FACT_PATH_RE = re.compile(r"[a-z][a-z0-9_.-]{1,119}")
-_MYSTAND_REFERENCE_RE = re.compile(
-    r"(?:AUTH|OUT)-[A-Z0-9][A-Z0-9-]{5,}[A-Z0-9]",
-    re.IGNORECASE,
-)
+
+
+def _model_facing_query_schema() -> dict:
+    """Return the exact semantic and finance shapes shown to providers."""
+    return copy.deepcopy(MYSTAND_QUERY_CONTRACT["tool"])
+
+
+MYSTAND_QUERY_SCHEMA = _model_facing_query_schema()
 _INTERNAL_IDENTIFIER_RE = re.compile(
     r"(?:"
     r"\b(?:AUTH|OUT|KGREF|RESOURCEUID|SOURCEID|OWNERUSER|USERID|INTERNALID)"
@@ -379,76 +353,6 @@ def _post_internal(payload: dict, session: dict) -> str:
         "Accept": "application/json",
         "X-Xiaoban-User-Id": safe_user_id,
     }
-    try:
-        from xiaoban.trusted_runtime.turns import current_turn
-        from xiaoban.trusted_runtime.types import (
-            MYSTAND_COMPLETION_BINDING_FIELDS,
-            MYSTAND_COMPLETION_PROTOCOL_V2,
-        )
-
-        turn = current_turn()
-    except Exception:
-        turn = None
-    if turn is not None and turn.completion_protocol:
-        binding = (
-            dict(turn.completion_binding)
-            if isinstance(turn.completion_binding, dict)
-            else {}
-        )
-        attempt = binding.get("attempt")
-        if (
-            turn.completion_protocol != MYSTAND_COMPLETION_PROTOCOL_V2
-            or set(binding) != MYSTAND_COMPLETION_BINDING_FIELDS
-            or binding.get("user_id") != safe_user_id
-            or binding.get("session_id") != session.get("session_id")
-            or binding.get("delivery_id") != turn.request_id
-            or binding.get("message_id") != turn.message_id
-            or binding.get("message_id") != session.get("message_id")
-            or isinstance(attempt, bool)
-            or not isinstance(attempt, int)
-            or attempt < 1
-            or not re.fullmatch(
-                r"xbd_[0-9a-f]{40}",
-                str(binding.get("delivery_id") or ""),
-            )
-            or not re.fullmatch(
-                r"[a-f0-9]{64}",
-                str(binding.get("request_fingerprint") or ""),
-            )
-            or not re.fullmatch(
-                r"[a-f0-9]{64}",
-                str(binding.get("invocation_fingerprint") or ""),
-            )
-            or not re.fullmatch(
-                r"[a-f0-9]{16}",
-                str(binding.get("datascope_fingerprint") or ""),
-            )
-        ):
-            return _error(
-                "本轮事实查询没有通过可信完成绑定。",
-                code="trusted_completion_binding_required",
-                status=409,
-            )
-        headers.update(
-            {
-                "X-Xiaoban-Completion-Protocol": (
-                    MYSTAND_COMPLETION_PROTOCOL_V2
-                ),
-                "X-Xiaoban-Delivery-Id": binding["delivery_id"],
-                "X-Xiaoban-Delivery-Attempt": str(attempt),
-                "X-Xiaoban-Attempt": str(attempt),
-                "X-Xiaoban-Message-Id": binding["message_id"],
-                "X-Xiaoban-Request-Fingerprint": (
-                    binding["request_fingerprint"]
-                ),
-                "X-Xiaoban-Invocation-Fingerprint": (
-                    binding["invocation_fingerprint"]
-                ),
-                "X-Xiaoban-Datascope-Fingerprint": (
-                    binding["datascope_fingerprint"]
-                ),
-            }
-        )
     for header_name, session_key in (
         ("X-Xiaoban-Message-Id", "message_id"),
         ("X-Xiaoban-Session-Id", "session_id"),
@@ -516,116 +420,69 @@ def _text(
     return text
 
 
-def _typed_value_is_safe(value, *, depth: int = 0) -> bool:
-    if depth > 5:
-        return False
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return not isinstance(value, str) or len(value) <= 500
-    if isinstance(value, list):
-        return len(value) <= 24 and all(
-            _typed_value_is_safe(item, depth=depth + 1) for item in value
-        )
-    if isinstance(value, dict):
-        return (
-            len(value) <= 24
-            and all(
-                isinstance(key, str)
-                and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,79}", key)
-                and key not in _FORBIDDEN_TYPED_KEYS
-                and _typed_value_is_safe(item, depth=depth + 1)
-                for key, item in value.items()
-            )
-        )
-    return False
-
-
-def _validate_typed_plan(args: dict) -> dict:
+def _validate_finance_aggregate_plan(args: dict) -> dict:
     query_kind = args.get("query_kind")
-    if query_kind not in _TYPED_QUERY_KINDS:
+    if query_kind not in _FINANCE_AGGREGATE_QUERY_KINDS:
         raise ValueError("query_kind 不在允许范围内")
-    module_id = args.get("module_id")
-    if (
-        not isinstance(module_id, str)
-        or len(module_id) > 80
-        or (
-            module_id
-            and not re.fullmatch(r"[A-Za-z0-9._:@-]{1,80}", module_id)
-        )
-        or (query_kind != "resource-read" and not module_id)
-    ):
+    if args.get("module_id") != "finance-ledger":
         raise ValueError("module_id 不在允许范围内")
-    fact_paths = args.get("fact_paths")
-    if (
-        not isinstance(fact_paths, list)
-        or not fact_paths
-        or len(fact_paths) > 12
-        or len(set(fact_paths)) != len(fact_paths)
-        or any(
-            not isinstance(path, str) or not _FACT_PATH_RE.fullmatch(path)
-            for path in fact_paths
-        )
-    ):
+    expected_fact_path = f"finance.performance.{query_kind}"
+    if args.get("fact_paths") != [expected_fact_path]:
         raise ValueError("fact_paths 不在允许范围内")
+    if args.get("coverage_required") is not True:
+        raise ValueError("coverage_required 必须为 true")
+
     query_args = args.get("query_args")
-    if not isinstance(query_args, dict) or not _typed_value_is_safe(query_args):
-        raise ValueError("query_args 不在允许范围内")
-    coverage_required = args.get("coverage_required")
+    if not isinstance(query_args, dict):
+        raise ValueError("query_args 必须是对象")
+    year = query_args.get("year")
     if (
-        not isinstance(coverage_required, bool)
-        or coverage_required is (query_kind == "resource-read")
+        isinstance(year, bool)
+        or not isinstance(year, int)
+        or not 2000 <= year <= 2100
     ):
-        raise ValueError("coverage_required 不在允许范围内")
-    if query_kind == "resource-read":
-        if fact_paths != ["content"]:
-            raise ValueError("resource-read fact_paths 不在允许范围内")
-        semantic_digest = query_args.get("semanticQueryDigest")
-        stable_reference = query_args.get("stableReference")
-        if (
-            not isinstance(semantic_digest, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", semantic_digest)
-            or (
-                stable_reference is not None
-                and (
-                    not isinstance(stable_reference, str)
-                    or not _MYSTAND_REFERENCE_RE.fullmatch(stable_reference)
-                )
-            )
-            or set(query_args) - {"semanticQueryDigest", "stableReference"}
-        ):
-            raise ValueError("resource-read query_args 不在允许范围内")
+        raise ValueError(f"{query_kind} query_args 不在允许范围内")
+
+    if query_kind == "list":
+        if set(query_args) != {"year"}:
+            raise ValueError("list query_args 不在允许范围内")
+        normalized_args = {"year": year}
     elif query_kind == "rank":
+        rank = query_args.get("rank")
         if (
-            fact_paths != ["finance.performance.rank"]
-            or set(query_args) != {"year", "rank"}
-            or isinstance(query_args.get("year"), bool)
-            or not isinstance(query_args.get("year"), int)
-            or not 2000 <= query_args["year"] <= 2200
-            or isinstance(query_args.get("rank"), bool)
-            or not isinstance(query_args.get("rank"), int)
-            or not 1 <= query_args["rank"] <= 10_000
+            set(query_args) != {"year", "rank"}
+            or isinstance(rank, bool)
+            or not isinstance(rank, int)
+            or not 1 <= rank <= 10_000
         ):
             raise ValueError("rank query_args 不在允许范围内")
-    elif query_kind in {"predicate", "count"}:
+        normalized_args = {"year": year, "rank": rank}
+    else:
+        amount = query_args.get("amount")
         if (
-            fact_paths != [f"finance.performance.{query_kind}"]
-            or set(query_args) != {"year", "field", "operator", "amount"}
-            or isinstance(query_args.get("year"), bool)
-            or not isinstance(query_args.get("year"), int)
-            or not 2000 <= query_args["year"] <= 2200
+            set(query_args) != {"year", "field", "operator", "amount"}
             or query_args.get("field") != "yearlyAmount"
             or query_args.get("operator") not in {"gt", "gte"}
-            or isinstance(query_args.get("amount"), bool)
-            or not isinstance(query_args.get("amount"), (int, float))
-            or query_args["amount"] < 0
+            or isinstance(amount, bool)
+            or not isinstance(amount, (int, float))
+            or not math.isfinite(amount)
+            or amount < 0
         ):
             raise ValueError(f"{query_kind} query_args 不在允许范围内")
+        normalized_args = {
+            "year": year,
+            "field": "yearlyAmount",
+            "operator": query_args["operator"],
+            "amount": amount,
+        }
+
     return {
         "operation": "read",
         "query_kind": query_kind,
-        "module_id": module_id,
-        "fact_paths": list(fact_paths),
-        "query_args": json.loads(json.dumps(query_args, ensure_ascii=False)),
-        "coverage_required": coverage_required,
+        "module_id": "finance-ledger",
+        "fact_paths": [expected_fact_path],
+        "query_args": normalized_args,
+        "coverage_required": True,
     }
 
 
@@ -636,20 +493,11 @@ def _validate_plan(args) -> dict:
         raise ValueError("查询参数包含不允许的字段")
     if args.get("operation") != "read":
         raise ValueError("operation 不在允许范围内")
-    if "query_kind" in args:
-        typed_fields = {
-            "operation",
-            "query_kind",
-            "module_id",
-            "fact_paths",
-            "query_args",
-            "coverage_required",
-        }
-        if set(args) != typed_fields:
-            raise ValueError("typed 查询参数包含不允许的字段")
-        return _validate_typed_plan(args)
-    if _TYPED_QUERY_FIELDS.intersection(args):
-        raise ValueError("semantic 查询参数包含 typed 字段")
+    if _FINANCE_AGGREGATE_FIELDS.intersection(args):
+        expected_fields = {"operation", *_FINANCE_AGGREGATE_FIELDS}
+        if set(args) != expected_fields:
+            raise ValueError("finance aggregate 查询参数包含不允许的字段")
+        return _validate_finance_aggregate_plan(args)
 
     resource = args.get("resource")
     normalized_resource = None
@@ -737,60 +585,9 @@ def _validate_plan(args) -> dict:
     }
 
 
-def validate_mystand_query_plan(args) -> dict:
-    """Validate and normalize one provider-visible query call.
-
-    Recovery validation deliberately reuses the handler's exact parser so the
-    model-facing schema, the pre-dispatch correction gate, and physical
-    execution cannot drift into three different definitions of "valid".
-    """
+def validate_mystand_query_call(args) -> dict:
+    """Validate and normalize one provider-visible query call."""
     return _validate_plan(args)
-
-
-def validate_mystand_semantic_query_plan(args) -> dict:
-    """Validate the exact semantic-only shape exposed in dynamic reads."""
-    if not isinstance(args, dict):
-        raise ValueError("查询参数必须是对象")
-    if set(args) - _SEMANTIC_QUERY_FIELDS:
-        raise ValueError("semantic 查询参数包含不允许的字段")
-    if "resource" not in args:
-        raise ValueError("semantic 查询参数缺少 resource")
-    payload = _validate_plan(args)
-    if "query_kind" in payload:
-        raise ValueError("dynamic read requires semantic 查询参数")
-    return payload
-
-
-def _dynamic_semantic_query_active() -> bool:
-    try:
-        from xiaoban.trusted_runtime.turns import current_turn
-        from xiaoban.trusted_runtime.types import (
-            MYSTAND_COMPLETION_PROTOCOL_V2,
-        )
-
-        turn = current_turn()
-    except Exception:
-        return False
-    return bool(
-        turn is not None
-        and turn.completion_protocol == MYSTAND_COMPLETION_PROTOCOL_V2
-        and turn.fact_requirement is None
-        and not str(turn.completion_finalization or "")
-    )
-
-
-_SEMANTIC_CORRECTION = {
-    "allowed_fields": [
-        "operation",
-        "resource",
-        "entities",
-        "fact_needs",
-        "mode",
-    ],
-    "required_fields": ["operation", "resource", "fact_needs"],
-    "locator_rule": "preserve the indexed resource; entities may only narrow it",
-    "max_calls": 1,
-}
 
 
 def mystand_query_tool_handler(args, **_kwargs):
@@ -801,87 +598,23 @@ def mystand_query_tool_handler(args, **_kwargs):
             code="mystand_session_required",
             status=403,
         )
-    dynamic_semantic = _dynamic_semantic_query_active()
     try:
-        payload = (
-            validate_mystand_semantic_query_plan(args)
-            if dynamic_semantic
-            else validate_mystand_query_plan(args)
-        )
+        payload = validate_mystand_query_call(args)
     except ValueError as exc:
         return _error(
             str(exc),
             code="invalid_mystand_query_arguments",
-            retryable=dynamic_semantic,
-            correction=(
-                dict(_SEMANTIC_CORRECTION)
-                if dynamic_semantic
-                else None
-            ),
         )
     mark_mystand_private_query_turn()
-    if "query_kind" in payload:
-        try:
-            from xiaoban.trusted_runtime.turns import current_turn
-
-            turn = current_turn()
-            requirement = (
-                turn.fact_requirement
-                if turn is not None
-                and isinstance(turn.fact_requirement, dict)
-                else None
-            )
-            signed_plan = build_fact_query_plan(requirement)
-            expected_plan = (
-                _validate_plan(signed_plan)
-                if isinstance(signed_plan, dict)
-                else None
-            )
-            if expected_plan != payload:
-                raise ValueError("typed 查询未绑定本轮事实要求")
-            binding = requirement.get("binding")
-            if not isinstance(binding, dict):
-                raise ValueError("typed 查询缺少可信绑定")
-            requirement_digest = evidence_requirement_digest(
-                requirement,
-                canonical_fallback=turn.fact_requirement_digest,
-            )
-            plan_id = str(requirement.get("plan_id") or "")
-            scope_fingerprint = str(
-                binding.get("datascope_fingerprint") or ""
-            )
-            if (
-                not re.fullmatch(r"[a-f0-9]{64}", requirement_digest)
-                or not re.fullmatch(r"[A-Za-z0-9._:@-]{1,160}", plan_id)
-                or not re.fullmatch(r"[a-f0-9]{16,64}", scope_fingerprint)
-            ):
-                raise ValueError("typed 查询可信字段无效")
-            payload.update(
-                {
-                    "plan_id": plan_id,
-                    "requirement_digest": requirement_digest,
-                    "scope_fingerprint": scope_fingerprint,
-                }
-            )
-        except (ValueError, TypeError):
-            return _error(
-                "本轮事实查询没有通过可信计划绑定。",
-                code="trusted_fact_requirement_required",
-                status=409,
-            )
     raw_user_message = get_session_user_message()
-    trusted_user_message = (
-        normalized_fact_query_text(raw_user_message)
-        if "query_kind" in payload
-        else raw_user_message.strip()[:4_000]
-    )
+    trusted_user_message = raw_user_message.strip()[:4_000]
     if not trusted_user_message:
         return _error(
             "当前查询缺少可信用户消息。",
             code="trusted_query_text_required",
             status=409,
         )
-    if "query_kind" not in payload or payload.get("query_kind") == "resource-read":
+    if "query_kind" not in payload:
         payload["queryText"] = trusted_user_message
     return _post_internal(payload, session)
 
@@ -894,7 +627,7 @@ registry.register(
     check_fn=check_mystand_query,
     requires_env=[],
     is_async=False,
-    description="High-level semantic query for authorized My Stand data",
+    description="Authorized My Stand semantic and finance aggregate query",
     emoji="🔎",
     max_result_size_chars=_MAX_RESPONSE_BYTES,
 )

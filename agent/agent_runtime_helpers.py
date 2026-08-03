@@ -34,6 +34,12 @@ from typing import Any, Dict, List, Optional
 from xiaoban_cli.timeouts import get_provider_request_timeout
 from agent.prompt_builder import format_steer_marker
 from agent.tool_dispatch_helpers import _trajectory_normalize_msg, make_tool_result_message
+from agent.tool_result_classification import (
+    CANONICAL_TOOL_RESULT_INTERNAL_KEY,
+    TRUSTED_STEER_INTERNAL_KEY,
+    append_trusted_steer_markers_for_model,
+    project_tool_result_for_model,
+)
 from agent.trajectory import convert_scratchpad_to_think
 from agent.credential_pool import STATUS_EXHAUSTED
 from agent.error_classifier import FailoverReason
@@ -53,7 +59,7 @@ AGENT_RUNTIME_POST_HOOK_TOOL_NAMES = frozenset(
 )
 
 POST_RESPONSE_HOUSEKEEPING_TOOL_NAMES = frozenset(
-    {"memory", "todo", "skill_manage"}
+    {"memory", "skill_manage"}
 )
 
 
@@ -61,7 +67,7 @@ def is_post_response_housekeeping_tool(function_name: str) -> bool:
     """Return whether a tool only maintains agent/session state after an answer.
 
     This is execution-role metadata, not business-task matching.  Keeping it in
-    one place prevents a successful memory/todo side effect from being mistaken
+    one place prevents a successful memory/skill side effect from being mistaken
     for recovery of an earlier failed user-facing action.
     """
     return function_name in POST_RESPONSE_HOUSEKEEPING_TOOL_NAMES
@@ -2057,7 +2063,47 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
                 role,
             )
             continue
-        filtered.append(msg)
+        api_msg = msg
+        if (
+            CANONICAL_TOOL_RESULT_INTERNAL_KEY in msg
+            or TRUSTED_STEER_INTERNAL_KEY in msg
+        ):
+            api_msg = msg.copy()
+            trusted_steer_markers = api_msg.pop(
+                TRUSTED_STEER_INTERNAL_KEY, None
+            )
+            metadata = api_msg.pop(CANONICAL_TOOL_RESULT_INTERNAL_KEY, None)
+            if role == "tool" and isinstance(metadata, dict):
+                try:
+                    api_msg["content"] = project_tool_result_for_model(
+                        api_msg.get("content"),
+                        metadata,
+                        trusted_steer_markers,
+                    )
+                except Exception:
+                    _ra().logger.exception(
+                        "Pre-call sanitizer: canonical ToolResult projection failed"
+                    )
+                    dispatch_state = metadata.get("dispatchState")
+                    if dispatch_state not in {"not_dispatched", "dispatched"}:
+                        dispatch_state = "dispatched"
+                    fallback = {
+                        key: str(metadata.get(key) or "")
+                        for key in ("requestId", "turnId", "callId", "toolName")
+                    }
+                    fallback.update(
+                        schema="xiaoban.tool-result.v1",
+                        dispatchState=dispatch_state,
+                        outcome="unknown",
+                        retrySafe=False,
+                        modelError={"code": "projection_failed"},
+                    )
+                    # Never fall back to private/raw tool content.
+                    api_msg["content"] = append_trusted_steer_markers_for_model(
+                        json.dumps(fallback, ensure_ascii=False),
+                        trusted_steer_markers,
+                    )
+        filtered.append(api_msg)
     messages = filtered
 
     surviving_call_ids: set = set()
@@ -2517,6 +2563,32 @@ def extract_api_error_context(error: Exception) -> Dict[str, Any]:
 
 
 
+def append_trusted_steer_to_tool_message(message: dict, steer_text: str) -> None:
+    """Append one runtime-authenticated steer to history and its sidecar."""
+    marker = format_steer_marker(steer_text)
+    existing_content = message.get("content", "")
+    if not isinstance(existing_content, str):
+        # Anthropic multimodal content blocks — preserve them and append
+        # a text block at the end.
+        try:
+            blocks = list(existing_content) if existing_content else []
+            blocks.append({"type": "text", "text": marker.lstrip()})
+            message["content"] = blocks
+        except Exception:
+            # Fall back to string replacement if content shape is unexpected.
+            message["content"] = f"{existing_content}{marker}"
+    else:
+        message["content"] = existing_content + marker
+
+    existing_markers = message.get(TRUSTED_STEER_INTERNAL_KEY)
+    if isinstance(existing_markers, list):
+        markers = [item for item in existing_markers if isinstance(item, str)]
+    else:
+        markers = []
+    markers.append(marker)
+    message[TRUSTED_STEER_INTERNAL_KEY] = markers
+
+
 def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: int) -> None:
     """Append any pending /steer text to the last tool result in this turn.
 
@@ -2560,20 +2632,7 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
             existing = getattr(agent, "_pending_steer", None)
             agent._pending_steer = (existing + "\n" + steer_text) if existing else steer_text
         return
-    marker = format_steer_marker(steer_text)
-    existing_content = messages[target_idx].get("content", "")
-    if not isinstance(existing_content, str):
-        # Anthropic multimodal content blocks — preserve them and append
-        # a text block at the end.
-        try:
-            blocks = list(existing_content) if existing_content else []
-            blocks.append({"type": "text", "text": marker.lstrip()})
-            messages[target_idx]["content"] = blocks
-        except Exception:
-            # Fall back to string replacement if content shape is unexpected.
-            messages[target_idx]["content"] = f"{existing_content}{marker}"
-    else:
-        messages[target_idx]["content"] = existing_content + marker
+    append_trusted_steer_to_tool_message(messages[target_idx], steer_text)
     _ra().logger.info(
         "Delivered /steer to agent after tool batch (%d chars): %s",
         len(steer_text),
@@ -2657,6 +2716,7 @@ __all__ = [
     "copy_reasoning_content_for_api",
     "cleanup_dead_connections",
     "extract_api_error_context",
+    "append_trusted_steer_to_tool_message",
     "apply_pending_steer_to_tool_results",
     "_iter_pool_sockets",
     "force_close_tcp_sockets",

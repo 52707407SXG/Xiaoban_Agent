@@ -1,8 +1,7 @@
 """Trusted Action Runtime 核心类型（渠道无关）。
 
 模型可以理解和表达，但只有程序产生的 WorkTurn / ActionCall /
-ActionResult / EvidenceEnvelope 能决定某个动作是否真的发生、
-结果是否可以引用、业务事实是否可以陈述。
+ActionResult 能决定某个工具动作是否真的发生。
 
 机制来源（固定上游审计 commit，见交接单映射矩阵）：
 - OpenAI Codex 322d5b96：typed tool call 进统一 registry、唯一 call ID、
@@ -20,12 +19,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from xiaoban.trusted_runtime.protocol_contract import (
-    MYSTAND_COMPLETION_PROTOCOL as MYSTAND_COMPLETION_PROTOCOL_V2,
-    MYSTAND_COMPLETION_VERIFICATION_SCHEMA
-    as MYSTAND_COMPLETION_VERIFICATION_SCHEMA_V2,
-)
-
 # ActionResult.status 全状态；失败、空、拒绝、歧义、未找到必须明确区分。
 ACTION_STATUSES = (
     "success",
@@ -37,15 +30,6 @@ ACTION_STATUSES = (
     "cancelled",
 )
 
-# IndexReceipt.status
-INDEX_STATUSES = (
-    "found",
-    "none",
-    "denied",
-    "unavailable",
-    "no_internal_resource_needed",
-)
-
 # PreActionDecision.decision（Claude PreToolUse allow/deny 等价语义；
 # clarify/confirm 预留给后续波次，本波不产生）。
 PRE_ACTION_DECISIONS = ("allow", "deny", "clarify", "confirm")
@@ -54,7 +38,6 @@ PRE_ACTION_DECISIONS = ("allow", "deny", "clarify", "confirm")
 TURN_STATES = (
     "accepted",
     "identity_resolved",
-    "indexing",
     "validating",
     "awaiting_clarification",
     "awaiting_confirmation",
@@ -65,37 +48,6 @@ TURN_STATES = (
     "cancelled",
     "blocked",
 )
-
-INTERACTION_CHAT = "CHAT"
-INTERACTION_WORK = "WORK"
-
-MYSTAND_COMPLETION_BINDING_FIELDS = frozenset(
-    {
-        "user_id",
-        "session_id",
-        "delivery_id",
-        "attempt",
-        "message_id",
-        "request_fingerprint",
-        "invocation_fingerprint",
-        "datascope_fingerprint",
-    }
-)
-
-
-@dataclass(frozen=True)
-class CommandEnvelope:
-    """渠道适配后的统一输入；渠道只负责收消息和身份映射。"""
-
-    request_id: str
-    platform: str
-    conversation_id: str
-    message_id: str
-    external_user_ref: str
-    text: str
-    received_at: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
 
 @dataclass(frozen=True)
 class TrustedIdentity:
@@ -155,44 +107,31 @@ class PreActionDecision:
 class ActionOutputContract:
     """动作级输出合同（动作目录的服务端侧声明）。
 
-    - kind=index：最小资源索引读取，建立 IndexReceipt；
-    - kind=scoped_read：按稳定 ID 的最小定向读取，同时建立 IndexReceipt；
-    - kind=read：开放事实查询，执行前必须已有 found 的 IndexReceipt。
-    allowed_fact_paths 是 Evidence 唯一允许公开的字段路径。
+    ``kind`` only selects the deterministic result validator. Resource discovery
+    is a normal model-selected read and is not a prerequisite for stable IDs.
     """
 
     action_id: str
     version: str
     kind: str
-    allowed_fact_paths: Tuple[str, ...]
-    record_ref_paths: Tuple[str, ...]
 
 
-# 第一波只适配现有只读动作，不扩大动作目录。
-# kind=index：最小资源索引读取，是 IndexReceipt 的唯一来源；
-# kind=read：业务读取，执行前必须已有 found 的 IndexReceipt，
-# 禁止用业务 ActionResult 反向补索引。
+# 只适配现有只读动作，不扩大动作目录。
 ACTION_OUTPUT_CONTRACTS: Dict[str, ActionOutputContract] = {
     "mystand_resource_index": ActionOutputContract(
         "mystand_resource_index",
         "v1",
         "index",
-        ("items[].safeLabel",),
-        ("items[].resourceUid",),
     ),
     "mystand_authorization": ActionOutputContract(
         "mystand_authorization",
         "v1",
         "read",
-        ("content",),
-        ("resourceUid", "authorizationId", "recordRefs[]"),
     ),
     "mystand_query": ActionOutputContract(
         "mystand_query",
         "v1",
         "read",
-        ("content", "facts", "collection"),
-        ("resourceUid", "resource.resourceUid", "recordRefs[]"),
     ),
 }
 
@@ -210,52 +149,6 @@ def is_write_action(name: str, arguments: Optional[Dict[str, Any]] = None) -> bo
     return False
 
 
-@dataclass(frozen=True)
-class IndexReceipt:
-    request_id: str
-    actor_fingerprint: str
-    loaded_at: str
-    scope_summary: str
-    matched_resource_refs: List[str]
-    status: str
-    source_call_id: str = ""
-    has_more: Optional[bool] = None
-    resource_count: int = 0
-    resource_refs_digest: str = ""
-
-
-@dataclass(frozen=True)
-class EvidenceEnvelope:
-    """本轮业务事实的唯一可信来源。
-
-    allowed_facts 是动作合同允许字段路径的 JSON 投影（{path: value}），
-    不是 raw text；recordRefs 来自受控执行上下文与合同声明路径。
-    """
-
-    evidence_id: str
-    turn_id: str
-    call_id: str
-    action_id: str
-    datascope_fingerprint: str
-    status: str
-    allowed_facts: str
-    record_refs: List[str]
-    input_digest: str
-    output_digest: str
-    verified_at: str
-    verification_status: str
-    requirement_digest: str = ""
-    coverage_digest: str = ""
-
-
-@dataclass(frozen=True)
-class CompletionDecision:
-    allowed: bool
-    text: str
-    reason: str
-    verification: Optional[Dict[str, Any]] = None
-
-
 @dataclass
 class WorkTurn:
     turn_id: str
@@ -263,21 +156,8 @@ class WorkTurn:
     message_id: str
     channel: str
     identity: Optional[TrustedIdentity]
-    interaction_kind: str
-    index_receipt: Optional[IndexReceipt]
-    resource_module_id: str = ""
-    completion_protocol: str = ""
-    completion_binding: Dict[str, Any] = field(default_factory=dict)
-    business_tools_disabled: bool = False
-    completion_finalization: str = ""
-    completion_finalization_output_digest: str = ""
-    completion_execution_failure: str = ""
-    fact_requirement: Optional[Dict[str, Any]] = None
-    fact_requirement_digest: str = ""
-    collection_evidence: Optional[Dict[str, Any]] = None
     action_calls: List[ActionCall] = field(default_factory=list)
     action_results: List[ActionResult] = field(default_factory=list)
-    evidence: List[EvidenceEnvelope] = field(default_factory=list)
     states: List[str] = field(default_factory=list)
     state: str = "accepted"
     terminal_reason: str = ""

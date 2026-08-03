@@ -155,7 +155,143 @@ def test_applies_agent_side_effects():
     assert agent._persist_calls == 1
     # task/turn ids assigned on the agent.
     assert agent._current_task_id
+    assert agent._current_request_id.startswith("agent-request:")
     assert agent._current_turn_id
+
+
+def test_mystand_work_turn_owns_canonical_request_and_turn_ids():
+    agent = _FakeAgent()
+    trusted_turn = types.SimpleNamespace(
+        request_id="delivery-1",
+        turn_id="trusted-turn-1",
+    )
+
+    with patch(
+        "xiaoban.trusted_runtime.turns.current_turn",
+        return_value=trusted_turn,
+    ):
+        ctx = _build(agent)
+
+    assert agent._current_request_id == "delivery-1"
+    assert agent._current_turn_id == "trusted-turn-1"
+    assert ctx.request_id == "delivery-1"
+    assert ctx.turn_id == "trusted-turn-1"
+
+
+def test_mystand_work_turn_is_marked_only_with_trusted_turn_and_session_source():
+    agent = _FakeAgent()
+    trusted_turn = types.SimpleNamespace(
+        request_id="delivery-1",
+        turn_id="trusted-turn-1",
+    )
+
+    with patch(
+        "xiaoban.trusted_runtime.turns.current_turn",
+        return_value=trusted_turn,
+    ), patch(
+        "gateway.session_context.get_session_env",
+        return_value="mystand",
+    ):
+        ctx = _build(agent)
+
+    assert ctx.is_mystand_turn is True
+
+
+def test_run_conversation_emits_turn_started_only_after_context_exists():
+    from agent.conversation_loop import run_conversation
+
+    events = []
+    context = types.SimpleNamespace(
+        user_message="hello",
+        original_user_message="hello",
+        messages=[{"role": "user", "content": "hello"}],
+        conversation_history=None,
+        active_system_prompt="SYSTEM",
+        effective_task_id="task-1",
+        request_id="xbd_" + "1" * 40,
+        turn_id="2" * 16,
+        is_mystand_turn=True,
+        current_turn_user_idx=0,
+        should_review_memory=False,
+        plugin_user_context="",
+        ext_prefetch_cache="",
+    )
+    agent = types.SimpleNamespace(
+        api_mode="codex_app_server",
+        tool_progress_callback=lambda *args: events.append(args),
+        _run_codex_app_server_turn=lambda **_kwargs: {
+            "completed": True,
+        },
+    )
+
+    with patch(
+        "agent.conversation_loop.build_turn_context",
+        return_value=context,
+    ):
+        result = run_conversation(agent, "hello")
+
+    assert result == {"completed": True}
+    assert events == [
+        (
+            "turn.started",
+            context.request_id,
+            context.turn_id,
+            None,
+        )
+    ]
+
+
+def test_run_conversation_does_not_emit_turn_event_outside_mystand():
+    from agent.conversation_loop import run_conversation
+
+    events = []
+    context = types.SimpleNamespace(
+        user_message="hello",
+        original_user_message="hello",
+        messages=[{"role": "user", "content": "hello"}],
+        conversation_history=None,
+        active_system_prompt="SYSTEM",
+        effective_task_id="task-1",
+        request_id="agent-request:local",
+        turn_id="session:task:turn",
+        is_mystand_turn=False,
+        current_turn_user_idx=0,
+        should_review_memory=False,
+        plugin_user_context="",
+        ext_prefetch_cache="",
+    )
+    agent = types.SimpleNamespace(
+        api_mode="codex_app_server",
+        tool_progress_callback=lambda *args: events.append(args),
+        _run_codex_app_server_turn=lambda **_kwargs: {
+            "completed": True,
+        },
+    )
+
+    with patch(
+        "agent.conversation_loop.build_turn_context",
+        return_value=context,
+    ):
+        run_conversation(agent, "hello")
+
+    assert events == []
+
+
+def test_run_conversation_does_not_emit_turn_started_when_context_build_fails():
+    from agent.conversation_loop import run_conversation
+
+    events = []
+    agent = types.SimpleNamespace(
+        tool_progress_callback=lambda *args: events.append(args),
+    )
+
+    with patch(
+        "agent.conversation_loop.build_turn_context",
+        side_effect=RuntimeError("pre-turn failure"),
+    ), pytest.raises(RuntimeError, match="pre-turn failure"):
+        run_conversation(agent, "hello")
+
+    assert events == []
 
 
 def test_task_id_passthrough():

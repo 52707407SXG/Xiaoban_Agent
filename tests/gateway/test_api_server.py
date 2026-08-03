@@ -709,6 +709,27 @@ def _mystand_idempotent_headers(
     }
 
 
+def _mystand_stream_headers(delivery_id: str) -> dict[str, str]:
+    headers = _mystand_idempotent_headers(delivery_id)
+    headers.pop("Idempotency-Key")
+    headers["X-Xiaoban-Delivery-Id"] = delivery_id
+    headers["X-Xiaoban-Delivery-Attempt"] = headers["X-Xiaoban-Attempt"]
+    return headers
+
+
+def _xiaoban_progress_payloads(body: str) -> list[dict]:
+    payloads = []
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "event: xiaoban.tool.progress":
+            continue
+        for follow in lines[index + 1:index + 4]:
+            if follow.startswith("data: "):
+                payloads.append(json.loads(follow[len("data: "):]))
+                break
+    return payloads
+
+
 @pytest.fixture
 def adapter():
     return _make_adapter()
@@ -794,43 +815,6 @@ class TestAgentExecution:
         assert bind_session.call_args.kwargs["user_message"] == (
             "把城南一号2栋10楼的特征卡改一下"
         )
-
-    @pytest.mark.asyncio
-    async def test_mystand_confirmation_turn_receives_dynamic_system_reminder(
-        self,
-        auth_adapter,
-    ):
-        mock_agent = MagicMock()
-        mock_agent.run_conversation.return_value = {
-            "final_response": "没有写入。",
-            "messages": [],
-        }
-        mock_agent.session_prompt_tokens = 1
-        mock_agent.session_completion_tokens = 2
-        mock_agent.session_total_tokens = 3
-
-        with patch.object(
-            auth_adapter,
-            "_create_agent",
-            return_value=mock_agent,
-        ) as create_agent:
-            await auth_adapter._run_agent(
-                user_message="确认",
-                conversation_history=[
-                    {
-                        "role": "assistant",
-                        "content": "写入预览如下，确认后再提交。",
-                    }
-                ],
-                session_id="session-integrity-reminder",
-                request_headers=_mystand_idempotent_headers(
-                    "integrity-reminder"
-                ),
-            )
-
-        prompt = create_agent.call_args.kwargs["ephemeral_system_prompt"]
-        assert "本轮诚信强制提醒" in prompt
-        assert "当前回合" in prompt
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1339,60 +1323,6 @@ class TestChatCompletionsEndpoint:
         mock_run.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_mystand_stream_never_leaks_unverified_write_success_delta(
-        self,
-        auth_adapter,
-    ):
-        app = _create_app(auth_adapter)
-        headers = _mystand_idempotent_headers("stream-integrity")
-        headers.pop("Idempotency-Key")
-
-        async def _mock_run_agent(**kwargs):
-            callback = kwargs.get("stream_delta_callback")
-            if callback:
-                callback("四项全部写入成功。")
-            return (
-                {
-                    "_mystand_request": True,
-                    "final_response": "四项全部写入成功。",
-                    "messages": [
-                        {"role": "user", "content": "确认"},
-                        {"role": "assistant", "content": "四项全部写入成功。"},
-                    ],
-                },
-                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-            )
-
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(
-                auth_adapter,
-                "_run_agent",
-                side_effect=_mock_run_agent,
-            ):
-                response = await cli.post(
-                    "/v1/chat/completions",
-                    headers=headers,
-                    json={
-                        "model": "test",
-                        "messages": [{"role": "user", "content": "确认"}],
-                        "stream": True,
-                    },
-                )
-                body = await response.text()
-
-        assert response.status == 200
-        visible_parts = []
-        for line in body.splitlines():
-            if not line.startswith("data: ") or line == "data: [DONE]":
-                continue
-            payload = json.loads(line[len("data: ") :])
-            for choice in payload.get("choices", []):
-                visible_parts.append(choice.get("delta", {}).get("content", ""))
-        visible_text = "".join(visible_parts)
-        assert "四项全部写入成功" not in visible_text
-        assert "没有实际执行可验证的写入" in visible_text
-
-    @pytest.mark.asyncio
     async def test_concurrent_mystand_delivery_uses_stable_ledger_fingerprint(self, auth_adapter):
         app = _create_app(auth_adapter)
         gate = asyncio.Event()
@@ -1813,41 +1743,6 @@ class TestChatCompletionsEndpoint:
             assert data["choices"][0]["message"]["content"] == mock_result["final_response"]
 
     @pytest.mark.asyncio
-    async def test_wechat_article_answer_without_tool_evidence_fails_closed(self, adapter):
-        """URL/article reading must not return model-invented content without tool evidence."""
-        mock_result = {
-            "final_response": "这篇文章主要讲 Hermes 的 MoA 混合 Agent 模式。",
-            "messages": [],
-            "api_calls": 1,
-        }
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (
-                    mock_result,
-                    {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
-                )
-                resp = await cli.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": "xiaoban-agent",
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": "总结这篇公众号：https://mp.weixin.qq.com/s/pbHlRqN_w1RLXnC_IgC8Ag",
-                            }
-                        ],
-                    },
-                )
-
-            assert resp.status == 200
-            data = await resp.json()
-            assert data["choices"][0]["message"]["content"] == (
-                "我还没有成功读取到这个链接的正文，所以不能总结或分析里面的内容。"
-            )
-
-    @pytest.mark.asyncio
     async def test_wechat_article_answer_with_tool_evidence_passes(self, adapter):
         mock_result = {
             "final_response": "这篇文章主要讲 Hermes 的 MoA 混合 Agent 模式。",
@@ -2265,6 +2160,991 @@ class TestChatCompletionsEndpoint:
                 ("running", "call_query_failed"),
                 ("failed", "call_query_failed"),
             ], pairs
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("outcome", "expected_status"),
+        [
+            ("success", "completed"),
+            ("empty", "completed"),
+            ("not_found", "failed"),
+            ("denied", "failed"),
+            ("failed", "failed"),
+            ("unknown", "failed"),
+            ("cancelled", "stopped"),
+        ],
+    )
+    async def test_stream_tool_terminal_uses_safe_canonical_metadata(
+        self,
+        adapter,
+        outcome,
+        expected_status,
+    ):
+        """Terminal SSE is a bounded projection of the canonical sidecar."""
+        app = _create_app(adapter)
+        call_id = f"call_canonical_{outcome}"
+        raw_secret = f"PRIVATE_RAW_RESULT_{outcome}"
+        nested_secret = f"PRIVATE_NESTED_METADATA_{outcome}"
+
+        async with TestClient(TestServer(app)) as cli:
+            async def _mock_run_agent(**kwargs):
+                start_cb = kwargs.get("tool_start_callback")
+                complete_cb = kwargs.get("tool_complete_callback")
+                if start_cb:
+                    start_cb(call_id, "mystand_query", {"query": "safe-label"})
+                if complete_cb:
+                    complete_cb(
+                        call_id,
+                        "mystand_query",
+                        {"privateArg": "MUST_NOT_REACH_TERMINAL_SSE"},
+                        raw_secret,
+                        {
+                            "schema": "xiaoban.tool-result.v1",
+                            "requestId": "delivery-e1a",
+                            "turnId": "turn-e1a",
+                            "callId": call_id,
+                            "toolName": "mystand_query",
+                            "dispatchState": "dispatched",
+                            "outcome": outcome,
+                            "retrySafe": False,
+                            "recordRefs": [nested_secret],
+                            "continuation": {"private": nested_secret},
+                        },
+                    )
+                return (
+                    {"final_response": "done", "messages": [], "api_calls": 1},
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+
+            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "run"}],
+                        "stream": True,
+                    },
+                )
+                assert resp.status == 200
+                body = await resp.text()
+
+        terminal_payloads = []
+        lines = body.splitlines()
+        for index, line in enumerate(lines):
+            if line.strip() != "event: xiaoban.tool.progress":
+                continue
+            for follow in lines[index + 1:index + 4]:
+                if follow.startswith("data: "):
+                    payload = json.loads(follow[len("data: "):])
+                    if payload.get("status") != "running":
+                        terminal_payloads.append(payload)
+                    break
+
+        assert terminal_payloads == [
+            {
+                "tool": "mystand_query",
+                "toolCallId": call_id,
+                "status": expected_status,
+                "schema": "xiaoban.tool-result.v1",
+                "requestId": "delivery-e1a",
+                "turnId": "turn-e1a",
+                "dispatchState": "dispatched",
+                "outcome": outcome,
+                "retrySafe": False,
+            }
+        ]
+        assert raw_secret not in body
+        assert nested_secret not in body
+        assert "MUST_NOT_REACH_TERMINAL_SSE" not in json.dumps(
+            terminal_payloads,
+            ensure_ascii=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_mystand_tool_sse_payloads_bind_to_accepted_turn(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+    ):
+        """Every real My Stand tool frame carries the accepted turn binding."""
+        from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
+
+        durable_cache = _IdempotencyCache(
+            durable_path=str(tmp_path / "tool-binding.sqlite"),
+            outcome_keys={"test-v1": b"\x31" * 32},
+        )
+        monkeypatch.setattr(
+            "gateway.platforms.api_server._idem_cache",
+            durable_cache,
+        )
+        delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
+        turn_id = uuid.uuid4().hex[:16]
+        call_id = "call-bound-tool"
+        app = _create_app(auth_adapter)
+
+        async def _mock_run_agent(**kwargs):
+            kwargs["tool_progress_callback"](
+                "turn.started",
+                delivery_id,
+                turn_id,
+                None,
+            )
+            kwargs["tool_start_callback"](
+                call_id,
+                "mystand_query",
+                {"query": "safe"},
+            )
+            kwargs["tool_complete_callback"](
+                call_id,
+                "mystand_query",
+                {"query": "safe"},
+                {"ok": True},
+                {
+                    "schema": "xiaoban.tool-result.v1",
+                    "requestId": delivery_id,
+                    "turnId": turn_id,
+                    "callId": call_id,
+                    "toolName": "mystand_query",
+                    "dispatchState": "dispatched",
+                    "outcome": "success",
+                    "retrySafe": False,
+                },
+            )
+            ledger = AgentCallUsageLedger(provider="test", model="test")
+            ledger.set_status("completed")
+            return (
+                {
+                    "final_response": "done",
+                    "completed": True,
+                    "failed": False,
+                    "partial": False,
+                    "interrupted": False,
+                    "messages": [],
+                },
+                {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "total_tokens": 2,
+                    "agent_calls": ledger.to_dict(),
+                },
+            )
+
+        async with TestClient(TestServer(app)) as cli:
+            with (
+                patch.object(
+                    auth_adapter,
+                    "_run_agent",
+                    side_effect=_mock_run_agent,
+                ),
+                patch(
+                    "agent.display.get_tool_emoji",
+                    return_value="🔎",
+                ),
+            ):
+                response = await cli.post(
+                    "/v1/chat/completions",
+                    headers=_mystand_stream_headers(delivery_id),
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "run"}],
+                        "stream": True,
+                    },
+                )
+                body = await response.text()
+
+        tool_payloads = [
+            payload
+            for payload in _xiaoban_progress_payloads(body)
+            if payload.get("toolCallId") == call_id
+        ]
+        assert tool_payloads == [
+            {
+                "tool": "mystand_query",
+                "emoji": "🔎",
+                "label": "mystand_query",
+                "toolCallId": call_id,
+                "status": "running",
+                "requestId": delivery_id,
+                "turnId": turn_id,
+            },
+            {
+                "tool": "mystand_query",
+                "toolCallId": call_id,
+                "status": "completed",
+                "schema": "xiaoban.tool-result.v1",
+                "requestId": delivery_id,
+                "turnId": turn_id,
+                "dispatchState": "dispatched",
+                "outcome": "success",
+                "retrySafe": False,
+            },
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("forged_field", "raw_result", "expected_status"),
+        [
+            ("requestId", {"ok": True}, "completed"),
+            (
+                "turnId",
+                {"ok": False, "error": "PRIVATE_RAW_FAILURE"},
+                "failed",
+            ),
+        ],
+        ids=["cross-request", "cross-turn"],
+    )
+    async def test_mystand_tool_terminal_rejects_cross_binding_metadata(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+        forged_field,
+        raw_result,
+        expected_status,
+    ):
+        """Forged sidecar identity falls back to raw status and safe binding."""
+        from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
+
+        durable_cache = _IdempotencyCache(
+            durable_path=str(tmp_path / f"tool-forged-{forged_field}.sqlite"),
+            outcome_keys={"test-v1": b"\x31" * 32},
+        )
+        monkeypatch.setattr(
+            "gateway.platforms.api_server._idem_cache",
+            durable_cache,
+        )
+        delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
+        turn_id = uuid.uuid4().hex[:16]
+        call_id = f"call-forged-{forged_field}"
+        app = _create_app(auth_adapter)
+
+        async def _mock_run_agent(**kwargs):
+            kwargs["tool_progress_callback"](
+                "turn.started",
+                delivery_id,
+                turn_id,
+                None,
+            )
+            kwargs["tool_start_callback"](
+                call_id,
+                "mystand_query",
+                {"query": "safe"},
+            )
+            metadata = {
+                "schema": "xiaoban.tool-result.v1",
+                "requestId": delivery_id,
+                "turnId": turn_id,
+                "callId": call_id,
+                "toolName": "mystand_query",
+                "dispatchState": "dispatched",
+                "outcome": "success",
+                "retrySafe": False,
+                "recordRefs": ["PRIVATE_METADATA_MUST_NOT_LEAK"],
+            }
+            metadata[forged_field] = (
+                "xbd_" + "f" * 40
+                if forged_field == "requestId"
+                else "f" * 16
+            )
+            kwargs["tool_complete_callback"](
+                call_id,
+                "mystand_query",
+                {"private": "PRIVATE_ARGS_MUST_NOT_LEAK"},
+                raw_result,
+                metadata,
+            )
+            ledger = AgentCallUsageLedger(provider="test", model="test")
+            ledger.set_status("completed")
+            return (
+                {
+                    "final_response": "done",
+                    "completed": True,
+                    "failed": False,
+                    "partial": False,
+                    "interrupted": False,
+                    "messages": [],
+                },
+                {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "total_tokens": 2,
+                    "agent_calls": ledger.to_dict(),
+                },
+            )
+
+        async with TestClient(TestServer(app)) as cli:
+            with (
+                patch.object(
+                    auth_adapter,
+                    "_run_agent",
+                    side_effect=_mock_run_agent,
+                ),
+                patch(
+                    "agent.display.get_tool_emoji",
+                    return_value="🔎",
+                ),
+            ):
+                response = await cli.post(
+                    "/v1/chat/completions",
+                    headers=_mystand_stream_headers(delivery_id),
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "run"}],
+                        "stream": True,
+                    },
+                )
+                body = await response.text()
+
+        terminal_payloads = [
+            payload
+            for payload in _xiaoban_progress_payloads(body)
+            if payload.get("toolCallId") == call_id
+            and payload.get("status") != "running"
+        ]
+        assert terminal_payloads == [
+            {
+                "tool": "mystand_query",
+                "toolCallId": call_id,
+                "status": expected_status,
+                "requestId": delivery_id,
+                "turnId": turn_id,
+            }
+        ]
+        assert "PRIVATE_" not in body
+
+    @pytest.mark.asyncio
+    async def test_mystand_tool_callbacks_without_accepted_turn_emit_nothing(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+    ):
+        """A My Stand tool cannot invent its request/turn binding."""
+        from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
+
+        durable_cache = _IdempotencyCache(
+            durable_path=str(tmp_path / "tool-no-turn.sqlite"),
+            outcome_keys={"test-v1": b"\x31" * 32},
+        )
+        monkeypatch.setattr(
+            "gateway.platforms.api_server._idem_cache",
+            durable_cache,
+        )
+        delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
+        turn_id = uuid.uuid4().hex[:16]
+        call_id = "call-without-turn"
+        app = _create_app(auth_adapter)
+
+        async def _mock_run_agent(**kwargs):
+            kwargs["tool_start_callback"](
+                call_id,
+                "mystand_query",
+                {"query": "safe"},
+            )
+            kwargs["tool_complete_callback"](
+                call_id,
+                "mystand_query",
+                {},
+                {"ok": True},
+                {
+                    "schema": "xiaoban.tool-result.v1",
+                    "requestId": delivery_id,
+                    "turnId": turn_id,
+                    "callId": call_id,
+                    "toolName": "mystand_query",
+                    "dispatchState": "dispatched",
+                    "outcome": "success",
+                    "retrySafe": False,
+                },
+            )
+            ledger = AgentCallUsageLedger(provider="test", model="test")
+            ledger.set_status("completed")
+            return (
+                {
+                    "final_response": "done",
+                    "completed": True,
+                    "failed": False,
+                    "partial": False,
+                    "interrupted": False,
+                    "messages": [],
+                },
+                {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "total_tokens": 2,
+                    "agent_calls": ledger.to_dict(),
+                },
+            )
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                auth_adapter,
+                "_run_agent",
+                side_effect=_mock_run_agent,
+            ):
+                response = await cli.post(
+                    "/v1/chat/completions",
+                    headers=_mystand_stream_headers(delivery_id),
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "run"}],
+                        "stream": True,
+                    },
+                )
+                body = await response.text()
+
+        assert not [
+            payload
+            for payload in _xiaoban_progress_payloads(body)
+            if payload.get("toolCallId") == call_id
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("final_result", "ledger_status", "expected_type", "expected_status"),
+        [
+            (
+                {
+                    "final_response": "done",
+                    "completed": True,
+                    "failed": False,
+                    "partial": False,
+                    "interrupted": False,
+                    "messages": [],
+                },
+                "completed",
+                "turn.completed",
+                "completed",
+            ),
+            (
+                {
+                    "final_response": "",
+                    "completed": False,
+                    "failed": True,
+                    "partial": False,
+                    "interrupted": False,
+                    "error": "provider call durable settlement failed",
+                    "messages": [],
+                },
+                "failed",
+                "turn.failed",
+                "failed",
+            ),
+            (
+                {
+                    "final_response": "",
+                    "completed": False,
+                    "failed": True,
+                    "partial": False,
+                    "interrupted": True,
+                    "error": "completion stopped",
+                    "messages": [],
+                },
+                "cancelled",
+                "turn.stopped",
+                "stopped",
+            ),
+        ],
+        ids=["tool-less-success", "settlement-reversed-failure", "stopped"],
+    )
+    async def test_mystand_stream_turn_lifecycle_uses_real_ids_and_settled_result(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+        final_result,
+        ledger_status,
+        expected_type,
+        expected_status,
+    ):
+        """Tool-less turns close from the settled result, never from tools."""
+        from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
+
+        durable_cache = _IdempotencyCache(
+            durable_path=str(tmp_path / f"turn-{ledger_status}.sqlite"),
+            outcome_keys={"test-v1": b"\x31" * 32},
+        )
+        monkeypatch.setattr(
+            "gateway.platforms.api_server._idem_cache",
+            durable_cache,
+        )
+        delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
+        turn_id = uuid.uuid4().hex[:16]
+        app = _create_app(auth_adapter)
+
+        async def _mock_run_agent(**kwargs):
+            progress = kwargs.get("tool_progress_callback")
+            assert progress is not None
+            progress("turn.started", delivery_id, turn_id, None)
+            ledger = AgentCallUsageLedger(provider="test", model="test")
+            ledger.set_status(ledger_status)
+            usage = {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2,
+                "agent_calls": ledger.to_dict(),
+            }
+            return dict(final_result), usage
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                auth_adapter,
+                "_run_agent",
+                side_effect=_mock_run_agent,
+            ):
+                response = await cli.post(
+                    "/v1/chat/completions",
+                    headers=_mystand_stream_headers(delivery_id),
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "stream": True,
+                    },
+                )
+                body = await response.text()
+
+        assert response.status == 200
+        turn_payloads = [
+            payload
+            for payload in _xiaoban_progress_payloads(body)
+            if str(payload.get("type") or "").startswith("turn.")
+        ]
+        assert turn_payloads == [
+            {
+                "type": "turn.started",
+                "requestId": delivery_id,
+                "turnId": turn_id,
+            },
+            {
+                "type": expected_type,
+                "requestId": delivery_id,
+                "turnId": turn_id,
+                "status": expected_status,
+            },
+        ]
+        assert body.index(f'"type": "{expected_type}"') < body.index(
+            "data: [DONE]"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("reported_request_id", "reported_turn_id"),
+        [
+            ("xbd_" + "f" * 40, "1" * 16),
+            (None, "not-a-real-turn"),
+        ],
+        ids=["cross-request", "invalid-turn-id"],
+    )
+    async def test_mystand_stream_drops_unbound_turn_lifecycle(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+        reported_request_id,
+        reported_turn_id,
+    ):
+        from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
+
+        durable_cache = _IdempotencyCache(
+            durable_path=str(tmp_path / "turn-unbound.sqlite"),
+            outcome_keys={"test-v1": b"\x31" * 32},
+        )
+        monkeypatch.setattr(
+            "gateway.platforms.api_server._idem_cache",
+            durable_cache,
+        )
+        delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
+        app = _create_app(auth_adapter)
+
+        async def _mock_run_agent(**kwargs):
+            progress = kwargs.get("tool_progress_callback")
+            assert progress is not None
+            progress(
+                "turn.started",
+                reported_request_id or delivery_id,
+                reported_turn_id,
+                None,
+            )
+            ledger = AgentCallUsageLedger(provider="test", model="test")
+            ledger.set_status("completed")
+            return (
+                {
+                    "final_response": "done",
+                    "completed": True,
+                    "failed": False,
+                    "partial": False,
+                    "interrupted": False,
+                    "messages": [],
+                },
+                {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "total_tokens": 2,
+                    "agent_calls": ledger.to_dict(),
+                },
+            )
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                auth_adapter,
+                "_run_agent",
+                side_effect=_mock_run_agent,
+            ):
+                response = await cli.post(
+                    "/v1/chat/completions",
+                    headers=_mystand_stream_headers(delivery_id),
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "stream": True,
+                    },
+                )
+                body = await response.text()
+
+        assert response.status == 200
+        assert not [
+            payload
+            for payload in _xiaoban_progress_payloads(body)
+            if str(payload.get("type") or "").startswith("turn.")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_mystand_stream_pre_turn_failure_does_not_invent_turn(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+    ):
+        from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
+
+        durable_cache = _IdempotencyCache(
+            durable_path=str(tmp_path / "turn-preflight-failure.sqlite"),
+            outcome_keys={"test-v1": b"\x31" * 32},
+        )
+        monkeypatch.setattr(
+            "gateway.platforms.api_server._idem_cache",
+            durable_cache,
+        )
+        delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
+        app = _create_app(auth_adapter)
+
+        async def _mock_run_agent(**_kwargs):
+            ledger = AgentCallUsageLedger(provider="test", model="test")
+            ledger.set_status("failed")
+            return (
+                {
+                    "final_response": "",
+                    "completed": False,
+                    "failed": True,
+                    "partial": False,
+                    "interrupted": False,
+                    "error": "agent preflight failed",
+                    "messages": [],
+                },
+                {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "agent_calls": ledger.to_dict(),
+                },
+            )
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                auth_adapter,
+                "_run_agent",
+                side_effect=_mock_run_agent,
+            ):
+                response = await cli.post(
+                    "/v1/chat/completions",
+                    headers=_mystand_stream_headers(delivery_id),
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "stream": True,
+                    },
+                )
+                body = await response.text()
+
+        assert response.status == 200
+        assert not [
+            payload
+            for payload in _xiaoban_progress_payloads(body)
+            if str(payload.get("type") or "").startswith("turn.")
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("start_turn", "expected_terminal"),
+        [
+            (True, "turn.failed"),
+            (False, None),
+        ],
+        ids=["post-start-exception", "pre-turn-exception"],
+    )
+    async def test_mystand_stream_exception_only_closes_a_started_turn(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+        start_turn,
+        expected_terminal,
+    ):
+        durable_cache = _IdempotencyCache(
+            durable_path=str(tmp_path / f"turn-exception-{start_turn}.sqlite"),
+            outcome_keys={"test-v1": b"\x31" * 32},
+        )
+        monkeypatch.setattr(
+            "gateway.platforms.api_server._idem_cache",
+            durable_cache,
+        )
+        delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
+        turn_id = uuid.uuid4().hex[:16]
+        private_error = "PRIVATE_PROVIDER_EXCEPTION_MUST_NOT_LEAK"
+        app = _create_app(auth_adapter)
+
+        async def _mock_run_agent(**kwargs):
+            if start_turn:
+                kwargs["tool_progress_callback"](
+                    "turn.started",
+                    delivery_id,
+                    turn_id,
+                    None,
+                )
+            raise RuntimeError(private_error)
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                auth_adapter,
+                "_run_agent",
+                side_effect=_mock_run_agent,
+            ):
+                response = await cli.post(
+                    "/v1/chat/completions",
+                    headers=_mystand_stream_headers(delivery_id),
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "stream": True,
+                    },
+                )
+                body = await response.text()
+
+        turn_payloads = [
+            payload
+            for payload in _xiaoban_progress_payloads(body)
+            if str(payload.get("type") or "").startswith("turn.")
+        ]
+        if expected_terminal is None:
+            assert turn_payloads == []
+        else:
+            assert turn_payloads == [
+                {
+                    "type": "turn.started",
+                    "requestId": delivery_id,
+                    "turnId": turn_id,
+                },
+                {
+                    "type": expected_terminal,
+                    "requestId": delivery_id,
+                    "turnId": turn_id,
+                    "status": "failed",
+                },
+            ]
+        assert private_error not in body
+
+    @pytest.mark.asyncio
+    async def test_post_start_cancelled_error_queues_stopped_before_eos(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+    ):
+        durable_cache = _IdempotencyCache(
+            durable_path=str(tmp_path / "turn-cancelled-error.sqlite"),
+            outcome_keys={"test-v1": b"\x31" * 32},
+        )
+        monkeypatch.setattr(
+            "gateway.platforms.api_server._idem_cache",
+            durable_cache,
+        )
+        delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
+        turn_id = uuid.uuid4().hex[:16]
+        captured_items = []
+        app = _create_app(auth_adapter)
+
+        async def _mock_run_agent(**kwargs):
+            kwargs["tool_progress_callback"](
+                "turn.started",
+                delivery_id,
+                turn_id,
+                None,
+            )
+            raise asyncio.CancelledError()
+
+        async def _capture_cancelled_stream(*args, **_kwargs):
+            stream_q = args[4]
+            agent_task = args[5]
+            with pytest.raises(asyncio.CancelledError):
+                await agent_task
+            await asyncio.sleep(0)
+            while not stream_q.empty():
+                captured_items.append(stream_q.get_nowait())
+            return web.Response(status=200, text="cancelled")
+
+        async with TestClient(TestServer(app)) as cli:
+            with (
+                patch.object(
+                    auth_adapter,
+                    "_run_agent",
+                    side_effect=_mock_run_agent,
+                ),
+                patch.object(
+                    auth_adapter,
+                    "_write_sse_chat_completion",
+                    side_effect=_capture_cancelled_stream,
+                ),
+            ):
+                response = await cli.post(
+                    "/v1/chat/completions",
+                    headers=_mystand_stream_headers(delivery_id),
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "stream": True,
+                    },
+                )
+
+        progress = [
+            item[1]
+            for item in captured_items
+            if isinstance(item, tuple)
+            and len(item) == 2
+            and item[0] == "__tool_progress__"
+        ]
+        assert progress == [
+            {
+                "type": "turn.started",
+                "requestId": delivery_id,
+                "turnId": turn_id,
+            },
+            {
+                "type": "turn.stopped",
+                "requestId": delivery_id,
+                "turnId": turn_id,
+                "status": "stopped",
+            },
+        ]
+        assert captured_items[-1] is None
+
+    @pytest.mark.asyncio
+    async def test_turn_terminal_queues_after_open_tool_close_and_before_eos(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+    ):
+        from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
+
+        durable_cache = _IdempotencyCache(
+            durable_path=str(tmp_path / "turn-queue-order.sqlite"),
+            outcome_keys={"test-v1": b"\x31" * 32},
+        )
+        monkeypatch.setattr(
+            "gateway.platforms.api_server._idem_cache",
+            durable_cache,
+        )
+        delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
+        turn_id = uuid.uuid4().hex[:16]
+        call_id = "call-open-at-turn-end"
+        app = _create_app(auth_adapter)
+
+        async def _mock_run_agent(**kwargs):
+            kwargs["tool_progress_callback"](
+                "turn.started",
+                delivery_id,
+                turn_id,
+                None,
+            )
+            kwargs["tool_start_callback"](
+                call_id,
+                "mystand_query",
+                {"query": "safe"},
+            )
+            ledger = AgentCallUsageLedger(provider="test", model="test")
+            ledger.set_status("failed")
+            return (
+                {
+                    "final_response": "",
+                    "completed": False,
+                    "failed": True,
+                    "partial": False,
+                    "interrupted": False,
+                    "messages": [],
+                },
+                {
+                    "input_tokens": 1,
+                    "output_tokens": 0,
+                    "total_tokens": 1,
+                    "agent_calls": ledger.to_dict(),
+                },
+            )
+
+        async with TestClient(TestServer(app)) as cli:
+            with (
+                patch.object(
+                    auth_adapter,
+                    "_run_agent",
+                    side_effect=_mock_run_agent,
+                ),
+                patch(
+                    "agent.display.get_tool_emoji",
+                    return_value="🔎",
+                ),
+            ):
+                response = await cli.post(
+                    "/v1/chat/completions",
+                    headers=_mystand_stream_headers(delivery_id),
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "stream": True,
+                    },
+                )
+                body = await response.text()
+
+        payloads = _xiaoban_progress_payloads(body)
+        assert payloads == [
+            {
+                "type": "turn.started",
+                "requestId": delivery_id,
+                "turnId": turn_id,
+            },
+            {
+                "tool": "mystand_query",
+                "emoji": "🔎",
+                "label": "mystand_query",
+                "toolCallId": call_id,
+                "status": "running",
+                "requestId": delivery_id,
+                "turnId": turn_id,
+            },
+            {
+                "tool": "mystand_query",
+                "toolCallId": call_id,
+                "status": "failed",
+                "requestId": delivery_id,
+                "turnId": turn_id,
+            },
+            {
+                "type": "turn.failed",
+                "requestId": delivery_id,
+                "turnId": turn_id,
+                "status": "failed",
+            },
+        ]
+        assert body.index('"type": "turn.failed"') < body.index("data: [DONE]")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("exit_mode", ["normal", "exception"])

@@ -2,7 +2,17 @@
 
 import json
 
-from tools.todo_tool import TodoStore, todo_tool
+from tools.todo_tool import TODO_SCHEMA, TodoStore, todo_tool
+
+
+def test_schema_keeps_plan_advisory_and_final_reply_model_owned():
+    description = TODO_SCHEMA["description"]
+
+    assert "never grants permission" in description
+    assert "authorizes or selects tools" in description
+    assert "determines the user-facing reply" in description
+    assert "forming the final answer yourself" in description
+    assert "after processing any ToolResults" in description
 
 
 class TestWriteAndRead:
@@ -35,6 +45,39 @@ class TestWriteAndRead:
             {"id": "2", "content": "Other task", "status": "pending"},
             {"id": "1", "content": "Latest version", "status": "in_progress"},
         ]
+
+    def test_replace_rejects_multiple_in_progress_atomically(self):
+        store = TodoStore()
+        original = [{"id": "old", "content": "Keep", "status": "pending"}]
+        store.write(original)
+
+        result = json.loads(todo_tool(
+            todos=[
+                {"id": "1", "content": "First", "status": "in_progress"},
+                {"id": "2", "content": "Second", "status": "in_progress"},
+            ],
+            store=store,
+        ))
+
+        assert result["code"] == "multiple_in_progress"
+        assert store.read() == original
+
+    def test_merge_rejects_second_in_progress_atomically(self):
+        store = TodoStore()
+        original = [
+            {"id": "1", "content": "First", "status": "in_progress"},
+            {"id": "2", "content": "Second", "status": "pending"},
+        ]
+        store.write(original)
+
+        result = json.loads(todo_tool(
+            todos=[{"id": "2", "status": "in_progress"}],
+            merge=True,
+            store=store,
+        ))
+
+        assert result["code"] == "multiple_in_progress"
+        assert store.read() == original
 
 
 class TestHasItems:

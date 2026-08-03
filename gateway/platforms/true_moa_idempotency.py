@@ -21,8 +21,6 @@ from gateway.platforms.mystand_egress_seal import (
     seal_mystand_egress_projection,
 )
 from xiaoban.trusted_runtime.protocol_contract import (
-    MYSTAND_COMPLETION_PROTOCOL,
-    MYSTAND_COMPLETION_VERIFICATION_SCHEMA,
     MYSTAND_TRUE_MOA_USAGE_SCHEMA,
 )
 
@@ -170,16 +168,6 @@ class _IdempotencyCache(_TrueMoAUsageDrainMixin):
                     else {}
                 ),
             }
-            verification = outcome.get("trustedVerification")
-            if isinstance(verification, Mapping):
-                result["_mystand_trusted_verification"] = dict(
-                    verification
-                )
-            completion_protocol = outcome.get("completionProtocol")
-            if completion_protocol == MYSTAND_COMPLETION_PROTOCOL:
-                result["_mystand_completion_protocol"] = (
-                    completion_protocol
-                )
             seal_mystand_egress_projection(result)
             return result, usage
         return (
@@ -324,56 +312,7 @@ class _IdempotencyCache(_TrueMoAUsageDrainMixin):
             "completed": True,
             "finalResponse": final_response,
             "outputDigest": output_digest,
-            "factGuardRequired": isinstance(
-                result.get("_mystand_fact_requirement"),
-                dict,
-            ),
         }
-        verification = result.get("_mystand_trusted_verification")
-        completion_protocol = str(
-            result.get("_mystand_completion_protocol") or ""
-        )
-        verification_is_v2 = bool(
-            isinstance(verification, dict)
-            and verification.get("schema")
-            == MYSTAND_COMPLETION_VERIFICATION_SCHEMA
-        )
-        trusted_turn = result.get("_trusted_turn")
-        dynamic_action_ids = {
-            str(getattr(item, "action_id", "") or "")
-            for item in (
-                list(getattr(trusted_turn, "action_calls", None) or [])
-                + list(getattr(trusted_turn, "action_results", None) or [])
-            )
-        }
-        dynamic_actions_used = bool(
-            dynamic_action_ids.intersection(
-                {
-                    "mystand_resource_index",
-                    "mystand_query",
-                    "mystand_authorization",
-                }
-            )
-        )
-        if verification_is_v2:
-            if completion_protocol != MYSTAND_COMPLETION_PROTOCOL:
-                raise RuntimeError(
-                    "true MoA dynamic completion protocol is missing"
-                )
-            payload["completionProtocol"] = completion_protocol
-        elif completion_protocol not in {
-            "",
-            MYSTAND_COMPLETION_PROTOCOL,
-        }:
-            raise RuntimeError(
-                "true MoA dynamic completion protocol is invalid"
-            )
-        elif completion_protocol and dynamic_actions_used:
-            raise RuntimeError(
-                "true MoA dynamic completion receipt is invalid"
-            )
-        if isinstance(verification, dict):
-            payload["trustedVerification"] = dict(verification)
         return payload
 
     async def get_or_set(

@@ -30,7 +30,8 @@ def internal_calls(monkeypatch):
     return calls
 
 
-def _call(
+def _call_with_handler(
+    handler,
     args,
     *,
     platform="api_server",
@@ -47,45 +48,77 @@ def _call(
         user_message=user_message,
     )
     try:
-        return json.loads(bridge.mystand_authorization_tool_handler(args))
+        return json.loads(handler(args))
     finally:
         clear_session_vars(tokens)
 
 
-def test_schema_exposes_only_fixed_operations_and_write_actions():
-    operation = bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]["operation"]
-    action = bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]["action"]
-    payload = bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]["payload"]
-    payload_properties = payload["properties"]
-
-    assert operation["enum"] == [
-        "list",
-        "resolve",
-        "resolve_many",
-        "preview_write",
-        "commit_write",
-    ]
-    assert set(action["enum"]) == {
-        "note.append-content",
-        "property-note.append-text-block",
-        "profile-card.update-field",
-        "knowledge-graph.add-node",
-        "knowledge-graph.update-node",
-        "knowledge-graph.add-edge",
-        "finance-archive.update-row-fields",
-    }
-    assert bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["additionalProperties"] is False
-    assert "resource_query" not in bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]
-    assert "module_id" not in bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]
-    assert "resource_uids" in bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]
-    assert "expected_version" not in bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]
-    assert "never narrate" in bridge.MYSTAND_AUTHORIZATION_SCHEMA["description"]
-    assert payload["additionalProperties"] is False
-    assert {"node", "nodeId", "label", "type", "changes", "edge"} <= set(
-        payload_properties
+def _call(args, **kwargs):
+    return _call_with_handler(
+        bridge.mystand_authorization_tool_handler,
+        args,
+        **kwargs,
     )
-    assert "graphId" not in payload_properties
-    assert "Never include graphId" in payload["description"]
+
+
+def _call_write(args, **kwargs):
+    return _call_with_handler(
+        bridge._mystand_authorization_write_operation_handler,
+        args,
+        **kwargs,
+    )
+
+
+def test_schema_exposes_only_read_operations():
+    operation = bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]["operation"]
+    properties = bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]
+
+    assert operation["enum"] == ["list", "resolve", "resolve_many"]
+    assert "preview_write" not in json.dumps(properties)
+    assert "commit_write" not in json.dumps(properties)
+    assert "action" not in properties
+    assert "payload" not in properties
+    assert "idempotency_key" not in properties
+    assert "preview_token" not in properties
+    assert bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["additionalProperties"] is False
+    assert "resource_query" not in properties
+    assert "module_id" not in properties
+    assert "resource_uids" in properties
+    assert "expected_version" not in properties
+    description = bridge.MYSTAND_AUTHORIZATION_SCHEMA["description"]
+    assert "never narrate" in description
+    assert "only lists or resolves" in description
+    assert "mystand_authorization_write" in description
+    assert "exact AUTH or OUT" in description
+    assert "resolve it directly with resource_uid" in description
+    assert "without an exact AUTH, OUT, or resourceUid" in description
+    assert "KGREF, OUT, or module IDs as authorization_id" not in description
+    resource_uid = properties["resource_uid"]
+    assert "supplied in the current request" in resource_uid["description"]
+    assert "Resolve it directly" in resource_uid["description"]
+
+
+@pytest.mark.parametrize("operation", ["preview_write", "commit_write"])
+def test_model_visible_handler_hard_rejects_write_operations(
+    operation,
+    internal_calls,
+):
+    result = _call(
+        {
+            "operation": operation,
+            "authorization_id": "AUTH-ABC123",
+            "action": "knowledge-graph.add-node",
+            "payload": {"node": {"label": "不得写入", "type": "skill"}},
+            "idempotency_key": "write-hidden-operation-001",
+            "preview_token": "preview-hidden-operation",
+        },
+        user_message="确认写入",
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == 403
+    assert result["code"] == "authorization_write_tool_required"
+    assert internal_calls == []
 
 
 @pytest.mark.parametrize(
@@ -196,6 +229,53 @@ def test_resolve_passes_resource_uid_from_index_without_guessing_auth(internal_c
     }
 
 
+def test_resolve_rejects_multiple_locators_before_network(internal_calls):
+    result = _call(
+        {
+            "operation": "resolve",
+            "authorization_id": "AUTH-ABC123",
+            "resource_uid": "resource-uid-from-index",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "invalid_authorization_arguments"
+    assert internal_calls == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {
+            "operation": "resolve",
+            "resource_uid": "resource-one",
+            "resource_uids": ["resource-two"],
+        },
+        {
+            "operation": "resolve",
+            "authorization_id": "AUTH-ABC123",
+            "resource_uids": ["resource-two"],
+        },
+        {
+            "operation": "resolve_many",
+            "resource_uids": ["resource-one"],
+            "resource_uid": "resource-two",
+        },
+        {
+            "operation": "resolve_many",
+            "resource_uids": ["resource-one"],
+            "authorization_id": "AUTH-ABC123",
+        },
+    ],
+)
+def test_resolve_modes_reject_cross_mode_locators_before_network(args, internal_calls):
+    result = _call(args)
+
+    assert result["ok"] is False
+    assert result["code"] == "invalid_authorization_arguments"
+    assert internal_calls == []
+
+
 def test_resolve_many_reads_each_index_uid_and_returns_one_bound_result(monkeypatch):
     calls = []
 
@@ -296,7 +376,7 @@ def test_resolve_uses_trusted_user_message_instead_of_model_broadened_query(
 def test_preview_requires_trusted_write_context(
     internal_calls, message_id, session_id
 ):
-    result = _call(
+    result = _call_write(
         {
             "operation": "preview_write",
             "authorization_id": "AUTH-ABC123",
@@ -325,7 +405,7 @@ def test_preview_normalizes_flat_add_node_and_ignores_model_version(
         "y": 360,
         "color": "#2563eb",
     }
-    result = _call(
+    result = _call_write(
         {
             "operation": "preview_write",
             "authorization_id": "AUTH-ABC123",
@@ -335,7 +415,7 @@ def test_preview_normalizes_flat_add_node_and_ignores_model_version(
             "idempotency_key": "write-001",
         }
     )
-    nested_result = _call(
+    nested_result = _call_write(
         {
             "operation": "preview_write",
             "authorization_id": "AUTH-ABC123",
@@ -428,7 +508,7 @@ def test_preview_rejects_add_node_unknown_mixed_or_graph_id_before_transport(
     internal_calls,
     payload,
 ):
-    result = _call(
+    result = _call_write(
         {
             "operation": "preview_write",
             "authorization_id": "AUTH-ABC123",
@@ -444,7 +524,7 @@ def test_preview_rejects_add_node_unknown_mixed_or_graph_id_before_transport(
 
 
 def test_preview_rejects_unknown_write_action_before_transport(internal_calls):
-    result = _call(
+    result = _call_write(
         {
             "operation": "preview_write",
             "authorization_id": "AUTH-ABC123",
@@ -482,7 +562,7 @@ def test_preview_rejects_unknown_write_action_before_transport(internal_calls):
 def test_commit_rejects_missing_negated_or_question_confirmation(
     internal_calls, user_message
 ):
-    result = _call(
+    result = _call_write(
         {
             "operation": "commit_write",
             "preview_token": "preview-token",
@@ -499,7 +579,7 @@ def test_commit_rejects_missing_negated_or_question_confirmation(
 
 
 def test_commit_uses_actual_user_confirmation_and_trusted_session_ids(internal_calls):
-    result = _call(
+    result = _call_write(
         {
             "operation": "commit_write",
             "preview_token": "preview-token",

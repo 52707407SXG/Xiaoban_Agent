@@ -416,26 +416,20 @@ class TestBuildApiKwargsKimiNoTemperatureOverride:
         kwargs = agent._build_api_kwargs(messages)
         assert "temperature" not in kwargs
 
-    def test_kimi_profile_receives_one_shot_required_tool_choice(self, monkeypatch):
+    def test_kimi_profile_keeps_stable_tool_contract(self, monkeypatch):
         agent = _make_agent(
             monkeypatch,
             "kimi-coding",
             base_url="https://api.kimi.com/coding/v1",
             model="kimi-for-coding",
         )
-        agent._ephemeral_tool_choice = "web_search"
-
         first = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
         second = agent._build_api_kwargs([{"role": "user", "content": "again"}])
 
-        assert first["tool_choice"] == {
-            "type": "function",
-            "function": {"name": "web_search"},
-        }
-        assert [
-            item["function"]["name"]
-            for item in first["tools"]
-        ] == ["web_search"]
+        assert {
+            item["function"]["name"] for item in first["tools"]
+        } == {"web_search", "terminal"}
+        assert "tool_choice" not in first
         assert "tool_choice" not in second
         assert {
             item["function"]["name"]
@@ -444,27 +438,24 @@ class TestBuildApiKwargsKimiNoTemperatureOverride:
 
 
 class TestBuildApiKwargsDeepSeekToolChoice:
-    def test_v4_thinking_filters_once_without_named_choice(self, monkeypatch):
+    def test_v4_thinking_keeps_stable_tool_contract(self, monkeypatch):
         agent = _make_agent(
             monkeypatch,
             "deepseek",
             base_url="https://api.deepseek.com/v1",
             model="deepseek-v4-pro",
         )
-        agent._ephemeral_tool_choice = "web_search"
-
         first = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
         second = agent._build_api_kwargs([{"role": "user", "content": "again"}])
 
-        assert [item["function"]["name"] for item in first["tools"]] == [
-            "web_search"
-        ]
+        assert {
+            item["function"]["name"] for item in first["tools"]
+        } == {"web_search", "terminal"}
         assert "tool_choice" not in first
         assert {
             item["function"]["name"] for item in second["tools"]
         } == {"web_search", "terminal"}
         assert "tool_choice" not in second
-        assert agent._ephemeral_tool_choice == ""
 
     @pytest.mark.parametrize(
         ("model", "reasoning_config"),
@@ -474,7 +465,7 @@ class TestBuildApiKwargsDeepSeekToolChoice:
             ("deepseek-v3-0324", {"enabled": True, "effort": "high"}),
         ],
     )
-    def test_non_thinking_keeps_named_choice(
+    def test_non_thinking_keeps_stable_tool_contract(
         self,
         monkeypatch,
         model,
@@ -487,18 +478,12 @@ class TestBuildApiKwargsDeepSeekToolChoice:
             model=model,
         )
         agent.reasoning_config = reasoning_config
-        agent._ephemeral_tool_choice = "web_search"
-
         kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
 
-        assert kwargs["tool_choice"] == {
-            "type": "function",
-            "function": {"name": "web_search"},
-        }
-        assert [item["function"]["name"] for item in kwargs["tools"]] == [
-            "web_search"
-        ]
-        assert agent._ephemeral_tool_choice == ""
+        assert "tool_choice" not in kwargs
+        assert {
+            item["function"]["name"] for item in kwargs["tools"]
+        } == {"web_search", "terminal"}
 
 
 class TestBuildApiKwargsNousPortal:

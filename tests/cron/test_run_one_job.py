@@ -117,3 +117,36 @@ def test_run_one_job_exception_marks_failure(monkeypatch):
 
     assert ok is False
     assert marks == [("j6", False)]
+
+
+def test_delivery_broken_pipe_does_not_rerun_and_marks_once(monkeypatch):
+    """A delivery Broken pipe is separate from a successful Agent run."""
+    calls = {"run": 0, "deliver": 0}
+    marks = []
+
+    def run(_job):
+        calls["run"] += 1
+        return True, "output", "final response", None
+
+    def deliver(_job, _content, adapters=None, loop=None):
+        calls["deliver"] += 1
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(s, "run_job", run)
+    monkeypatch.setattr(s, "save_job_output", lambda _jid, _out: "/tmp/out")
+    monkeypatch.setattr(s, "_deliver_result", deliver)
+    monkeypatch.setattr(
+        s,
+        "mark_job_run",
+        lambda jid, ok, err=None, delivery_error=None: marks.append(
+            (jid, ok, err, delivery_error)
+        ),
+    )
+
+    processed = s.run_one_job({"id": "delivery-broken-pipe", "name": "t"})
+
+    assert processed is True
+    assert calls == {"run": 1, "deliver": 1}
+    assert marks == [
+        ("delivery-broken-pipe", True, None, "[Errno 32] Broken pipe"),
+    ]

@@ -20,14 +20,8 @@ from gateway.platforms.true_moa_runner_preflight import (
 from gateway.platforms.true_moa_stop_projection import (
     CompletionStoppedError,
 )
-from xiaoban.trusted_runtime.protocol_contract import (
-    MYSTAND_COMPLETION_PROTOCOL,
-)
-
-
 @dataclass
 class TrueMoARunnerTraceState:
-    evidence_followup: dict[str, Any]
     tool_count: int = 0
 
 
@@ -48,12 +42,6 @@ class TrueMoARunRequest:
     gateway_session_key: Optional[str]
     request_headers: Any
     async_delivery: bool
-    fact_requirement: Optional[Dict[str, Any]]
-    completion_protocol: str
-    completion_binding: Dict[str, Any]
-    dynamic_evidence_required: bool
-    business_tools_disabled: bool
-    resource_module_id: str
     true_moa_snapshot: Any
     paid_call_usage_callback: Any
     request_user_id: str
@@ -65,8 +53,6 @@ class TrueMoARunRequest:
     memory_identity: Any
     metadata_trace: Any
     trace_state: TrueMoARunnerTraceState
-    resolve_mystand_initial_tool_choice: Callable[..., str]
-    run_mystand_preexecuted_evidence: Callable[..., Any]
 
 
 class TrueMoARunWorkflow(
@@ -131,38 +117,6 @@ class TrueMoARunWorkflow(
         trusted_turn_token = None
         deactivate_turn = None
         try:
-            dynamic_evidence_required = bool(
-                getattr(
-                    request,
-                    "dynamic_evidence_required",
-                    False,
-                )
-            )
-            business_tools_disabled = bool(
-                getattr(
-                    request,
-                    "business_tools_disabled",
-                    False,
-                )
-            )
-            if dynamic_evidence_required and (
-                not request.mystand_request
-                or request.completion_protocol
-                != MYSTAND_COMPLETION_PROTOCOL
-                or request.fact_requirement is not None
-            ):
-                raise ValueError(
-                    "invalid dynamic evidence requirement",
-                )
-            trusted_initial_tool_choice = ""
-            if request.mystand_request and not business_tools_disabled:
-                trusted_initial_tool_choice = (
-                    request.resolve_mystand_initial_tool_choice(
-                        request.user_message,
-                        self.run_system_prompt,
-                        fact_requirement=request.fact_requirement,
-                    )
-                )
             if request.metadata_trace is not None:
                 attempt_value = request.adapter._header_value(
                     request.request_headers,
@@ -210,7 +164,6 @@ class TrueMoARunWorkflow(
                 trusted_turn = begin_turn(
                     channel="web",
                     user_message=request.user_message,
-                    conversation_history=request.conversation_history,
                     identity=(
                         TrustedIdentity(
                             account_id=str(
@@ -229,22 +182,6 @@ class TrueMoARunWorkflow(
                     ),
                     message_id=str(
                         request.request_message_id or ""
-                    ),
-                    evidence_required=bool(
-                        dynamic_evidence_required
-                        or trusted_initial_tool_choice
-                        or request.fact_requirement
-                    ),
-                    fact_requirement=request.fact_requirement,
-                    completion_protocol=request.completion_protocol,
-                    completion_binding=request.completion_binding,
-                    business_tools_disabled=(
-                        business_tools_disabled
-                    ),
-                    resource_module_id=getattr(
-                        request,
-                        "resource_module_id",
-                        "",
                     ),
                 )
                 trusted_turn_token = activate_turn(trusted_turn)
@@ -451,9 +388,6 @@ class TrueMoARunWorkflow(
                     f"gateway-final-handoff:{trusted_turn.request_id}"
                 )
             return self.run_final_flow(
-                trusted_initial_tool_choice=(
-                    trusted_initial_tool_choice
-                ),
                 trusted_turn=trusted_turn,
                 effective_task_id=effective_task_id,
             )

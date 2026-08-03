@@ -162,10 +162,12 @@ def execute_llm_request(
                 notify=False,
             )
         if ledger is not None and not ledger.confirm_change():
+            # The Provider callable has not run. Close only this local
+            # reservation as not-dispatched so billing/recovery never sees a
+            # permanently active paid call after the durable writer failed.
+            ledger.finish_not_dispatched(call_id, notify=False)
             if controller is not None:
                 controller.fail()
-            # The durable owner may still have only the reserved snapshot.
-            # Never invent a physical dispatch or a zero-call terminal here.
             raise RuntimeError("provider call durable reservation failed")
         if controller is not None and not controller.try_begin_dispatch(
             f"final-llm:{api_request_id}"
@@ -326,7 +328,8 @@ def strict_failure_result(
         agent._cleanup_task_resources(cleanup_task_id)
     if drop_scaffolding:
         agent._drop_trailing_empty_response_scaffolding(messages)
-    agent._persist_session(messages, conversation_history)
+    if not getattr(agent, "_defer_true_moa_final_commit", False):
+        agent._persist_session(messages, conversation_history)
     result: dict[str, Any] = {
         "messages": messages,
         "api_calls": api_call_count,

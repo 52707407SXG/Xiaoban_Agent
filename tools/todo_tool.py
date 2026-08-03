@@ -33,6 +33,10 @@ MAX_TODO_ITEMS = 256
 _TRUNCATION_MARKER = "… [truncated]"
 
 
+class MultipleInProgressError(ValueError):
+    """Raised when a proposed plan has more than one active step."""
+
+
 class TodoStore:
     """
     In-memory todo list. One instance per AIAgent (one per session).
@@ -57,10 +61,12 @@ class TodoStore:
         """
         if not merge:
             # Replace mode: new list entirely
-            self._items = [self._validate(t) for t in self._dedupe_by_id(todos)]
+            candidate = [self._validate(t) for t in self._dedupe_by_id(todos)]
         else:
-            # Merge mode: update existing items by id, append new ones
-            existing = {item["id"]: item for item in self._items}
+            # Build on copies so an invalid proposal cannot partially mutate
+            # the current plan before validation finishes.
+            candidate = [item.copy() for item in self._items]
+            existing = {item["id"]: item for item in candidate}
             for t in self._dedupe_by_id(todos):
                 item_id = str(t.get("id", "")).strip()
                 if not item_id:
@@ -78,21 +84,17 @@ class TodoStore:
                     # New item -- validate fully and append to end
                     validated = self._validate(t)
                     existing[validated["id"]] = validated
-                    self._items.append(validated)
-            # Rebuild _items preserving order for existing items
-            seen = set()
-            rebuilt = []
-            for item in self._items:
-                current = existing.get(item["id"], item)
-                if current["id"] not in seen:
-                    rebuilt.append(current)
-                    seen.add(current["id"])
-            self._items = rebuilt
+                    candidate.append(validated)
         # Bound total item count so a replayed/oversized list can't grow the
         # re-injection block without limit. Keep the highest-priority head
         # (list order is priority).
-        if len(self._items) > MAX_TODO_ITEMS:
-            self._items = self._items[:MAX_TODO_ITEMS]
+        if len(candidate) > MAX_TODO_ITEMS:
+            candidate = candidate[:MAX_TODO_ITEMS]
+        if sum(item["status"] == "in_progress" for item in candidate) > 1:
+            raise MultipleInProgressError(
+                "A plan may contain only one in_progress item; revise the plan and retry"
+            )
+        self._items = candidate
         return self.read()
 
     def read(self) -> List[Dict[str, str]]:
@@ -203,10 +205,13 @@ def todo_tool(
     if store is None:
         return tool_error("TodoStore not initialized")
 
-    if todos is not None:
-        items = store.write(todos, merge)
-    else:
-        items = store.read()
+    try:
+        if todos is not None:
+            items = store.write(todos, merge)
+        else:
+            items = store.read()
+    except MultipleInProgressError as exc:
+        return tool_error(str(exc), code="multiple_in_progress")
 
     # Build summary counts
     pending = sum(1 for i in items if i["status"] == "pending")
@@ -240,8 +245,13 @@ def check_todo_requirements() -> bool:
 TODO_SCHEMA = {
     "name": "todo",
     "description": (
-        "Manage your task list for the current session. Use for complex tasks "
-        "with 3+ steps or when the user provides multiple tasks. "
+        "Optional planning aid for the current session. Use only when it "
+        "materially helps with a complex task of 3+ steps or multiple tasks; "
+        "skip it for simple work. This list never grants permission, "
+        "authorizes or selects tools, executes a step, or determines the "
+        "user-facing reply. You remain responsible for using each allowed "
+        "tool only when needed and for forming the final answer yourself "
+        "after processing any ToolResults. "
         "Call with no parameters to read the current list.\n\n"
         "Writing:\n"
         "- Provide 'todos' array to create/update items\n"

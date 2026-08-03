@@ -37,3 +37,12 @@ def test_ledger_records_file_symbol_consumers_and_tests():
         assert block["related_tests"], f"{block['id']} 缺少相关测试记录"
         kinds.add(block["kind"])
     assert kinds == {"角色感", "时间感", "空间感"}
+
+    blocks = {block["id"]: block for block in ledger["blocks"]}
+    for update in ledger.get("approved_updates", []):
+        assert update["block"] in blocks
+        assert len(update["from_sha256"]) == 64
+        assert len(update["to_sha256"]) == 64
+        assert update["from_sha256"] != update["to_sha256"]
+        assert blocks[update["block"]]["sha256"] == update["to_sha256"]
+        assert update["reason"]

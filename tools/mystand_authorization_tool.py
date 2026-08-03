@@ -1,9 +1,9 @@
-"""AUTH-gated My Stand read/write bridge for Xiaoban API sessions.
+"""AUTH-gated My Stand read bridge for Xiaoban API sessions.
 
 This tool never reads My Stand storage directly.  It calls the loopback-only
 My Stand internal API, which re-checks the current user, AUTH/OUT permissions,
-domain ownership, preview confirmation, CAS, idempotency, verification, and
-audit rules.
+and domain ownership.  Confirmed writes use the separate model-visible
+``mystand_authorization_write`` tool and a private delegate in this module.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from gateway.session_context import (
 )
 from tools.mystand_authorization_write_payload import (
     AuthorizationWritePayloadError,
-    build_authorization_write_payload_schema,
     normalize_authorization_write_payload,
 )
 from tools.registry import registry
@@ -40,6 +39,8 @@ _OPERATIONS = {
     "preview_write": "/api/xiaoban/internal/authorization/write/preview",
     "commit_write": "/api/xiaoban/internal/authorization/write/commit",
 }
+_READ_OPERATIONS = frozenset({"list", "resolve", "resolve_many"})
+_WRITE_OPERATIONS = frozenset({"preview_write", "commit_write"})
 _WRITE_ACTIONS = {
     "note.append-content",
     "property-note.append-text-block",
@@ -62,56 +63,47 @@ _EXPLICIT_CONFIRMATION_REPLY_RE = re.compile(
 MYSTAND_AUTHORIZATION_SCHEMA = {
     "name": "mystand_authorization",
     "description": (
-        "Use My Stand's server-enforced authorization wall. This is the only "
-        "tool for Xiaoban to list or resolve AUTH/OUT records and to preview or "
-        "commit supported My Stand writes. Never read a database or local file "
-        "instead.\n\n"
-        "READS: list returns only the current user's authorization index. "
-        "After mystand_resource_index finds one resource, resolve it with the exact "
-        "resource_uid. If the question spans multiple "
-        "indexed resources, use one resolve_many call with all exact resource_uids; every "
-        "item is independently re-checked by My Stand before combined content is returned. "
-        "Never pass resource_uid, source_id, "
-        "KGREF, OUT, or module IDs as authorization_id. Direct AUTH/OUT resolve "
-        "remains supported and is re-checked before content is returned. A feature "
+        "Read through My Stand's server-enforced authorization wall. This tool "
+        "only lists or resolves AUTH/OUT records; for every write preview or "
+        "commit use mystand_authorization_write instead. Never read a database "
+        "or local file instead.\n\n"
+        "list returns only the current user's authorization index. If the user "
+        "supplies an exact AUTH or OUT, resolve it directly with authorization_id; OUT "
+        "remains read-only. If the user supplies an exact resourceUid, resolve it "
+        "directly with resource_uid. Do not call the resource index first for either "
+        "known locator. Use mystand_resource_index only when the current request gives "
+        "a material name or business goal without an exact AUTH, OUT, or resourceUid, "
+        "then resolve the returned resource_uid. If the question spans multiple exact "
+        "resource_uids, use one resolve_many call; every item is independently re-checked "
+        "by My Stand before combined content is returned. Never reinterpret resource_uid, "
+        "source_id, KGREF, or module IDs as authorization_id. A feature "
         "explanation does not need this tool; real user data does. Resource discovery, "
         "index maps, AUTH IDs, internal queries, retries, truncation, and tool output "
         "are private backend details: never narrate them to the user; answer naturally "
-        "from the final authorized result.\n\n"
-        "WRITES: OUT can never write. Only the fixed allowlisted actions are supported. "
-        "First call preview_write with an internal AUTH whose canWrite is true, "
-        "the action payload, and a fresh idempotency_key; My Stand reads the "
-        "current target version authoritatively. "
-        "Show the returned exact preview to the user and stop. Call commit_write "
-        "only in a later user message whose complete reply is an unambiguous "
-        "standalone confirmation such as '确认写入' or '预览没问题，确认写入'; "
-        "reuse the preview_token and idempotency_key. Never infer confirmation "
-        "from quoted text, questions, button labels, or analysis, never invent "
-        "confirmation, never commit in the preview turn, and never describe a "
-        "successful write unless the receipt says verified=true."
+        "from the final authorized result."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "operation": {
                 "type": "string",
-                "enum": ["list", "resolve", "resolve_many", "preview_write", "commit_write"],
-                "description": "Authorization operation to perform.",
+                "enum": ["list", "resolve", "resolve_many"],
+                "description": "Read-only authorization operation to perform.",
             },
             "authorization_id": {
                 "type": "string",
-                "description": "AUTH-... for internal read/write, or OUT-... for read-only resolve. OUT is rejected for every write.",
+                "description": "Exact AUTH-... or OUT-... for direct read-only resolve.",
             },
             "resource_uid": {
                 "type": "string",
-                "description": "Exact opaque resourceUid returned by mystand_resource_index. Preferred for resolve after an index lookup; never reinterpret it as authorization_id.",
+                "description": "Exact opaque resourceUid supplied in the current request or returned by mystand_resource_index. Resolve it directly; never reinterpret it as authorization_id.",
             },
             "resource_uids": {
                 "type": "array",
                 "minItems": 1,
                 "maxItems": 100,
                 "items": {"type": "string", "minLength": 1, "maxLength": 120},
-                "description": "Exact opaque resourceUids returned by the current mystand_resource_index result. Use resolve_many for a question spanning several resources.",
+                "description": "Exact opaque resourceUids supplied in the current request or returned by mystand_resource_index. Use resolve_many for a question spanning several resources.",
             },
             "query": {
                 "type": "string",
@@ -140,20 +132,6 @@ MYSTAND_AUTHORIZATION_SCHEMA = {
                 "type": "string",
                 "enum": ["summary", "include"],
                 "description": "Resolve media only when the current user explicitly asked to inspect it; otherwise use summary.",
-            },
-            "action": {
-                "type": "string",
-                "enum": sorted(_WRITE_ACTIONS),
-                "description": "Fixed write action for preview_write.",
-            },
-            "payload": build_authorization_write_payload_schema(),
-            "idempotency_key": {
-                "type": "string",
-                "description": "Fresh stable key for one logical write; reuse it for preview and commit retries.",
-            },
-            "preview_token": {
-                "type": "string",
-                "description": "Short-lived token returned by preview_write; required for commit_write.",
             },
         },
         "required": ["operation"],
@@ -370,7 +348,7 @@ def _resolve_many(resource_uids: list[str], *, session: dict, query: str) -> str
     )
 
 
-def mystand_authorization_tool_handler(args, **_kwargs):
+def _mystand_authorization_operation_handler(args, **_kwargs):
     operation = str(args.get("operation") or "").strip()
     if operation not in _OPERATIONS:
         return _error("operation 不在允许范围内", code="invalid_authorization_operation")
@@ -398,16 +376,31 @@ def mystand_authorization_tool_handler(args, **_kwargs):
         elif operation in {"resolve", "resolve_many"}:
             trusted_user_message = get_session_user_message().strip()
             query = trusted_user_message or str(args.get("query") or "").strip()
+            resource_uid = str(args.get("resource_uid") or "").strip()
+            authorization_id = str(args.get("authorization_id") or "").strip()
             if operation == "resolve_many":
+                if resource_uid or authorization_id:
+                    return _error(
+                        "resolve_many 只能提供 resource_uids",
+                        code="invalid_authorization_arguments",
+                    )
                 return _resolve_many(
                     _resource_uid_list(args.get("resource_uids")),
                     session=session,
                     query=query,
                 )
-            resource_uid = str(args.get("resource_uid") or "").strip()
-            authorization_id = str(args.get("authorization_id") or "").strip()
+            if args.get("resource_uids") is not None:
+                return _error(
+                    "resolve 不能同时提供 resource_uids",
+                    code="invalid_authorization_arguments",
+                )
             if not resource_uid and not authorization_id:
                 raise ValueError("缺少 resource_uid 或 authorization_id")
+            if resource_uid and authorization_id:
+                return _error(
+                    "resource_uid 与 authorization_id 只能提供一个",
+                    code="invalid_authorization_arguments",
+                )
             body.update(
                 {
                     **(
@@ -467,6 +460,34 @@ def mystand_authorization_tool_handler(args, **_kwargs):
     )
 
 
+def _mystand_authorization_write_operation_handler(args, **kwargs):
+    """Execute a write operation only for the dedicated write-only tool."""
+    operation = str(args.get("operation") or "").strip()
+    if operation not in _WRITE_OPERATIONS:
+        return _error(
+            "该私有委托只允许写入预览与确认提交。",
+            code="invalid_authorization_write_operation",
+        )
+    return _mystand_authorization_operation_handler(args, **kwargs)
+
+
+def mystand_authorization_tool_handler(args, **kwargs):
+    """Expose only AUTH/OUT reads, even when hidden write args are supplied."""
+    operation = str(args.get("operation") or "").strip()
+    if operation in _WRITE_OPERATIONS:
+        return _error(
+            "写入必须使用 mystand_authorization_write。",
+            code="authorization_write_tool_required",
+            status=403,
+        )
+    if operation not in _READ_OPERATIONS:
+        return _error(
+            "operation 不在允许范围内",
+            code="invalid_authorization_operation",
+        )
+    return _mystand_authorization_operation_handler(args, **kwargs)
+
+
 registry.register(
     name="mystand_authorization",
     toolset="mystand_authorization",
@@ -475,7 +496,7 @@ registry.register(
     check_fn=check_mystand_authorization,
     requires_env=[],
     is_async=False,
-    description="Server-enforced My Stand AUTH/OUT read and confirmed write bridge",
+    description="Server-enforced My Stand AUTH/OUT read-only bridge",
     emoji="🔐",
     max_result_size_chars=1_000_000,
 )

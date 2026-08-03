@@ -12,6 +12,7 @@ import threading
 import pytest
 
 from agent.prompt_builder import STEER_MARKER_OPEN, format_steer_marker
+from agent.agent_runtime_helpers import append_trusted_steer_to_tool_message
 from run_agent import AIAgent
 
 
@@ -229,10 +230,13 @@ class TestPreApiCallSteerDrain:
         # Inject into last tool msg (mirrors the new code in run_conversation)
         for _si in range(len(messages) - 1, -1, -1):
             if messages[_si].get("role") == "tool":
-                messages[_si]["content"] += format_steer_marker(_pre_api_steer)
+                append_trusted_steer_to_tool_message(
+                    messages[_si], _pre_api_steer
+                )
                 break
         assert STEER_MARKER_OPEN in messages[-1]["content"]
         assert "focus on error handling" in messages[-1]["content"]
+        assert messages[-1]["_xiaoban_trusted_steer"]
         assert agent._pending_steer is None
 
     def test_pre_api_drain_restashes_when_no_tool_message(self):
@@ -273,7 +277,9 @@ class TestPreApiCallSteerDrain:
         assert _pre_api_steer is not None
         for _si in range(len(messages) - 1, -1, -1):
             if messages[_si].get("role") == "tool":
-                messages[_si]["content"] += format_steer_marker(_pre_api_steer)
+                append_trusted_steer_to_tool_message(
+                    messages[_si], _pre_api_steer
+                )
                 break
         assert "change approach" in messages[2]["content"]
 

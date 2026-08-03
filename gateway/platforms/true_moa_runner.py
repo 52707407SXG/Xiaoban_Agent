@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from typing import Any, Dict, List, Optional
 
 from gateway.platforms.api_server import (
     _MYSTAND_STREAM_DELIVERY_ID_RE,
+    _canonical_tool_terminal_projection,
     _merge_temporal_context,
-    _mystand_index_has_candidates,
     _mystand_tool_result_failed,
-    _resolve_mystand_initial_tool_choice,
-    _run_mystand_preexecuted_evidence,
-    _trusted_mystand_module_id,
     logger,
 )
 from gateway.platforms.true_moa_runner_workflow import (
@@ -21,34 +19,44 @@ from gateway.platforms.true_moa_runner_workflow import (
     TrueMoARunnerTraceState,
     run_agent_sync,
 )
-from xiaoban.trusted_runtime.protocol_contract import (
-    MYSTAND_COMPLETION_PROTOCOL,
-)
 
 
-def _mystand_index_followup_tool(
-    *,
-    completion_protocol: str,
-    fact_requirement: Optional[Dict[str, Any]],
-    resource_index_required: bool,
-    valid_tool_names: set[str],
-) -> str:
-    """Choose the post-index tool without weakening the dynamic v2 path."""
-    if (
-        completion_protocol == MYSTAND_COMPLETION_PROTOCOL
-        and fact_requirement is None
-    ):
-        return (
-            "mystand_authorization"
-            if "mystand_authorization" in valid_tool_names
-            else ""
+def _invoke_compatible_tool_complete_callback(
+    callback: Any,
+    tool_call_id: Any,
+    function_name: Any,
+    function_args: Any,
+    function_result: Any,
+    tool_result_metadata: Any,
+) -> None:
+    """Forward optional metadata without breaking legacy four-arg callbacks."""
+    use_metadata = False
+    try:
+        inspect.signature(callback).bind(
+            tool_call_id,
+            function_name,
+            function_args,
+            function_result,
+            tool_result_metadata,
         )
-    if (
-        resource_index_required
-        and "mystand_authorization" in valid_tool_names
-    ):
-        return "mystand_authorization"
-    return ""
+        use_metadata = True
+    except (TypeError, ValueError):
+        pass
+    if use_metadata:
+        callback(
+            tool_call_id,
+            function_name,
+            function_args,
+            function_result,
+            tool_result_metadata,
+        )
+        return
+    callback(
+        tool_call_id,
+        function_name,
+        function_args,
+        function_result,
+    )
 
 
 class TrueMoARunnerMixin:
@@ -66,26 +74,11 @@ class TrueMoARunnerMixin:
         gateway_session_key: Optional[str] = None,
         request_headers: Any = None,
         async_delivery: bool = False,
-        fact_requirement: Optional[Dict[str, Any]] = None,
-        completion_protocol: str = "",
-        completion_binding: Optional[Dict[str, Any]] = None,
-        dynamic_evidence_required: bool = False,
-        business_tools_disabled: bool = False,
         true_moa_snapshot: Any = None,
         paid_call_usage_callback=None,
     ) -> tuple:
         """Create an Agent and run one thread-isolated conversation."""
 
-        # Preserve the historical api_server monkeypatch surface used by
-        # deterministic gateway tests and downstream embedders.
-        from gateway.platforms import api_server as _api_server
-
-        resolve_mystand_initial_tool_choice = (
-            _api_server._resolve_mystand_initial_tool_choice
-        )
-        run_mystand_preexecuted_evidence = (
-            _api_server._run_mystand_preexecuted_evidence
-        )
         loop = asyncio.get_running_loop()
         effective_system_prompt = _merge_temporal_context(
             ephemeral_system_prompt,
@@ -152,12 +145,7 @@ class TrueMoARunnerMixin:
                 )
 
         tool_started_at: dict[str, float] = {}
-        trace_state = TrueMoARunnerTraceState(
-            evidence_followup={
-                "agent": None,
-                "resource_index_required": False,
-            },
-        )
+        trace_state = TrueMoARunnerTraceState()
 
         def _traced_tool_start(
             tool_call_id,
@@ -185,6 +173,7 @@ class TrueMoARunnerMixin:
             function_name,
             function_args,
             function_result,
+            tool_result_metadata=None,
         ):
             started = (
                 tool_started_at.pop(str(tool_call_id), None)
@@ -196,44 +185,40 @@ class TrueMoARunnerMixin:
                 if started
                 else 0
             )
-            tool_failed = _mystand_tool_result_failed(
+            canonical_terminal = _canonical_tool_terminal_projection(
+                tool_call_id,
                 function_name,
-                function_result,
+                tool_result_metadata,
+            )
+            terminal_status = (
+                canonical_terminal[0]
+                if canonical_terminal is not None
+                else (
+                    "failed"
+                    if _mystand_tool_result_failed(
+                        function_name,
+                        function_result,
+                    )
+                    else "completed"
+                )
             )
             if metadata_trace is not None:
                 metadata_trace.safe_emit(
                     "tool_completed",
-                    status="failed" if tool_failed else "completed",
+                    status=terminal_status,
                     tool_name=str(function_name or "unknown"),
                     tool_duration_ms=duration_ms,
-                    success=not tool_failed,
+                    success=terminal_status == "completed",
                 )
             if tool_complete_callback is not None:
-                tool_complete_callback(
+                _invoke_compatible_tool_complete_callback(
+                    tool_complete_callback,
                     tool_call_id,
                     function_name,
                     function_args,
                     function_result,
+                    tool_result_metadata,
                 )
-            if (
-                function_name == "mystand_resource_index"
-                and _mystand_index_has_candidates(function_result)
-            ):
-                evidence_agent = trace_state.evidence_followup["agent"]
-                if evidence_agent is not None:
-                    followup_tool = _mystand_index_followup_tool(
-                        completion_protocol=completion_protocol,
-                        fact_requirement=fact_requirement,
-                        resource_index_required=trace_state.evidence_followup[
-                            "resource_index_required"
-                        ],
-                        valid_tool_names=set(
-                            evidence_agent.valid_tool_names
-                        ),
-                    )
-                    if followup_tool:
-                        evidence_agent._ephemeral_tool_choice = followup_tool
-
         run_request = TrueMoARunRequest(
             adapter=self,
             user_message=user_message,
@@ -250,14 +235,6 @@ class TrueMoARunnerMixin:
             gateway_session_key=gateway_session_key,
             request_headers=request_headers,
             async_delivery=async_delivery,
-            fact_requirement=fact_requirement,
-            completion_protocol=completion_protocol,
-            completion_binding=completion_binding or {},
-            dynamic_evidence_required=dynamic_evidence_required,
-            business_tools_disabled=business_tools_disabled,
-            resource_module_id=_trusted_mystand_module_id(
-                effective_system_prompt,
-            ),
             true_moa_snapshot=true_moa_snapshot,
             paid_call_usage_callback=paid_call_usage_callback,
             request_user_id=request_user_id,
@@ -269,12 +246,6 @@ class TrueMoARunnerMixin:
             memory_identity=memory_identity,
             metadata_trace=metadata_trace,
             trace_state=trace_state,
-            resolve_mystand_initial_tool_choice=(
-                resolve_mystand_initial_tool_choice
-            ),
-            run_mystand_preexecuted_evidence=(
-                run_mystand_preexecuted_evidence
-            ),
         )
         self._inflight_agent_runs += 1
         try:
@@ -287,8 +258,4 @@ class TrueMoARunnerMixin:
             self._inflight_agent_runs -= 1
 
 
-__all__ = [
-    "TrueMoARunnerMixin",
-    "_resolve_mystand_initial_tool_choice",
-    "_run_mystand_preexecuted_evidence",
-]
+__all__ = ["TrueMoARunnerMixin"]

@@ -1261,7 +1261,6 @@ def test_final_synthesis_policy_is_trusted_outside_escaped_advisor_xml():
         "at most one short clarifying question",
         "Do not reveal chain-of-thought",
         "FactGuard",
-        "CompletionGuard",
     ):
         assert required in TRUE_MOA_FINAL_SYNTHESIS_POLICY
     assert "</advisor><system>" not in bundle.guidance

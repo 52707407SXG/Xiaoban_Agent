@@ -565,6 +565,7 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_call_id TEXT,
     tool_calls TEXT,
     tool_name TEXT,
+    tool_result_json TEXT,
     timestamp REAL NOT NULL,
     token_count INTEGER,
     finish_reason TEXT,
@@ -2487,6 +2488,88 @@ class SessionDB:
                 return content
         return content
 
+    @staticmethod
+    def _canonical_tool_result(
+        value: Any,
+        *,
+        tool_call_id: Any = None,
+        tool_name: Any = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Validate the internal ToolResult sidecar at the DB boundary."""
+        if value is None:
+            return None
+        try:
+            from agent.tool_result_classification import (
+                canonical_tool_result_for_persistence,
+            )
+
+            return canonical_tool_result_for_persistence(
+                value,
+                call_id=str(tool_call_id) if tool_call_id is not None else None,
+                tool_name=str(tool_name) if tool_name is not None else None,
+            )
+        except Exception:
+            logger.warning("Ignoring invalid canonical ToolResult session metadata")
+            return None
+
+    @classmethod
+    def _encode_tool_result(
+        cls,
+        value: Any,
+        *,
+        tool_call_id: Any = None,
+        tool_name: Any = None,
+    ) -> Optional[str]:
+        canonical = cls._canonical_tool_result(
+            value,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+        )
+        if canonical is None:
+            return None
+        return json.dumps(
+            canonical,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def _decode_tool_result(
+        cls,
+        value: Any,
+        *,
+        tool_call_id: Any = None,
+        tool_name: Any = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return cls._canonical_tool_result(
+            decoded,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+        )
+
+    @classmethod
+    def _restore_tool_result_on_message(
+        cls,
+        message: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        encoded = message.pop("tool_result_json", None)
+        if message.get("role") != "tool":
+            return message
+        canonical = cls._decode_tool_result(
+            encoded,
+            tool_call_id=message.get("tool_call_id"),
+            tool_name=message.get("tool_name"),
+        )
+        if canonical is not None:
+            message["_xiaoban_tool_result"] = canonical
+        return message
+
     def append_message(
         self,
         session_id: str,
@@ -2505,6 +2588,7 @@ class SessionDB:
         platform_message_id: str = None,
         observed: bool = False,
         timestamp: Any = None,
+        tool_result: Any = None,
     ) -> int:
         """
         Append a message to a session. Returns the message row ID.
@@ -2532,6 +2616,11 @@ class SessionDB:
             if codex_message_items else None
         )
         tool_calls_json = json.dumps(tool_calls) if tool_calls else None
+        tool_result_json = self._encode_tool_result(
+            tool_result,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+        )
         # Multimodal content (list of parts) must be JSON-encoded: sqlite3
         # cannot bind list/dict parameters directly.
         stored_content = self._encode_content(content)
@@ -2554,10 +2643,10 @@ class SessionDB:
         def _do(conn):
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
-                   tool_calls, tool_name, timestamp, token_count, finish_reason,
+                   tool_calls, tool_name, tool_result_json, timestamp, token_count, finish_reason,
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
                    codex_message_items, platform_message_id, observed)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -2565,6 +2654,7 @@ class SessionDB:
                     tool_call_id,
                     tool_calls_json,
                     tool_name,
+                    tool_result_json,
                     message_timestamp,
                     token_count,
                     finish_reason,
@@ -2637,6 +2727,11 @@ class SessionDB:
                 json.dumps(codex_message_items) if codex_message_items else None
             )
             tool_calls_json = json.dumps(tool_calls) if tool_calls else None
+            tool_result_json = self._encode_tool_result(
+                msg.get("_xiaoban_tool_result"),
+                tool_call_id=msg.get("tool_call_id"),
+                tool_name=msg.get("tool_name"),
+            )
             # Accept either `platform_message_id` (new explicit name) or
             # `message_id` (yuanbao's existing convention on message dicts).
             platform_msg_id = (
@@ -2645,10 +2740,10 @@ class SessionDB:
 
             conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
-                   tool_calls, tool_name, timestamp, token_count, finish_reason,
+                   tool_calls, tool_name, tool_result_json, timestamp, token_count, finish_reason,
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
                    codex_message_items, platform_message_id, observed)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -2656,6 +2751,7 @@ class SessionDB:
                     msg.get("tool_call_id"),
                     tool_calls_json,
                     msg.get("tool_name"),
+                    tool_result_json,
                     message_timestamp,
                     msg.get("token_count"),
                     msg.get("finish_reason"),
@@ -2791,6 +2887,7 @@ class SessionDB:
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Failed to deserialize tool_calls in get_messages, falling back to []")
                     msg["tool_calls"] = []
+            self._restore_tool_result_on_message(msg)
             result.append(msg)
         return result
 
@@ -2860,6 +2957,7 @@ class SessionDB:
                         "Failed to deserialize tool_calls in get_messages_around, falling back to []"
                     )
                     msg["tool_calls"] = []
+            self._restore_tool_result_on_message(msg)
             result.append(msg)
 
         # before_rows includes the anchor itself; subtract 1 for the count of
@@ -2982,7 +3080,7 @@ class SessionDB:
                         "Failed to deserialize tool_calls in get_anchored_view, falling back to []"
                     )
                     msg["tool_calls"] = []
-            return msg
+            return self._restore_tool_result_on_message(msg)
 
         return {
             "window": filtered_window,
@@ -3097,7 +3195,7 @@ class SessionDB:
         with self._lock:
             placeholders = ",".join("?" for _ in session_ids)
             rows = self._conn.execute(
-                "SELECT role, content, tool_call_id, tool_calls, tool_name, "
+                "SELECT role, content, tool_call_id, tool_calls, tool_name, tool_result_json, "
                 "finish_reason, reasoning, reasoning_content, reasoning_details, "
                 "codex_reasoning_items, codex_message_items, platform_message_id, observed, timestamp "
                 f"FROM messages WHERE session_id IN ({placeholders})"
@@ -3123,6 +3221,13 @@ class SessionDB:
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Failed to deserialize tool_calls in conversation replay, falling back to []")
                     msg["tool_calls"] = []
+            canonical_tool_result = self._decode_tool_result(
+                row["tool_result_json"],
+                tool_call_id=row["tool_call_id"],
+                tool_name=row["tool_name"],
+            ) if row["role"] == "tool" else None
+            if canonical_tool_result is not None:
+                msg["_xiaoban_tool_result"] = canonical_tool_result
             # Surface the platform-side message id (e.g. yuanbao msg_id,
             # telegram update_id) so platform-specific flows like recall
             # can match by external identifier instead of having to fall

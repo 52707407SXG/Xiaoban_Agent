@@ -5,6 +5,9 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from agent.agent_runtime_helpers import sanitize_api_messages
 from run_agent import AIAgent
 
 
@@ -111,7 +114,10 @@ def test_default_sequential_path_warns_repeated_exact_failure_without_blocking_e
     assert len(messages) == 1
     assert messages[0]["role"] == "tool"
     assert messages[0]["tool_call_id"] == "c-soft"
-    assert "repeated_exact_failure_warning" in messages[0]["content"]
+    assert messages[0]["_xiaoban_tool_result"]["continuation"]["guardrail"][
+        "code"
+    ] == "repeated_exact_failure_warning"
+    assert "repeated_exact_failure_warning" not in messages[0]["content"]
     assert "repeated_exact_failure_block" not in messages[0]["content"]
     assert agent._tool_guardrail_halt_decision is None
 
@@ -154,28 +160,60 @@ def test_config_enabled_hard_stop_blocks_repeated_exact_failure_before_execution
     assert "repeated_exact_failure_block" in messages[0]["content"]
 
 
-def test_sequential_after_call_appends_guidance_to_tool_result_without_extra_messages():
+@pytest.mark.parametrize(
+    "executor_name",
+    ["_execute_tool_calls_sequential", "_execute_tool_calls_concurrent"],
+)
+def test_after_call_guidance_uses_trusted_sidecar_without_exposing_not_found_raw(
+    executor_name,
+):
     agent = _make_agent("web_search")
     args = {"query": "same"}
     _seed_exact_failures(agent, "web_search", args, count=1)
     tc = _mock_tool_call("web_search", json.dumps(args), "c-warn")
     msg = SimpleNamespace(content="", tool_calls=[tc])
     messages = []
+    private_result = json.dumps(
+        {"ok": False, "status": 404, "private": "HIDE-ME"}
+    )
 
-    with patch("run_agent.handle_function_call", return_value=json.dumps({"error": "boom"})):
-        agent._execute_tool_calls_sequential(msg, messages, "task-1")
+    with patch("run_agent.handle_function_call", return_value=private_result):
+        getattr(agent, executor_name)(msg, messages, "task-1")
 
     assert [m["role"] for m in messages] == ["tool"]
     assert messages[0]["tool_call_id"] == "c-warn"
-    content = messages[0]["content"]
-    structured = json.loads(
-        content[content.index("{"):content.rindex("}") + 1]
-    )
-    assert structured["error"] == "boom"
-    assert structured["guardrail_label"] == "Tool loop warning"
-    assert structured["guardrail"]["code"] == (
+    assert "HIDE-ME" in messages[0]["content"]
+    assert "repeated_exact_failure_warning" not in messages[0]["content"]
+    continuation = messages[0]["_xiaoban_tool_result"]["continuation"]
+    assert continuation["kind"] == "tool_guardrail"
+    assert continuation["guardrail"]["code"] == (
         "repeated_exact_failure_warning"
     )
+
+    provider_messages = sanitize_api_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "c-warn",
+                        "type": "function",
+                        "function": {
+                            "name": "web_search",
+                            "arguments": json.dumps(args),
+                        },
+                    }
+                ],
+            },
+            messages[0],
+        ]
+    )
+    projected = json.loads(provider_messages[-1]["content"])
+    assert projected["outcome"] == "not_found"
+    assert projected["modelError"] == {"code": "not_found"}
+    assert projected["continuation"] == continuation
+    assert "HIDE-ME" not in provider_messages[-1]["content"]
 
 
 def test_same_tool_failure_warning_tells_model_to_recover_with_tools():
@@ -200,9 +238,28 @@ def test_same_tool_failure_warning_tells_model_to_recover_with_tools():
     with patch("run_agent.handle_function_call", return_value=json.dumps({"exit_code": 1})):
         agent._execute_tool_calls_sequential(msg, messages, "task-1")
 
-    content = messages[0]["content"]
-    assert "same_tool_failure_warning" in content
-    assert "Do not switch to text-only replies" in content
+    provider_messages = sanitize_api_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "c-recover",
+                        "type": "function",
+                        "function": {
+                            "name": "terminal",
+                            "arguments": json.dumps({"command": "bad-3"}),
+                        },
+                    }
+                ],
+            },
+            messages[0],
+        ]
+    )
+    content = provider_messages[-1]["content"]
+    assert content.count("same_tool_failure_warning") == 1
+    assert content.count("Do not switch to text-only replies") == 1
     assert "keep using tools" in content
     assert "pwd && ls -la" in content
     assert "absolute path" in content
@@ -254,143 +311,6 @@ def test_config_enabled_hard_stop_concurrent_path_does_not_submit_blocked_calls_
     assert completed_events[1][3]["is_error"] is False
 
 
-def test_dynamic_stage_rejects_raw_tool_call_bridge_before_unwrap():
-    bridge_arguments = json.dumps(
-        {
-            "name": "mystand_resource_index",
-            "arguments": {},
-        }
-    )
-
-    for mode in ("sequential", "concurrent"):
-        agent = _make_agent(
-            "tool_call",
-            "mystand_resource_index",
-        )
-        calls = [
-            _mock_tool_call(
-                "tool_call",
-                bridge_arguments,
-                f"{mode}-bridge-a",
-            ),
-            _mock_tool_call(
-                "tool_call",
-                bridge_arguments,
-                f"{mode}-bridge-b",
-            ),
-        ]
-        if mode == "sequential":
-            calls = calls[:1]
-        msg = SimpleNamespace(content="", tool_calls=calls)
-        messages = []
-
-        with (
-            patch(
-                "xiaoban.trusted_runtime.turns.current_turn",
-                return_value=SimpleNamespace(
-                    completion_protocol="dynamic-evidence-v2",
-                ),
-            ),
-            patch(
-                "xiaoban.trusted_runtime.tool_visibility."
-                "dynamic_evidence_allowed_tool_names",
-                return_value=frozenset({"mystand_resource_index"}),
-            ),
-            patch(
-                "run_agent.handle_function_call",
-                return_value="SHOULD_NOT_RUN",
-            ) as mock_hfc,
-        ):
-            if mode == "sequential":
-                agent._execute_tool_calls_sequential(
-                    msg,
-                    messages,
-                    "dynamic-task",
-                    api_call_count=1,
-                )
-            else:
-                agent._execute_tool_calls_concurrent(
-                    msg,
-                    messages,
-                    "dynamic-task",
-                    api_call_count=1,
-                )
-
-        mock_hfc.assert_not_called()
-        assert len(messages) == len(calls)
-        assert all(
-            "dynamic_tool_not_allowed" in str(item.get("content") or "")
-            for item in messages
-        )
-        assert [
-            item["tool_call_id"]
-            for item in agent._turn_tool_outcomes
-        ] == [call.id for call in calls]
-        assert all(
-            item["failed"] is True
-            for item in agent._turn_tool_outcomes
-        )
-
-
-def test_dynamic_stage_visibility_error_fails_closed_before_bridge_unwrap():
-    for mode in ("sequential", "concurrent"):
-        agent = _make_agent(
-            "tool_call",
-            "mystand_resource_index",
-        )
-        call = _mock_tool_call(
-            "tool_call",
-            json.dumps(
-                {
-                    "name": "mystand_resource_index",
-                    "arguments": {},
-                }
-            ),
-            f"{mode}-visibility-error",
-        )
-        msg = SimpleNamespace(content="", tool_calls=[call])
-        messages = []
-
-        with (
-            patch(
-                "xiaoban.trusted_runtime.turns.current_turn",
-                return_value=SimpleNamespace(
-                    completion_protocol="dynamic-evidence-v2",
-                ),
-            ),
-            patch(
-                "xiaoban.trusted_runtime.tool_visibility."
-                "dynamic_evidence_allowed_tool_names",
-                side_effect=RuntimeError("visibility unavailable"),
-            ),
-            patch(
-                "run_agent.handle_function_call",
-                return_value="SHOULD_NOT_RUN",
-            ) as mock_hfc,
-        ):
-            if mode == "sequential":
-                agent._execute_tool_calls_sequential(
-                    msg,
-                    messages,
-                    "dynamic-task",
-                    api_call_count=1,
-                )
-            else:
-                agent._execute_tool_calls_concurrent(
-                    msg,
-                    messages,
-                    "dynamic-task",
-                    api_call_count=1,
-                )
-
-        mock_hfc.assert_not_called()
-        assert len(messages) == 1
-        assert "dynamic_tool_not_allowed" in str(
-            messages[0].get("content") or ""
-        )
-        assert agent._turn_tool_outcomes[-1]["failed"] is True
-
-
 def test_plugin_pre_tool_block_wins_without_counting_as_toolguard_block():
     agent = _make_agent("web_search")
     args = {"query": "same"}
@@ -435,8 +355,30 @@ def test_default_run_conversation_warns_without_guardrail_halt():
     assert result["turn_exit_reason"].startswith("text_response")
     assert "guardrail" not in result
     assert result["final_response"] == "done"
-    tool_contents = [m["content"] for m in result["messages"] if m.get("role") == "tool"]
-    assert any("repeated_exact_failure_warning" in content for content in tool_contents)
+    tool_messages = [m for m in result["messages"] if m.get("role") == "tool"]
+    assert any(
+        message.get("_xiaoban_tool_result", {})
+        .get("continuation", {})
+        .get("guardrail", {})
+        .get("code")
+        == "repeated_exact_failure_warning"
+        for message in tool_messages
+    )
+    third_sample = agent.client.chat.completions.create.call_args_list[2].kwargs[
+        "messages"
+    ]
+    projected_tool_results = [
+        json.loads(message["content"])
+        for message in third_sample
+        if message.get("role") == "tool"
+    ]
+    latest_projection = projected_tool_results[-1]
+    assert latest_projection["continuation"]["guardrail"]["code"] == (
+        "repeated_exact_failure_warning"
+    )
+    assert json.dumps(latest_projection).count(
+        "repeated_exact_failure_warning"
+    ) == 1
 
 
 def test_config_enabled_hard_stop_run_conversation_returns_failed_human_outcome():
@@ -467,9 +409,10 @@ def test_config_enabled_hard_stop_run_conversation_returns_failed_human_outcome(
     assert result["error"] == "tool execution did not produce a usable result"
     assert result["completed"] is False
     assert result["failed"] is True
-    assert result["tool_outcome"]["terminal_status"] == "failed"
-    assert result["tool_outcome"]["attempt_count"] == 1
-    assert result["tool_outcome"]["event_ids"] == ["c3"]
+    # L4 leaves business-task interpretation with the model. The generic loop
+    # guardrail may halt repeated physical calls, but it no longer fabricates a
+    # separate whole-turn outcome/lineage receipt.
+    assert "tool_outcome" not in result
     assert "连续 2 次采用同一处理方式" in result["final_response"]
     assert "仍缺少可靠结果" in result["final_response"]
     assert result["guardrail"]["code"] == "repeated_exact_failure_block"

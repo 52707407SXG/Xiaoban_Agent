@@ -190,6 +190,7 @@ from agent.tool_guardrails import (
     toolguard_synthetic_result,
 )
 from agent.tool_result_classification import (
+    CANONICAL_TOOL_RESULT_INTERNAL_KEY,
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
     file_mutation_result_landed,
 )
@@ -1677,6 +1678,8 @@ class AIAgent:
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                     codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
                     timestamp=msg.get("timestamp"),
+                    tool_result=msg.get(CANONICAL_TOOL_RESULT_INTERNAL_KEY)
+                    if role == "tool" else None,
                 )
                 flushed_ids.add(msg_id)
             self._last_flushed_db_idx = len(messages)
@@ -3301,6 +3304,9 @@ class AIAgent:
         for msg in reversed(history):
             if msg.get("role") != "tool":
                 continue
+            tool_name = str(msg.get("name") or msg.get("tool_name") or "").strip()
+            if tool_name != "todo":
+                continue
             content = msg.get("content", "")
             # Quick check: todo responses contain "todos" key
             if '"todos"' not in content:
@@ -3315,9 +3321,15 @@ class AIAgent:
         
         if last_todo_response:
             # Replay the items into the store (replace mode)
-            self._todo_store.write(last_todo_response, merge=False)
-            if not self.quiet_mode:
-                self._vprint(f"{self.log_prefix}📋 Restored {len(last_todo_response)} todo item(s) from history")
+            from tools.todo_tool import MultipleInProgressError
+
+            try:
+                self._todo_store.write(last_todo_response, merge=False)
+            except MultipleInProgressError:
+                logger.debug("Ignored invalid historical todo snapshot")
+            else:
+                if not self.quiet_mode:
+                    self._vprint(f"{self.log_prefix}📋 Restored {len(last_todo_response)} todo item(s) from history")
         _set_interrupt(False)
 
     @property
@@ -4877,13 +4889,8 @@ class AIAgent:
     def _build_api_kwargs(self, api_messages: list) -> dict:
         """Forwarder — see ``agent.chat_completion_helpers.build_api_kwargs``."""
         from agent.chat_completion_helpers import build_api_kwargs
-        from xiaoban.trusted_runtime.tool_visibility import (
-            filter_dynamic_evidence_api_kwargs,
-        )
 
-        return filter_dynamic_evidence_api_kwargs(
-            build_api_kwargs(self, api_messages)
-        )
+        return build_api_kwargs(self, api_messages)
 
     def _supports_reasoning_extra_body(self) -> bool:
         """Return True when reasoning extra_body is safe to send for this route/model.
@@ -5192,252 +5199,26 @@ class AIAgent:
         self,
         tool_name: str,
         function_args: dict,
-        function_result: str,
+        function_result: Any,
         *,
         failed: bool,
         batch_id: int = 0,
         tool_call_id: str = "",
-    ) -> str:
-        self._record_turn_tool_outcome(
-            tool_name,
-            failed=failed,
-            batch_id=batch_id,
-            tool_call_id=tool_call_id,
-            function_args=function_args,
-        )
+        return_decision: bool = False,
+    ) -> Any:
         decision = self._tool_guardrails.after_call(
             tool_name,
             function_args,
             function_result,
             failed=failed,
         )
-        if decision.action in {"warn", "halt"}:
+        if decision.action in {"warn", "halt"} and isinstance(function_result, str):
             function_result = append_toolguard_guidance(function_result, decision)
         if decision.should_halt:
             self._set_tool_guardrail_halt(decision)
+        if return_decision:
+            return function_result, decision
         return function_result
-
-    def _record_turn_tool_outcome(
-        self,
-        tool_name: str,
-        *,
-        failed: bool,
-        batch_id: int = 0,
-        tool_call_id: str = "",
-        function_args: dict | None = None,
-    ) -> None:
-        """Record one physical task-action outcome without interpreting prose."""
-        from agent.tool_outcome_lineage import action_fingerprint
-
-        outcomes = getattr(self, "_turn_tool_outcomes", None)
-        if not isinstance(outcomes, list):
-            outcomes = []
-            self._turn_tool_outcomes = outcomes
-        context_by_call_id = getattr(
-            self,
-            "_current_tool_call_execution_contexts",
-            None,
-        )
-        if not isinstance(context_by_call_id, dict):
-            context_by_call_id = {}
-        call_context = context_by_call_id.get(
-            str(tool_call_id or ""),
-        )
-        if not isinstance(call_context, dict):
-            call_context = {}
-        execution_role = str(
-            call_context.get("execution_role")
-            or "user-task"
-        )
-        recovery_of = str(call_context.get("recovery_of") or "")
-        recovery_authority = str(
-            call_context.get("recovery_authority") or ""
-        )
-        recovery_grant_id = str(
-            call_context.get("recovery_grant_id") or ""
-        )
-        fingerprint = str(
-            call_context.get("action_fingerprint") or ""
-        ) or action_fingerprint(tool_name, function_args or {})
-        # Failures are always task-relevant: a user may directly ask Xiaoban
-        # to search its sessions, update memory, or maintain a todo.  A
-        # successful post-response side effect, however, must not masquerade
-        # as recovery of an earlier failed user-facing action.
-        material = bool(
-            failed or execution_role != "maintenance-side-effect"
-        )
-        outcomes.append(
-            {
-                "batch_id": max(0, int(batch_id or 0)),
-                "tool_call_id": str(tool_call_id or ""),
-                "tool_name": str(tool_name or ""),
-                "failed": bool(failed),
-                "material": material,
-                "execution_role": execution_role,
-                "action_fingerprint": fingerprint,
-                **(
-                    {"recovery_of": recovery_of}
-                    if recovery_of
-                    else {}
-                ),
-                **(
-                    {"recovery_authority": recovery_authority}
-                    if recovery_authority
-                    else {}
-                ),
-                **(
-                    {"recovery_grant_id": recovery_grant_id}
-                    if recovery_grant_id
-                    else {}
-                ),
-            }
-        )
-
-    def _issue_turn_tool_recovery_grant(
-        self,
-        *,
-        target_call_id: str,
-        tool_name: str,
-        function_args: dict,
-        grant_id: str = "",
-        trusted_failure: bool = False,
-        turn_id_override: str = "",
-    ) -> str:
-        """Register one invisible, target-bound cross-action recovery grant."""
-        from agent.tool_outcome_lineage import (
-            action_fingerprint,
-            normalize_lineage_action,
-            unresolved_failure_ids,
-        )
-
-        target_call_id = str(target_call_id or "").strip()
-        current_turn_id = str(
-            getattr(self, "_current_turn_id", "") or ""
-        ) or str(turn_id_override or "").strip()
-        if (
-            not target_call_id
-            or not current_turn_id
-            or not isinstance(function_args, dict)
-        ):
-            return ""
-        outcomes = [
-            item
-            for item in (
-                getattr(self, "_turn_tool_outcomes", None) or []
-            )
-            if isinstance(item, dict)
-        ]
-        grants = getattr(self, "_turn_tool_recovery_grants", None)
-        if not isinstance(grants, dict):
-            grants = {}
-            self._turn_tool_recovery_grants = grants
-        unresolved_ids = set(
-            unresolved_failure_ids(
-                outcomes,
-                server_grants=grants,
-                expected_turn_id=current_turn_id,
-            )
-        )
-        if (
-            not trusted_failure
-            and target_call_id not in unresolved_ids
-        ):
-            return ""
-        target = next(
-            (
-                item
-                for item in outcomes
-                if str(item.get("tool_call_id") or "")
-                == target_call_id
-            ),
-            None,
-        )
-        if isinstance(target, dict) and (
-            target.get("failed") is not True
-            or target.get("material") is not True
-        ):
-            return ""
-        if not trusted_failure and not isinstance(target, dict):
-            return ""
-        normalized_name, normalized_args, _ = normalize_lineage_action(
-            tool_name,
-            function_args,
-        )
-        allowed_fingerprint = action_fingerprint(
-            normalized_name,
-            normalized_args,
-        )
-        clean_grant_id = str(grant_id or "").strip()
-        if len(clean_grant_id) > 256:
-            return ""
-        clean_grant_id = clean_grant_id or uuid.uuid4().hex
-        candidate = {
-            "schema": "xiaoban.recovery-grant.v1",
-            "grant_id": clean_grant_id,
-            "turn_id": current_turn_id,
-            "target_event_id": target_call_id,
-            "allowed_action_fingerprint": allowed_fingerprint,
-            "max_uses": 1,
-            "used": False,
-        }
-        existing = grants.get(clean_grant_id)
-        if isinstance(existing, dict):
-            return clean_grant_id if existing == candidate else ""
-        grants[clean_grant_id] = candidate
-        return clean_grant_id
-
-    def _claim_turn_tool_recovery_grant(
-        self,
-        *,
-        action_fingerprint_value: str,
-        unresolved_failure_ids: set[str],
-        used_recovery_ids: set[str],
-        claimed_recovery_ids: set[str],
-        batch_id: int,
-    ) -> tuple[str, str]:
-        """Consume the sole internal grant matching this physical action."""
-        grants = getattr(self, "_turn_tool_recovery_grants", None)
-        if not isinstance(grants, dict):
-            return "", ""
-        current_turn_id = str(
-            getattr(self, "_current_turn_id", "") or ""
-        )
-        outcomes_by_id = {
-            str(item.get("tool_call_id") or ""): item
-            for item in (
-                getattr(self, "_turn_tool_outcomes", None) or []
-            )
-            if isinstance(item, dict)
-            and str(item.get("tool_call_id") or "")
-        }
-        for grant_id, grant in grants.items():
-            if not isinstance(grant, dict):
-                continue
-            target_call_id = str(
-                grant.get("target_event_id") or ""
-            )
-            target = outcomes_by_id.get(target_call_id)
-            if (
-                grant.get("schema") != "xiaoban.recovery-grant.v1"
-                or str(grant.get("grant_id") or "") != str(grant_id)
-                or grant.get("max_uses") != 1
-                or grant.get("used") is True
-                or str(grant.get("turn_id") or "") != current_turn_id
-                or str(
-                    grant.get("allowed_action_fingerprint") or ""
-                )
-                != str(action_fingerprint_value or "")
-                or target_call_id not in unresolved_failure_ids
-                or target_call_id in used_recovery_ids
-                or target_call_id in claimed_recovery_ids
-                or not isinstance(target, dict)
-                or target.get("failed") is not True
-                or int(target.get("batch_id") or 0) >= int(batch_id or 0)
-            ):
-                continue
-            grant["used"] = True
-            return target_call_id, str(grant_id)
-        return "", ""
 
     def _guardrail_block_result(self, decision: ToolGuardrailDecision) -> str:
         self._set_tool_guardrail_halt(decision)

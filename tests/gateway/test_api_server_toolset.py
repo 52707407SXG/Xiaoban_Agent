@@ -103,19 +103,18 @@ class TestApiServerAdapterToolset:
         owner_research = APIServerAdapter._toolsets_for_request_policy("mystand-owner-research")
 
         assert basic == [
+            "web",
+            "todo",
             "mystand_parser",
             "mystand_resource_index",
             "mystand_query",
             "mystand_authorization",
             "mystand_authorization_write",
         ]
-        assert research == [
-            "web",
-            "mystand_parser",
-        ]
+        assert research == basic
         assert owner == [*basic, "file_readonly"]
-        assert owner_research == research
-        for toolsets in (basic, research, owner_research):
+        assert owner_research == owner
+        for toolsets in (basic, research):
             assert "terminal" not in toolsets
             assert "file" not in toolsets
             assert "file_readonly" not in toolsets
@@ -129,10 +128,46 @@ class TestApiServerAdapterToolset:
         assert "mystand_resource_index" in owner
         assert "mystand_authorization" in basic
         assert "mystand_authorization" in owner
-        assert "web" not in basic
-        assert "web" not in owner
-        assert "mystand_query" not in research
-        assert "mystand_authorization_write" not in research
+        assert "web" in basic
+        assert "web" in owner
+        assert "todo" in basic
+        assert "todo" in owner
+
+    def test_broker_contract_exposes_stable_discovery_and_read_tools_together(self):
+        from gateway.platforms.api_server import APIServerAdapter
+        from tools.mystand_query_tool import MYSTAND_QUERY_SCHEMA
+        from toolsets import resolve_multiple_toolsets
+
+        toolsets = APIServerAdapter._toolsets_for_request_headers(
+            {
+                "X-Xiaoban-Toolset-Policy": "mystand-broker-basic",
+                "X-Xiaoban-User-Id": "ZYJ001",
+            },
+        )
+        names = set(resolve_multiple_toolsets(toolsets))
+
+        assert {
+            "mystand_resource_index",
+            "mystand_query",
+            "mystand_authorization",
+        } <= names
+        parameters = MYSTAND_QUERY_SCHEMA["parameters"]
+        assert set(parameters["properties"]) == {
+            "operation",
+            "query_kind",
+            "module_id",
+            "fact_paths",
+            "query_args",
+            "coverage_required",
+            "resource",
+            "entities",
+            "fact_needs",
+            "mode",
+        }
+        assert {
+            branch.get("properties", {}).get("query_kind", {}).get("const")
+            for branch in parameters["anyOf"]
+        } - {None} == {"rank", "list", "predicate", "count"}
 
     @pytest.mark.parametrize("policy", ["", "mystand-owner-typo", "unknown", "  "])
     def test_present_unknown_or_blank_mystand_policy_is_rejected(self, policy):
@@ -191,7 +226,7 @@ class TestApiServerAdapterToolset:
             "delegate_task",
         }
         assert resolved.isdisjoint(forbidden)
-        if policy == "mystand-owner":
+        if policy in {"mystand-owner", "mystand-owner-research"}:
             assert {"read_file", "search_files"} <= resolved
         else:
             assert resolved.isdisjoint({"read_file", "search_files"})

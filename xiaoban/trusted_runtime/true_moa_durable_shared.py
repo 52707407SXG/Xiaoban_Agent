@@ -12,9 +12,6 @@ from typing import Any, Mapping
 
 from xiaoban.trusted_runtime.protocol_contract import (
     MYSTAND_COMPLETED_OUTCOME_SCHEMA,
-    MYSTAND_COMPLETION_PROTOCOL,
-    MYSTAND_COMPLETION_VERIFICATION_SCHEMA,
-    MYSTAND_FACT_VERIFICATION_SCHEMA,
     MYSTAND_OUTCOME_AAD_SCHEMA,
     MYSTAND_OUTCOME_BINDING_SCHEMA,
     MYSTAND_TRUE_MOA_PRESET_ID,
@@ -29,7 +26,6 @@ TRUE_MOA_DURABLE_MAX_FINAL_CALLS = 8
 TRUE_MOA_COMPLETED_OUTCOME_SCHEMA = MYSTAND_COMPLETED_OUTCOME_SCHEMA
 TRUE_MOA_OUTCOME_BINDING_SCHEMA = MYSTAND_OUTCOME_BINDING_SCHEMA
 TRUE_MOA_OUTCOME_MAX_TEXT_BYTES = 64 * 1024
-TRUE_MOA_OUTCOME_MAX_VERIFICATION_BYTES = 16 * 1024
 TRUE_MOA_OUTCOME_MAX_PLAINTEXT_BYTES = 96 * 1024
 TRUE_MOA_OUTCOME_DEFAULT_TTL_SECONDS = 24 * 60 * 60
 TRUE_MOA_OUTCOME_MAX_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -97,12 +93,6 @@ _OUTCOME_BINDING_FIELDS = {
     "presetId",
     "presetRevision",
 }
-_OUTCOME_DYNAMIC_BINDING_FIELDS = _OUTCOME_BINDING_FIELDS | {
-    "completionProtocol",
-    "invocationFingerprint",
-}
-_DYNAMIC_COMPLETION_PROTOCOL = MYSTAND_COMPLETION_PROTOCOL
-_DYNAMIC_VERIFICATION_SCHEMA = MYSTAND_COMPLETION_VERIFICATION_SCHEMA
 
 
 def _durable_max_rows() -> int:
@@ -194,96 +184,6 @@ def _canonical_json_bytes(value: Any) -> bytes:
     return encoded.encode("utf-8")
 
 
-def _dynamic_turn_outcome_valid(
-    outcome: Any,
-    *,
-    digest: Any,
-    request_fingerprint: str,
-    failure_reason: str,
-    recovery_reason: str,
-    failed_action_count: int,
-) -> bool:
-    """Validate the runtime-derived failure truth without reading prose."""
-    if not isinstance(outcome, Mapping):
-        return False
-    expected_fields = {
-        "schema",
-        "turn_id",
-        "terminal_status",
-        "intent_binding",
-        "target_binding",
-        "attempt_event_ids",
-        "attempt_count",
-        "completed_stages",
-        "recovery",
-        "final_cause",
-        "obtained",
-        "missing",
-        "process_summary",
-        "digest",
-    }
-    attempt_ids = outcome.get("attempt_event_ids")
-    completed_stages = outcome.get("completed_stages")
-    recovery = outcome.get("recovery")
-    final_cause = outcome.get("final_cause")
-    obtained = outcome.get("obtained")
-    missing = outcome.get("missing")
-    target_binding = str(outcome.get("target_binding") or "")
-    if (
-        set(outcome) != expected_fields
-        or outcome.get("schema") != "xiaoban.turn-outcome.v1"
-        or outcome.get("terminal_status") != "failed"
-        or outcome.get("intent_binding") != request_fingerprint
-        or (target_binding and not _OUTCOME_DIGEST.fullmatch(target_binding))
-        or not isinstance(attempt_ids, list)
-        or any(not isinstance(item, str) or not item for item in attempt_ids)
-        or len(attempt_ids) != len(set(attempt_ids))
-        or outcome.get("attempt_count") != failed_action_count
-        or len(attempt_ids) != failed_action_count
-        or not isinstance(completed_stages, list)
-        or any(
-            not isinstance(item, str) or not item
-            for item in completed_stages
-        )
-        or not isinstance(recovery, Mapping)
-        or set(recovery) != {"attempted", "reason"}
-        or recovery.get("attempted") is not bool(recovery_reason)
-        or str(recovery.get("reason") or "") != recovery_reason
-        or not isinstance(final_cause, Mapping)
-        or set(final_cause) != {"event_id", "code", "safe_message"}
-        or str(final_cause.get("code") or "") != failure_reason
-        or (
-            str(final_cause.get("event_id") or "")
-            != (attempt_ids[-1] if attempt_ids else "")
-        )
-        or not isinstance(final_cause.get("safe_message"), str)
-        or not str(final_cause.get("safe_message") or "").strip()
-        or len(final_cause["safe_message"]) > 500
-        or obtained != {"material": False, "evidence_refs": []}
-        or not isinstance(missing, list)
-        or not missing
-        or any(
-            not isinstance(item, str) or not item.strip() or len(item) > 500
-            for item in missing
-        )
-        or not isinstance(outcome.get("process_summary"), str)
-        or not str(outcome.get("process_summary") or "").strip()
-        or len(outcome["process_summary"]) > 2_000
-    ):
-        return False
-    outcome_digest = str(outcome.get("digest") or "")
-    bare = dict(outcome)
-    bare.pop("digest", None)
-    expected_digest = hashlib.sha256(
-        _canonical_json_bytes(bare)
-    ).hexdigest()
-    return bool(
-        _OUTCOME_DIGEST.fullmatch(outcome_digest)
-        and outcome_digest == str(digest or "")
-        and outcome_digest == expected_digest
-    )
-
-
 def _decode_outcome_key(value: str) -> bytes:
     encoded = str(value or "").strip()
     if not encoded or len(encoded) > 128:
@@ -363,12 +263,8 @@ def project_true_moa_outcome_binding(
     value: Mapping[str, Any],
 ) -> dict[str, Any]:
     field_names = frozenset(value) if isinstance(value, Mapping) else frozenset()
-    if field_names not in {
-        frozenset(_OUTCOME_BINDING_FIELDS),
-        frozenset(_OUTCOME_DYNAMIC_BINDING_FIELDS),
-    }:
+    if field_names != frozenset(_OUTCOME_BINDING_FIELDS):
         raise ValueError("invalid true MoA outcome binding")
-    dynamic_binding = field_names == frozenset(_OUTCOME_DYNAMIC_BINDING_FIELDS)
     projected = {
         "schema": str(value.get("schema") or ""),
         "siteId": str(value.get("siteId") or ""),
@@ -386,13 +282,6 @@ def project_true_moa_outcome_binding(
         "presetId": str(value.get("presetId") or ""),
         "presetRevision": str(value.get("presetRevision") or ""),
     }
-    if dynamic_binding:
-        projected["completionProtocol"] = str(
-            value.get("completionProtocol") or ""
-        )
-        projected["invocationFingerprint"] = str(
-            value.get("invocationFingerprint") or ""
-        ).lower()
     if (
         projected["schema"] != TRUE_MOA_OUTCOME_BINDING_SCHEMA
         or not re.fullmatch(
@@ -418,392 +307,8 @@ def project_true_moa_outcome_binding(
         or projected["presetId"] != MYSTAND_TRUE_MOA_PRESET_ID
         or projected["presetRevision"]
         != MYSTAND_TRUE_MOA_PRESET_REVISION
-        or (
-            dynamic_binding
-            and (
-                projected["completionProtocol"]
-                != _DYNAMIC_COMPLETION_PROTOCOL
-                or projected["attempt"] < 1
-                or not _OUTCOME_DIGEST.fullmatch(
-                    projected["invocationFingerprint"]
-                )
-            )
-        )
     ):
         raise ValueError("invalid true MoA outcome binding")
-    return projected
-
-
-def _project_trusted_verification(
-    value: Any,
-    *,
-    output_digest: str,
-    binding: Mapping[str, Any] | None,
-) -> dict[str, Any] | None:
-    if value is None:
-        return None
-    if not isinstance(value, Mapping):
-        raise ValueError("invalid true MoA trusted verification")
-    encoded = _canonical_json_bytes(value)
-    if len(encoded) > TRUE_MOA_OUTCOME_MAX_VERIFICATION_BYTES:
-        raise ValueError("true MoA trusted verification is too large")
-    try:
-        projected = json.loads(encoded.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("invalid true MoA trusted verification") from exc
-    if (
-        isinstance(projected, dict)
-        and projected.get("schema") == _DYNAMIC_VERIFICATION_SCHEMA
-    ):
-        common_fields = {
-            "schema",
-            "completion_kind",
-            "binding_verified",
-            "semantic_verified",
-            "delivery_id",
-            "request_id",
-            "attempt",
-            "message_id",
-            "request_fingerprint",
-            "invocation_fingerprint",
-            "datascope_fingerprint",
-            "action_count",
-            "evidence_count",
-            "output_digest",
-            "decision",
-            "verified_at",
-        }
-        evidence_fields = {
-            "index_count",
-            "index_has_more",
-            "index_receipt_digest",
-            "index_resource_refs_digest",
-            "record_refs",
-            "record_refs_digest",
-            "evidence_digest",
-        }
-        transient_recovery_fields = {
-            "transient_failure_count",
-            "transient_action_result_digest",
-        }
-        failure_fields = {
-            "action_result_digest",
-            "failed_action_count",
-            "failure_class",
-        }
-        failure_reason_fields = {"failure_reason"}
-        recovery_reason_fields = {"recovery_reason"}
-        presentation_fields = {
-            "output_presentation",
-            "answer_status",
-        }
-        turn_outcome_fields = {
-            "turn_outcome",
-            "turn_outcome_digest",
-        }
-        completion_kind = projected.get("completion_kind")
-        no_progress_failure = bool(
-            completion_kind == "failure-bound"
-            and projected.get("failure_class") == "no_progress"
-        )
-        common_invalid = (
-            projected.get("binding_verified") is not True
-            or projected.get("semantic_verified") is not False
-            or isinstance(projected.get("action_count"), bool)
-            or not isinstance(projected.get("action_count"), int)
-            or projected["action_count"] < (
-                0 if no_progress_failure else 1
-            )
-            or isinstance(projected.get("evidence_count"), bool)
-            or not isinstance(projected.get("evidence_count"), int)
-            or projected["evidence_count"] < 0
-            or isinstance(projected.get("attempt"), bool)
-            or not isinstance(projected.get("attempt"), int)
-            or any(
-                not _OUTCOME_DIGEST.fullmatch(
-                    str(projected.get(name) or "")
-                )
-                for name in (
-                    "request_fingerprint",
-                    "invocation_fingerprint",
-                    "output_digest",
-                )
-            )
-            or projected.get("output_digest") != output_digest
-            or not isinstance(projected.get("verified_at"), str)
-            or not re.fullmatch(
-                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
-                r"(?:\.\d+)?Z",
-                projected["verified_at"],
-            )
-            or not isinstance(binding, Mapping)
-            or binding.get("completionProtocol")
-            != _DYNAMIC_COMPLETION_PROTOCOL
-            or projected.get("delivery_id") != binding.get("deliveryId")
-            or projected.get("request_id") != binding.get("deliveryId")
-            or projected.get("message_id") != binding.get("messageId")
-            or projected.get("attempt") != binding.get("attempt")
-            or projected.get("request_fingerprint")
-            != binding.get("requestFingerprint")
-            or projected.get("invocation_fingerprint")
-            != binding.get("invocationFingerprint")
-            or projected.get("datascope_fingerprint")
-            != binding.get("datascopeFingerprint")
-        )
-        if common_invalid:
-            raise TrueMoAOutcomeBindingError(
-                "true MoA dynamic verification binding mismatch"
-            )
-        if completion_kind == "failure-bound":
-            failure_class = projected.get("failure_class")
-            failure_reason = projected.get("failure_reason")
-            failed_action_count = projected.get("failed_action_count")
-            failure_expected_fields = common_fields | failure_fields
-            if "failure_reason" in projected:
-                failure_expected_fields |= failure_reason_fields
-            if "recovery_reason" in projected:
-                failure_expected_fields |= recovery_reason_fields
-            has_system_receipt = any(
-                field in projected for field in presentation_fields
-            )
-            if has_system_receipt:
-                failure_expected_fields |= presentation_fields
-            has_turn_outcome = any(
-                field in projected for field in turn_outcome_fields
-            )
-            if has_turn_outcome:
-                failure_expected_fields |= turn_outcome_fields
-            failure_count_valid = (
-                isinstance(failed_action_count, int)
-                and not isinstance(failed_action_count, bool)
-                and failed_action_count == 0
-                if failure_class == "no_progress"
-                else (
-                    isinstance(failed_action_count, int)
-                    and not isinstance(failed_action_count, bool)
-                    and 1 <= failed_action_count
-                    <= projected["action_count"]
-                )
-            )
-            failure_reason_valid = (
-                True
-                if "failure_reason" not in projected
-                else (
-                    (
-                        failure_class == "error"
-                        and failure_reason
-                        in {
-                            "execution_error",
-                            "invalid_arguments",
-                            "timeout",
-                            "unavailable",
-                        }
-                    )
-                    or (
-                        failure_class == "no_progress"
-                        and failure_reason
-                        in {
-                            "action_not_dispatched",
-                            "action_result_missing",
-                            "index_incomplete",
-                            "read_not_dispatched_after_index",
-                            "read_precondition_not_met",
-                        }
-                    )
-                    or (
-                        failure_class
-                        not in {"error", "no_progress"}
-                        and failure_reason == failure_class
-                    )
-                )
-            )
-            recovery_reason = projected.get("recovery_reason")
-            recovery_reason_valid = (
-                True
-                if "recovery_reason" not in projected
-                else (
-                    "failure_reason" in projected
-                    and projected.get("failed_action_count", 0) >= 2
-                    and recovery_reason
-                    in {
-                        "invalid_arguments",
-                        "timeout",
-                        "unavailable",
-                    }
-                )
-            )
-            presentation_valid = (
-                not has_system_receipt
-                or (
-                    projected.get("output_presentation")
-                    == "system-receipt"
-                    and projected.get("answer_status") == "incomplete"
-                )
-            )
-            turn_outcome_valid = (
-                not has_turn_outcome
-                or (
-                    turn_outcome_fields <= set(projected)
-                    and _dynamic_turn_outcome_valid(
-                        projected.get("turn_outcome"),
-                        digest=projected.get("turn_outcome_digest"),
-                        request_fingerprint=str(
-                            projected.get("request_fingerprint") or ""
-                        ),
-                        failure_reason=str(failure_reason or ""),
-                        recovery_reason=str(recovery_reason or ""),
-                        failed_action_count=failed_action_count,
-                    )
-                )
-            )
-            if (
-                set(projected) != failure_expected_fields
-                or projected.get("evidence_count") != 0
-                or projected.get("decision") != "execution_status_bound"
-                or not failure_count_valid
-                or not failure_reason_valid
-                or not recovery_reason_valid
-                or not presentation_valid
-                or not turn_outcome_valid
-                or failure_class
-                not in {
-                    "ambiguous",
-                    "cancelled",
-                    "denied",
-                    "empty",
-                    "error",
-                    "mixed",
-                    "no_progress",
-                    "not_found",
-                }
-                or not _OUTCOME_DIGEST.fullmatch(
-                    str(projected.get("action_result_digest") or "")
-                )
-            ):
-                raise TrueMoAOutcomeBindingError(
-                    "true MoA dynamic failure verification mismatch"
-                )
-            return projected
-        record_refs = projected.get("record_refs")
-        has_transient_recovery = any(
-            field in projected for field in transient_recovery_fields
-        )
-        evidence_expected_fields = common_fields | evidence_fields
-        if has_transient_recovery:
-            evidence_expected_fields |= transient_recovery_fields
-        has_system_receipt = any(
-            field in projected for field in presentation_fields
-        )
-        if has_system_receipt:
-            evidence_expected_fields |= presentation_fields
-        presentation_valid = (
-            not has_system_receipt
-            or (
-                projected.get("output_presentation")
-                == "system-receipt"
-                and projected.get("answer_status") == "incomplete"
-            )
-        )
-        transient_recovery_valid = (
-            (
-                projected.get("transient_failure_count") == 1
-                and not isinstance(
-                    projected.get("transient_failure_count"),
-                    bool,
-                )
-                and _OUTCOME_DIGEST.fullmatch(
-                    str(
-                        projected.get(
-                            "transient_action_result_digest",
-                        )
-                        or ""
-                    )
-                )
-                and projected.get("action_count")
-                == projected.get("evidence_count") + 2
-            )
-            if has_transient_recovery
-            else (
-                projected.get("action_count")
-                == projected.get("evidence_count") + 1
-            )
-        )
-        if (
-            set(projected) != evidence_expected_fields
-            or not presentation_valid
-            or completion_kind != "evidence-bound"
-            or projected.get("binding_verified") is not True
-            or projected.get("semantic_verified") is not False
-            or projected.get("evidence_count") < 1
-            or not (
-                (
-                    projected.get("action_count") == 2
-                    and projected.get("evidence_count") == 1
-                    and projected.get("decision")
-                    == "projected_evidence"
-                )
-                or (
-                    transient_recovery_valid
-                    and projected.get("decision")
-                    == "evidence_access_verified"
-                )
-            )
-            or projected.get("index_has_more") is not False
-            or isinstance(projected.get("index_count"), bool)
-            or not isinstance(projected.get("index_count"), int)
-            or projected["index_count"] < 1
-            or not isinstance(record_refs, list)
-            or not record_refs
-            or len(record_refs) > projected["index_count"]
-            or record_refs != sorted(set(record_refs))
-            or any(
-                not isinstance(ref, str)
-                or not ref
-                or len(ref) > 240
-                or re.search(r"[\r\n\x00]", ref)
-                for ref in record_refs
-            )
-            or any(
-                not _OUTCOME_DIGEST.fullmatch(
-                    str(projected.get(name) or "")
-                )
-                for name in (
-                    "index_receipt_digest",
-                    "index_resource_refs_digest",
-                    "record_refs_digest",
-                    "evidence_digest",
-                )
-            )
-            or projected.get("output_digest") != output_digest
-            or projected.get("record_refs_digest")
-            != hashlib.sha256(
-                _canonical_json_bytes(record_refs)
-            ).hexdigest()
-        ):
-            raise TrueMoAOutcomeBindingError(
-                "true MoA dynamic verification binding mismatch"
-            )
-        return projected
-    if (
-        not isinstance(projected, dict)
-        or projected.get("schema")
-        != MYSTAND_FACT_VERIFICATION_SCHEMA
-        or projected.get("verified") is not True
-        or projected.get("output_digest") != output_digest
-    ):
-        raise ValueError("invalid true MoA trusted verification")
-    if binding is not None and (
-        projected.get("delivery_id") != binding["deliveryId"]
-        or projected.get("message_id") != binding["messageId"]
-        or projected.get("attempt") != binding["attempt"]
-        or projected.get("request_fingerprint")
-        != binding["requestFingerprint"]
-        or projected.get("datascope_fingerprint")
-        != binding["datascopeFingerprint"]
-    ):
-        raise TrueMoAOutcomeBindingError(
-            "true MoA trusted verification binding mismatch"
-        )
     return projected
 
 
@@ -814,31 +319,20 @@ def project_true_moa_completed_outcome(
 ) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError("invalid true MoA completed outcome")
-    expected = {
+    if set(value) != {
         "schema",
         "completed",
         "finalResponse",
         "outputDigest",
-        "factGuardRequired",
-    }
-    if value.get("trustedVerification") is not None:
-        expected.add("trustedVerification")
-    if "completionProtocol" in value:
-        expected.add("completionProtocol")
-    if set(value) != expected:
+    }:
         raise ValueError("invalid true MoA completed outcome")
     final_response = value.get("finalResponse")
     if not isinstance(final_response, str):
         raise ValueError("invalid true MoA completed outcome")
     final_bytes = final_response.encode("utf-8")
     output_digest = str(value.get("outputDigest") or "").lower()
-    fact_guard_required = value.get("factGuardRequired")
-    completion_protocol = str(value.get("completionProtocol") or "")
-    projected_binding = (
+    if binding is not None:
         project_true_moa_outcome_binding(binding)
-        if binding is not None
-        else None
-    )
     if (
         value.get("schema") != TRUE_MOA_COMPLETED_OUTCOME_SCHEMA
         or value.get("completed") is not True
@@ -846,46 +340,14 @@ def project_true_moa_completed_outcome(
         or len(final_bytes) > TRUE_MOA_OUTCOME_MAX_TEXT_BYTES
         or not _OUTCOME_DIGEST.fullmatch(output_digest)
         or output_digest != hashlib.sha256(final_bytes).hexdigest()
-        or not isinstance(fact_guard_required, bool)
-        or (
-            "completionProtocol" in value
-            and completion_protocol != _DYNAMIC_COMPLETION_PROTOCOL
-        )
     ):
         raise ValueError("invalid true MoA completed outcome")
-    verification = _project_trusted_verification(
-        value.get("trustedVerification"),
-        output_digest=output_digest,
-        binding=projected_binding,
-    )
-    if fact_guard_required and verification is None:
-        raise ValueError("true MoA fact outcome lacks trusted verification")
-    if completion_protocol:
-        if (
-            fact_guard_required
-            or verification is None
-            or verification.get("schema") != _DYNAMIC_VERIFICATION_SCHEMA
-            or projected_binding is None
-            or projected_binding.get("completionProtocol")
-            != _DYNAMIC_COMPLETION_PROTOCOL
-        ):
-            raise ValueError("invalid true MoA dynamic completion outcome")
-    elif (
-        verification is not None
-        and verification.get("schema") == _DYNAMIC_VERIFICATION_SCHEMA
-    ):
-        raise ValueError("dynamic verification lacks completion protocol")
     projected: dict[str, Any] = {
         "schema": TRUE_MOA_COMPLETED_OUTCOME_SCHEMA,
         "completed": True,
         "finalResponse": final_response,
         "outputDigest": output_digest,
-        "factGuardRequired": fact_guard_required,
     }
-    if completion_protocol:
-        projected["completionProtocol"] = completion_protocol
-    if verification is not None:
-        projected["trustedVerification"] = verification
     if len(_canonical_json_bytes(projected)) > TRUE_MOA_OUTCOME_MAX_PLAINTEXT_BYTES:
         raise ValueError("true MoA completed outcome is too large")
     return projected

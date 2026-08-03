@@ -209,7 +209,7 @@ TOOLSETS = {
     },
 
     "mystand_authorization": {
-        "description": "My Stand server-enforced AUTH/OUT reads and preview-confirm-verify writes",
+        "description": "Read-only My Stand server-enforced AUTH/OUT bridge",
         "tools": ["mystand_authorization"],
         "includes": []
     },
@@ -221,7 +221,7 @@ TOOLSETS = {
     },
 
     "mystand_query": {
-        "description": "High-level semantic query for current-user authorized My Stand data",
+        "description": "Authorized My Stand semantic and finance aggregate query",
         "tools": ["mystand_query"],
         "includes": []
     },

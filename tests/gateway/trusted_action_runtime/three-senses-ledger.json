@@ -1,6 +1,15 @@
 {
   "base_commit": "213398b7abe4a42b453f92c1a0f1398b4c1a5371",
   "normalization": "crlf->lf; rstrip each line; strip leading/trailing blank lines; sha256 utf-8",
+  "approved_updates": [
+    {
+      "date": "2026-08-03",
+      "block": "policy.mystand-feature-reasoning",
+      "from_sha256": "728d84af15954ab869bcbb028466c7da415a77db29835740f3c11e9a5a7b12bb",
+      "to_sha256": "df0ca49c634474dc12cf120843c075cb2f0cf38c486bdc71b2f76b6dd3f835a8",
+      "reason": "August plan: exact AUTH, OUT, and resourceUid reads are direct; the resource index is discovery-only."
+    }
+  ],
   "blocks": [
     {
       "id": "identity.default-agent-identity",
@@ -114,7 +123,7 @@
       "kind": "角色感",
       "file": "agent/xiaoban_operating_policy.py",
       "symbol": "XIAOBAN_MYSTAND_FEATURE_REASONING_POLICY",
-      "sha256": "728d84af15954ab869bcbb028466c7da415a77db29835740f3c11e9a5a7b12bb",
+      "sha256": "df0ca49c634474dc12cf120843c075cb2f0cf38c486bdc71b2f76b6dd3f835a8",
       "consumers": [
         "agent/system_prompt.py::build_system_prompt_parts"
       ],

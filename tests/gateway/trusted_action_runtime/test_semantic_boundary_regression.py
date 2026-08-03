@@ -1,4 +1,4 @@
-"""真实语义回归：CompletionGuard 只审业务执行，不审普通自然语言。
+"""K4 真实语义回归：普通模型答卷不被代码改写。
 
 这些用例覆盖 2026-07-26 正式站事故：My Stand Web 的普通对话被统一
 替换成“没有真正查到站内资料”。边界必须来自服务器可信意图与真实
@@ -10,8 +10,7 @@ from __future__ import annotations
 import pytest
 
 from gateway.platforms.api_server import (
-    _guard_evidence_backed_response,
-    _should_buffer_stream_deltas,
+    _finalize_mystand_egress_result,
 )
 from xiaoban.trusted_runtime.turns import begin_turn
 from xiaoban.trusted_runtime.types import TrustedIdentity
@@ -24,13 +23,13 @@ MESSAGE_ID = "semantic-message"
 
 def _chat_result(
     user_message: str,
+    answer: str,
     *,
     history: list[dict[str, str]] | None = None,
 ) -> dict:
     turn = begin_turn(
         channel="web",
         user_message=user_message,
-        conversation_history=history or [],
         identity=TrustedIdentity(
             account_id=ACCOUNT,
             data_scope="mystand",
@@ -45,6 +44,9 @@ def _chat_result(
         "_mystand_request_id": REQUEST_ID,
         "_mystand_message_id": MESSAGE_ID,
         "_trusted_turn": turn,
+        "final_response": answer,
+        "completed": True,
+        "failed": False,
         "messages": [
             *(history or []),
             {"role": "user", "content": user_message},
@@ -73,18 +75,17 @@ def _chat_result(
         ),
     ],
 )
-def test_plain_mystand_chat_is_not_rewritten_by_business_guard(
+def test_plain_mystand_chat_keeps_the_model_answer(
     user_message: str,
     answer: str,
 ) -> None:
-    guarded = _guard_evidence_backed_response(
-        answer,
+    visible = _finalize_mystand_egress_result(
+        _chat_result(user_message, answer),
         user_message=user_message,
         conversation_history=[],
-        result=_chat_result(user_message),
     )
 
-    assert guarded == answer
+    assert visible == answer
 
 
 def test_old_business_history_does_not_turn_new_chat_into_work() -> None:
@@ -95,43 +96,10 @@ def test_old_business_history_does_not_turn_new_chat_into_work() -> None:
     user_message = "先不查了，谢谢。再介绍一下你自己。"
     answer = "不客气。我是站小伴，负责协助你使用 My Stand，也可以正常交流。"
 
-    guarded = _guard_evidence_backed_response(
-        answer,
+    visible = _finalize_mystand_egress_result(
+        _chat_result(user_message, answer, history=history),
         user_message=user_message,
         conversation_history=history,
-        result=_chat_result(user_message, history=history),
     )
 
-    assert guarded == answer
-
-
-def test_mystand_chat_streams_without_waiting_for_completion_guard() -> None:
-    prompt = (
-        "【本轮可信意图与索引证据】\n"
-        "意图=offsite-chat；索引=none；写闸=不需要；状态=not-needed。"
-    )
-
-    assert not _should_buffer_stream_deltas(
-        "你好，介绍一下你自己。",
-        mystand_request=True,
-        system_prompt=prompt,
-    )
-
-
-def test_only_structured_resource_requirement_buffers_until_verified() -> None:
-    prompt = (
-        "【本轮可信意图与索引证据】\n"
-        "意图=resource-read；索引=resource；写闸=不需要；状态=available。"
-    )
-
-    assert not _should_buffer_stream_deltas(
-        "查一下这份资料",
-        mystand_request=True,
-        system_prompt=prompt,
-    )
-    assert _should_buffer_stream_deltas(
-        "查一下这份资料",
-        mystand_request=True,
-        system_prompt=prompt,
-        fact_requirement={"schema": "mystand.fact-requirement.v1"},
-    )
+    assert visible == answer

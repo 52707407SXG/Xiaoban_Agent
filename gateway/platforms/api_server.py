@@ -34,8 +34,6 @@ Requires:
 """
 
 import asyncio
-import base64
-import copy
 import contextvars
 from collections import deque
 from datetime import datetime, time as dt_time, timedelta, timezone
@@ -76,28 +74,7 @@ from gateway.platforms.mystand_egress_seal import (
     seal_mystand_egress_projection,
 )
 from gateway.platforms.true_moa_http import TrueMoAHttpHandlersMixin
-from gateway.mystand_integrity_guard import (
-    build_runtime_integrity_reminder as _build_mystand_runtime_integrity_reminder,
-    guard_mutation_success_claim,
-    requires_write_evidence as _requires_mystand_write_evidence,
-)
-from xiaoban.trusted_runtime.fact_contract import (
-    SIGNED_FACT_INDEX_MAX_ITEMS,
-    SIGNED_FACT_INDEX_MAX_PAGES,
-    SIGNED_FACT_INDEX_PAGE_LIMIT,
-    build_fact_query_plan as _mystand_fact_query_plan,
-    normalized_fact_query_text as _normalized_mystand_fact_query_text,
-)
 from xiaoban.trusted_runtime.protocol_contract import (
-    MYSTAND_BUSINESS_TOOL_MODE_DISABLED_VALUE,
-    MYSTAND_BUSINESS_TOOL_MODE_HEADER as _MYSTAND_BUSINESS_TOOL_MODE_HEADER,
-    MYSTAND_BUSINESS_TOOL_MODE_VALUES,
-    MYSTAND_COMPLETION_PROTOCOL as _MYSTAND_COMPLETION_PROTOCOL_V2,
-    MYSTAND_EVIDENCE_REQUIRED_HEADER as _MYSTAND_EVIDENCE_REQUIRED_HEADER,
-    MYSTAND_EVIDENCE_REQUIRED_VALUES,
-    MYSTAND_FACT_QUERY_PLAN_SCHEMA,
-    MYSTAND_FACT_REQUIREMENT_BINDING_SCHEMA,
-    MYSTAND_FACT_REQUIREMENT_SCHEMA,
     TrustedRuntimeContractError,
     validate_trusted_runtime_contract_headers,
 )
@@ -115,6 +92,130 @@ def _mystand_tool_result_failed(tool_name: Any, tool_result: Any) -> bool:
         # Optional metadata must never break the request, but it must also not
         # turn an unclassifiable result into a false success signal.
         return True
+
+
+_CANONICAL_TOOL_TERMINAL_STATUSES = {
+    "success": "completed",
+    "empty": "completed",
+    "not_found": "failed",
+    "denied": "failed",
+    "failed": "failed",
+    "unknown": "failed",
+    "cancelled": "stopped",
+}
+
+
+def _canonical_tool_terminal_projection(
+    tool_call_id: Any,
+    function_name: Any,
+    metadata: Any,
+    *,
+    expected_delivery_id: Any = None,
+    started_turn: Any = None,
+    require_turn_binding: bool = False,
+) -> Optional[tuple[str, Dict[str, Any]]]:
+    """Validate and allowlist one canonical terminal lifecycle projection."""
+    try:
+        from agent.tool_result_classification import (
+            canonical_tool_result_for_persistence,
+        )
+
+        canonical = canonical_tool_result_for_persistence(
+            metadata,
+            call_id=str(tool_call_id or ""),
+            tool_name=str(function_name or ""),
+        )
+    except Exception:
+        canonical = None
+    if canonical is None:
+        return None
+
+    if require_turn_binding:
+        if not isinstance(started_turn, dict):
+            return None
+        validated_start = _canonical_turn_start_projection(
+            expected_delivery_id,
+            started_turn.get("type"),
+            started_turn.get("requestId"),
+            started_turn.get("turnId"),
+        )
+        if (
+            validated_start is None
+            or canonical["requestId"] != validated_start["requestId"]
+            or canonical["turnId"] != validated_start["turnId"]
+        ):
+            return None
+
+    status = _CANONICAL_TOOL_TERMINAL_STATUSES.get(
+        canonical["outcome"]
+    )
+    if status is None:
+        return None
+    return status, {
+        "schema": canonical["schema"],
+        "requestId": canonical["requestId"],
+        "turnId": canonical["turnId"],
+        "dispatchState": canonical["dispatchState"],
+        "outcome": canonical["outcome"],
+        "retrySafe": canonical["retrySafe"],
+    }
+
+
+def _canonical_turn_start_projection(
+    expected_delivery_id: Any,
+    event_type: Any,
+    request_id: Any,
+    turn_id: Any,
+) -> Optional[Dict[str, str]]:
+    """Allow one trusted Agent TurnContext onto the public SSE channel."""
+    expected = str(expected_delivery_id or "")
+    request = str(request_id or "")
+    turn = str(turn_id or "")
+    if (
+        event_type != "turn.started"
+        or not _MYSTAND_STREAM_DELIVERY_ID_RE.fullmatch(expected)
+        or request != expected
+        or not _MYSTAND_TURN_ID_RE.fullmatch(turn)
+    ):
+        return None
+    return {
+        "type": "turn.started",
+        "requestId": request,
+        "turnId": turn,
+    }
+
+
+def _canonical_turn_terminal_projection(
+    expected_delivery_id: Any,
+    started: Any,
+    result: Any,
+) -> Optional[Dict[str, str]]:
+    """Project the final settled result for one authenticated started turn."""
+    if not isinstance(started, dict) or not isinstance(result, dict):
+        return None
+    validated_start = _canonical_turn_start_projection(
+        expected_delivery_id,
+        started.get("type"),
+        started.get("requestId"),
+        started.get("turnId"),
+    )
+    if validated_start is None:
+        return None
+    if bool(result.get("interrupted") or result.get("stopped")):
+        status = "stopped"
+    elif (
+        bool(result.get("failed") or result.get("partial"))
+        or result.get("completed") is not True
+    ):
+        status = "failed"
+    else:
+        status = "completed"
+    return {
+        "type": f"turn.{status}",
+        "requestId": validated_start["requestId"],
+        "turnId": validated_start["turnId"],
+        "status": status,
+    }
 
 
 def _xiaoban_version() -> str:
@@ -171,6 +272,8 @@ class InvalidToolsetPolicy(ValueError):
 
 _MYSTAND_REQUEST_TOOLSETS = {
     "mystand-broker-basic": [
+        "web",
+        "todo",
         "mystand_parser",
         "mystand_resource_index",
         "mystand_query",
@@ -179,9 +282,16 @@ _MYSTAND_REQUEST_TOOLSETS = {
     ],
     "mystand-broker-research": [
         "web",
+        "todo",
         "mystand_parser",
+        "mystand_resource_index",
+        "mystand_query",
+        "mystand_authorization",
+        "mystand_authorization_write",
     ],
     "mystand-owner": [
+        "web",
+        "todo",
         "mystand_parser",
         "mystand_resource_index",
         "mystand_query",
@@ -191,11 +301,20 @@ _MYSTAND_REQUEST_TOOLSETS = {
     ],
     "mystand-owner-research": [
         "web",
+        "todo",
         "mystand_parser",
+        "mystand_resource_index",
+        "mystand_query",
+        "mystand_authorization",
+        "mystand_authorization_write",
+        "file_readonly",
     ],
 }
 _MYSTAND_REQUEST_TOOL_NAMES = {
     "mystand-broker-basic": {
+        "web_search",
+        "web_extract",
+        "todo",
         "mystand_parse",
         "mystand_resource_index",
         "mystand_query",
@@ -205,9 +324,17 @@ _MYSTAND_REQUEST_TOOL_NAMES = {
     "mystand-broker-research": {
         "web_search",
         "web_extract",
+        "todo",
         "mystand_parse",
+        "mystand_resource_index",
+        "mystand_query",
+        "mystand_authorization",
+        "mystand_authorization_write",
     },
     "mystand-owner": {
+        "web_search",
+        "web_extract",
+        "todo",
         "mystand_parse",
         "mystand_resource_index",
         "mystand_query",
@@ -219,1304 +346,27 @@ _MYSTAND_REQUEST_TOOL_NAMES = {
     "mystand-owner-research": {
         "web_search",
         "web_extract",
+        "todo",
         "mystand_parse",
+        "mystand_resource_index",
+        "mystand_query",
+        "mystand_authorization",
+        "mystand_authorization_write",
+        "read_file",
+        "search_files",
     },
 }
-
-_MYSTAND_REFERENCE_ID_RE = re.compile(
-    r"(?<![A-Z0-9])(?:AUTH|OUT)-[A-Z0-9][A-Z0-9-]{5,}[A-Z0-9](?![A-Z0-9])",
-    re.IGNORECASE,
-)
 
 # Trusted My Stand stream delivery identity (wave 2).  A stream that carries
 # any delivery signal must present the full quartet below.
 _MYSTAND_STREAM_DELIVERY_ID_RE = re.compile(r"xbd_[0-9a-f]{40}")
+_MYSTAND_TURN_ID_RE = re.compile(r"[0-9a-f]{16}")
 _MYSTAND_STREAM_ATTEMPT_RE = re.compile(r"[0-9]{1,9}")
 _MYSTAND_STREAM_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
-_MYSTAND_FACT_REQUIREMENT_HEADER = "X-Xiaoban-Fact-Requirement"
-_MYSTAND_FACT_SIGNATURE_HEADER = "X-Xiaoban-Fact-Signature"
-_MYSTAND_COMPLETION_PROTOCOL_HEADER = "X-Xiaoban-Completion-Protocol"
-_MYSTAND_INVOCATION_FINGERPRINT_HEADER = (
-    "X-Xiaoban-Invocation-Fingerprint"
-)
-_MYSTAND_FACT_SIGNATURE_DOMAIN = b"mystand-fact-requirement-v1\0"
-_MYSTAND_FACT_INDEX_MAX_SCAN_BYTES = 60_000_000
-_MYSTAND_FACT_INDEX_MAX_RESULT_BYTES = 8_000_000
-_MYSTAND_FACT_BINDING_FIELDS = frozenset(
-    {
-        "user_id",
-        "message_id",
-        "delivery_id",
-        "attempt",
-        "request_fingerprint",
-        "session_id",
-        "datascope_fingerprint",
-    }
-)
-_MYSTAND_FACT_QUERY_PLAN_FIELDS = frozenset(
-    {
-        "operation",
-        "query_kind",
-        "module_id",
-        "fact_paths",
-        "query_args",
-        "coverage_required",
-    }
-)
-_MYSTAND_FACT_FORBIDDEN_PLAN_FIELDS = frozenset(
-    {
-        "owner",
-        "owner_user",
-        "user",
-        "user_id",
-        "authorization_id",
-        "auth_id",
-        "resource_uid",
-        "source_id",
-        "scope_fingerprint",
-        "requirement_digest",
-        "plan_id",
-        "queryText",
-    }
-)
-
-_MYSTAND_EVIDENCE_FAILURE = (
-    "这轮没有取得可验证的 My Stand 站内资料结果，所以我不能判断资料内容、"
-    "权限状态或是否完成。"
-)
-
-
-def _fact_header_value(headers: Any, name: str) -> str:
-    """Read one header without assuming a concrete multidict implementation."""
-    if headers is None:
-        return ""
-    try:
-        value = headers.get(name, "")
-    except (AttributeError, TypeError):
-        value = ""
-    if value not in (None, ""):
-        return str(value).strip()
-    lowered = name.lower()
-    try:
-        for key, candidate in headers.items():
-            if str(key).lower() == lowered:
-                return str(candidate or "").strip()
-    except (AttributeError, TypeError):
-        return ""
-    return ""
-
-
-def _canonical_json_bytes(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-
-def _fact_plan_has_forbidden_field(value: Any) -> bool:
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            if str(key) in _MYSTAND_FACT_FORBIDDEN_PLAN_FIELDS:
-                return True
-            if _fact_plan_has_forbidden_field(nested):
-                return True
-    elif isinstance(value, list):
-        return any(_fact_plan_has_forbidden_field(item) for item in value)
-    return False
-
-
-def _validate_mystand_fact_query_plan(
-    plan: Any,
-    *,
-    fact_kind: str,
-    operation: str,
-    module_id: str,
-) -> None:
-    if (
-        not isinstance(plan, dict)
-        or set(plan) - _MYSTAND_FACT_QUERY_PLAN_FIELDS
-        or _fact_plan_has_forbidden_field(plan)
-        or len(_canonical_json_bytes(plan)) > 8_192
-        or plan.get("operation") != "read"
-    ):
-        raise ValueError("fact requirement query plan is invalid")
-    query_kind = plan.get("query_kind")
-    if query_kind not in {
-        "resource-read",
-        "rank",
-        "list",
-        "aggregate",
-        "predicate",
-        "count",
-    }:
-        raise ValueError("fact requirement query plan is invalid")
-    if plan.get("module_id") != module_id:
-        raise ValueError("fact requirement query plan is invalid")
-    coverage_required = plan.get("coverage_required")
-    if fact_kind == "collection":
-        if query_kind != operation or coverage_required is not True:
-            raise ValueError("fact requirement query plan is invalid")
-    elif query_kind != "resource-read" or coverage_required is not False:
-        raise ValueError("fact requirement query plan is invalid")
-    fact_paths = plan.get("fact_paths")
-    if (
-        not isinstance(fact_paths, list)
-        or not fact_paths
-        or len(fact_paths) > 12
-        or len(set(fact_paths)) != len(fact_paths)
-        or any(
-            not isinstance(path, str)
-            or not re.fullmatch(r"[a-z][a-z0-9_.-]{1,119}", path)
-            for path in fact_paths
-        )
-    ):
-        raise ValueError("fact requirement query plan is invalid")
-    query_args = plan.get("query_args")
-    if not isinstance(query_args, dict):
-        raise ValueError("fact requirement query plan is invalid")
-
-
-def _validate_mystand_fact_requirement_seed(
-    payload: Dict[str, Any],
-) -> None:
-    """Recompute the API-authored canonical seed and bind its transport view."""
-    seed = payload.get("requirement_seed")
-    signed_plan = payload.get("query_plan")
-    binding = payload.get("binding")
-    if (
-        not isinstance(seed, dict)
-        or not isinstance(signed_plan, dict)
-        or not isinstance(binding, dict)
-    ):
-        raise ValueError("fact requirement seed is missing")
-    collection = payload.get("fact_kind") == "collection"
-    expected_seed_keys = {
-        "schema",
-        "required",
-        "planId",
-        "queryKind",
-        "factKind",
-        "scopeFingerprint",
-        "coverageRequired",
-        "queryPlan",
-        "indexCount",
-        "indexResourceRefsDigest",
-        "indexHasMore",
-    }
-    if collection:
-        expected_seed_keys.add("year")
-    seed_plan = seed.get("queryPlan")
-    expected_seed_plan_keys = {
-        "schema",
-        "queryKind",
-        "moduleId",
-        "factPaths",
-        "queryArgs",
-        "coverageRequired",
-        "contextSource",
-    }
-    if not collection:
-        expected_seed_plan_keys.add("factKind")
-    if (
-        set(seed) != expected_seed_keys
-        or not isinstance(seed_plan, dict)
-        or set(seed_plan) != expected_seed_plan_keys
-        or seed_plan.get("contextSource")
-        not in {"current-message", "adjacent-user-turn"}
-    ):
-        raise ValueError("fact requirement seed schema is invalid")
-    expected_seed_plan = {
-        "schema": MYSTAND_FACT_QUERY_PLAN_SCHEMA,
-        "queryKind": signed_plan.get("query_kind"),
-        "moduleId": signed_plan.get("module_id"),
-        **({"factKind": "single-resource"} if not collection else {}),
-        "factPaths": signed_plan.get("fact_paths"),
-        "queryArgs": signed_plan.get("query_args"),
-        "coverageRequired": signed_plan.get("coverage_required"),
-        "contextSource": seed_plan.get("contextSource"),
-    }
-    expected_seed = {
-        "schema": MYSTAND_FACT_REQUIREMENT_BINDING_SCHEMA,
-        "required": True,
-        "planId": payload.get("plan_id"),
-        "queryKind": payload.get("query_kind"),
-        "factKind": "collection" if collection else "single-resource",
-        **(
-            {"year": signed_plan.get("query_args", {}).get("year")}
-            if collection
-            else {}
-        ),
-        "scopeFingerprint": binding.get("datascope_fingerprint"),
-        "coverageRequired": payload.get("coverage_required"),
-        "queryPlan": expected_seed_plan,
-        "indexCount": payload.get("index_count"),
-        "indexResourceRefsDigest": payload.get(
-            "index_resource_refs_digest"
-        ),
-        "indexHasMore": payload.get("index_has_more"),
-    }
-    requirement_digest = payload.get("requirement_digest")
-    recomputed_digest = hashlib.sha256(
-        _canonical_json_bytes(seed)
-    ).hexdigest()
-    if (
-        seed_plan != expected_seed_plan
-        or seed != expected_seed
-        or requirement_digest != recomputed_digest
-    ):
-        raise ValueError("fact requirement seed projection is invalid")
-
-
-def _parse_mystand_fact_requirement_header(
-    headers: Any,
-    *,
-    signing_key: str,
-    expected_binding: Dict[str, Any],
-    expected_user_message: Any = None,
-) -> Optional[Dict[str, Any]]:
-    """Verify and parse My Stand's server-signed fact requirement.
-
-    The signature authenticates the canonical payload.  The binding check then
-    ties that payload to this exact account, message, delivery attempt, request,
-    session and DataScope before any agent/model work can start.
-    """
-    encoded = _fact_header_value(headers, _MYSTAND_FACT_REQUIREMENT_HEADER)
-    signature = _fact_header_value(headers, _MYSTAND_FACT_SIGNATURE_HEADER)
-    if not encoded and not signature:
-        return None
-    if not signature:
-        raise ValueError("fact requirement signature is missing")
-    if not encoded:
-        raise ValueError("fact requirement signature has no payload")
-    if not signing_key:
-        raise ValueError("fact requirement signature key is unavailable")
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,8192}", encoded):
-        raise ValueError("fact requirement signature payload is invalid")
-    if not re.fullmatch(r"[0-9a-f]{64}", signature):
-        raise ValueError("fact requirement signature is invalid")
-
-    expected_signature = hmac.new(
-        signing_key.encode("utf-8"),
-        _MYSTAND_FACT_SIGNATURE_DOMAIN + encoded.encode("ascii"),
-        hashlib.sha256,
-    ).hexdigest()
-    if not hmac.compare_digest(signature, expected_signature):
-        raise ValueError("fact requirement signature mismatch")
-
-    try:
-        padded = encoded + ("=" * (-len(encoded) % 4))
-        raw = base64.b64decode(
-            padded.encode("ascii"),
-            altchars=b"-_",
-            validate=True,
-        )
-        payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError("fact requirement payload is invalid") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("fact requirement payload is invalid")
-    canonical_encoded = (
-        base64.urlsafe_b64encode(_canonical_json_bytes(payload))
-        .rstrip(b"=")
-        .decode("ascii")
-    )
-    if not hmac.compare_digest(encoded, canonical_encoded):
-        raise ValueError("fact requirement payload is not canonical")
-
-    allowed_fields = {
-        "schema",
-        "source",
-        "fact_kind",
-        "operation",
-        "module_id",
-        "time_scope",
-        "metric",
-        "ordinal",
-        "plan_id",
-        "query_plan",
-        "requirement_seed",
-        "requirement_digest",
-        "query_kind",
-        "fact_paths",
-        "query_args",
-        "coverage_required",
-        "index_evidence_digest",
-        "index_count",
-        "index_resource_refs_digest",
-        "index_has_more",
-        "binding",
-    }
-    required_fields = {
-        "schema",
-        "source",
-        "fact_kind",
-        "operation",
-        "module_id",
-        "binding",
-    }
-    if set(payload) - allowed_fields or not required_fields.issubset(payload):
-        raise ValueError("fact requirement payload schema is invalid")
-    if payload.get("schema") != MYSTAND_FACT_REQUIREMENT_SCHEMA:
-        raise ValueError("fact requirement payload schema is invalid")
-    if payload.get("source") != "mystand-server":
-        raise ValueError("fact requirement source is invalid")
-    if payload.get("fact_kind") not in {"single", "collection"}:
-        raise ValueError("fact requirement kind is invalid")
-    operation = payload.get("operation")
-    if operation not in {
-        "read",
-        "query",
-        "rank",
-        "list",
-        "aggregate",
-        "predicate",
-        "count",
-    }:
-        raise ValueError("fact requirement operation is invalid")
-    module_id = payload.get("module_id")
-    if (
-        not isinstance(module_id, str)
-        or len(module_id) > 80
-        or (
-            module_id
-            and not re.fullmatch(r"[A-Za-z0-9._:@-]{1,80}", module_id)
-        )
-        or (not module_id and payload.get("fact_kind") != "single")
-    ):
-        raise ValueError("fact requirement module is invalid")
-    plan_id = payload.get("plan_id")
-    if plan_id is not None and (
-        not isinstance(plan_id, str)
-        or not re.fullmatch(r"[A-Za-z0-9._:@-]{1,160}", plan_id)
-    ):
-        raise ValueError("fact requirement plan is invalid")
-    for name, limit in (("time_scope", 160), ("metric", 120)):
-        value = payload.get(name)
-        if value is not None and (
-            not isinstance(value, str)
-            or not value.strip()
-            or len(value) > limit
-            or re.search(r"[\x00-\x1f\x7f]", value)
-        ):
-            raise ValueError(f"fact requirement {name} is invalid")
-    ordinal = payload.get("ordinal")
-    if ordinal is not None and (
-        isinstance(ordinal, bool)
-        or not isinstance(ordinal, int)
-        or ordinal < 1
-        or ordinal > 10_000
-    ):
-        raise ValueError("fact requirement ordinal is invalid")
-    if operation == "rank" and (
-        payload.get("fact_kind") != "collection"
-        or ordinal is None
-        or not payload.get("metric")
-        or not payload.get("time_scope")
-    ):
-        raise ValueError("fact requirement rank schema is invalid")
-    if payload.get("fact_kind") == "single" and operation not in {
-        "read",
-        "query",
-    }:
-        raise ValueError("fact requirement single schema is invalid")
-    if payload.get("fact_kind") == "collection" and operation in {
-        "read",
-        "query",
-    }:
-        raise ValueError("fact requirement collection schema is invalid")
-    query_plan = payload.get("query_plan")
-    if query_plan is not None:
-        _validate_mystand_fact_query_plan(
-            query_plan,
-            fact_kind=str(payload.get("fact_kind") or ""),
-            operation=str(operation or ""),
-            module_id=module_id,
-        )
-        for top_name, plan_name in (
-            ("query_kind", "query_kind"),
-            ("fact_paths", "fact_paths"),
-            ("query_args", "query_args"),
-            ("coverage_required", "coverage_required"),
-        ):
-            if (
-                top_name not in payload
-                or payload.get(top_name) != query_plan.get(plan_name)
-            ):
-                raise ValueError("fact requirement query plan binding is invalid")
-        query_args = query_plan.get("query_args")
-        if payload.get("fact_kind") == "collection":
-            plan_year = query_args.get("year")
-            if (
-                isinstance(plan_year, bool)
-                or not isinstance(plan_year, int)
-                or payload.get("time_scope") != str(plan_year)
-            ):
-                raise ValueError(
-                    "fact requirement query plan binding is invalid"
-                )
-        if operation == "rank" and (
-            not isinstance(query_args, dict)
-            or payload.get("ordinal") != query_args.get("rank")
-        ):
-            raise ValueError("fact requirement query plan binding is invalid")
-        if query_plan.get("query_kind") == "resource-read":
-            normalized_query = _normalized_mystand_fact_query_text(
-                expected_user_message
-            )
-            semantic_digest = query_args.get("semanticQueryDigest")
-            if (
-                not normalized_query
-                or semantic_digest
-                != hashlib.sha256(
-                    normalized_query.encode("utf-8")
-                ).hexdigest()
-            ):
-                raise ValueError(
-                    "fact requirement query text binding is invalid"
-                )
-    declared_requirement_digest = payload.get("requirement_digest")
-    if declared_requirement_digest is not None and (
-        not isinstance(declared_requirement_digest, str)
-        or not re.fullmatch(r"[0-9a-f]{64}", declared_requirement_digest)
-    ):
-        raise ValueError("fact requirement digest is invalid")
-    index_evidence_digest = payload.get("index_evidence_digest")
-    if index_evidence_digest is not None and (
-        not isinstance(index_evidence_digest, str)
-        or not re.fullmatch(r"[0-9a-f]{64}", index_evidence_digest)
-    ):
-        raise ValueError("fact requirement index evidence digest is invalid")
-    index_count = payload.get("index_count")
-    index_resource_refs_digest = payload.get("index_resource_refs_digest")
-    index_has_more = payload.get("index_has_more")
-    if any(
-        name in payload
-        for name in (
-            "index_count",
-            "index_resource_refs_digest",
-            "index_has_more",
-        )
-    ) and (
-        isinstance(index_count, bool)
-        or not isinstance(index_count, int)
-        or index_count < 0
-        or not isinstance(index_resource_refs_digest, str)
-        or not re.fullmatch(r"[0-9a-f]{64}", index_resource_refs_digest)
-        or index_has_more is not False
-    ):
-        raise ValueError("fact requirement index coverage is invalid")
-    if query_plan is not None and not all(
-        name in payload
-        for name in (
-            "plan_id",
-            "requirement_seed",
-            "requirement_digest",
-            "index_count",
-            "index_resource_refs_digest",
-            "index_has_more",
-        )
-    ):
-        raise ValueError("fact requirement index coverage is missing")
-
-    binding = payload.get("binding")
-    if (
-        not isinstance(binding, dict)
-        or set(binding) != _MYSTAND_FACT_BINDING_FIELDS
-        or set(expected_binding) != _MYSTAND_FACT_BINDING_FIELDS
-    ):
-        raise ValueError("fact requirement binding is invalid")
-    for field in _MYSTAND_FACT_BINDING_FIELDS:
-        actual = binding.get(field)
-        expected = expected_binding.get(field)
-        if field == "attempt":
-            if (
-                isinstance(actual, bool)
-                or not isinstance(actual, int)
-                or isinstance(expected, bool)
-                or not isinstance(expected, int)
-            ):
-                raise ValueError("fact requirement binding is invalid")
-        elif not isinstance(actual, str) or not isinstance(expected, str):
-            raise ValueError("fact requirement binding is invalid")
-        if actual != expected:
-            raise ValueError("fact requirement binding mismatch")
-    if query_plan is not None:
-        _validate_mystand_fact_requirement_seed(payload)
-    return payload
-
-
-def _mystand_fact_expected_binding(
-    headers: Any,
-    *,
-    session_id: str,
-) -> Dict[str, Any]:
-    """Build the server-observed side of a signed requirement binding."""
-    from xiaoban.trusted_runtime.types import TrustedIdentity
-
-    attempt_text = _fact_header_value(headers, "X-Xiaoban-Attempt")
-    if not _MYSTAND_STREAM_ATTEMPT_RE.fullmatch(attempt_text):
-        raise ValueError("fact requirement binding attempt is invalid")
-    user_id = _fact_header_value(headers, "X-Xiaoban-User-Id")
-    binding = {
-        "user_id": user_id,
-        "message_id": _fact_header_value(headers, "X-Xiaoban-Message-Id"),
-        "delivery_id": _fact_header_value(headers, "X-Xiaoban-Delivery-Id"),
-        "attempt": int(attempt_text),
-        "request_fingerprint": _fact_header_value(
-            headers,
-            "X-Xiaoban-Request-Fingerprint",
-        ).lower(),
-        "session_id": str(session_id or ""),
-        "datascope_fingerprint": TrustedIdentity(
-            account_id=user_id,
-            data_scope="mystand",
-            source="server_session",
-        ).datascope_fingerprint,
-    }
-    if (
-        not user_id
-        or not binding["message_id"]
-        or not _MYSTAND_STREAM_DELIVERY_ID_RE.fullmatch(binding["delivery_id"])
-        or not _MYSTAND_STREAM_FINGERPRINT_RE.fullmatch(
-            binding["request_fingerprint"]
-        )
-        or not binding["session_id"]
-    ):
-        raise ValueError("fact requirement binding is invalid")
-    return binding
-
-
-def _mystand_completion_expected_binding(
-    headers: Any,
-    *,
-    session_id: str,
-) -> Dict[str, Any]:
-    """Bind dynamic completion to authenticated durable delivery identity."""
-    binding = _mystand_fact_expected_binding(
-        headers,
-        session_id=session_id,
-    )
-    if binding["attempt"] < 1:
-        raise ValueError("completion attempt is invalid")
-    delivery_attempt = _fact_header_value(
-        headers,
-        "X-Xiaoban-Delivery-Attempt",
-    )
-    if (
-        not _MYSTAND_STREAM_ATTEMPT_RE.fullmatch(delivery_attempt)
-        or int(delivery_attempt) != binding["attempt"]
-    ):
-        raise ValueError("completion delivery attempt is invalid")
-    invocation_fingerprint = _fact_header_value(
-        headers,
-        _MYSTAND_INVOCATION_FINGERPRINT_HEADER,
-    ).lower()
-    if not _MYSTAND_STREAM_FINGERPRINT_RE.fullmatch(
-        invocation_fingerprint
-    ):
-        raise ValueError("completion invocation fingerprint is invalid")
-    binding["invocation_fingerprint"] = invocation_fingerprint
-    return binding
-
-
-def _mystand_dynamic_evidence_required(
-    headers: Any,
-    *,
-    completion_protocol: str,
-) -> bool:
-    """Require an explicit server intent bit on every dynamic turn."""
-
-    value = _fact_header_value(
-        headers,
-        _MYSTAND_EVIDENCE_REQUIRED_HEADER,
-    )
-    if completion_protocol:
-        if value not in MYSTAND_EVIDENCE_REQUIRED_VALUES:
-            raise ValueError(
-                "dynamic evidence requirement is invalid",
-            )
-        return value == "1"
-    if value:
-        raise ValueError(
-            "dynamic evidence requirement requires a protocol",
-        )
-    return False
-
-
-def _mystand_business_tools_disabled(
-    headers: Any,
-    *,
-    completion_protocol: str,
-) -> bool:
-    """Bind diagnostic no-tool mode to the authenticated API request."""
-
-    value = _fact_header_value(
-        headers,
-        _MYSTAND_BUSINESS_TOOL_MODE_HEADER,
-    )
-    if completion_protocol:
-        if value not in MYSTAND_BUSINESS_TOOL_MODE_VALUES:
-            raise ValueError("dynamic business tool mode is invalid")
-        return value == MYSTAND_BUSINESS_TOOL_MODE_DISABLED_VALUE
-    if value:
-        raise ValueError(
-            "dynamic business tool mode requires a protocol",
-        )
-    return False
-
-
-def _resolve_mystand_initial_tool_choice(
-    user_message: Any,
-    system_prompt: Any = None,
-    *,
-    fact_requirement: Optional[Dict[str, Any]] = None,
-) -> str:
-    """Select the first evidence tool from trusted My Stand request context.
-
-    This is an execution gate, not another behavioral prompt. Exact AUTH/OUT
-    references must be resolved through the authorization wall. Natural
-    business-fact work is trusted only when My Stand supplied a verified,
-    request-bound structured requirement; prompt text is never an authority.
-    """
-
-    del system_prompt
-    if fact_requirement is not None:
-        return "mystand_resource_index"
-    user_text = _content_to_visible_text(user_message)
-    if _MYSTAND_REFERENCE_ID_RE.search(user_text):
-        return "mystand_authorization"
-    return ""
-
-
-def _required_mystand_evidence_groups(
-    initial_tool_choice: str,
-) -> list[set[str]]:
-    if initial_tool_choice == "mystand_authorization":
-        return [{"mystand_authorization"}]
-    if initial_tool_choice == "mystand_resource_index":
-        return [
-            {"mystand_resource_index"},
-            {"mystand_authorization", "mystand_query"},
-        ]
-    return []
-
-
-def _trusted_mystand_module_id(system_prompt: Any) -> str:
-    """Read only the module id inside My Stand's trusted intent block."""
-    prompt = str(system_prompt or "")
-    marker = "【本轮可信意图与索引证据】"
-    if marker not in prompt:
-        return ""
-    trusted_block = prompt.rsplit(marker, 1)[-1]
-    match = re.search(r'"moduleId"\s*:\s*"([A-Za-z0-9._:@-]{1,80})"', trusted_block)
-    return match.group(1) if match else ""
-
-
-def _longest_common_contiguous_length(left: str, right: str) -> int:
-    """Return a conservative label/message overlap score."""
-    a = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", str(left or "")).lower()
-    b = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", str(right or "")).lower()
-    if not a or not b:
-        return 0
-    previous = [0] * (len(b) + 1)
-    best = 0
-    for char_a in a:
-        current = [0]
-        for index, char_b in enumerate(b, start=1):
-            value = previous[index - 1] + 1 if char_a == char_b else 0
-            current.append(value)
-            best = max(best, value)
-        previous = current
-    return best
-
-
-def _select_mystand_index_candidate(
-    tool_result: Any,
-    user_message: Any,
-) -> Optional[Dict[str, Any]]:
-    """Select only one clearly identified readable resource."""
-    try:
-        payload = json.loads(_safe_tool_content(tool_result))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-    items = payload.get("items") if isinstance(payload, dict) else None
-    if not isinstance(items, list):
-        return None
-    readable = [
-        item
-        for item in items
-        if isinstance(item, dict)
-        and item.get("canRead") is True
-        and str(item.get("resourceUid") or "").strip()
-    ]
-    if len(readable) == 1:
-        return readable[0]
-    user_text = _content_to_visible_text(user_message)
-    scored = sorted(
-        (
-            (_longest_common_contiguous_length(item.get("safeLabel"), user_text), item)
-            for item in readable
-        ),
-        key=lambda pair: pair[0],
-        reverse=True,
-    )
-    if not scored or scored[0][0] < 2:
-        return None
-    if len(scored) > 1 and scored[0][0] == scored[1][0]:
-        return None
-    return scored[0][1]
-
-
-def _build_mystand_preexecuted_prompt(evidence: List[Dict[str, Any]]) -> str:
-    successful = [
-        item for item in evidence
-        if _tool_result_looks_successful(item.get("content"))
-    ]
-    if not successful:
-        return ""
-    lines = [
-        "【本轮程序已执行的 My Stand 站内证据】",
-        "以下结果由服务器在当前登录身份和授权边界内直接执行，优先级高于旧对话。"
-        "只根据结果回答当前问题；不得沿用旧对话里的权限、存在性或数值判断。",
-    ]
-    for item in successful:
-        content = _safe_tool_content(item.get("content"))
-        lines.append(
-            f"{item.get('name')}={content[:300_000]}"
-        )
-    return "\n".join(lines)
-
-
-def _read_complete_mystand_resource_index(
-    arguments: Dict[str, Any],
-    page_handler: Any,
-) -> str:
-    """Walk one signed fact index to a terminal cursor, or fail as a whole.
-
-    The trusted runtime records this as one logical index action.  Individual
-    pages are transport details; no partial page set may establish an
-    IndexReceipt or be compared with My Stand's signed count/digest.
-    """
-
-    def _failure() -> str:
-        return json.dumps(
-            {
-                "ok": False,
-                "status": 502,
-                "code": "mystand_resource_index_incomplete",
-                "error": "My Stand 资源索引没有完整读取。",
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-
-    try:
-        page_limit = int(arguments.get("limit", 100))
-    except (TypeError, ValueError):
-        return _failure()
-    if page_limit < 1 or page_limit > SIGNED_FACT_INDEX_PAGE_LIMIT:
-        return _failure()
-
-    all_items: List[Dict[str, Any]] = []
-    resource_refs: set[str] = set()
-    seen_cursors = {""}
-    cursor = ""
-    total_bytes = 0
-    for page_count in range(1, SIGNED_FACT_INDEX_MAX_PAGES + 1):
-        page_arguments = dict(arguments)
-        if cursor:
-            page_arguments["cursor"] = cursor
-        else:
-            page_arguments.pop("cursor", None)
-        raw_page = _safe_tool_content(page_handler(page_arguments))
-        total_bytes += len(raw_page.encode("utf-8"))
-        if total_bytes > _MYSTAND_FACT_INDEX_MAX_SCAN_BYTES:
-            return _failure()
-        try:
-            page = json.loads(raw_page)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return _failure()
-        if (
-            not isinstance(page, dict)
-            or page.get("schema") != "mystand.resource-index.page.v1"
-            or page.get("ok") is not True
-            or not isinstance(page.get("items"), list)
-            or len(page["items"]) > page_limit
-            or not isinstance(page.get("hasMore"), bool)
-            or not isinstance(page.get("nextCursor"), str)
-            or len(page["nextCursor"]) > 800
-        ):
-            return _failure()
-
-        page_refs: List[str] = []
-        for item in page["items"]:
-            if not isinstance(item, dict):
-                return _failure()
-            resource_uid = item.get("resourceUid")
-            if (
-                not isinstance(resource_uid, str)
-                or not resource_uid
-                or len(resource_uid) > 120
-                or resource_uid in resource_refs
-                or resource_uid in page_refs
-            ):
-                return _failure()
-            page_refs.append(resource_uid)
-        if (
-            len(all_items) + len(page["items"])
-            > SIGNED_FACT_INDEX_MAX_ITEMS
-        ):
-            return _failure()
-        resource_refs.update(page_refs)
-        all_items.extend(
-            {"resourceUid": resource_uid}
-            for resource_uid in page_refs
-        )
-
-        has_more = page["hasMore"]
-        next_cursor = page["nextCursor"]
-        if not has_more:
-            if next_cursor:
-                return _failure()
-            complete_result = json.dumps(
-                {
-                    "schema": "mystand.resource-index.complete.v1",
-                    "ok": True,
-                    "items": all_items,
-                    "nextCursor": "",
-                    "hasMore": False,
-                    "pageCount": page_count,
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-            if (
-                len(complete_result.encode("utf-8"))
-                > _MYSTAND_FACT_INDEX_MAX_RESULT_BYTES
-            ):
-                return _failure()
-            return complete_result
-        if (
-            not page["items"]
-            or not next_cursor
-            or next_cursor in seen_cursors
-        ):
-            return _failure()
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
-    return _failure()
-
-
-def _run_mystand_preexecuted_evidence(
-    initial_tool_choice: str,
-    *,
-    user_message: Any,
-    system_prompt: Any,
-    tool_start_callback: Any,
-    tool_complete_callback: Any,
-    trusted_turn: Any = None,
-    fact_requirement: Optional[Dict[str, Any]] = None,
-    terminal_controller: Any = None,
-) -> List[Dict[str, Any]]:
-    """Execute required read evidence in the harness, not by model choice.
-
-    When *trusted_turn* is given, every action passes the trusted runtime
-    PreAction gate first; a non-allow decision means zero handler calls,
-    and the result is bound to the gate-issued callId via PostAction.
-    """
-    evidence: List[Dict[str, Any]] = []
-    if bool(
-        getattr(trusted_turn, "business_tools_disabled", False)
-    ):
-        return evidence
-
-    def _ensure_active() -> None:
-        if terminal_controller is not None and terminal_controller.is_set:
-            raise CompletionStoppedError(
-                "true MoA stopped during deterministic evidence"
-            )
-
-    def _catalog_contains(name: str) -> bool:
-        try:
-            from tools.registry import registry as _tool_registry
-
-            return _tool_registry.get_entry(name) is not None
-        except Exception:
-            return False
-
-    def execute(name: str, args: Dict[str, Any], handler: Any) -> str:
-        _ensure_active()
-        call_id = f"mystand_pre_{uuid.uuid4().hex}"
-        if (
-            terminal_controller is not None
-            and not terminal_controller.try_begin_dispatch(
-                f"preexecuted-tool:{call_id}"
-            )
-        ):
-            raise CompletionStoppedError(
-                "true MoA stopped before deterministic evidence dispatch"
-            )
-        decision = None
-        action_finished = False
-        if trusted_turn is not None:
-            from xiaoban.trusted_runtime.turns import begin_action, finish_action
-
-            decision = begin_action(
-                trusted_turn,
-                name,
-                "v1",
-                args,
-                call_id=call_id,
-                catalog_lookup=_catalog_contains,
-            )
-            if decision.decision != "allow":
-                # PreAction 拒绝：handler 调用数为 0，回执为确定性拒绝。
-                content = json.dumps(
-                    {"ok": False, "status": 403, "code": decision.reason},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-                evidence.append(
-                    {"call_id": "", "name": name, "args": args, "content": content}
-                )
-                return content
-            call_id = decision.call.call_id
-
-        def _ensure_action_active() -> None:
-            nonlocal action_finished
-            if terminal_controller is None or not terminal_controller.is_set:
-                return
-            if (
-                decision is not None
-                and decision.decision == "allow"
-                and not action_finished
-            ):
-                finish_action(
-                    trusted_turn,
-                    call_id,
-                    name,
-                    "v1",
-                    {
-                        "ok": False,
-                        "status": "cancelled",
-                        "code": "terminal_fence",
-                    },
-                    cancelled=True,
-                )
-                action_finished = True
-            raise CompletionStoppedError(
-                "true MoA stopped during deterministic evidence"
-            )
-
-        _ensure_action_active()
-        tool_start_callback(call_id, name, args)
-        _ensure_action_active()
-        try:
-            content = handler(args)
-        except Exception:
-            logger.warning("My Stand deterministic evidence tool failed: %s", name, exc_info=False)
-            content = json.dumps(
-                {
-                    "ok": False,
-                    "status": 502,
-                    "code": "mystand_evidence_execution_failed",
-                    "error": "My Stand 站内资料读取暂时没有接稳。",
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        _ensure_action_active()
-        if decision is not None:
-            finish_action(trusted_turn, call_id, name, "v1", content)
-            action_finished = True
-        _ensure_action_active()
-        tool_complete_callback(call_id, name, args, content)
-        _ensure_action_active()
-        evidence.append(
-            {
-                "call_id": call_id,
-                "name": name,
-                "args": args,
-                "content": content,
-            }
-        )
-        return content
-
-    if initial_tool_choice == "mystand_authorization":
-        match = _MYSTAND_REFERENCE_ID_RE.search(
-            _content_to_visible_text(user_message)
-        )
-        if not match:
-            return evidence
-        from tools.mystand_authorization_tool import mystand_authorization_tool_handler
-        from tools.mystand_resource_index_tool import mystand_resource_index_tool_handler
-
-        # WORK 强制最小索引前置：任何业务读取前必须先取得服务端 IndexReceipt。
-        execute(
-            "mystand_resource_index",
-            {
-                "operation": "list_resources",
-                "module_id": _trusted_mystand_module_id(system_prompt),
-                "status": "all",
-                "limit": 100,
-            },
-            mystand_resource_index_tool_handler,
-        )
-        execute(
-            "mystand_authorization",
-            {
-                "operation": "resolve",
-                "authorization_id": match.group(0).upper(),
-            },
-            mystand_authorization_tool_handler,
-        )
-        return evidence
-
-    if initial_tool_choice != "mystand_resource_index":
-        return evidence
-
-    from tools.mystand_resource_index_tool import mystand_resource_index_tool_handler
-
-    index_handler = mystand_resource_index_tool_handler
-    if isinstance(fact_requirement, dict):
-        index_handler = lambda args: _read_complete_mystand_resource_index(
-            args,
-            mystand_resource_index_tool_handler,
-        )
-    index_result = execute(
-        "mystand_resource_index",
-        {
-            "operation": "list_resources",
-            "module_id": (
-                str(fact_requirement.get("module_id") or "")
-                if isinstance(fact_requirement, dict)
-                else _trusted_mystand_module_id(system_prompt)
-            ),
-            "status": "all",
-            "limit": SIGNED_FACT_INDEX_PAGE_LIMIT,
-        },
-        index_handler,
-    )
-    if isinstance(fact_requirement, dict):
-        try:
-            index_payload = json.loads(_safe_tool_content(index_result))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return evidence
-        if (
-            not isinstance(index_payload, dict)
-            or index_payload.get("schema")
-            != "mystand.resource-index.complete.v1"
-            or index_payload.get("ok") is not True
-            or not isinstance(index_payload.get("items"), list)
-            or (
-                not index_payload["items"]
-                and fact_requirement.get("fact_kind") != "collection"
-            )
-            or index_payload.get("hasMore") is not False
-            or index_payload.get("nextCursor") not in (None, "")
-        ):
-            return evidence
-        if trusted_turn is not None and any(
-            name in fact_requirement
-            for name in (
-                "index_count",
-                "index_resource_refs_digest",
-                "index_has_more",
-            )
-        ):
-            receipt = getattr(trusted_turn, "index_receipt", None)
-            if (
-                receipt is None
-                or receipt.resource_count != fact_requirement.get("index_count")
-                or receipt.resource_refs_digest
-                != fact_requirement.get("index_resource_refs_digest")
-                or receipt.has_more is not fact_requirement.get("index_has_more")
-            ):
-                return evidence
-        query_plan = _mystand_fact_query_plan(fact_requirement)
-        if query_plan is not None:
-            from tools.mystand_query_tool import mystand_query_tool_handler
-
-            execute(
-                "mystand_query",
-                query_plan,
-                mystand_query_tool_handler,
-            )
-        return evidence
-
-    from tools.mystand_authorization_tool import mystand_authorization_tool_handler
-
-    selected = _select_mystand_index_candidate(index_result, user_message)
-    if selected is not None:
-        execute(
-            "mystand_authorization",
-            {
-                "operation": "resolve",
-                "resource_uid": str(selected.get("resourceUid") or ""),
-            },
-            mystand_authorization_tool_handler,
-        )
-    return evidence
-
-
-def _append_mystand_preexecuted_evidence(
-    result: Dict[str, Any],
-    evidence: List[Dict[str, Any]],
-) -> None:
-    """Attach auditable tool-shaped receipts for the existing egress gate."""
-    messages = result.setdefault("messages", [])
-    if not isinstance(messages, list):
-        messages = []
-        result["messages"] = messages
-    for item in evidence:
-        call_id = str(item.get("call_id") or "")
-        name = str(item.get("name") or "")
-        args = item.get("args") if isinstance(item.get("args"), dict) else {}
-        messages.extend([
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{
-                    "id": call_id,
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": json.dumps(
-                            args,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                    },
-                }],
-            },
-            {
-                "role": "tool",
-                "name": name,
-                "tool_call_id": call_id,
-                "content": item.get("content"),
-            },
-        ])
-
-
-def _build_guarded_fact_persistence_transcript(
-    conversation_history: Any,
-    *,
-    user_message: Any,
-    guarded_final_response: Any,
-) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Build a transcript without raw fact-model or tool-result bytes.
-
-    The returned history objects are reused by identity in the full messages
-    list so ``AIAgent._flush_messages_to_session_db`` recognizes them as prior
-    history instead of appending duplicates.
-    """
-
-    safe_history: List[Dict[str, Any]] = []
-    if isinstance(conversation_history, list):
-        for item in conversation_history:
-            if not isinstance(item, Mapping):
-                continue
-            role = str(item.get("role") or "").strip().lower()
-            if role not in {"user", "assistant"}:
-                continue
-            safe_history.append({
-                "role": role,
-                "content": _content_to_visible_text(item.get("content")),
-            })
-    safe_messages = list(safe_history)
-    safe_messages.append({
-        "role": "user",
-        "content": _content_to_visible_text(user_message),
-    })
-    safe_messages.append({
-        "role": "assistant",
-        "content": str(guarded_final_response or ""),
-    })
-    return safe_history, safe_messages
-
-
 _LOCAL_PATH_RE = re.compile(
     r"(?<![:/\w])/(?:root|opt|srv|var|etc)(?:/[^\s`'\"<>()\[\]{}，。；;]*)*"
 )
 _LOCAL_FILE_URL_RE = re.compile(r"file://[^\s`'\"<>()\[\]{}，。；;]*", re.IGNORECASE)
-_HTTP_URL_RE = re.compile(r"https?://[^\s`'\"<>()\[\]{}，。；;]+", re.IGNORECASE)
-_URL_READ_KEYWORD_RE = re.compile(
-    r"(读|看|读取|打开|总结|概括|分析|讨论|评价|解释|讲讲|看看|文章|链接|公众号|网页|"
-    r"read|open|summari[sz]e|analy[sz]e|article|link|webpage|url)",
-    re.IGNORECASE,
-)
-_IMAGE_READ_KEYWORD_RE = re.compile(
-    r"(这张图|那张图|上面.*图|刚才.*图|图里|图中|图片里|截图里|照片里|看图(?!谱|表|形)|(?<!知)识图(?!谱)|"
-    r"识别.*(?:图片|截图|照片|画面)|描述.*(?:图片|截图|照片|画面)|"
-    r"画面.*(?:什么|内容)|what.*(?:image|photo|picture|screenshot)|"
-    r"describe.*(?:image|photo|picture|screenshot))",
-    re.IGNORECASE,
-)
-_MYSTAND_GRAPH_PRODUCT_TERM_RE = re.compile(
-    r"(?:知识图谱|看图谱|图谱|图形中心|图表)",
-    re.IGNORECASE,
-)
-_EXPLICIT_VISUAL_MEDIA_TERM_RE = re.compile(
-    r"(?:图片|截图|照片|画面|图像|户型图|image|photo|picture|screenshot)",
-    re.IGNORECASE,
-)
-_TOOL_FAILURE_MARKER_RE = re.compile(
-    r"(error|failed|failure|exception|traceback|timeout|captcha|forbidden|unauthorized|"
-    r"login required|access denied|无法|失败|报错|超时|验证码|登录|无权限|403|401)",
-    re.IGNORECASE,
-)
-_SOURCE_MENTION_REQUEST_RE = re.compile(
-    r"(?:文章|文中|正文|链接|里面|里边|里头)[^，。；;?？！!\n]{0,24}提到(?:的|了)?"
-    r"(?P<tail>[^，。；;?？！!\n]{2,80})",
-    re.IGNORECASE,
-)
-_SOURCE_ABSENCE_MARKER_RE = re.compile(
-    r"(没(?:有)?提到|未提到|没有找到|未找到|不涉及|无(?:相关)?内容|不沾边|链接发错|"
-    r"does not mention|not mentioned|no mention|not in the article)",
-    re.IGNORECASE,
-)
-_URL_EVIDENCE_TOOLS = {
-    "mystand_parse",
-    "mystand_parser",
-    "web_extract",
-    "browser_navigate",
-    "browser_snapshot",
-    "browser_vision",
-}
-_IMAGE_EVIDENCE_TOOLS = {
-    "vision_analyze",
-    "browser_vision",
-    "ocr_image",
-    "mystand_parse",
-    "mystand_parser",
-}
-_URL_EVIDENCE_FAILURE = "我还没有成功读取到这个链接的正文，所以不能总结或分析里面的内容。"
-_IMAGE_EVIDENCE_FAILURE = "我现在没有成功看到这张图片的内容，所以不能描述画面或识别图片细节。"
-_URL_UNSUPPORTED_MENTION_FAILURE = "我已读取到这个链接，但正文里没有找到你说的这项内容，所以不能按文章内容展开分析。"
-_SOURCE_TERM_STOPWORDS = {
-    "这篇",
-    "这篇文章",
-    "文章",
-    "里面",
-    "里边",
-    "里头",
-    "提到",
-    "提到的",
-    "如何",
-    "怎么",
-    "怎样",
-    "看看",
-    "分析",
-    "分析一下",
-    "一下",
-    "这个",
-    "那个",
-    "内容",
-}
-
-
 def _sanitize_user_visible_text(text: Any) -> str:
     """Scrub local filesystem references before returning API-visible text.
 
@@ -1549,520 +399,6 @@ def _content_to_visible_text(content: Any) -> str:
     return str(content or "")
 
 
-def _content_has_image_part(content: Any) -> bool:
-    if isinstance(content, list):
-        for part in content:
-            if isinstance(part, dict):
-                ptype = str(part.get("type") or "").strip().lower()
-                if ptype in _IMAGE_PART_TYPES:
-                    return True
-    return False
-
-
-def _latest_turn_requires_url_evidence(user_message: Any) -> bool:
-    text = _content_to_visible_text(user_message)
-    urls = _HTTP_URL_RE.findall(text)
-    if not urls:
-        return False
-    if any("mp.weixin.qq.com" in url.lower() for url in urls):
-        return True
-    return bool(_URL_READ_KEYWORD_RE.search(text))
-
-
-def _latest_turn_requires_image_evidence(user_message: Any) -> bool:
-    text = _content_to_visible_text(user_message)
-    if _content_has_image_part(user_message):
-        return False
-    if (
-        _MYSTAND_GRAPH_PRODUCT_TERM_RE.search(text)
-        and not _EXPLICIT_VISUAL_MEDIA_TERM_RE.search(text)
-    ):
-        # Remove the product phrase and evaluate what remains.  This avoids
-        # treating "看图谱" as "看图", while still catching a second, real
-        # visual request such as "知识图谱旁边这张图是什么".
-        text = _MYSTAND_GRAPH_PRODUCT_TERM_RE.sub(" ", text)
-    return bool(_IMAGE_READ_KEYWORD_RE.search(text))
-
-
-def _should_buffer_stream_deltas(
-    user_message: Any,
-    *,
-    mystand_request: bool = False,
-    system_prompt: Any = None,
-    conversation_history: Optional[List[Dict[str, Any]]] = None,
-    fact_requirement: Optional[Dict[str, Any]] = None,
-    completion_protocol: str = "",
-) -> bool:
-    """Buffer signed or dynamic My Stand text until CompletionGuard."""
-    mystand_evidence_required = bool(
-        mystand_request
-        and (
-            completion_protocol == _MYSTAND_COMPLETION_PROTOCOL_V2
-            or _resolve_mystand_initial_tool_choice(
-                user_message,
-                system_prompt,
-                fact_requirement=fact_requirement,
-            )
-        )
-    )
-    mystand_write_required = bool(
-        mystand_request
-        and _requires_mystand_write_evidence(
-            user_message,
-            conversation_history,
-            None,
-        )
-    )
-    return bool(
-        mystand_evidence_required
-        or mystand_write_required
-        or _latest_turn_requires_url_evidence(user_message)
-        or _latest_turn_requires_image_evidence(user_message)
-    )
-
-
-def _conversation_has_image_input(
-    user_message: Any,
-    conversation_history: Optional[List[Dict[str, Any]]] = None,
-) -> bool:
-    if _content_has_image_part(user_message):
-        return True
-    for msg in reversed(conversation_history or []):
-        if not isinstance(msg, dict):
-            continue
-        if msg.get("role") == "user" and _content_has_image_part(msg.get("content")):
-            return True
-    return False
-
-
-def _safe_tool_content(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    try:
-        return json.dumps(content, ensure_ascii=False, default=str)
-    except Exception:
-        return str(content or "")
-
-
-def _tool_result_looks_successful(content: Any) -> bool:
-    text = _safe_tool_content(content).strip()
-    if not text:
-        return False
-    try:
-        payload = json.loads(text)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        payload = None
-    if isinstance(payload, dict):
-        if payload.get("ok") is True or payload.get("success") is True:
-            return True
-        status = payload.get("status")
-        if (
-            payload.get("ok") is False
-            or payload.get("success") is False
-            or payload.get("error")
-            or (isinstance(status, int) and status >= 400)
-        ):
-            return False
-    lowered = text.lower()
-    if '"success": true' in lowered or "'success': true" in lowered:
-        return True
-    if _TOOL_FAILURE_MARKER_RE.search(text):
-        return False
-    return len(text) >= 20
-
-
-def _mystand_index_has_candidates(content: Any) -> bool:
-    try:
-        payload = json.loads(_safe_tool_content(content))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return False
-    return bool(
-        isinstance(payload, dict)
-        and payload.get("ok") is True
-        and isinstance(payload.get("items"), list)
-        and payload["items"]
-    )
-
-
-def _source_text_for_evidence_tools(result: Any, evidence_tools: set[str]) -> str:
-    if not isinstance(result, dict):
-        return ""
-    messages = result.get("messages")
-    if not isinstance(messages, list):
-        return ""
-
-    call_names: Dict[str, str] = {}
-    for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "assistant":
-            continue
-        for call in msg.get("tool_calls") or []:
-            if not isinstance(call, dict):
-                continue
-            function = call.get("function") or {}
-            name = str(function.get("name") or call.get("name") or "")
-            call_id = str(call.get("id") or "")
-            if call_id and name:
-                call_names[call_id] = name
-
-    parts: List[str] = []
-    for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "tool":
-            continue
-        tool_name = str(msg.get("name") or "")
-        call_id = str(msg.get("tool_call_id") or "")
-        if call_id and not tool_name:
-            tool_name = call_names.get(call_id, "")
-        content = msg.get("content")
-        if tool_name in evidence_tools and _tool_result_looks_successful(content):
-            parts.append(_safe_tool_content(content))
-    return "\n".join(parts)
-
-
-def _extract_source_mention_terms(user_message: Any) -> List[str]:
-    text = _HTTP_URL_RE.sub("", _content_to_visible_text(user_message))
-    match = _SOURCE_MENTION_REQUEST_RE.search(text)
-    if not match:
-        return []
-    tail = match.group("tail")
-    tail = re.sub(r"(如何|怎么|怎样|请.*|帮我.*|分析.*|评价.*|看法.*)$", "", tail).strip()
-    raw_terms = re.findall(r"20\d{2}|[A-Za-z][A-Za-z0-9_-]{1,}|[\u4e00-\u9fff]{2,}", tail)
-    terms: List[str] = []
-    for term in raw_terms:
-        term = term.strip()
-        if not term or term in _SOURCE_TERM_STOPWORDS:
-            continue
-        if len(term) > 12:
-            for chunk in re.findall(r"[\u4e00-\u9fff]{2,4}", term):
-                if chunk not in _SOURCE_TERM_STOPWORDS:
-                    terms.append(chunk)
-            continue
-        terms.append(term)
-    return terms[:8]
-
-
-def _needs_source_absence_guard(user_message: Any, final_text: str, source_text: str) -> bool:
-    terms = _extract_source_mention_terms(user_message)
-    if not terms or not source_text:
-        return False
-    if _SOURCE_ABSENCE_MARKER_RE.search(final_text):
-        return False
-    source_lower = source_text.lower()
-    return not any(term.lower() in source_lower for term in terms)
-
-
-def _has_successful_tool_evidence(result: Any, evidence_tools: set[str]) -> bool:
-    if not isinstance(result, dict):
-        return False
-    messages = result.get("messages")
-    if not isinstance(messages, list):
-        return False
-
-    call_names: Dict[str, str] = {}
-    for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "assistant":
-            continue
-        for call in msg.get("tool_calls") or []:
-            if not isinstance(call, dict):
-                continue
-            function = call.get("function") or {}
-            name = str(function.get("name") or call.get("name") or "")
-            call_id = str(call.get("id") or "")
-            if call_id and name:
-                call_names[call_id] = name
-
-    for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "tool":
-            continue
-        tool_name = str(msg.get("name") or "")
-        call_id = str(msg.get("tool_call_id") or "")
-        if call_id and not tool_name:
-            tool_name = call_names.get(call_id, "")
-        if tool_name in evidence_tools and _tool_result_looks_successful(msg.get("content")):
-            return True
-    return False
-
-
-def _verified_mystand_failure_response(
-    result: Any,
-    evidence_tools: set[str],
-) -> str:
-    """Turn an executed negative receipt into one precise, non-model answer."""
-    if not isinstance(result, dict) or not isinstance(result.get("messages"), list):
-        return ""
-    call_names: Dict[str, str] = {}
-    for msg in result["messages"]:
-        if not isinstance(msg, dict) or msg.get("role") != "assistant":
-            continue
-        for call in msg.get("tool_calls") or []:
-            if not isinstance(call, dict):
-                continue
-            function = call.get("function") or {}
-            call_id = str(call.get("id") or "")
-            name = str(function.get("name") or call.get("name") or "")
-            if call_id and name:
-                call_names[call_id] = name
-    for msg in reversed(result["messages"]):
-        if not isinstance(msg, dict) or msg.get("role") != "tool":
-            continue
-        name = str(msg.get("name") or "")
-        if not name:
-            name = call_names.get(str(msg.get("tool_call_id") or ""), "")
-        if name not in evidence_tools:
-            continue
-        try:
-            payload = json.loads(_safe_tool_content(msg.get("content")))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if not isinstance(payload, dict) or payload.get("ok") is not False:
-            continue
-        try:
-            status = int(payload.get("status") or 0)
-        except (TypeError, ValueError):
-            status = 0
-        if status == 403:
-            return "当前没有权限让小伴读取这份资料。"
-        if status == 404:
-            return "没有找到这份资料，或者这个站内 ID 已失效。"
-        if status == 409:
-            return "这份资料目前无法唯一定位，请补充更完整的资料名称。"
-        if status >= 500:
-            return "站内资料读取暂时没有接稳，请稍后再试。"
-    return ""
-
-
-def _bind_verification_to_visible_text(text: str, result: Any) -> str:
-    """Keep a terminal receipt only when it hashes the actual egress text."""
-    if not isinstance(result, dict):
-        return text
-    verification = result.get("_mystand_trusted_verification")
-    if not isinstance(verification, dict):
-        return text
-    actual_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    if verification.get("output_digest") != actual_digest:
-        result.pop("_mystand_trusted_verification", None)
-        result["_mystand_completion_allowed"] = False
-    return text
-
-
-def _has_system_receipt_projection(result: Any) -> bool:
-    verification = (
-        result.get("_mystand_trusted_verification")
-        if isinstance(result, dict)
-        else None
-    )
-    return bool(
-        isinstance(verification, dict)
-        and (
-            verification.get("output_presentation")
-            or verification.get("outputPresentation")
-        )
-        == "system-receipt"
-    )
-
-
-def _guard_evidence_backed_response(
-    text: Any,
-    *,
-    user_message: Any,
-    conversation_history: Optional[List[Dict[str, Any]]] = None,
-    result: Any = None,
-) -> str:
-    """Fail closed for URL/image reading when the turn has no real evidence.
-
-    This is an API egress guard, not a prompt preference. If Xiaoban did not
-    actually read a link or see an image, user-visible output must say that
-    plainly instead of describing unobserved content.
-    """
-    final_text = _sanitize_user_visible_text(text)
-    has_fact_requirement = bool(
-        isinstance(result, dict)
-        and isinstance(result.get("_mystand_fact_requirement"), dict)
-    )
-    has_dynamic_completion = bool(
-        isinstance(result, dict)
-        and result.get("_mystand_completion_protocol")
-        == _MYSTAND_COMPLETION_PROTOCOL_V2
-    )
-    trusted_turn = (
-        result.get("_trusted_turn")
-        if isinstance(result, dict)
-        else None
-    )
-    has_dynamic_lifecycle = bool(
-        has_dynamic_completion
-        and trusted_turn is not None
-        and (
-            getattr(trusted_turn, "action_calls", None)
-            or getattr(trusted_turn, "action_results", None)
-        )
-    )
-    if not final_text and not has_fact_requirement:
-        return final_text
-    if isinstance(result, dict):
-        result.pop("_mystand_trusted_verification", None)
-        result["_mystand_completion_allowed"] = False
-
-    if _requires_mystand_write_evidence(
-        user_message,
-        conversation_history,
-        result,
-    ):
-        integrity_decision = guard_mutation_success_claim(final_text, result)
-        if integrity_decision.blocked:
-            logger.warning(
-                "My Stand integrity guard blocked unsupported mutation success claim: "
-                "evidence_status=%s",
-                integrity_decision.evidence_status,
-            )
-            return integrity_decision.text
-        final_text = integrity_decision.text
-
-    required_evidence_groups: list[set[str]] = []
-    if (
-        isinstance(result, dict)
-        and not has_fact_requirement
-        and not has_dynamic_lifecycle
-    ):
-        for raw_group in result.get("_mystand_required_evidence_groups") or []:
-            if isinstance(raw_group, (list, tuple, set)):
-                group = {str(item) for item in raw_group if str(item)}
-                if group:
-                    required_evidence_groups.append(group)
-        legacy_tools = {
-            str(item)
-            for item in result.get("_mystand_required_evidence_tools") or []
-            if str(item)
-        }
-        if legacy_tools:
-            required_evidence_groups.append(legacy_tools)
-        if result.get("_mystand_required_evidence_tool"):
-            required_evidence_groups.append(
-                {str(result.get("_mystand_required_evidence_tool"))}
-            )
-    missing_evidence_groups = [
-        group
-        for group in required_evidence_groups
-        if not _has_successful_tool_evidence(result, group)
-    ]
-    if missing_evidence_groups:
-        verified_failure = _verified_mystand_failure_response(
-            result,
-            set().union(*missing_evidence_groups),
-        )
-        if verified_failure:
-            return verified_failure
-        logger.warning(
-            "My Stand evidence gate blocked unverified response: missing_groups=%s",
-            ";".join(
-                ",".join(sorted(group))
-                for group in missing_evidence_groups
-            ),
-        )
-        return _MYSTAND_EVIDENCE_FAILURE
-
-    if isinstance(result, dict) and result.get("_mystand_request") is True:
-        from xiaoban.trusted_runtime.completion_guard import (
-            check_mystand_final_answer,
-        )
-
-        completion = check_mystand_final_answer(
-            final_text,
-            user_message=user_message,
-            conversation_history=conversation_history,
-            result=result,
-            channel="web",
-            account_id=str(result.get("_mystand_user_id") or ""),
-            request_id=str(result.get("_mystand_request_id") or ""),
-            message_id=str(result.get("_mystand_message_id") or ""),
-        )
-        if not completion.allowed:
-            logger.warning(
-                "unsupported_claim_blocked reason=%s channel=web",
-                completion.reason,
-            )
-            if (
-                result.get("_mystand_completion_protocol")
-                == _MYSTAND_COMPLETION_PROTOCOL_V2
-                and result.get("_mystand_evidence_required") is True
-            ):
-                # A server-classified work turn without a valid evidence- or
-                # failure-bound receipt is a failed execution, not an
-                # assistant reply. Never replace the model's lie with another
-                # fixed assistant sentence.
-                result["completed"] = False
-                result["failed"] = True
-                result["partial"] = False
-                result["error"] = "trusted work did not complete"
-                result["final_response"] = ""
-                result["messages"] = []
-                result["_mystand_completion_allowed"] = False
-                return ""
-            return completion.text
-        result["_mystand_completion_allowed"] = True
-        if completion.verification is not None:
-            result["_mystand_trusted_verification"] = dict(
-                completion.verification
-            )
-            if _has_system_receipt_projection(result):
-                # The text is a server-owned explanation of an incomplete
-                # execution, not a successful assistant answer.  Keep it
-                # visible, but make every outer protocol carry the same failed
-                # terminal truth.
-                result["completed"] = False
-                result["failed"] = True
-                result["partial"] = False
-                result["error"] = "trusted work did not complete"
-            elif (
-                completion.verification.get("completion_kind")
-                == "failure-bound"
-            ):
-                # The business task failed, but the Agent successfully closed
-                # the turn with a bound final reply. Keep task truth in the
-                # receipt instead of misreporting a transport/runtime failure.
-                result["completed"] = True
-                result["failed"] = False
-                result["partial"] = False
-                result.pop("error", None)
-        elif (
-            result.get("_mystand_completion_protocol")
-            == _MYSTAND_COMPLETION_PROTOCOL_V2
-        ):
-            # The v2 request header grants a capability; it does not turn
-            # ordinary chat, web/file reads, writes, or unrelated trusted
-            # actions into evidence-bound completion outcomes.
-            result.pop("_mystand_completion_protocol", None)
-            result.pop("_mystand_completion_binding", None)
-        final_text = completion.text
-
-    url_required = _latest_turn_requires_url_evidence(user_message)
-    image_required = _latest_turn_requires_image_evidence(user_message)
-    if not url_required and not image_required:
-        return _bind_verification_to_visible_text(final_text, result)
-
-    if url_required:
-        if not _has_successful_tool_evidence(result, _URL_EVIDENCE_TOOLS):
-            return _bind_verification_to_visible_text(
-                _URL_EVIDENCE_FAILURE,
-                result,
-            )
-        source_text = _source_text_for_evidence_tools(result, _URL_EVIDENCE_TOOLS)
-        if _needs_source_absence_guard(user_message, final_text, source_text):
-            return _bind_verification_to_visible_text(
-                _URL_UNSUPPORTED_MENTION_FAILURE,
-                result,
-            )
-
-    image_has_input = _conversation_has_image_input(user_message, conversation_history)
-    image_has_tool = _has_successful_tool_evidence(result, _IMAGE_EVIDENCE_TOOLS)
-    if image_required and not (image_has_input or image_has_tool):
-        return _bind_verification_to_visible_text(
-            _IMAGE_EVIDENCE_FAILURE,
-            result,
-        )
-
-    return _bind_verification_to_visible_text(final_text, result)
-
-
 def _finalize_mystand_egress_result(
     result: Any,
     *,
@@ -2076,13 +412,7 @@ def _finalize_mystand_egress_result(
     if is_mystand_egress_sealed(result):
         return result["final_response"]
     discard_untrusted_mystand_egress_projection(result)
-    existing = result.get("final_response")
-    final_text = _guard_evidence_backed_response(
-        existing or "",
-        user_message=user_message,
-        conversation_history=conversation_history or [],
-        result=result,
-    )
+    final_text = _sanitize_user_visible_text(result.get("final_response", ""))
     result["final_response"] = final_text
     result["_mystand_egress_output_digest"] = hashlib.sha256(
         final_text.encode("utf-8")
@@ -2098,88 +428,14 @@ def _resolved_mystand_egress_text(
     user_message: Any,
     conversation_history: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    """Reuse a sealed projection; otherwise apply the ordinary egress guard."""
+    """Reuse a sealed projection; otherwise sanitize the model output."""
 
     if is_mystand_egress_sealed(result):
         return result["final_response"]
     discard_untrusted_mystand_egress_projection(result)
-    return _guard_evidence_backed_response(
-        result.get("final_response", "") if isinstance(result, dict) else "",
-        user_message=user_message,
-        conversation_history=conversation_history or [],
-        result=result,
+    return _sanitize_user_visible_text(
+        result.get("final_response", "") if isinstance(result, dict) else ""
     )
-
-
-def _install_mystand_completion_persistence_guard(
-    agent: Any,
-    trusted_turn: Any,
-) -> None:
-    """Persist only the terminal CompletionGuard projection for a bound turn."""
-    original_persist = getattr(agent, "_persist_session", None)
-    if not callable(original_persist):
-        return
-    safe_assistant: Dict[str, Any] = {
-        "role": "assistant",
-        "content": "",
-    }
-
-    def _guarded_persist(
-        messages: Any,
-        conversation_history: Any = None,
-    ) -> None:
-        if not isinstance(messages, list):
-            return
-        last_user_index = next(
-            (
-                index
-                for index in range(len(messages) - 1, -1, -1)
-                if isinstance(messages[index], dict)
-                and messages[index].get("role") == "user"
-            ),
-            -1,
-        )
-        if last_user_index < 0:
-            return
-        safe_messages = list(messages[: last_user_index + 1])
-        terminal_text = ""
-        for message in reversed(messages[last_user_index + 1 :]):
-            if (
-                isinstance(message, dict)
-                and message.get("role") == "assistant"
-                and not message.get("tool_calls")
-            ):
-                terminal_text = _content_to_visible_text(
-                    message.get("content")
-                )
-                if terminal_text:
-                    break
-        if terminal_text:
-            from xiaoban.trusted_runtime.completion_guard import (
-                check_completion,
-            )
-
-            decision = check_completion(terminal_text, trusted_turn)
-            if (
-                decision.allowed
-                and not _has_system_receipt_projection(
-                    {
-                        "_mystand_trusted_verification":
-                            decision.verification or {}
-                    }
-                )
-            ):
-                safe_assistant["content"] = decision.text
-                safe_messages.append(safe_assistant)
-        original_persist(safe_messages, conversation_history)
-
-    agent._persist_session = _guarded_persist
-
-
-# Compatibility surface for existing signed-fact tests/importers.
-_install_signed_fact_persistence_guard = (
-    _install_mystand_completion_persistence_guard
-)
 
 
 def _normalize_timezone_name(value: Any, default: str = DEFAULT_USER_TIMEZONE) -> str:
@@ -4143,11 +2399,10 @@ class APIServerAdapter(
             async_delivery=self._session_events_requested(request),
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
-        final_response = _guard_evidence_backed_response(
-            result.get("final_response", "") if isinstance(result, dict) else "",
+        final_response = _resolved_mystand_egress_text(
+            result,
             user_message=user_message,
             conversation_history=history,
-            result=result,
         )
         headers = {"X-Xiaoban-Session-Id": effective_session_id or session_id}
         if gateway_session_key:
@@ -4193,15 +2448,7 @@ class APIServerAdapter(
         run_id = f"run_{uuid.uuid4().hex}"
         seq = 0
         history = self._conversation_history_for_session(session_id)
-        guard_stream_deltas = _should_buffer_stream_deltas(
-            user_message,
-            mystand_request=self._header_present(
-                request.headers,
-                "X-Xiaoban-Toolset-Policy",
-            ),
-            system_prompt=system_prompt,
-            conversation_history=history,
-        )
+        guard_stream_deltas = False
 
         def _event_payload(name: str, payload: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
             nonlocal seq
@@ -4252,11 +2499,10 @@ class APIServerAdapter(
                     request_headers=request.headers,
                     async_delivery=self._session_events_requested(request),
                 )
-                final_response = _guard_evidence_backed_response(
-                    result.get("final_response", "") if isinstance(result, dict) else "",
+                final_response = _resolved_mystand_egress_text(
+                    result,
                     user_message=user_message,
                     conversation_history=history,
-                    result=result,
                 )
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
                 turn_messages = self._turn_transcript_messages(history, user_message, result) if isinstance(result, dict) else []
@@ -4549,120 +2795,6 @@ class APIServerAdapter(
 
         history = _trim_chat_history_for_context(history)
 
-        fact_requirement: Optional[Dict[str, Any]] = None
-        completion_protocol = _fact_header_value(
-            request.headers,
-            _MYSTAND_COMPLETION_PROTOCOL_HEADER,
-        )
-        try:
-            completion_evidence_required = (
-                _mystand_dynamic_evidence_required(
-                    request.headers,
-                    completion_protocol=completion_protocol,
-                )
-            )
-            completion_business_tools_disabled = (
-                _mystand_business_tools_disabled(
-                    request.headers,
-                    completion_protocol=completion_protocol,
-                )
-            )
-        except ValueError:
-            return web.json_response(
-                _openai_error(
-                    "Invalid My Stand completion protocol",
-                    code="invalid_completion_protocol",
-                ),
-                status=400,
-            )
-        completion_invocation_fingerprint = _fact_header_value(
-            request.headers,
-            _MYSTAND_INVOCATION_FINGERPRINT_HEADER,
-        )
-        completion_binding: Dict[str, Any] = {}
-        fact_header_present = bool(
-            _fact_header_value(request.headers, _MYSTAND_FACT_REQUIREMENT_HEADER)
-            or _fact_header_value(request.headers, _MYSTAND_FACT_SIGNATURE_HEADER)
-        )
-        if completion_protocol:
-            if (
-                completion_protocol != _MYSTAND_COMPLETION_PROTOCOL_V2
-                or not mystand_request
-                or fact_header_present
-            ):
-                return web.json_response(
-                    _openai_error(
-                        "Invalid My Stand completion protocol",
-                        code="invalid_completion_protocol",
-                    ),
-                    status=400,
-                )
-            try:
-                completion_binding = (
-                    _mystand_completion_expected_binding(
-                        request.headers,
-                        session_id=session_id,
-                    )
-                )
-            except ValueError:
-                return web.json_response(
-                    _openai_error(
-                        "Invalid My Stand completion binding",
-                        code="invalid_completion_binding",
-                    ),
-                    status=400,
-                )
-        elif completion_invocation_fingerprint:
-            return web.json_response(
-                _openai_error(
-                    "Invalid My Stand completion protocol",
-                    code="invalid_completion_protocol",
-                ),
-                status=400,
-            )
-        if fact_header_present:
-            if not mystand_request:
-                return web.json_response(
-                    _openai_error(
-                        "Fact requirements are only accepted from My Stand",
-                        code="invalid_fact_requirement",
-                    ),
-                    status=400,
-                )
-            try:
-                fact_requirement = _parse_mystand_fact_requirement_header(
-                    request.headers,
-                    signing_key=self._api_key,
-                    expected_binding=_mystand_fact_expected_binding(
-                        request.headers,
-                        session_id=session_id,
-                    ),
-                    expected_user_message=_content_to_visible_text(
-                        user_message
-                    ),
-                )
-            except ValueError:
-                # Do not reflect signed payload/binding details to the client or
-                # logs.  The stable code is sufficient for deterministic retry.
-                return web.json_response(
-                    _openai_error(
-                        "Invalid My Stand fact requirement",
-                        code="invalid_fact_requirement",
-                    ),
-                    status=400,
-                )
-        if (
-            fact_requirement is not None
-            and self._session_events_requested(request)
-        ):
-            return web.json_response(
-                _openai_error(
-                    "Signed fact turns cannot use asynchronous session delivery",
-                    code="fact_async_delivery_unsupported",
-                ),
-                status=409,
-            )
-
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())
@@ -4759,17 +2891,7 @@ class APIServerAdapter(
                 return limited
             import queue as _q
             _stream_q: _q.Queue = _q.Queue()
-            guard_stream_deltas = bool(
-                true_moa_snapshot is not None
-                or _should_buffer_stream_deltas(
-                    user_message,
-                    mystand_request=mystand_request,
-                    system_prompt=system_prompt,
-                    conversation_history=history,
-                    fact_requirement=fact_requirement,
-                    completion_protocol=completion_protocol,
-                )
-            )
+            guard_stream_deltas = true_moa_snapshot is not None
 
             def _on_delta(delta):
                 # Filter out None — the agent fires stream_delta_callback(None)
@@ -4787,9 +2909,37 @@ class APIServerAdapter(
             # Keep one locked lifecycle ledger so every visible call id gets
             # exactly one terminal event, including interrupted tool batches.
             _tool_lifecycle_lock = threading.Lock()
-            _open_tool_calls: dict[str, str] = {}
+            _open_tool_calls: dict[
+                str,
+                tuple[str, Optional[tuple[str, str]]],
+            ] = {}
             _seen_tool_call_ids: set[str] = set()
             _tool_lifecycle_closed = False
+            _started_turn: Optional[Dict[str, str]] = None
+            _turn_lifecycle_closed = False
+
+            def _on_agent_progress(
+                event_type,
+                request_id=None,
+                turn_id=None,
+                _details=None,
+                **_kwargs,
+            ):
+                """Accept only a trusted TurnContext start from Agent progress."""
+                nonlocal _started_turn
+                started = _canonical_turn_start_projection(
+                    stream_delivery_id,
+                    event_type,
+                    request_id,
+                    turn_id,
+                )
+                if started is None:
+                    return
+                with _tool_lifecycle_lock:
+                    if _turn_lifecycle_closed or _started_turn is not None:
+                        return
+                    _started_turn = started
+                    _stream_q.put(("__tool_progress__", dict(started)))
 
             def _on_tool_start(tool_call_id, function_name, function_args):
                 """Emit ``xiaoban.tool.progress`` with ``status: running``.
@@ -4816,17 +2966,46 @@ class APIServerAdapter(
                 with _tool_lifecycle_lock:
                     if _tool_lifecycle_closed or tool_call_id in _seen_tool_call_ids:
                         return
+                    binding: Optional[tuple[str, str]] = None
+                    if mystand_request:
+                        started = _canonical_turn_start_projection(
+                            stream_delivery_id,
+                            (_started_turn or {}).get("type"),
+                            (_started_turn or {}).get("requestId"),
+                            (_started_turn or {}).get("turnId"),
+                        )
+                        if started is None:
+                            return
+                        binding = (
+                            started["requestId"],
+                            started["turnId"],
+                        )
                     _seen_tool_call_ids.add(tool_call_id)
-                    _open_tool_calls[tool_call_id] = function_name
-                    _stream_q.put(("__tool_progress__", {
+                    _open_tool_calls[tool_call_id] = (
+                        function_name,
+                        binding,
+                    )
+                    payload = {
                         "tool": function_name,
                         "emoji": get_tool_emoji(function_name),
                         "label": label,
                         "toolCallId": tool_call_id,
                         "status": "running",
-                    }))
+                    }
+                    if binding is not None:
+                        payload.update({
+                            "requestId": binding[0],
+                            "turnId": binding[1],
+                        })
+                    _stream_q.put(("__tool_progress__", payload))
 
-            def _on_tool_complete(tool_call_id, function_name, function_args, function_result):
+            def _on_tool_complete(
+                tool_call_id,
+                function_name,
+                function_args,
+                function_result,
+                tool_result_metadata=None,
+            ):
                 """Emit the matching terminal tool event.
 
                 Dropped if the start was filtered (internal tool, missing
@@ -4835,41 +3014,96 @@ class APIServerAdapter(
                 """
                 if not tool_call_id:
                     return
-                status = (
-                    "failed"
-                    if _mystand_tool_result_failed(function_name, function_result)
-                    else "completed"
-                )
                 with _tool_lifecycle_lock:
-                    if _open_tool_calls.pop(tool_call_id, None) is None:
+                    open_call = _open_tool_calls.pop(tool_call_id, None)
+                    if open_call is None:
                         return
-                    _stream_q.put(("__tool_progress__", {
-                        "tool": function_name,
+                    open_function_name, binding = open_call
+                    started_turn = (
+                        {
+                            "type": "turn.started",
+                            "requestId": binding[0],
+                            "turnId": binding[1],
+                        }
+                        if binding is not None
+                        else None
+                    )
+                    canonical_terminal = _canonical_tool_terminal_projection(
+                        tool_call_id,
+                        open_function_name,
+                        tool_result_metadata,
+                        expected_delivery_id=stream_delivery_id,
+                        started_turn=started_turn,
+                        require_turn_binding=mystand_request,
+                    )
+                    if canonical_terminal is None:
+                        status = (
+                            "failed"
+                            if _mystand_tool_result_failed(
+                                open_function_name,
+                                function_result,
+                            )
+                            else "completed"
+                        )
+                        public_metadata = (
+                            {
+                                "requestId": binding[0],
+                                "turnId": binding[1],
+                            }
+                            if binding is not None
+                            else {}
+                        )
+                    else:
+                        status, public_metadata = canonical_terminal
+                    payload = {
+                        "tool": open_function_name,
                         "toolCallId": tool_call_id,
                         "status": status,
-                    }))
+                    }
+                    payload.update(public_metadata)
+                    _stream_q.put(("__tool_progress__", payload))
 
             def _close_open_tool_calls() -> None:
                 """Fail every visible call left open when the agent exits."""
                 nonlocal _tool_lifecycle_closed
                 with _tool_lifecycle_lock:
                     _tool_lifecycle_closed = True
-                    for tool_call_id, function_name in _open_tool_calls.items():
-                        _stream_q.put(("__tool_progress__", {
+                    for tool_call_id, open_call in _open_tool_calls.items():
+                        function_name, binding = open_call
+                        payload = {
                             "tool": function_name,
                             "toolCallId": tool_call_id,
                             "status": "failed",
-                        }))
+                        }
+                        if binding is not None:
+                            payload.update({
+                                "requestId": binding[0],
+                                "turnId": binding[1],
+                            })
+                        _stream_q.put(("__tool_progress__", payload))
                     _open_tool_calls.clear()
+
+            def _close_turn_lifecycle(result: Any) -> None:
+                """Emit one turn terminal from the final settled run result."""
+                nonlocal _turn_lifecycle_closed
+                with _tool_lifecycle_lock:
+                    if _turn_lifecycle_closed:
+                        return
+                    _turn_lifecycle_closed = True
+                    terminal = _canonical_turn_terminal_projection(
+                        stream_delivery_id,
+                        _started_turn,
+                        result,
+                    )
+                    if terminal is not None:
+                        _stream_q.put(("__tool_progress__", terminal))
 
             # Start agent in background.  agent_ref is a mutable container
             # so the SSE writer can interrupt the agent on client disconnect.
             #
-            # ``tool_progress_callback`` is intentionally not wired here:
-            # it would duplicate every emit because ``run_agent`` fires it
-            # side-by-side with ``tool_start_callback``/``tool_complete_callback``.
-            # The structured callbacks are strictly richer (they carry the
-            # tool_call id), so they own the chat-completions SSE channel.
+            # Structured callbacks remain the sole owner of tool SSE.  The
+            # generic progress callback below filters exclusively for the
+            # Agent's ``turn.started`` signal and ignores tool/thinking events.
             #
             # Trusted My Stand streams additionally register in the
             # idempotency cache (inflight task + agent_ref), so a /stop with
@@ -4878,89 +3112,102 @@ class APIServerAdapter(
             agent_ref = [None, False, None]
 
             async def _stream_compute():
-                try:
-                    if (
-                        stream_scoped_key
-                        and agent_ref[1]
-                        and (
-                            not normal_durable_intent
+                if (
+                    stream_scoped_key
+                    and agent_ref[1]
+                    and (
+                        not normal_durable_intent
+                    )
+                ):
+                    raise CompletionStoppedError("request stopped before execution")
+                result, usage = await self._run_agent(
+                    user_message=user_message,
+                    conversation_history=history,
+                    ephemeral_system_prompt=system_prompt,
+                    session_id=session_id,
+                    stream_delta_callback=_on_delta,
+                    tool_progress_callback=_on_agent_progress,
+                    tool_start_callback=_on_tool_start,
+                    tool_complete_callback=_on_tool_complete,
+                    agent_ref=agent_ref,
+                    gateway_session_key=gateway_session_key,
+                    request_headers=request.headers,
+                    async_delivery=self._session_events_requested(request),
+                    true_moa_snapshot=true_moa_snapshot,
+                    paid_call_usage_callback=(
+                        (
+                            lambda ledger: _idem_cache.persist_usage(
+                                stream_scoped_key,
+                                stream_idem_fp,
+                                ledger,
+                            )
                         )
-                    ):
-                        raise CompletionStoppedError("request stopped before execution")
-                    result, usage = await self._run_agent(
+                        if durable_request
+                        else None
+                    ),
+                )
+                if (
+                    true_moa_snapshot is not None
+                    and isinstance(result, dict)
+                    and result.get("completed", True)
+                    and not result.get("failed")
+                    and not result.get("partial")
+                    and not result.get("interrupted")
+                ):
+                    if not is_mystand_egress_sealed(result):
+                        raise RuntimeError(
+                            "true MoA egress was not sealed",
+                        )
+                    _resolved_mystand_egress_text(
+                        result,
                         user_message=user_message,
                         conversation_history=history,
-                        ephemeral_system_prompt=system_prompt,
-                        session_id=session_id,
-                        stream_delta_callback=_on_delta,
-                        tool_start_callback=_on_tool_start,
-                        tool_complete_callback=_on_tool_complete,
-                        agent_ref=agent_ref,
-                        gateway_session_key=gateway_session_key,
-                        request_headers=request.headers,
-                        async_delivery=(
-                            False
-                            if fact_requirement is not None
-                            else self._session_events_requested(request)
-                        ),
-                        fact_requirement=fact_requirement,
-                        completion_protocol=completion_protocol,
-                        completion_binding=completion_binding,
-                        dynamic_evidence_required=(
-                            completion_evidence_required
-                        ),
-                        business_tools_disabled=(
-                            completion_business_tools_disabled
-                        ),
-                        true_moa_snapshot=true_moa_snapshot,
-                        paid_call_usage_callback=(
-                            (
-                                lambda ledger: _idem_cache.persist_usage(
-                                    stream_scoped_key,
-                                    stream_idem_fp,
-                                    ledger,
-                                )
-                            )
-                            if durable_request
-                            else None
+                    )
+                return result, usage
+
+            async def _stream_owner():
+                settled_result = None
+                try:
+                    if stream_scoped_key:
+                        settled_result, usage = await _idem_cache.get_or_set(
+                            stream_scoped_key,
+                            stream_idem_fp,
+                            _stream_compute,
+                            agent_ref=agent_ref,
+                            durable=durable_request,
+                            outcome_binding=stream_outcome_binding,
+                        )
+                    else:
+                        settled_result, usage = await _stream_compute()
+                    return settled_result, usage
+                except BaseException as terminal_error:
+                    stopped = isinstance(
+                        terminal_error,
+                        (
+                            CompletionStoppedError,
+                            asyncio.CancelledError,
+                            KeyboardInterrupt,
                         ),
                     )
-                    if (
-                        true_moa_snapshot is not None
-                        and isinstance(result, dict)
-                        and result.get("completed", True)
-                        and not result.get("failed")
-                        and not result.get("partial")
-                        and not result.get("interrupted")
-                    ):
-                        if not is_mystand_egress_sealed(result):
-                            raise RuntimeError(
-                                "true MoA egress was not sealed",
-                            )
-                        _resolved_mystand_egress_text(
-                            result,
-                            user_message=user_message,
-                            conversation_history=history,
-                        )
-                    return result, usage
+                    # Close an already-started turn without reflecting the
+                    # exception object or message into public lifecycle data.
+                    # If no trusted start was accepted, the projection below
+                    # emits nothing, preserving the pre-turn failure boundary.
+                    settled_result = {
+                        "completed": False,
+                        "failed": True,
+                        "partial": False,
+                        "interrupted": stopped,
+                    }
+                    raise
                 finally:
-                    # Runs for success, provider/tool exceptions, explicit
-                    # /stop cancellation, client disconnect cancellation and
-                    # BaseException paths such as sequential KeyboardInterrupt.
-                    # This enqueue happens before the task's EOS callback.
+                    # Open tools close first.  A validated turn terminal is then
+                    # queued from the final idempotency/settlement result before
+                    # the task done callback appends the SSE EOS sentinel.
                     _close_open_tool_calls()
+                    _close_turn_lifecycle(settled_result)
 
-            if stream_scoped_key:
-                agent_task = asyncio.ensure_future(_idem_cache.get_or_set(
-                    stream_scoped_key,
-                    stream_idem_fp,
-                    _stream_compute,
-                    agent_ref=agent_ref,
-                    durable=durable_request,
-                    outcome_binding=stream_outcome_binding,
-                ))
-            else:
-                agent_task = asyncio.ensure_future(_stream_compute())
+            agent_task = asyncio.ensure_future(_stream_owner())
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
             agent_task.add_done_callback(lambda _fut: _stream_q.put(None))
@@ -5047,21 +3294,8 @@ class APIServerAdapter(
                     session_id=session_id,
                     gateway_session_key=gateway_session_key,
                     request_headers=request.headers,
-                    async_delivery=(
-                        False
-                        if fact_requirement is not None
-                        else self._session_events_requested(request)
-                    ),
+                    async_delivery=self._session_events_requested(request),
                     agent_ref=agent_ref,
-                    fact_requirement=fact_requirement,
-                    completion_protocol=completion_protocol,
-                    completion_binding=completion_binding,
-                    dynamic_evidence_required=(
-                        completion_evidence_required
-                    ),
-                    business_tools_disabled=(
-                        completion_business_tools_disabled
-                    ),
                     true_moa_snapshot=true_moa_snapshot,
                     paid_call_usage_callback=paid_call_usage_callback,
                 )
@@ -5327,20 +3561,6 @@ class APIServerAdapter(
             )
             xiaoban_state["outcome_id"] = outcome_id
             xiaoban_state["output_digest"] = output_digest
-        trusted_verification = result.get("_mystand_trusted_verification")
-        if isinstance(trusted_verification, dict):
-            xiaoban_state = response_data.setdefault(
-                "xiaoban",
-                {
-                    "completed": completed,
-                    "partial": is_partial,
-                    "failed": is_failed,
-                },
-            )
-            xiaoban_state["trusted_verification"] = dict(
-                trusted_verification
-            )
-
         return web.json_response(response_data, headers=response_headers)
 
     async def _write_sse_chat_completion(
@@ -5501,60 +3721,6 @@ class APIServerAdapter(
                     "choices": [{"index": 0, "delta": {"content": guarded_final}, "finish_reason": None}],
                 }
                 await response.write(f"data: {json.dumps(content_chunk)}\n\n".encode())
-
-            # Trusted work turns surface their verification receipt as a
-            # dedicated SSE event after the content chunk, before finish.
-            # Signed fact turns may emit only the full receipt produced by the
-            # successful terminal CompletionGuard decision.
-            if (
-                isinstance(result, dict)
-                and result.get("_mystand_request")
-                and (
-                    not run_terminal_failure
-                    or _has_system_receipt_projection(result)
-                )
-            ):
-                fact_verification = result.get("_mystand_trusted_verification")
-                verification_emitted = False
-                if isinstance(fact_verification, dict):
-                    await response.write(
-                        (
-                            "event: xiaoban.trusted.verification\n"
-                            f"data: {json.dumps(fact_verification, ensure_ascii=False)}\n\n"
-                        ).encode()
-                    )
-                    verification_emitted = True
-                trusted_turn = result.get("_trusted_turn")
-                verified_evidence = [
-                    item
-                    for item in (getattr(trusted_turn, "evidence", None) or [])
-                    if getattr(item, "status", "") == "success"
-                    and getattr(item, "verification_status", "") == "verified"
-                ]
-                request_id = str(getattr(trusted_turn, "request_id", "") or "")
-                if (
-                    not verification_emitted
-                    and result.get("_mystand_completion_protocol")
-                    != _MYSTAND_COMPLETION_PROTOCOL_V2
-                    and getattr(trusted_turn, "completion_protocol", "")
-                    != _MYSTAND_COMPLETION_PROTOCOL_V2
-                    and not isinstance(
-                        result.get("_mystand_fact_requirement"),
-                        dict,
-                    )
-                    and result.get("_mystand_completion_allowed") is True
-                    and trusted_turn is not None
-                    and verified_evidence
-                    and request_id == str(result.get("_mystand_request_id") or "")
-                ):
-                    verification = {
-                        "verified": True,
-                        "action_count": len(verified_evidence),
-                        "request_id": request_id,
-                    }
-                    await response.write(
-                        f"event: xiaoban.trusted.verification\ndata: {json.dumps(verification, ensure_ascii=False)}\n\n".encode()
-                    )
 
             outcome_id = (
                 result.get("_true_moa_outcome_id")
@@ -6099,11 +4265,10 @@ class APIServerAdapter(
                 # deltas were streamed (e.g. some providers only emit
                 # the full response at the end), emit a single fallback
                 # delta so Responses clients still receive a live text part.
-                agent_final = _guard_evidence_backed_response(
-                    result.get("final_response", "") if isinstance(result, dict) else "",
+                agent_final = _resolved_mystand_egress_text(
+                    result,
                     user_message=user_message,
                     conversation_history=conversation_history,
-                    result=result,
                 )
                 if agent_final and not final_text_parts:
                     await _emit_text_delta(agent_final)
@@ -6452,12 +4617,7 @@ class APIServerAdapter(
             # calls in real time.  See _write_sse_responses for details.
             import queue as _q
             _stream_q: _q.Queue = _q.Queue()
-            guard_stream_deltas = _should_buffer_stream_deltas(
-                user_message,
-                mystand_request=mystand_request,
-                system_prompt=instructions,
-                conversation_history=conversation_history,
-            )
+            guard_stream_deltas = False
 
             def _on_delta(delta):
                 # None from the agent is a CLI box-close signal, not EOS.
@@ -6572,11 +4732,10 @@ class APIServerAdapter(
                     status=500,
                 )
 
-        final_response = _guard_evidence_backed_response(
-            result.get("final_response", ""),
+        final_response = _resolved_mystand_egress_text(
+            result,
             user_message=user_message,
             conversation_history=conversation_history,
-            result=result,
         )
         if not final_response:
             final_response = _sanitize_user_visible_text(result.get("error", "(No response generated)"))
@@ -6994,36 +5153,6 @@ class APIServerAdapter(
         current_user = {"role": "user", "content": user_message}
         agent_messages = result.get("messages") if isinstance(result, dict) else None
 
-        if _has_system_receipt_projection(result):
-            # A system receipt is visible delivery/status text, not Xiaoban's
-            # speech. Preserve canonical tool calls/results for audit and
-            # follow-up reasoning, but never persist either the rejected model
-            # candidate or the server receipt as an assistant history message.
-            safe_turn: List[Dict[str, Any]] = []
-            if isinstance(agent_messages, list) and agent_messages:
-                turn_start = (
-                    APIServerAdapter._response_messages_turn_start_index(
-                        conversation_history,
-                        user_message,
-                        result,
-                    )
-                )
-                current_turn = (
-                    agent_messages[turn_start:]
-                    if turn_start
-                    else agent_messages
-                )
-                for message in current_turn:
-                    if not isinstance(message, dict):
-                        continue
-                    role = message.get("role")
-                    if role == "tool" or (
-                        role == "assistant"
-                        and message.get("tool_calls")
-                    ):
-                        safe_turn.append(dict(message))
-            return [*prior, current_user, *safe_turn]
-
         if isinstance(agent_messages, list) and agent_messages:
             turn_start = APIServerAdapter._response_messages_turn_start_index(
                 conversation_history,
@@ -7093,17 +5222,10 @@ class APIServerAdapter(
         )
         turn = agent_messages[start:]
         out: List[Dict[str, Any]] = []
-        system_receipt = _has_system_receipt_projection(result)
         for msg in turn:
             if not isinstance(msg, dict):
                 continue
             if msg.get("role") not in {"assistant", "tool"}:
-                continue
-            if (
-                system_receipt
-                and msg.get("role") == "assistant"
-                and not msg.get("tool_calls")
-            ):
                 continue
             out.append(cls._message_response(msg))
         return out
@@ -7394,12 +5516,6 @@ class APIServerAdapter(
             "X-User-Timezone",
             "X-Xiaoban-User-Locale",
             "X-User-Locale",
-            _MYSTAND_FACT_REQUIREMENT_HEADER,
-            _MYSTAND_FACT_SIGNATURE_HEADER,
-            _MYSTAND_COMPLETION_PROTOCOL_HEADER,
-            _MYSTAND_EVIDENCE_REQUIRED_HEADER,
-            _MYSTAND_BUSINESS_TOOL_MODE_HEADER,
-            _MYSTAND_INVOCATION_FINGERPRINT_HEADER,
         )
         mystand_request = cls._header_present(headers, "X-Xiaoban-Toolset-Policy")
         if mystand_request:
@@ -7488,38 +5604,6 @@ class APIServerAdapter(
                 getattr(snapshot, "preset_revision", "") or ""
             ),
         }
-        completion_protocol = cls._header_value(
-            headers,
-            _MYSTAND_COMPLETION_PROTOCOL_HEADER,
-        )
-        invocation_fingerprint = cls._header_value(
-            headers,
-            _MYSTAND_INVOCATION_FINGERPRINT_HEADER,
-        ).lower()
-        if completion_protocol or invocation_fingerprint:
-            delivery_attempt = cls._header_value(
-                headers,
-                "X-Xiaoban-Delivery-Attempt",
-            )
-            if (
-                completion_protocol != _MYSTAND_COMPLETION_PROTOCOL_V2
-                or not _MYSTAND_STREAM_FINGERPRINT_RE.fullmatch(
-                    invocation_fingerprint
-                )
-                or not _MYSTAND_STREAM_ATTEMPT_RE.fullmatch(
-                    delivery_attempt
-                )
-                or int(delivery_attempt) != attempt
-            ):
-                raise InvalidToolsetPolicy(
-                    "Invalid true MoA outcome binding"
-                )
-            binding.update(
-                {
-                    "completionProtocol": completion_protocol,
-                    "invocationFingerprint": invocation_fingerprint,
-                }
-            )
         try:
             return project_true_moa_outcome_binding(binding)
         except ValueError as exc:
@@ -8098,11 +6182,10 @@ class APIServerAdapter(
                         last_event="run.failed",
                     )
                 else:
-                    final_response = _guard_evidence_backed_response(
-                        result.get("final_response", "") if isinstance(result, dict) else "",
+                    final_response = _resolved_mystand_egress_text(
+                        result,
                         user_message=user_message,
                         conversation_history=conversation_history,
-                        result=result,
                     )
                     q.put_nowait({
                         "event": "run.completed",

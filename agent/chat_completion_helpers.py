@@ -34,6 +34,10 @@ from agent.message_sanitization import (
     _sanitize_surrogates,
     _repair_tool_call_arguments,
 )
+from agent.tool_result_classification import (
+    CANONICAL_TOOL_RESULT_INTERNAL_KEY,
+    TRUSTED_STEER_INTERNAL_KEY,
+)
 from tools.terminal_tool import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname, env_float, env_int
 
@@ -846,81 +850,11 @@ def interruptible_api_call(agent, api_kwargs: dict):
 
 
 
-def _apply_ephemeral_tool_choice(
-    agent,
-    api_kwargs: dict,
-    *,
-    provider_profile=None,
-    model: str | None = None,
-    reasoning_config: dict | None = None,
-) -> dict:
-    """Require one evidence tool for one call using provider capabilities.
-
-    ``_tools_for_ephemeral_choice`` already narrows the request to the required
-    function.  Providers that reject named ``tool_choice`` can therefore keep
-    that single-tool constraint while omitting the unsupported wire field.
-    """
-
-    tool_name = str(getattr(agent, "_ephemeral_tool_choice", "") or "").strip()
-    if not tool_name or not api_kwargs.get("tools"):
-        return api_kwargs
-    agent._ephemeral_tool_choice = ""
-    if (
-        provider_profile is not None
-        and not provider_profile.supports_named_tool_choice(
-            model=model,
-            reasoning_config=reasoning_config,
-        )
-    ):
-        api_kwargs.pop("tool_choice", None)
-        return api_kwargs
-    api_kwargs["tool_choice"] = {
-        "type": "function",
-        "function": {"name": tool_name},
-    }
-    return api_kwargs
-
-
-def _tools_for_ephemeral_choice(agent, tools: Optional[list] = None) -> list:
-    """Expose only the required first tool so providers cannot choose another."""
-
-    tools = list(agent.tools or []) if tools is None else list(tools)
-    tool_name = str(getattr(agent, "_ephemeral_tool_choice", "") or "").strip()
-    if not tool_name:
-        return tools
-
-    def definition_name(item: Any) -> str:
-        if not isinstance(item, dict):
-            return ""
-        function = item.get("function")
-        if isinstance(function, dict):
-            return str(function.get("name") or "")
-        return str(item.get("name") or "")
-
-    filtered = [item for item in tools if definition_name(item) == tool_name]
-    return filtered or tools
-
-
 def build_api_kwargs(agent, api_messages: list) -> dict:
     """Build the keyword arguments dict for the active API mode."""
-    from xiaoban.trusted_runtime.tool_visibility import (
-        filter_dynamic_evidence_tools,
-    )
-
-    canonical_tools = list(agent.tools or [])
-    visible_tools = filter_dynamic_evidence_tools(canonical_tools)
-    if visible_tools is not canonical_tools:
-        visible_names = {
-            str((tool.get("function") or {}).get("name") or tool.get("name") or "")
-            for tool in visible_tools
-            if isinstance(tool, dict)
-        }
-        ephemeral_choice = str(
-            getattr(agent, "_ephemeral_tool_choice", "") or ""
-        ).strip()
-        if ephemeral_choice and ephemeral_choice not in visible_names:
-            agent._ephemeral_tool_choice = ""
-    tools_for_api = _tools_for_ephemeral_choice(agent, visible_tools)
+    # The gateway has already selected the stable identity/mode tool contract.
+    # Do not hide tools or force a first tool from request-local business state.
+    tools_for_api = list(agent.tools or [])
 
     if agent.api_mode == "anthropic_messages":
         _transport = agent._get_transport()
@@ -1128,13 +1062,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             supports_reasoning=agent._supports_reasoning_extra_body(),
             qwen_session_metadata=_qwen_meta,
         )
-        return _apply_ephemeral_tool_choice(
-            agent,
-            api_kwargs,
-            provider_profile=_profile,
-            model=agent.model,
-            reasoning_config=agent.reasoning_config,
-        )
+        return api_kwargs
 
     # ── Legacy flag path ────────────────────────────────────────────
     # Reached only when get_provider_profile() returns None — i.e. a
@@ -1182,7 +1110,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         anthropic_max_output=_ant_max,
         provider_name=agent.provider,
     )
-    return _apply_ephemeral_tool_choice(agent, api_kwargs)
+    return api_kwargs
 
 
 
@@ -1368,6 +1296,16 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
                     _fn_args = getattr(_fn, "arguments", "{}") if _fn else "{}"
                     call_id = agent._deterministic_call_id(_fn_name, _fn_args, len(tool_calls))
             call_id = call_id.strip()
+            if raw_id != call_id:
+                try:
+                    setattr(tool_call, "id", call_id)
+                except Exception:
+                    try:
+                        object.__setattr__(tool_call, "id", call_id)
+                    except Exception as exc:
+                        raise TypeError(
+                            "provider tool call does not allow canonical id binding"
+                        ) from exc
 
             response_item_id = getattr(tool_call, "response_item_id", None)
             if not isinstance(response_item_id, str) or not response_item_id.strip():
@@ -1740,7 +1678,16 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             # and every Xiaoban-internal underscore-prefixed scaffolding key.
             for schema_foreign in ("tool_name", "codex_reasoning_items", "codex_message_items"):
                 api_msg.pop(schema_foreign, None)
-            for internal_key in [k for k in api_msg if isinstance(k, str) and k.startswith("_")]:
+            for internal_key in [
+                key
+                for key in api_msg
+                if isinstance(key, str)
+                and key.startswith("_")
+                and key not in {
+                    CANONICAL_TOOL_RESULT_INTERNAL_KEY,
+                    TRUSTED_STEER_INTERNAL_KEY,
+                }
+            ]:
                 api_msg.pop(internal_key, None)
             if _needs_sanitize:
                 agent._sanitize_tool_calls_for_strict_api(api_msg, model=agent.model)

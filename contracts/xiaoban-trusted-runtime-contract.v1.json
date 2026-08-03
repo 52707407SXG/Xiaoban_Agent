@@ -1,48 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "contract": "mystand.xiaoban-trusted-runtime-contract.v1",
-  "revision": "2026-07-31.5",
+  "revision": "2026-08-03.3",
   "compatibility": {
     "mode": "exact-match",
     "silentFallbackAllowed": false,
-    "providerCanAuthorizeCompletion": false,
-    "completionGuardRequired": true,
     "identitySource": "server-only",
     "dataScopeSource": "server-only"
   },
   "transport": {
     "revisionHeader": "x-xiaoban-trusted-runtime-contract",
     "digestHeader": "x-xiaoban-trusted-runtime-contract-digest"
-  },
-  "completion": {
-    "protocol": "dynamic-evidence-v2",
-    "verificationSchema": "mystand.xiaoban-completion-verification.v2",
-    "verificationKinds": [
-      "evidence-bound",
-      "failure-bound"
-    ],
-    "evidenceBinding": "valid-read-subchain",
-    "legacyEvidenceDecision": "projected_evidence",
-    "currentEvidenceDecision": "evidence_access_verified",
-    "evidenceRequiredHeader": "x-xiaoban-evidence-required",
-    "evidenceRequiredValues": [
-      "0",
-      "1"
-    ],
-    "evidenceRequiredSource": "server-trusted-intent",
-    "businessToolModeHeader": "x-xiaoban-business-tool-mode",
-    "businessToolModeEnabledValue": "enabled",
-    "businessToolModeDisabledValue": "disabled",
-    "businessToolModeRequired": true,
-    "businessToolModeSource": "server-trusted-intent",
-    "factRequirementSchema": "mystand.fact-requirement.v1",
-    "factQueryPlanSchema": "mystand.xiaoban-fact-query-plan.v1",
-    "factRequirementBindingSchema": "mystand.xiaoban-trusted-fact-requirement-binding.v1",
-    "factVerificationSchema": "mystand.xiaoban-fact-verification.v1",
-    "queryResultSchema": "mystand.query-result.v1",
-    "collectionEvidenceSchema": "mystand.collection-evidence.v1",
-    "resourceIndexPageSchema": "mystand.resource-index.page.v1",
-    "resourceIndexCompleteSchema": "mystand.resource-index.complete.v1"
   },
   "usage": {
     "agentCallSchema": "mystand.agent-call-usage.v1",
@@ -111,19 +79,17 @@
   },
   "write": {
     "receiptVersion": "authorization-write-receipt-v2",
-    "confirmationIntentSchema": "mystand.xiaoban-write-confirmation-intent.v1",
-    "previewBindingSchema": "mystand.xiaoban-write-preview-binding.v1",
     "successRequiresOk": true,
     "successRequiresVerified": true
   },
   "tools": {
     "resourceIndex": {
       "contract": "mystand.resource-index-tool.v1",
-      "sha256": "792878baedc75e07aaa1e0faea7816500f5cc1b4236a6093599104e54702d6e5"
+      "sha256": "b15dee824f2a27014f8bf2d353c9679abffa5352b18f3a4bfae706fd0ae64405"
     },
     "query": {
       "contract": "mystand.query-tool.v1",
-      "sha256": "3d16be0505571b4558f3a4369d4c2a81ffc57d48f843312ee4812ef29532b0b9"
+      "sha256": "cca9a8cfdc9190bb3ff8da7a9f0cf43ba7305f92b8118971105fb81c6c71660a"
     }
   },
   "parityFixtures": {
@@ -131,12 +97,12 @@
   },
   "protectedInvariants": [
     "server-identity-and-datascope-only",
-    "action-result-and-evidence-before-completion",
-    "completion-guard-before-egress",
+    "tool-result-before-agent-reply",
+    "single-agent-reply-owner",
     "verified-write-receipt-only",
     "per-physical-call-usage",
-    "no-silent-model-or-protocol-fallback",
-    "channel-neutral-trusted-runtime",
+    "exact-cross-service-contract",
+    "sealed-durable-outcome-before-publication",
     "no-private-plaintext-in-ledgers"
   ]
 }

@@ -1,5 +1,6 @@
 """Tests for xiaoban_state.py — SessionDB SQLite CRUD, FTS5 search, export."""
 
+import json
 import sqlite3
 import time
 import pytest
@@ -570,6 +571,42 @@ class TestMessageStorage:
 
         session = db.get_session("s1")
         assert session["tool_call_count"] == 0
+
+    def test_canonical_tool_result_round_trips_and_tampering_fails_closed(self, db):
+        db.create_session(session_id="s_tool_result", source="api")
+        canonical = {
+            "schema": "xiaoban.tool-result.v1",
+            "requestId": "request-1",
+            "turnId": "turn-1",
+            "callId": "call-1",
+            "toolName": "web_search",
+            "dispatchState": "dispatched",
+            "outcome": "unknown",
+            "retrySafe": False,
+        }
+        db.append_message(
+            "s_tool_result",
+            role="tool",
+            content='{"private":"raw"}',
+            tool_name="web_search",
+            tool_call_id="call-1",
+            tool_result=canonical,
+        )
+
+        replayed = db.get_messages_as_conversation("s_tool_result")
+        assert replayed[0]["_xiaoban_tool_result"] == canonical
+
+        with db._lock:
+            db._conn.execute(
+                "UPDATE messages SET tool_result_json = ? WHERE session_id = ?",
+                (
+                    json.dumps({**canonical, "callId": "call-forged"}),
+                    "s_tool_result",
+                ),
+            )
+            db._conn.commit()
+        replayed = db.get_messages_as_conversation("s_tool_result")
+        assert "_xiaoban_tool_result" not in replayed[0]
 
     def test_assistant_tool_calls_increment_by_count(self, db):
         """An assistant message with N tool_calls should increment by N."""

@@ -73,7 +73,9 @@ class TurnContext:
     active_system_prompt: Optional[str]
     # Task / turn identifiers.
     effective_task_id: str
+    request_id: str
     turn_id: str
+    is_mystand_turn: bool
     # Index of the current user turn within ``messages``.
     current_turn_user_idx: int
     # Whether the post-turn memory review should fire.
@@ -167,7 +169,23 @@ def build_turn_context(
     # Generate unique task_id if not provided to isolate VMs between tasks.
     effective_task_id = task_id or str(uuid.uuid4())
     agent._current_task_id = effective_task_id
-    turn_id = f"{agent.session_id or 'session'}:{effective_task_id}:{uuid.uuid4().hex[:8]}"
+    try:
+        from xiaoban.trusted_runtime.turns import current_turn
+
+        trusted_turn = current_turn()
+    except Exception:
+        trusted_turn = None
+    if trusted_turn is not None:
+        request_id = str(getattr(trusted_turn, "request_id", "") or "")
+        turn_id = str(getattr(trusted_turn, "turn_id", "") or "")
+    else:
+        request_id = f"agent-request:{uuid.uuid4().hex}"
+        turn_id = f"{agent.session_id or 'session'}:{effective_task_id}:{uuid.uuid4().hex[:8]}"
+    if not request_id:
+        request_id = f"agent-request:{uuid.uuid4().hex}"
+    if not turn_id:
+        turn_id = f"{agent.session_id or 'session'}:{effective_task_id}:{uuid.uuid4().hex[:8]}"
+    agent._current_request_id = request_id
     agent._current_turn_id = turn_id
     agent._current_api_request_id = ""
 
@@ -185,9 +203,6 @@ def build_turn_context(
     agent._unicode_sanitization_passes = 0
     agent._tool_guardrails.reset_for_turn()
     agent._tool_guardrail_halt_decision = None
-    agent._turn_tool_outcomes = []
-    agent._current_tool_call_execution_contexts = {}
-    agent._turn_tool_recovery_grants = {}
     agent._vision_supported = True
 
     # Pre-turn connection health check: clean up dead TCP connections.
@@ -212,7 +227,10 @@ def build_turn_context(
     # Log conversation turn start for debugging/observability.
     from gateway.session_context import get_session_env
 
-    _mystand_turn = get_session_env("XIAOBAN_SESSION_SOURCE") == "mystand"
+    _mystand_turn = bool(
+        trusted_turn is not None
+        and get_session_env("XIAOBAN_SESSION_SOURCE") == "mystand"
+    )
     if _mystand_turn:
         _msg_preview = "[mystand-content-redacted]"
         _session_log_value = "mystand"
@@ -467,7 +485,9 @@ def build_turn_context(
         conversation_history=conversation_history,
         active_system_prompt=active_system_prompt,
         effective_task_id=effective_task_id,
+        request_id=request_id,
         turn_id=turn_id,
+        is_mystand_turn=_mystand_turn,
         current_turn_user_idx=current_turn_user_idx,
         should_review_memory=(
             False if strict_paid_call else should_review_memory

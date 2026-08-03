@@ -93,7 +93,7 @@ class TrueMoACancelController:
         a hard total deadline even when a provider ignores interruption.  That
         worker may stage a candidate response, but it must never make the
         request publicly ``completed`` before the gateway has received the
-        complete payload and applied CompletionGuard. Reserving the one-shot
+        complete payload and sealed the final output. Reserving the one-shot
         key, current thread identity, and optional monotonic deadline makes
         that hand-off the only legal final commit point.
         """

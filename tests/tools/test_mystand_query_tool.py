@@ -1,17 +1,13 @@
-"""Tests for Xiaoban's high-level My Stand semantic-query bridge."""
+"""Tests for Xiaoban's authorized semantic and finance query bridge."""
 
 import io
 import json
 import urllib.error
 
+import pytest
+
 from gateway.session_context import clear_session_vars, set_session_vars
 from tools import mystand_query_tool as bridge
-from xiaoban.trusted_runtime import (
-    TrustedIdentity,
-    activate_turn,
-    begin_turn,
-    deactivate_turn,
-)
 
 FACT_NEEDS = {
     "owner.name",
@@ -61,6 +57,33 @@ def _valid_plan():
     }
 
 
+def _finance_plan(kind):
+    query_args = {
+        "list": {"year": 2026},
+        "rank": {"year": 2026, "rank": 3},
+        "predicate": {
+            "year": 2026,
+            "field": "yearlyAmount",
+            "operator": "gte",
+            "amount": 1_000_000,
+        },
+        "count": {
+            "year": 2026,
+            "field": "yearlyAmount",
+            "operator": "gt",
+            "amount": 500_000,
+        },
+    }[kind]
+    return {
+        "operation": "read",
+        "query_kind": kind,
+        "module_id": "finance-ledger",
+        "fact_paths": [f"finance.performance.{kind}"],
+        "query_args": query_args,
+        "coverage_required": True,
+    }
+
+
 def _call(
     args,
     *,
@@ -81,7 +104,7 @@ def _call(
         clear_session_vars(tokens)
 
 
-def test_contract_is_semantic_and_contains_no_identity_or_internal_id_inputs():
+def test_contract_exposes_semantic_and_strict_finance_aggregate_shapes():
     parameters = bridge.MYSTAND_QUERY_SCHEMA["parameters"]
     properties = parameters["properties"]
 
@@ -97,8 +120,36 @@ def test_contract_is_semantic_and_contains_no_identity_or_internal_id_inputs():
         "fact_needs",
         "mode",
     }
+    assert parameters["required"] == ["operation"]
+    assert len(parameters["anyOf"]) == 6
     assert parameters["additionalProperties"] is False
     assert properties["operation"]["const"] == "read"
+    assert set(properties["query_kind"]["enum"]) == {
+        "rank",
+        "list",
+        "predicate",
+        "count",
+    }
+    assert properties["module_id"]["const"] == "finance-ledger"
+    assert properties["coverage_required"]["const"] is True
+    finance_branches = {
+        branch["properties"]["query_kind"]["const"]: branch
+        for branch in parameters["anyOf"]
+        if "query_kind" in branch.get("properties", {})
+    }
+    assert set(finance_branches) == {"rank", "list", "predicate", "count"}
+    for kind, branch in finance_branches.items():
+        assert set(branch["required"]) == {
+            "query_kind",
+            "module_id",
+            "fact_paths",
+            "query_args",
+            "coverage_required",
+        }
+        assert branch["properties"]["fact_paths"]["const"] == [
+            f"finance.performance.{kind}"
+        ]
+        assert branch["properties"]["query_args"]["additionalProperties"] is False
     assert set(properties["fact_needs"]["items"]["enum"]) == FACT_NEEDS
     assert set(
         properties["resource"]["properties"]["type_hint"]["enum"]
@@ -124,10 +175,111 @@ def test_contract_is_semantic_and_contains_no_identity_or_internal_id_inputs():
         "auth_id",
         "resource_uid",
         "source_id",
-        "plan_id",
-        "requirement_digest",
-        "scope_fingerprint",
     }.isdisjoint(properties)
+
+
+@pytest.mark.parametrize("kind", ["rank", "list", "predicate", "count"])
+def test_handler_directly_dispatches_each_finance_aggregate_shape(
+    monkeypatch,
+    kind,
+):
+    calls = []
+
+    def fake_post(payload, session):
+        calls.append((payload, session))
+        return json.dumps(
+            {
+                "schema": "mystand.query-result.v1",
+                "ok": True,
+                "facts": [{"path": f"finance.performance.{kind}"}],
+                "coverage": {"complete": True},
+            }
+        )
+
+    monkeypatch.setattr(bridge, "_post_internal", fake_post)
+    plan = _finance_plan(kind)
+    result = _call(plan, user_message="查今年的财务表现")
+
+    assert result["ok"] is True
+    assert calls == [
+        (
+            plan,
+            {
+                "platform": "api_server",
+                "user_id": "ZYJ005",
+                "message_id": "msg-1",
+                "session_id": "session-1",
+            },
+        )
+    ]
+
+
+def test_handler_rejects_finance_aggregate_shape_drift_before_dispatch(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda *args: calls.append(args) or json.dumps({"ok": True}),
+    )
+
+    invalid_plans = []
+
+    invalid_kind = _finance_plan("list")
+    invalid_kind["query_kind"] = "sum"
+    invalid_plans.append(invalid_kind)
+
+    invalid_module = _finance_plan("list")
+    invalid_module["module_id"] = "profile"
+    invalid_plans.append(invalid_module)
+
+    invalid_path = _finance_plan("rank")
+    invalid_path["fact_paths"] = ["finance.performance.list"]
+    invalid_plans.append(invalid_path)
+
+    invalid_coverage = _finance_plan("count")
+    invalid_coverage["coverage_required"] = False
+    invalid_plans.append(invalid_coverage)
+
+    invalid_year = _finance_plan("list")
+    invalid_year["query_args"] = {"year": 2101}
+    invalid_plans.append(invalid_year)
+
+    invalid_list = _finance_plan("list")
+    invalid_list["query_args"] = {"year": 2026, "rank": 1}
+    invalid_plans.append(invalid_list)
+
+    invalid_rank = _finance_plan("rank")
+    invalid_rank["query_args"] = {"year": 2026, "rank": 0}
+    invalid_plans.append(invalid_rank)
+
+    invalid_predicate = _finance_plan("predicate")
+    invalid_predicate["query_args"] = {
+        "year": 2026,
+        "field": "yearlyAmount",
+        "operator": "eq",
+        "amount": 1,
+    }
+    invalid_plans.append(invalid_predicate)
+
+    invalid_count = _finance_plan("count")
+    invalid_count["query_args"]["amount"] = float("inf")
+    invalid_plans.append(invalid_count)
+
+    mixed_shape = _finance_plan("rank")
+    mixed_shape["resource"] = {"name": "财务档案"}
+    invalid_plans.append(mixed_shape)
+
+    extra_control = _finance_plan("rank")
+    extra_control["unexpected_control"] = "forged"
+    invalid_plans.append(extra_control)
+
+    for plan in invalid_plans:
+        result = _call(plan)
+        assert result["code"] == "invalid_mystand_query_arguments"
+
+    assert calls == []
 
 
 def test_handler_injects_trusted_query_text_and_session_identity_stays_out_of_body(
@@ -251,84 +403,6 @@ def test_handler_rejects_invalid_semantic_enums_and_duplicate_fact_needs(
     invalid_fact_type = _valid_plan()
     invalid_fact_type["fact_needs"] = [{"predicate": "owner.name"}]
     assert _call(invalid_fact_type)["code"] == "invalid_mystand_query_arguments"
-
-
-def test_dynamic_handler_returns_specific_semantic_correction_without_dispatch(
-    monkeypatch,
-):
-    dispatched = []
-    monkeypatch.setattr(
-        bridge,
-        "_post_internal",
-        lambda *args: dispatched.append(args) or json.dumps({"ok": True}),
-    )
-    identity = TrustedIdentity(
-        account_id="ZYJ005",
-        data_scope="mystand",
-        source="server_session",
-    )
-    request_id = "dynamic-query-correction"
-    message_id = "dynamic-query-correction-message"
-    turn = begin_turn(
-        channel="web",
-        user_message="查一下特征卡并给我建议",
-        identity=identity,
-        request_id=request_id,
-        message_id=message_id,
-        evidence_required=True,
-        completion_protocol="dynamic-evidence-v2",
-        completion_binding={
-            "user_id": identity.account_id,
-            "session_id": "dynamic-query-correction-session",
-            "delivery_id": request_id,
-            "attempt": 1,
-            "message_id": message_id,
-            "request_fingerprint": "a" * 64,
-            "invocation_fingerprint": "b" * 64,
-            "datascope_fingerprint": identity.datascope_fingerprint,
-        },
-    )
-    active = activate_turn(turn)
-    try:
-        result = _call(
-            {
-                "operation": "read",
-                "query_kind": "resource-read",
-                "module_id": "profile",
-                "fact_paths": ["resource.summary"],
-                "query_args": {},
-                "coverage_required": False,
-                "resource": {
-                    "name": "特征卡",
-                    "type_hint": "profile-card",
-                },
-                "fact_needs": ["document.content", "resource.summary"],
-                "mode": "summary",
-            },
-            user_message="查一下特征卡并给我建议",
-        )
-    finally:
-        deactivate_turn(active)
-
-    assert result["ok"] is False
-    assert result["code"] == "invalid_mystand_query_arguments"
-    assert result["retryable"] is True
-    assert result["error"] == "semantic 查询参数包含不允许的字段"
-    assert result["correction"] == {
-        "allowed_fields": [
-            "operation",
-            "resource",
-            "entities",
-            "fact_needs",
-            "mode",
-        ],
-        "required_fields": ["operation", "resource", "fact_needs"],
-        "locator_rule": (
-            "preserve the indexed resource; entities may only narrow it"
-        ),
-        "max_calls": 1,
-    }
-    assert dispatched == []
 
 
 def test_handler_requires_authenticated_api_session_and_trusted_user_message(

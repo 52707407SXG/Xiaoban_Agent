@@ -1,5 +1,6 @@
 """Tests for the write-only My Stand authorization wrapper."""
 
+import hashlib
 import json
 
 import pytest
@@ -10,6 +11,94 @@ from gateway.session_context import (
     set_session_vars,
 )
 from tools import mystand_authorization_write_tool as bridge
+
+
+def _node_preview_token_hash(preview_token: str) -> str:
+    """Independently mirror SHA256(UTF-8(JSON.stringify(String(token))))."""
+    serialized = json.dumps(
+        str(preview_token),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _node_confirmation_id(
+    *,
+    user_id: str = "ZYJ005",
+    session_id: str = "session-001",
+    message_id: str = "msg-0001",
+) -> str:
+    context = f"{user_id}\u001f{session_id}\u001f{message_id}"
+    return f"xiaoban-write-{hashlib.sha256(context.encode('utf-8')).hexdigest()}"
+
+
+def _valid_commit_receipt(
+    *,
+    preview_token: str = "preview-token",
+    idempotency_key: str = "same-key-as-preview",
+    user_id: str = "ZYJ005",
+    session_id: str = "session-001",
+    message_id: str = "msg-0001",
+) -> dict:
+    return {
+        "ok": True,
+        "status": 200,
+        "receiptVersion": "authorization-write-receipt-v2",
+        "verified": True,
+        "audit": {
+            "recorded": True,
+            "auditId": "audit-e4-agent-0001",
+        },
+        "confirmationId": _node_confirmation_id(
+            user_id=user_id,
+            session_id=session_id,
+            message_id=message_id,
+        ),
+        "action": "knowledge-graph.add-node",
+        "target": {"graphId": "graph-e4", "nodeId": "node-e4"},
+        "expectedVersion": "graph-version-1",
+        "nextVersion": "graph-version-2",
+        "idempotencyKey": idempotency_key,
+        "requestFingerprint": "a" * 64,
+        "previewTokenHash": _node_preview_token_hash(preview_token),
+        "changeDigest": "c" * 64,
+        "committedAt": "2026-08-03T12:00:00.000Z",
+    }
+
+
+def _call_stubbed_commit(
+    monkeypatch,
+    upstream_result: dict,
+    *,
+    preview_token: str = "preview-token",
+    idempotency_key: str = "same-key-as-preview",
+) -> dict:
+    monkeypatch.setattr(bridge, "mark_mystand_private_query_turn", lambda: None)
+    monkeypatch.setattr(
+        bridge,
+        "_current_session",
+        lambda: {
+            "platform": "api_server",
+            "user_id": "ZYJ005",
+            "message_id": "msg-0001",
+            "session_id": "session-001",
+        },
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_mystand_authorization_write_operation_handler",
+        lambda *_args, **_kwargs: json.dumps(upstream_result),
+    )
+    return json.loads(
+        bridge.mystand_authorization_write_tool_handler(
+            {
+                "operation": "commit_write",
+                "preview_token": preview_token,
+                "idempotency_key": idempotency_key,
+            }
+        )
+    )
 
 
 def test_schema_exposes_only_write_operations():
@@ -417,7 +506,7 @@ def test_handler_hard_rejects_read_operations_and_extra_fields(monkeypatch):
     )
     monkeypatch.setattr(
         bridge,
-        "mystand_authorization_tool_handler",
+        "_mystand_authorization_write_operation_handler",
         lambda *args, **kwargs: calls.append((args, kwargs)),
     )
 
@@ -453,24 +542,29 @@ def test_handler_delegates_valid_write_operations(monkeypatch):
         lambda: {
             "platform": "api_server",
             "user_id": "ZYJ005",
-            "message_id": "msg-001",
+            "message_id": "msg-0001",
             "session_id": "session-001",
         },
     )
 
     def fake_handler(args, **kwargs):
         calls.append((args, kwargs))
-        return json.dumps({"ok": True})
+        return json.dumps(
+            _valid_commit_receipt(
+                preview_token=args["preview_token"],
+                idempotency_key=args["idempotency_key"],
+            )
+        )
 
     monkeypatch.setattr(
         bridge,
-        "mystand_authorization_tool_handler",
+        "_mystand_authorization_write_operation_handler",
         fake_handler,
     )
     args = {
         "operation": "commit_write",
         "preview_token": "preview-token",
-        "idempotency_key": "idem-1",
+        "idempotency_key": "idem-0001",
     }
     result = json.loads(
         bridge.mystand_authorization_write_tool_handler(
@@ -480,6 +574,7 @@ def test_handler_delegates_valid_write_operations(monkeypatch):
     )
 
     assert result["ok"] is True
+    assert "可以准确说明写入成功" in result["integrity_notice"]
     assert calls == [(args, {"task_id": "task-1"})]
 
 
@@ -501,7 +596,7 @@ def test_failed_commit_result_injects_immediate_integrity_notice(monkeypatch):
     )
     monkeypatch.setattr(
         bridge,
-        "mystand_authorization_tool_handler",
+        "_mystand_authorization_write_operation_handler",
         lambda *_args, **_kwargs: json.dumps(
             {
                 "ok": False,
@@ -624,9 +719,16 @@ def test_handler_taints_before_preview_or_commit_processing(
     )
     observed = []
 
-    def observe_commit(_args, **_kwargs):
+    def observe_commit(commit_args, **_kwargs):
         observed.append(("commit", mystand_private_query_turn_active()))
-        return '{"ok":true}'
+        return json.dumps(
+            _valid_commit_receipt(
+                preview_token=commit_args["preview_token"],
+                idempotency_key=commit_args["idempotency_key"],
+                session_id="session-write-taint",
+                message_id="msg-write-taint",
+            )
+        )
 
     def observe_preview(_path, _payload, **_kwargs):
         observed.append(("preview", mystand_private_query_turn_active()))
@@ -634,7 +736,7 @@ def test_handler_taints_before_preview_or_commit_processing(
 
     monkeypatch.setattr(
         bridge,
-        "mystand_authorization_tool_handler",
+        "_mystand_authorization_write_operation_handler",
         observe_commit,
     )
     monkeypatch.setattr(bridge, "_post_internal", observe_preview)
@@ -793,16 +895,23 @@ def test_preview_rejects_auth_id_and_type_mismatch(monkeypatch):
     assert mismatch["code"] == "invalid_write_resource"
 
 
-def test_schema_tells_model_idempotency_key_is_required_for_preview():
+def test_schema_requires_one_idempotency_key_across_preview_and_commit():
     parameters = bridge.MYSTAND_AUTHORIZATION_WRITE_SCHEMA["parameters"]
 
     key_description = parameters["properties"]["idempotency_key"].get("description", "")
-    assert "REQUIRED for preview_write" in key_description
-    assert "unique" in key_description
-    assert "retrying the same preview" in key_description
+    assert "REQUIRED for both preview_write and commit_write" in key_description
+    assert "fresh unique key" in key_description
+    assert "commit_write MUST reuse exactly the same key" in key_description
+    assert "retries of that logical write" in key_description
     assert "Never reuse" in key_description
     tool_description = bridge.MYSTAND_AUTHORIZATION_WRITE_SCHEMA["description"]
-    assert "preview_write REQUIRES idempotency_key" in tool_description
+    assert "Both preview_write and commit_write REQUIRE idempotency_key" in tool_description
+    assert "reuse exactly that same key" in tool_description
+    operation_description = parameters["properties"]["operation"]["description"]
+    assert "preview_write requires" in operation_description
+    assert "commit_write requires preview_token" in operation_description
+    assert "same idempotency_key" in operation_description
+    assert parameters["required"] == ["operation"]
 
 
 def test_preview_still_hard_fails_closed_without_idempotency_key(monkeypatch):
@@ -847,3 +956,150 @@ def test_preview_still_hard_fails_closed_without_idempotency_key(monkeypatch):
     assert "idempotency_key" in result["error"]
     assert result["integrity_notice"]
     assert calls == [], "缺少 idempotency_key 时不得触达 My Stand 写入预览接口"
+
+
+def test_commit_hard_fails_closed_without_preview_idempotency_key(monkeypatch):
+    monkeypatch.setattr(bridge, "mark_mystand_private_query_turn", lambda: None)
+    monkeypatch.setattr(
+        bridge,
+        "_current_session",
+        lambda: {
+            "platform": "api_server",
+            "user_id": "ZYJ005",
+            "message_id": "msg-001",
+            "session_id": "session-001",
+        },
+    )
+    calls = []
+    monkeypatch.setattr(
+        bridge,
+        "_mystand_authorization_write_operation_handler",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or "{}",
+    )
+
+    result = json.loads(
+        bridge.mystand_authorization_write_tool_handler(
+            {
+                "operation": "commit_write",
+                "preview_token": "preview-token",
+            }
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == 400
+    assert result["code"] == "authorization_argument_missing"
+    assert "idempotency_key" in result["error"]
+    assert "禁止向用户声称已经写入" in result["integrity_notice"]
+    assert calls == [], "缺少预览使用的 idempotency_key 时不得触达提交接口"
+
+
+@pytest.mark.parametrize(
+    "upstream_result",
+    [
+        pytest.param(
+            {
+                "ok": True,
+                "status": 200,
+                "verified": True,
+                "receiptVersion": "authorization-write-receipt-v2",
+            },
+            id="minimal-three-field-v2-is-not-a-valid-receipt",
+        ),
+        pytest.param(
+            {**_valid_commit_receipt(), "verified": False},
+            id="verified-false",
+        ),
+        pytest.param(
+            {
+                **_valid_commit_receipt(),
+                "receiptVersion": "authorization-write-receipt-v1",
+            },
+            id="wrong-receipt-version",
+        ),
+    ],
+)
+def test_commit_ok_without_verified_v2_receipt_is_forced_to_failure(
+    monkeypatch,
+    upstream_result,
+):
+    result = _call_stubbed_commit(monkeypatch, upstream_result)
+
+    assert result["ok"] is False
+    assert result["status"] == 502
+    assert result["code"] == "authorization_write_receipt_invalid"
+    assert "完整且与本次确认绑定" in result["error"]
+    assert "verified=true" in result["error"]
+    assert "authorization-write-receipt-v2" in result["error"]
+    assert "禁止向用户声称已经写入" in result["integrity_notice"]
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "audit",
+        "audit.auditId",
+        "confirmationId",
+        "action",
+        "target",
+        "expectedVersion",
+        "nextVersion",
+        "idempotencyKey",
+        "requestFingerprint",
+        "previewTokenHash",
+        "changeDigest",
+        "committedAt",
+    ],
+)
+def test_commit_receipt_missing_required_structure_is_forced_to_failure(
+    monkeypatch,
+    missing_field,
+):
+    receipt = _valid_commit_receipt()
+    if missing_field == "audit.auditId":
+        receipt["audit"].pop("auditId")
+    else:
+        receipt.pop(missing_field)
+
+    result = _call_stubbed_commit(monkeypatch, receipt)
+
+    assert result["ok"] is False
+    assert result["status"] == 502
+    assert result["code"] == "authorization_write_receipt_invalid"
+    assert "完整且与本次确认绑定" in result["error"]
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        pytest.param(
+            "idempotencyKey",
+            "different-logical-write-key",
+            id="wrong-idempotency-binding",
+        ),
+        pytest.param(
+            "previewTokenHash",
+            "d" * 64,
+            id="wrong-json-stringified-preview-token-hash",
+        ),
+        pytest.param(
+            "confirmationId",
+            f"xiaoban-write-{'e' * 64}",
+            id="wrong-confirmation-context-binding",
+        ),
+    ],
+)
+def test_commit_receipt_wrong_request_binding_is_forced_to_failure(
+    monkeypatch,
+    field,
+    wrong_value,
+):
+    receipt = _valid_commit_receipt()
+    receipt[field] = wrong_value
+
+    result = _call_stubbed_commit(monkeypatch, receipt)
+
+    assert result["ok"] is False
+    assert result["status"] == 502
+    assert result["code"] == "authorization_write_receipt_invalid"
+    assert "完整且与本次确认绑定" in result["error"]

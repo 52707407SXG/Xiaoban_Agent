@@ -3,7 +3,7 @@
   "contract": "mystand.query-tool.v1",
   "tool": {
     "name": "mystand_query",
-    "description": "Read facts from the current user's authorized My Stand data. Understand the latest request as a whole, then create one semantic plan: when the user identified a material, use its estate, person, document, or other subject as a human-readable resource anchor; otherwise omit resource and provide the known subject entities. Infer the data kind only when clear and request only the needed fact categories. Do not route from isolated keywords and do not invent an exact backend module or stored title. The server follows the real index and entity relationships. Call this tool once, then answer only from its compact result. Identity, ownership, resource IDs, authorization IDs, source IDs, lookup steps, and queryText are trusted backend concerns and must never be supplied or narrated.",
+    "description": "Read facts from the current user's authorized My Stand data. Use the semantic resource/entity shape for an identified material. For finance-ledger questions that require rank, list, predicate, or count over one year, use the matching strict finance aggregate shape shown in this schema. Call once and answer only from its result. Identity, ownership, authorization IDs, resource IDs, source IDs, lookup steps, query text, and fields outside the selected shape must never be supplied or narrated.",
     "parameters": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -13,29 +13,33 @@
           "type": "string"
         },
         "query_kind": {
-          "enum": ["resource-read", "rank", "predicate", "count", "list", "aggregate"],
+          "enum": ["rank", "list", "predicate", "count"],
           "type": "string"
         },
         "module_id": {
-          "maxLength": 80,
+          "const": "finance-ledger",
           "type": "string"
         },
         "fact_paths": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 12,
+          "maxItems": 1,
           "uniqueItems": true,
           "items": {
-            "pattern": "^[a-z][a-z0-9_.-]{1,119}$",
+            "enum": [
+              "finance.performance.rank",
+              "finance.performance.list",
+              "finance.performance.predicate",
+              "finance.performance.count"
+            ],
             "type": "string"
           }
         },
         "query_args": {
-          "type": "object",
-          "maxProperties": 12,
-          "additionalProperties": true
+          "type": "object"
         },
         "coverage_required": {
+          "const": true,
           "type": "boolean"
         },
         "resource": {
@@ -157,7 +161,143 @@
             "fact_paths",
             "query_args",
             "coverage_required"
-          ]
+          ],
+          "properties": {
+            "query_kind": {
+              "const": "list"
+            },
+            "fact_paths": {
+              "const": ["finance.performance.list"]
+            },
+            "query_args": {
+              "type": "object",
+              "properties": {
+                "year": {
+                  "type": "integer",
+                  "minimum": 2000,
+                  "maximum": 2100
+                }
+              },
+              "required": ["year"],
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "required": [
+            "query_kind",
+            "module_id",
+            "fact_paths",
+            "query_args",
+            "coverage_required"
+          ],
+          "properties": {
+            "query_kind": {
+              "const": "rank"
+            },
+            "fact_paths": {
+              "const": ["finance.performance.rank"]
+            },
+            "query_args": {
+              "type": "object",
+              "properties": {
+                "year": {
+                  "type": "integer",
+                  "minimum": 2000,
+                  "maximum": 2100
+                },
+                "rank": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 10000
+                }
+              },
+              "required": ["year", "rank"],
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "required": [
+            "query_kind",
+            "module_id",
+            "fact_paths",
+            "query_args",
+            "coverage_required"
+          ],
+          "properties": {
+            "query_kind": {
+              "const": "predicate"
+            },
+            "fact_paths": {
+              "const": ["finance.performance.predicate"]
+            },
+            "query_args": {
+              "type": "object",
+              "properties": {
+                "year": {
+                  "type": "integer",
+                  "minimum": 2000,
+                  "maximum": 2100
+                },
+                "field": {
+                  "const": "yearlyAmount",
+                  "type": "string"
+                },
+                "operator": {
+                  "enum": ["gt", "gte"],
+                  "type": "string"
+                },
+                "amount": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": ["year", "field", "operator", "amount"],
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "required": [
+            "query_kind",
+            "module_id",
+            "fact_paths",
+            "query_args",
+            "coverage_required"
+          ],
+          "properties": {
+            "query_kind": {
+              "const": "count"
+            },
+            "fact_paths": {
+              "const": ["finance.performance.count"]
+            },
+            "query_args": {
+              "type": "object",
+              "properties": {
+                "year": {
+                  "type": "integer",
+                  "minimum": 2000,
+                  "maximum": 2100
+                },
+                "field": {
+                  "const": "yearlyAmount",
+                  "type": "string"
+                },
+                "operator": {
+                  "enum": ["gt", "gte"],
+                  "type": "string"
+                },
+                "amount": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": ["year", "field", "operator", "amount"],
+              "additionalProperties": false
+            }
+          }
         }
       ],
       "additionalProperties": false
@@ -182,10 +322,6 @@
       "recordRefs": {
         "type": "array",
         "items": { "type": "string" }
-      },
-      "requirementDigest": {
-        "pattern": "^[a-f0-9]{64}$",
-        "type": "string"
       }
     },
     "required": ["ok"],

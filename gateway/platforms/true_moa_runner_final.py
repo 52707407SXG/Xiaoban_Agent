@@ -4,20 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import copy
 import threading
 import time
-from typing import Any, Dict, List
+from typing import Any
 
 from gateway.platforms.api_server import (
-    _append_mystand_preexecuted_evidence,
-    _build_guarded_fact_persistence_transcript,
-    _build_mystand_preexecuted_prompt,
     _finalize_mystand_egress_result,
-    _install_mystand_completion_persistence_guard,
-    _required_mystand_evidence_groups,
     _resolved_mystand_egress_text,
-    _tool_result_looks_successful,
     _true_moa_usage_summary,
 )
 from gateway.platforms.mystand_egress_seal import (
@@ -47,7 +40,6 @@ class TrueMoARunnerFinalMixin:
     def execute_final_stage(
         self,
         *,
-        trusted_initial_tool_choice: str,
         trusted_turn: Any,
         effective_task_id: str,
     ) -> dict[str, Any]:
@@ -57,118 +49,26 @@ class TrueMoARunnerFinalMixin:
             raise CompletionStoppedError(
                 "true MoA final stage stopped before tools",
             )
-        initial_tool_choice = trusted_initial_tool_choice
-        if bool(
-            getattr(trusted_turn, "business_tools_disabled", False)
-        ):
-            initial_tool_choice = ""
-        if (
-            not initial_tool_choice
-            or initial_tool_choice not in self.agent.valid_tool_names
-        ):
-            initial_tool_choice = ""
-        request.trace_state.evidence_followup["agent"] = self.agent
-        request.trace_state.evidence_followup[
-            "resource_index_required"
-        ] = initial_tool_choice == "mystand_resource_index"
-        preexecuted_evidence: List[Dict[str, Any]] = []
-        if initial_tool_choice:
-            preexecuted_evidence = request.run_mystand_preexecuted_evidence(
-                initial_tool_choice,
-                user_message=request.user_message,
-                system_prompt=self.run_system_prompt,
-                tool_start_callback=request.traced_tool_start,
-                tool_complete_callback=request.traced_tool_complete,
-                trusted_turn=trusted_turn,
-                fact_requirement=request.fact_requirement,
-                terminal_controller=controller,
-            )
-            evidence_prompt = _build_mystand_preexecuted_prompt(
-                preexecuted_evidence
-            )
-            if evidence_prompt:
-                self.agent.ephemeral_system_prompt = "\n\n".join(
-                    part
-                    for part in (
-                        self.agent.ephemeral_system_prompt,
-                        evidence_prompt,
-                    )
-                    if isinstance(part, str) and part.strip()
-                )
-            # The harness already executed the authoritative read.
-            # Never ask the provider to repeat it through a hint.
-            self.agent._ephemeral_tool_choice = ""
-        if controller is not None and controller.state != "running":
-            raise CompletionStoppedError(
-                "true MoA final stage stopped after evidence",
-            )
-        successful_evidence_names = {
-            str(item.get("name") or "")
-            for item in preexecuted_evidence
-            if _tool_result_looks_successful(item.get("content"))
-        }
-        required_evidence_groups = _required_mystand_evidence_groups(
-            initial_tool_choice,
-        )
-        preexecuted_read_complete = bool(
-            required_evidence_groups
-            and all(
-                group & successful_evidence_names
-                for group in required_evidence_groups
-            )
-        )
-        if (
-            request.fact_requirement is not None
-            or preexecuted_read_complete
-        ):
-            # The signed plan already executed deterministically. The provider
-            # only writes prose and cannot spend payload space or another turn
-            # rediscovering tools after the required evidence is already read.
-            self.agent.tools = []
-            self.agent.valid_tool_names = set()
-            _install_mystand_completion_persistence_guard(
-                self.agent,
-                trusted_turn,
-            )
-        elif request.completion_protocol:
-            _install_mystand_completion_persistence_guard(
-                self.agent,
-                trusted_turn,
-            )
-        execution_history = (
-            []
-            if initial_tool_choice
-            and any(
-                _tool_result_looks_successful(item.get("content"))
-                for item in preexecuted_evidence
-            )
-            else request.conversation_history
-        )
         if controller is not None and controller.state != "running":
             raise CompletionStoppedError(
                 "true MoA final stage stopped before executor",
             )
         stage_result = self.agent.run_conversation(
             user_message=request.user_message,
-            conversation_history=execution_history,
+            conversation_history=request.conversation_history,
             task_id=effective_task_id,
         )
         if self.true_moa_ledger is None:
-            return {
-                "initial_tool_choice": initial_tool_choice,
-                "preexecuted_evidence": preexecuted_evidence,
-                "result": stage_result,
-            }
+            return {"result": stage_result}
         result = (
             dict(stage_result)
             if isinstance(stage_result, dict)
             else {}
         )
-        _append_mystand_preexecuted_evidence(
-            result,
-            preexecuted_evidence,
+        deferred_persistence_messages = list(result.get("messages") or [])
+        deferred_persistence_history = list(
+            request.conversation_history or []
         )
-        guarded_turn = copy.deepcopy(trusted_turn)
         result["_mystand_request"] = request.mystand_request
         if request.mystand_request:
             result["_mystand_user_id"] = str(
@@ -180,56 +80,21 @@ class TrueMoARunnerFinalMixin:
             result["_mystand_message_id"] = str(
                 request.request_message_id or "",
             )
-            # Guard mutation remains worker-local until settlement commits.
-            result["_trusted_turn"] = guarded_turn
-            result["_mystand_evidence_required"] = bool(
-                getattr(request, "dynamic_evidence_required", False)
-                or trusted_initial_tool_choice
-                or request.fact_requirement
-            )
-            if request.fact_requirement is not None:
-                result["_mystand_fact_requirement"] = (
-                    request.fact_requirement
-                )
-            if request.completion_protocol:
-                result["_mystand_completion_protocol"] = (
-                    request.completion_protocol
-                )
-                result["_mystand_completion_binding"] = dict(
-                    request.completion_binding
-                )
-        if initial_tool_choice:
-            result["_mystand_required_evidence_groups"] = [
-                sorted(group)
-                for group in _required_mystand_evidence_groups(
-                    initial_tool_choice
-                )
-            ]
-        visible_text = _finalize_mystand_egress_result(
+        _finalize_mystand_egress_result(
             result,
             user_message=request.user_message,
             conversation_history=request.conversation_history,
         )
-        (
-            safe_persistence_history,
-            safe_persistence_messages,
-        ) = _build_guarded_fact_persistence_transcript(
-            request.conversation_history,
-            user_message=request.user_message,
-            guarded_final_response=visible_text,
-        )
-        # Raw provider/tool bytes remain worker-local diagnostics.
+        # K5 keeps the real transcript private until durable settlement wins.
         result["messages"] = []
         return {
-            "initial_tool_choice": initial_tool_choice,
-            "preexecuted_evidence": preexecuted_evidence,
             "result": result,
-            "safe_persistence_history": safe_persistence_history,
-            "safe_persistence_messages": safe_persistence_messages,
-            "guarded_turn_projection": {
-                "state": guarded_turn.state,
-                "states": list(guarded_turn.states),
-                "terminal_reason": guarded_turn.terminal_reason,
+            "deferred_persistence_history": deferred_persistence_history,
+            "deferred_persistence_messages": deferred_persistence_messages,
+            "turn_projection": {
+                "state": trusted_turn.state,
+                "states": list(trusted_turn.states),
+                "terminal_reason": trusted_turn.terminal_reason,
             },
         }
 
@@ -254,7 +119,6 @@ class TrueMoARunnerFinalMixin:
     def run_final_flow(
         self,
         *,
-        trusted_initial_tool_choice: str,
         trusted_turn: Any,
         effective_task_id: str,
     ) -> tuple:
@@ -267,7 +131,6 @@ class TrueMoARunnerFinalMixin:
 
         def _execute_final_stage() -> dict[str, Any]:
             return self.execute_final_stage(
-                trusted_initial_tool_choice=trusted_initial_tool_choice,
                 trusted_turn=trusted_turn,
                 effective_task_id=effective_task_id,
             )
@@ -290,10 +153,16 @@ class TrueMoARunnerFinalMixin:
                 self.final_shutdown_grace_seconds,
             ):
                 controller.fail()
-                ledger.timeout_final_execution(
-                    error_category="final_executor_timeout",
+                # K5: this is a durable handoff failure before the Provider
+                # worker exists, not an execution timeout. Keep the final call
+                # set empty and give the slot its own terminal category.
+                ledger.finish_slot(
+                    self.final_executor_slot,
+                    status="failed",
+                    error_category="durable_final_slot_confirmation_failed",
                     notify=False,
                 )
+                ledger.set_wave_status("failed", notify=False)
                 raise RuntimeError(
                     "true MoA durable final-slot reservation failed"
                 )
@@ -367,7 +236,6 @@ class TrueMoARunnerFinalMixin:
         if ledger is None:
             return self.project_normal_result(
                 final_stage_payload=final_stage_payload,
-                trusted_initial_tool_choice=trusted_initial_tool_choice,
                 trusted_turn=trusted_turn,
             )
         return self.settle_true_moa_result(
@@ -380,35 +248,11 @@ class TrueMoARunnerFinalMixin:
         self,
         *,
         final_stage_payload: dict[str, Any],
-        trusted_initial_tool_choice: str,
         trusted_turn: Any,
     ) -> tuple:
         request = self.request
-        initial_tool_choice = str(
-            final_stage_payload.get("initial_tool_choice") or "",
-        )
-        preexecuted_evidence = final_stage_payload.get(
-            "preexecuted_evidence",
-        )
-        if not isinstance(preexecuted_evidence, list):
-            preexecuted_evidence = []
         result = final_stage_payload.get("result")
         result = dict(result) if isinstance(result, dict) else {}
-        _append_mystand_preexecuted_evidence(
-            result,
-            preexecuted_evidence,
-        )
-        if request.fact_requirement is not None:
-            from xiaoban.trusted_runtime.completion_guard import (
-                check_completion,
-            )
-
-            guarded_fact = check_completion(
-                result.get("final_response", ""),
-                trusted_turn,
-            )
-            result["final_response"] = guarded_fact.text
-            result["messages"] = []
         result["_mystand_request"] = request.mystand_request
         if request.mystand_request:
             result["_mystand_user_id"] = str(
@@ -421,29 +265,6 @@ class TrueMoARunnerFinalMixin:
                 request.request_message_id or "",
             )
             result["_trusted_turn"] = trusted_turn
-            result["_mystand_evidence_required"] = bool(
-                getattr(request, "dynamic_evidence_required", False)
-                or trusted_initial_tool_choice
-                or request.fact_requirement
-            )
-            if request.fact_requirement is not None:
-                result["_mystand_fact_requirement"] = (
-                    request.fact_requirement
-                )
-            if request.completion_protocol:
-                result["_mystand_completion_protocol"] = (
-                    request.completion_protocol
-                )
-                result["_mystand_completion_binding"] = dict(
-                    request.completion_binding
-                )
-        if initial_tool_choice:
-            result["_mystand_required_evidence_groups"] = [
-                sorted(group)
-                for group in _required_mystand_evidence_groups(
-                    initial_tool_choice
-                )
-            ]
         if request.mystand_request:
             _finalize_mystand_egress_result(
                 result,
@@ -520,23 +341,23 @@ class TrueMoARunnerFinalMixin:
         result = final_stage_payload.get("result")
         result = dict(result) if isinstance(result, dict) else {}
         deferred_persistence_messages = (
-            final_stage_payload.get("safe_persistence_messages")
+            final_stage_payload.get("deferred_persistence_messages")
             if isinstance(
-                final_stage_payload.get("safe_persistence_messages"),
+                final_stage_payload.get("deferred_persistence_messages"),
                 list,
             )
             else []
         )
         deferred_persistence_history = (
-            final_stage_payload.get("safe_persistence_history")
+            final_stage_payload.get("deferred_persistence_history")
             if isinstance(
-                final_stage_payload.get("safe_persistence_history"),
+                final_stage_payload.get("deferred_persistence_history"),
                 list,
             )
             else []
         )
-        guarded_turn_projection = final_stage_payload.get(
-            "guarded_turn_projection",
+        turn_projection = final_stage_payload.get(
+            "turn_projection",
         )
         request_stopped = bool(
             not self.final_deadline_timed_out
@@ -588,17 +409,17 @@ class TrueMoARunnerFinalMixin:
                 result.get("_mystand_egress_output_digest"),
                 str,
             )
-            or not isinstance(guarded_turn_projection, dict)
+            or not isinstance(turn_projection, dict)
             or not isinstance(
-                guarded_turn_projection.get("state"),
+                turn_projection.get("state"),
                 str,
             )
             or not isinstance(
-                guarded_turn_projection.get("states"),
+                turn_projection.get("states"),
                 list,
             )
             or not isinstance(
-                guarded_turn_projection.get("terminal_reason"),
+                turn_projection.get("terminal_reason"),
                 str,
             )
         ):
@@ -738,12 +559,12 @@ class TrueMoARunnerFinalMixin:
                 "error": "true MoA final settlement failed",
             })
         if deferred_persistence_ready and settlement_confirmed:
-            trusted_turn.state = guarded_turn_projection["state"]
+            trusted_turn.state = turn_projection["state"]
             trusted_turn.states = list(
-                guarded_turn_projection["states"],
+                turn_projection["states"],
             )
             trusted_turn.terminal_reason = (
-                guarded_turn_projection["terminal_reason"]
+                turn_projection["terminal_reason"]
             )
             result["_trusted_turn"] = trusted_turn
             from agent.turn_finalizer import (

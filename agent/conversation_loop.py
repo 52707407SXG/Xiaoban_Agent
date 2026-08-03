@@ -16,7 +16,6 @@ resolved through :func:`_ra` so those patches keep working.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -65,7 +64,7 @@ from agent.true_moa_conversation_policy import (
     execute_llm_request as _execute_llm_request,
     initialize_session_side_effects as _initialize_session_side_effects,
     prepare_llm_request as _prepare_llm_request,
-    strict_failure_result as _base_strict_failure_result,
+    strict_failure_result as _strict_failure_result,
     strict_mode as _strict_true_moa_mode,
 )
 from agent.paid_call_accounting import (
@@ -83,877 +82,6 @@ logger = logging.getLogger(__name__)
 # cancelled while waiting on the provider. Surfaces (ACP, TUI) match on this
 # to treat it as cancellation metadata rather than assistant prose.
 INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model response ("
-_FINALIZE_ONLY_INSTRUCTION = (
-    "Runtime finalization: tool access for this turn is now closed. "
-    "Complete the user's original request in natural language from the actual "
-    "tool results in this conversation. Use concrete material from those "
-    "results and supply every requested conclusion, analysis, recommendation "
-    "or next action; a lookup-status acknowledgement is not an answer. If the "
-    "results are insufficient, state the actual gap and cause. Never claim an "
-    "unobserved action or fact, request another tool call, or simulate one."
-)
-_FAILURE_FINALIZE_ONLY_INSTRUCTION = (
-    "Runtime finalization: tool access for this turn is now closed. "
-    "Explain the failed work naturally from the complete structured execution "
-    "outcome supplied below. Preserve its intent, target, ordered attempts, "
-    "actual recovery, final safe cause, obtained material and missing "
-    "deliverables. Do not infer facts or actions outside that outcome."
-)
-_FINALIZE_ONLY_USER_INSTRUCTION = (
-    "请直接完成原始请求，不要只汇报“查到了”或“执行过了”。回答中的事实必须"
-    "来自本轮实际结果；需要分析、判断或建议时一并完成。不要输出或模拟工具调用。"
-)
-_DYNAMIC_EVIDENCE_CONTINUATION_INSTRUCTION = (
-    "Trusted runtime continuation: this server-classified work turn still "
-    "has no completed current-turn My Stand evidence or failure state. "
-    "Before answering, use the available My Stand tool that fits the request. "
-    "Do not answer from memory, claim a lookup, or repeat this instruction."
-)
-_DYNAMIC_TRANSIENT_RECOVERY_INSTRUCTION = (
-    "Trusted runtime recovery: the previous current-turn My Stand read "
-    "ended in a server-confirmed transient condition. Make one bounded "
-    "recovery attempt now by retrying that exact same owner-scoped safe read. "
-    "Do not change the target, write data, invent a result, repeat the read "
-    "more than once, or answer before a verified result."
-)
-_DYNAMIC_ARGUMENT_RECOVERY_INSTRUCTION = (
-    "Trusted runtime correction: the failed tool_result above says the previous "
-    "current-turn My Stand read contained fields that are not allowed in the "
-    "semantic-read stage. Call exactly the one server-approved corrected "
-    "descriptor below. It preserves the original target and removes only the "
-    "incompatible fields. Do not rebuild or change the target, add a field, "
-    "change to a write, make a second call, or answer before the corrected read "
-    "returns."
-)
-_RAW_TOOL_PROTOCOL_PATTERNS = (
-    re.compile(
-        r"<[\|｜]{1,4}\s*DSML\s*[\|｜]{1,4}\s*"
-        r"(?:tool_calls?|function_calls?|invoke|recipient|parameter)",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"</?\s*(?:tool_call|function_call|function_calls|invoke)"
-        r"(?:\s|>|/)",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?:^|[\s<{])(?:to|recipient)\s*=\s*"
-        r"(?:functions?|tools?)\.[A-Za-z_][A-Za-z0-9_.-]*",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"""["']?tool_calls["']?\s*:\s*\[\s*\{""",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"""["']?function["']?\s*:\s*\{\s*["']?name["']?\s*:""",
-        re.IGNORECASE,
-    ),
-)
-
-
-def _append_api_only_system_instruction(
-    api_messages: list[dict[str, Any]],
-    instruction: str,
-) -> None:
-    """Add one request-local instruction without persisting transcript text."""
-    if api_messages and api_messages[0].get("role") == "system":
-        system_content = api_messages[0].get("content")
-        if isinstance(system_content, list):
-            api_messages[0] = {
-                **api_messages[0],
-                "content": [
-                    *system_content,
-                    {"type": "text", "text": instruction},
-                ],
-            }
-        else:
-            api_messages[0] = {
-                **api_messages[0],
-                "content": "\n\n".join(
-                    part
-                    for part in (
-                        str(system_content or "").strip(),
-                        instruction,
-                    )
-                    if part
-                ),
-            }
-        return
-    api_messages.insert(
-        0,
-        {"role": "system", "content": instruction},
-    )
-
-
-def _contains_raw_tool_protocol_content(content: Any) -> bool:
-    """Detect provider call framing masquerading as visible prose."""
-    text = str(content or "")
-    if any(pattern.search(text) for pattern in _RAW_TOOL_PROTOCOL_PATTERNS):
-        return True
-    return _contains_json_tool_protocol(text)
-
-
-def _json_tool_name_is_known(name: Any, valid_tool_names: set[str]) -> bool:
-    text = str(name or "").strip()
-    return bool(
-        text
-        and (
-            text in valid_tool_names
-            or text.startswith("mystand_")
-        )
-    )
-
-
-def _looks_like_json_tool_protocol(
-    value: Any,
-    *,
-    valid_tool_names: set[str],
-) -> bool:
-    if isinstance(value, list):
-        return any(
-            _looks_like_json_tool_protocol(
-                item,
-                valid_tool_names=valid_tool_names,
-            )
-            for item in value
-        )
-    if not isinstance(value, dict):
-        return False
-
-    envelope_type = str(value.get("type") or "").strip().lower()
-    explicit_envelope = envelope_type in {
-        "tool_call",
-        "tool_use",
-        "function_call",
-        "function_use",
-    }
-    name = value.get("name")
-    argument_keys = {"arguments", "input", "args"}
-    if (
-        name
-        and argument_keys.intersection(value)
-        and (
-            explicit_envelope
-            or _json_tool_name_is_known(name, valid_tool_names)
-        )
-    ):
-        return True
-
-    for key in (
-        "function",
-        "functionCall",
-        "function_call",
-        "toolCall",
-        "tool_call",
-    ):
-        nested = value.get(key)
-        if not isinstance(nested, dict):
-            continue
-        nested_name = nested.get("name")
-        if (
-            nested_name
-            and argument_keys.intersection(nested)
-            and (
-                explicit_envelope
-                or _json_tool_name_is_known(
-                    nested_name,
-                    valid_tool_names,
-                )
-            )
-        ):
-            return True
-
-    for key in ("tool_calls", "function_calls"):
-        nested_calls = value.get(key)
-        if isinstance(nested_calls, list) and nested_calls:
-            return True
-    return False
-
-
-def _contains_json_tool_protocol(
-    text: str,
-    *,
-    valid_tool_names: Optional[set[str]] = None,
-) -> bool:
-    """Parse embedded JSON values and identify provider tool envelopes."""
-    known_names = {
-        str(name or "").strip()
-        for name in valid_tool_names or set()
-        if str(name or "").strip()
-    }
-    decoder = json.JSONDecoder()
-    for index, char in enumerate(text):
-        if char not in "[{":
-            continue
-        try:
-            value, _ = decoder.raw_decode(text[index:])
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if _looks_like_json_tool_protocol(
-            value,
-            valid_tool_names=known_names,
-        ):
-            return True
-    return False
-
-
-def _failure_finalize_summary(trusted_turn: Any) -> str:
-    """Build a prompt-only TurnOutcome without raw/private tool output."""
-    try:
-        from xiaoban.trusted_runtime.dynamic_completion import (
-            dynamic_turn_outcome,
-        )
-
-        outcome = dynamic_turn_outcome(trusted_turn)
-    except Exception:
-        outcome = None
-    if not outcome:
-        return json.dumps(
-            {
-                "schema": "xiaoban.turn-outcome.v1",
-                "terminal_status": "failed",
-                "cause": "no_verified_terminal_outcome",
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    return json.dumps(
-        outcome,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
-def _dynamic_terminal_fallback_text() -> str:
-    """Return a server-owned terminal projection from the trusted ledger."""
-    try:
-        from xiaoban.trusted_runtime.dynamic_completion import (
-            render_dynamic_failure_report,
-        )
-        from xiaoban.trusted_runtime.turns import current_turn
-
-        trusted_turn = current_turn()
-    except Exception:
-        return ""
-    if (
-        trusted_turn is None
-        or getattr(trusted_turn, "completion_protocol", "")
-        != "dynamic-evidence-v2"
-    ):
-        return ""
-    mode = str(
-        getattr(trusted_turn, "completion_finalization", "") or ""
-    )
-    if mode == "failure":
-        try:
-            text = str(render_dynamic_failure_report(trusted_turn) or "")
-        except Exception:
-            return ""
-    elif mode == "evidence":
-        text = (
-            "资料已经读取成功，但最终回答没有使用本轮资料中的具体内容，"
-            "无法确认它真正完成了你的要求。本次任务仍按未完成处理。"
-        )
-    else:
-        return ""
-    if text:
-        setattr(
-            trusted_turn,
-            "completion_finalization_output_digest",
-            hashlib.sha256(text.encode("utf-8")).hexdigest(),
-        )
-    return text
-
-
-def _strict_failure_result(*args: Any, **kwargs: Any) -> dict[str, Any]:
-    """Keep trusted finalizer failures visible as a system receipt."""
-    fallback_exit_reason = kwargs.pop(
-        "fallback_exit_reason",
-        "text_response(finalize_fallback)",
-    )
-    failure_exit_reason = kwargs.pop(
-        "failure_exit_reason",
-        "strict_iteration_budget_reached(finalize_failure)",
-    )
-    result = _base_strict_failure_result(*args, **kwargs)
-    if result.get("final_response") is None:
-        terminal_projection = _dynamic_terminal_fallback_text()
-        if terminal_projection:
-            result["final_response"] = terminal_projection
-            result["partial"] = False
-            result["turn_exit_reason"] = fallback_exit_reason
-        else:
-            result["turn_exit_reason"] = failure_exit_reason
-    return result
-
-
-def _reject_finalize_only_protocol_candidate(
-    agent: Any,
-    messages: list[Any],
-    conversation_history: list[Any],
-    *,
-    api_call_count: int,
-    candidate: Any,
-    finalize_only: bool,
-) -> Optional[dict[str, Any]]:
-    """Strictly reject a whole final candidate containing call framing."""
-    if not finalize_only or not (
-        _contains_raw_tool_protocol_content(candidate)
-        or _contains_json_tool_protocol(
-            str(candidate or ""),
-            valid_tool_names=set(
-                getattr(agent, "valid_tool_names", None) or set()
-            ),
-        )
-    ):
-        return None
-    return _strict_failure_result(
-        agent,
-        messages,
-        conversation_history,
-        api_call_count=api_call_count,
-        error="Finalize-only model returned raw tool protocol content",
-        partial=True,
-        drop_scaffolding=True,
-        fallback_exit_reason=(
-            "text_response(finalize_protocol_content_rejected)"
-        ),
-        failure_exit_reason=(
-            "strict_iteration_budget_reached"
-            "(finalize_protocol_content_rejected)"
-        ),
-    )
-
-
-def _dynamic_incomplete_work_fingerprint() -> str:
-    """Fingerprint unfinished trusted lifecycle state without private text."""
-    try:
-        from xiaoban.trusted_runtime.dynamic_completion import (
-            dynamic_finalization_mode,
-        )
-        from xiaoban.trusted_runtime.turns import current_turn
-
-        trusted_turn = current_turn()
-    except Exception:
-        return ""
-    if (
-        trusted_turn is None
-        or getattr(trusted_turn, "completion_protocol", "")
-        != "dynamic-evidence-v2"
-        or getattr(trusted_turn, "interaction_kind", "") != "WORK"
-        or getattr(trusted_turn, "fact_requirement", None) is not None
-    ):
-        return ""
-    try:
-        if dynamic_finalization_mode(trusted_turn):
-            return ""
-    except Exception:
-        return ""
-
-    def _projection(items: Any, fields: tuple[str, ...]) -> list[dict[str, str]]:
-        return [
-            {
-                field: str(getattr(item, field, "") or "")
-                for field in fields
-            }
-            for item in (items or [])
-        ]
-
-    receipt = getattr(trusted_turn, "index_receipt", None)
-    lifecycle = {
-        "turn_id": str(getattr(trusted_turn, "turn_id", "") or ""),
-        "state": str(getattr(trusted_turn, "state", "") or ""),
-        "index": {
-            "count": str(getattr(receipt, "resource_count", "") or ""),
-            "digest": str(
-                getattr(receipt, "resource_refs_digest", "") or ""
-            ),
-            "has_more": str(getattr(receipt, "has_more", "") or ""),
-        },
-        "calls": _projection(
-            getattr(trusted_turn, "action_calls", None),
-            ("call_id", "action_id", "input_digest"),
-        ),
-        "results": _projection(
-            getattr(trusted_turn, "action_results", None),
-            (
-                "call_id",
-                "action_id",
-                "status",
-                "error_code",
-                "output_digest",
-            ),
-        ),
-        "evidence": _projection(
-            getattr(trusted_turn, "evidence", None),
-            (
-                "evidence_id",
-                "call_id",
-                "action_id",
-                "verification_status",
-            ),
-        ),
-    }
-    return hashlib.sha256(
-        json.dumps(
-            lifecycle,
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-
-
-def _prepare_finalize_only_call(
-    agent: Any,
-    api_call_count: int,
-    api_messages: list[dict[str, Any]],
-    *,
-    original_user_message: Any = None,
-) -> bool:
-    """Reserve the last paid slot, or close tools once trusted evidence exists."""
-    if not getattr(agent, "_strict_no_automatic_paid_retry", False):
-        return False
-    if agent.max_iterations <= 1:
-        return False
-    try:
-        from xiaoban.trusted_runtime.dynamic_completion import (
-            dynamic_finalization_mode,
-        )
-        from xiaoban.trusted_runtime.turns import current_turn
-
-        trusted_turn = current_turn()
-    except Exception:
-        trusted_turn = None
-    if (
-        trusted_turn is None
-        or getattr(trusted_turn, "completion_protocol", "")
-        != "dynamic-evidence-v2"
-    ):
-        return False
-    if api_call_count >= agent.max_iterations:
-        try:
-            from xiaoban.trusted_runtime.dynamic_completion import (
-                mark_dynamic_execution_no_progress,
-            )
-
-            mark_dynamic_execution_no_progress(trusted_turn)
-        except Exception:
-            pass
-    try:
-        finalization_mode = dynamic_finalization_mode(trusted_turn)
-    except Exception:
-        finalization_mode = ""
-    if api_call_count < agent.max_iterations and not finalization_mode:
-        return False
-    if not finalization_mode:
-        finalization_mode = "not_executed"
-    setattr(
-        trusted_turn,
-        "completion_finalization",
-        finalization_mode,
-    )
-    setattr(
-        trusted_turn,
-        "completion_finalization_output_digest",
-        "",
-    )
-    if finalization_mode == "failure":
-        # Do not replay raw assistant/tool serialization into the failure
-        # finalizer. It gets the current request for intent naming plus a
-        # server-owned, privacy-safe execution capsule with the actual cause.
-        clean_user_message = str(original_user_message or "").strip()
-        api_messages[:] = [
-            {
-                "role": "system",
-                "content": _FAILURE_FINALIZE_ONLY_INSTRUCTION,
-            },
-            {
-                "role": "user",
-                "content": clean_user_message
-                or "请说明这项任务为什么没有完成。",
-            },
-        ]
-    elif finalization_mode == "evidence":
-        # A recovered read must not make the earlier failed tool body visible
-        # again when the successful finalizer is built from canonical
-        # messages. Rebuild the call from the current request and only the
-        # server-recorded successful tool lifecycle. Assistant narration,
-        # prior turns and every non-success tool result remain private.
-        successful_results = {
-            str(getattr(result, "call_id", "") or ""): result
-            for result in getattr(trusted_turn, "action_results", ())
-            if str(getattr(result, "status", "") or "") == "success"
-        }
-        retained_system = (
-            dict(api_messages[0])
-            if api_messages and api_messages[0].get("role") == "system"
-            else None
-        )
-        projected_tool_messages: list[dict[str, Any]] = []
-        for action_call in getattr(trusted_turn, "action_calls", ()):
-            call_id = str(getattr(action_call, "call_id", "") or "")
-            result = successful_results.get(call_id)
-            if (
-                result is None
-                or str(getattr(result, "action_id", "") or "")
-                != str(getattr(action_call, "action_id", "") or "")
-                or not str(getattr(result, "raw_text", "") or "")
-            ):
-                continue
-            action_name = str(
-                getattr(action_call, "action_id", "") or ""
-            )
-            projected_tool_messages.extend(
-                [
-                    {
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [
-                            {
-                                "id": call_id,
-                                "type": "function",
-                                "function": {
-                                    "name": action_name,
-                                    "arguments": json.dumps(
-                                        getattr(
-                                            action_call,
-                                            "arguments",
-                                            {},
-                                        ),
-                                        ensure_ascii=False,
-                                        sort_keys=True,
-                                    ),
-                                },
-                            }
-                        ],
-                    },
-                    {
-                        "role": "tool",
-                        "name": action_name,
-                        "tool_call_id": call_id,
-                        "content": str(result.raw_text),
-                    },
-                ]
-            )
-        api_messages[:] = [
-            *([retained_system] if retained_system is not None else []),
-            {
-                "role": "user",
-                "content": str(original_user_message or "").strip()
-                or "请根据本轮已验证结果完成回答。",
-            },
-            *projected_tool_messages,
-        ]
-        _append_api_only_system_instruction(
-            api_messages,
-            _FINALIZE_ONLY_INSTRUCTION,
-        )
-    else:
-        _append_api_only_system_instruction(
-            api_messages,
-            _FINALIZE_ONLY_INSTRUCTION,
-        )
-    final_user_instruction = _FINALIZE_ONLY_USER_INSTRUCTION
-    if finalization_mode == "failure":
-        final_user_instruction = (
-            f"{_failure_finalize_summary(trusted_turn)}\n\n"
-            "请依据这个完整执行结果说明本次为什么没有完成；"
-            "不得添加结果对象中不存在的动作或事实。"
-        )
-    api_messages.append(
-        {
-            "role": "user",
-            "content": final_user_instruction,
-        }
-    )
-    return True
-
-
-def _prepare_dynamic_transient_recovery_call(
-    agent: Any,
-    api_call_count: int,
-    api_messages: list[dict[str, Any]],
-    *,
-    recovery_used: bool,
-    original_user_message: Any = None,
-) -> bool:
-    """Inject one redacted, tool-enabled recovery turn for transient reads."""
-    if (
-        recovery_used
-        or not getattr(agent, "_strict_no_automatic_paid_retry", False)
-        # This helper runs after the current call has already consumed its
-        # budget. The current call can perform recovery only when one future
-        # slot remains for the terminal finalizer.
-        or agent.max_iterations - api_call_count < 1
-        or agent.iteration_budget.remaining < 1
-    ):
-        return False
-    try:
-        from xiaoban.trusted_runtime.dynamic_completion import (
-            dynamic_transient_recovery_plan,
-        )
-        from xiaoban.trusted_runtime.turns import current_turn
-
-        trusted_turn = current_turn()
-        plan = (
-            dynamic_transient_recovery_plan(trusted_turn)
-            if trusted_turn is not None
-            else None
-        )
-    except Exception:
-        plan = None
-    if not plan:
-        return False
-    clean_user_message = str(original_user_message or "").strip()
-    if not clean_user_message:
-        return False
-    retained_system = (
-        dict(api_messages[0])
-        if api_messages and api_messages[0].get("role") == "system"
-        else None
-    )
-    failed_tool_call = plan.get("failed_tool_call")
-    tool_result = plan.get("tool_result")
-    if (
-        not isinstance(failed_tool_call, Mapping)
-        or not isinstance(tool_result, Mapping)
-        or not str(failed_tool_call.get("call_id") or "")
-        or not str(failed_tool_call.get("action_id") or "")
-        or not isinstance(failed_tool_call.get("arguments"), Mapping)
-        or tool_result.get("ok") is not False
-        or tool_result.get("is_error") is not True
-    ):
-        return False
-    failed_call_id = str(failed_tool_call["call_id"])
-    failed_action_id = str(failed_tool_call["action_id"])
-    grant = plan.get("grant")
-    if (
-        not isinstance(grant, Mapping)
-        or grant.get("schema") != "xiaoban.recovery-grant.v1"
-        or grant.get("max_uses") != 1
-        or not str(grant.get("grant_id") or "")
-    ):
-        return False
-    descriptor_key = (
-        "correction"
-        if plan.get("mode") == "correct_arguments"
-        else "retry"
-    )
-    raw_descriptor = plan.get(descriptor_key)
-    if not isinstance(raw_descriptor, Mapping):
-        return False
-    recovery_action_id = str(
-        raw_descriptor.get("action_id") or ""
-    )
-    recovery_arguments = raw_descriptor.get("arguments")
-    if not recovery_action_id or not isinstance(
-        recovery_arguments,
-        Mapping,
-    ):
-        return False
-    issue_recovery_grant = getattr(
-        agent,
-        "_issue_turn_tool_recovery_grant",
-        None,
-    )
-    if callable(issue_recovery_grant):
-        issued_grant_id = issue_recovery_grant(
-            target_call_id=failed_call_id,
-            tool_name=recovery_action_id,
-            function_args=dict(recovery_arguments),
-            grant_id=str(grant["grant_id"]),
-            trusted_failure=True,
-            turn_id_override=str(
-                getattr(trusted_turn, "turn_id", "") or ""
-            ),
-        )
-    else:
-        # Lightweight protocol-harness agents do not own execution lineage.
-        # The active trusted WorkTurn still validates the recovery call below.
-        issued_grant_id = str(grant["grant_id"])
-    if issued_grant_id != str(grant["grant_id"]):
-        return False
-
-    # Keep the mature agent-loop shape: assistant tool call followed by a
-    # structured tool error. The body is reconstructed from the trusted turn
-    # and a strict safe projection, so private/raw handler text is not replayed.
-    api_messages[:] = [
-        *([retained_system] if retained_system is not None else []),
-        {"role": "user", "content": clean_user_message},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": failed_call_id,
-                    "type": "function",
-                    "function": {
-                        "name": failed_action_id,
-                        "arguments": json.dumps(
-                            dict(failed_tool_call["arguments"]),
-                            ensure_ascii=False,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ),
-                    },
-                }
-            ],
-        },
-        {
-            "role": "tool",
-            "name": failed_action_id,
-            "tool_call_id": failed_call_id,
-            "content": json.dumps(
-                dict(tool_result),
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-        },
-    ]
-    if plan.get("mode") == "correct_arguments":
-        correction_descriptor = dict(plan.get("correction") or {})
-        correction_descriptor.pop("arguments_digest", None)
-        correction_text = json.dumps(
-            correction_descriptor,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        _append_api_only_system_instruction(
-            api_messages,
-            (
-                f"{_DYNAMIC_ARGUMENT_RECOVERY_INSTRUCTION} "
-                f"Verified state only: {plan['state']}. "
-                f"Correction boundary: {correction_text}."
-            ),
-        )
-        return True
-    retry_descriptor = dict(plan.get("retry") or {})
-    retry_descriptor.pop("arguments_digest", None)
-    retry_descriptor_text = json.dumps(
-        retry_descriptor,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    _append_api_only_system_instruction(
-        api_messages,
-        (
-            f"{_DYNAMIC_TRANSIENT_RECOVERY_INSTRUCTION} "
-            f"Verified state only: {plan['state']}. "
-            "Call exactly this one server-approved retry descriptor and no "
-            f"other tool: {retry_descriptor_text}."
-        ),
-    )
-    return True
-
-
-def _dynamic_transient_tool_calls_valid(tool_calls: list[Any]) -> bool:
-    """Validate the one physical retry before any handler can run."""
-    if len(tool_calls) != 1:
-        return False
-    tool_call = tool_calls[0]
-    try:
-        arguments = json.loads(tool_call.function.arguments)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return False
-    if not isinstance(arguments, dict):
-        return False
-    try:
-        from xiaoban.trusted_runtime.dynamic_completion import (
-            dynamic_transient_recovery_tool_call_valid,
-        )
-        from xiaoban.trusted_runtime.turns import current_turn
-
-        trusted_turn = current_turn()
-        return bool(
-            trusted_turn is not None
-            and dynamic_transient_recovery_tool_call_valid(
-                trusted_turn,
-                action_id=tool_call.function.name,
-                arguments=arguments,
-            )
-        )
-    except Exception:
-        return False
-
-
-def _cap_dynamic_evidence_tool_calls(tool_calls: list[Any]) -> list[Any]:
-    """Coerce a dynamic read response to one physical business call.
-
-    This is the same narrow class of deterministic repair used by mature code
-    agents for an unambiguous malformed shape: the provider was explicitly
-    told not to emit parallel reads, and the trusted stage exposes only
-    read-only My Stand tools. Keeping the first call lets its concrete result
-    return to the model before any next choice, while preventing speculative
-    batches from multiplying cost or failures.
-    """
-    if not isinstance(tool_calls, list) or len(tool_calls) <= 1:
-        return tool_calls
-    try:
-        from xiaoban.trusted_runtime.tool_visibility import (
-            dynamic_evidence_allowed_tool_names,
-        )
-        from xiaoban.trusted_runtime.turns import current_turn
-
-        allowed = dynamic_evidence_allowed_tool_names(current_turn())
-    except Exception:
-        return tool_calls
-    if not allowed or "mystand_query" not in allowed:
-        return tool_calls
-    staged = [
-        call
-        for call in tool_calls
-        if str(getattr(getattr(call, "function", None), "name", "") or "")
-        in allowed
-    ]
-    if len(staged) <= 1:
-        return tool_calls
-    logger.warning(
-        "Dynamic My Stand read response contained %d staged calls; "
-        "executing only the first before model follow-up",
-        len(staged),
-    )
-    return [staged[0]]
-
-
-def _reserve_dynamic_terminal_finalizer(
-    agent: Any,
-    api_call_count: int,
-) -> bool:
-    """Keep one paid slot for a trusted terminal reply after bad model output."""
-    if (
-        not getattr(agent, "_strict_no_automatic_paid_retry", False)
-        or agent.max_iterations - api_call_count < 1
-        or agent.iteration_budget.remaining < 1
-    ):
-        return False
-    try:
-        from xiaoban.trusted_runtime.dynamic_completion import (
-            dynamic_finalization_mode,
-            mark_dynamic_execution_no_progress,
-        )
-        from xiaoban.trusted_runtime.turns import current_turn
-
-        trusted_turn = current_turn()
-        if (
-            trusted_turn is None
-            or getattr(trusted_turn, "completion_protocol", "")
-            != "dynamic-evidence-v2"
-        ):
-            return False
-        finalization_mode = dynamic_finalization_mode(trusted_turn)
-        if not finalization_mode:
-            mark_dynamic_execution_no_progress(trusted_turn)
-            finalization_mode = dynamic_finalization_mode(trusted_turn)
-        return finalization_mode in {"evidence", "failure"}
-    except Exception:
-        return False
 
 
 def _image_error_max_dimension(error: Exception) -> Optional[int]:
@@ -1414,11 +542,30 @@ def run_conversation(
     conversation_history = _ctx.conversation_history
     active_system_prompt = _ctx.active_system_prompt
     effective_task_id = _ctx.effective_task_id
+    request_id = _ctx.request_id
     turn_id = _ctx.turn_id
     current_turn_user_idx = _ctx.current_turn_user_idx
     _should_review_memory = _ctx.should_review_memory
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
+
+    # A turn becomes observable only after the complete prologue has returned a
+    # real TurnContext.  The gateway filters this generic progress callback to
+    # trusted My Stand request/turn identifiers; other consumers ignore the
+    # unknown event type just as they do other non-tool progress events.
+    if (
+        _ctx.is_mystand_turn
+        and getattr(agent, "tool_progress_callback", None) is not None
+    ):
+        try:
+            agent.tool_progress_callback(
+                "turn.started",
+                request_id,
+                turn_id,
+                None,
+            )
+        except Exception:
+            logger.debug("turn.started callback failed", exc_info=True)
 
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
@@ -1426,16 +573,10 @@ def run_conversation(
     interrupted = False
     failed = False
     codex_ack_continuations = 0
-    dynamic_evidence_continuation_used = False
-    dynamic_evidence_continuation_pending = False
-    dynamic_evidence_continuation_call = False
-    dynamic_transient_recovery_used = False
-    dynamic_transient_recovery_pending = False
     length_continue_retries = 0
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
-    _finalize_only_call = False
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
 
     # Optional opt-in runtime: if api_mode == codex_app_server, hand the
@@ -1531,19 +672,13 @@ def run_conversation(
             for _si in range(len(messages) - 1, -1, -1):
                 _sm = messages[_si]
                 if isinstance(_sm, dict) and _sm.get("role") == "tool":
-                    from agent.prompt_builder import format_steer_marker
-                    marker = format_steer_marker(_pre_api_steer)
-                    existing = _sm.get("content", "")
-                    if isinstance(existing, str):
-                        _sm["content"] = existing + marker
-                    else:
-                        # Multimodal content blocks — append text block
-                        try:
-                            blocks = list(existing) if existing else []
-                            blocks.append({"type": "text", "text": marker})
-                            _sm["content"] = blocks
-                        except Exception:
-                            pass
+                    from agent.agent_runtime_helpers import (
+                        append_trusted_steer_to_tool_message,
+                    )
+
+                    append_trusted_steer_to_tool_message(
+                        _sm, _pre_api_steer
+                    )
                     _injected = True
                     logger.debug(
                         "Pre-API-call steer drain: injected into tool msg at index %d",
@@ -1673,42 +808,6 @@ def run_conversation(
             sys_offset = 1 if (api_messages and api_messages[0].get("role") == "system") else 0
             for idx, pfm in enumerate(agent.prefill_messages):
                 api_messages.insert(sys_offset + idx, pfm.copy())
-
-        dynamic_evidence_continuation_call = (
-            dynamic_evidence_continuation_pending
-        )
-        if dynamic_evidence_continuation_call:
-            _append_api_only_system_instruction(
-                api_messages,
-                _DYNAMIC_EVIDENCE_CONTINUATION_INSTRUCTION,
-            )
-            dynamic_evidence_continuation_pending = False
-
-        # A server-authenticated transient read failure gets one bounded,
-        # tool-enabled recovery turn before tools close.  The prompt contains
-        # only the redacted state capsule; a second failure goes straight to
-        # the ordinary failure finalizer.
-        dynamic_transient_recovery_pending = (
-            _prepare_dynamic_transient_recovery_call(
-                agent,
-                api_call_count,
-                api_messages,
-                recovery_used=dynamic_transient_recovery_used,
-                original_user_message=original_user_message,
-            )
-        )
-        if dynamic_transient_recovery_pending:
-            dynamic_transient_recovery_used = True
-            _finalize_only_call = False
-        else:
-            # Finalization must be selected before provider-specific
-            # prompt-cache transforms turn system text into structured blocks.
-            _finalize_only_call = _prepare_finalize_only_call(
-                agent,
-                api_call_count,
-                api_messages,
-                original_user_message=original_user_message,
-            )
 
         # Apply Anthropic prompt caching for Claude models on native
         # Anthropic, OpenRouter, and third-party Anthropic-compatible
@@ -1842,7 +941,6 @@ def run_conversation(
         finish_reason = "stop"
         response = None  # Guard against UnboundLocalError if all retries fail
         api_kwargs = None  # Guard against UnboundLocalError in except handler
-        _dynamic_terminal_after_provider_error = False
         api_request_id = f"{turn_id}:api:{api_call_count}"
         agent._current_api_request_id = api_request_id
 
@@ -1909,10 +1007,6 @@ def run_conversation(
                 # isn't sent with stale, primary-shaped reasoning fields.
                 agent._reapply_reasoning_echo_for_provider(api_messages)
                 api_kwargs = agent._build_api_kwargs(api_messages)
-                if _finalize_only_call:
-                    api_kwargs.pop("tools", None)
-                    api_kwargs.pop("tool_choice", None)
-                    api_kwargs.pop("parallel_tool_calls", None)
                 if agent._force_ascii_payload:
                     _sanitize_structure_non_ascii(api_kwargs)
                 if agent.api_mode == "codex_responses":
@@ -2180,28 +1274,8 @@ def run_conversation(
                     if agent.thinking_callback:
                         agent.thinking_callback("")
 
-                    if (
-                        _strict_true_moa_mode(agent)
-                        or _finalize_only_call
-                        or dynamic_evidence_continuation_call
-                    ):
-                        if (
-                            (
-                                dynamic_transient_recovery_pending
-                                or dynamic_evidence_continuation_call
-                            )
-                            and not _finalize_only_call
-                            and _reserve_dynamic_terminal_finalizer(
-                                agent,
-                                api_call_count,
-                            )
-                        ):
-                            dynamic_transient_recovery_pending = False
-                            dynamic_evidence_continuation_call = False
-                            _dynamic_terminal_after_provider_error = True
-                            break
-                        if _strict_true_moa_mode(agent):
-                            _record_strict_terminal_usage(agent, response)
+                    if _strict_true_moa_mode(agent):
+                        _record_strict_terminal_usage(agent, response)
                         return _strict_failure_result(
                             agent,
                             messages,
@@ -2433,37 +1507,6 @@ def run_conversation(
                     if agent.thinking_callback:
                         agent.thinking_callback("")
 
-                    if (
-                        (
-                            dynamic_transient_recovery_pending
-                            or dynamic_evidence_continuation_call
-                        )
-                        and _reserve_dynamic_terminal_finalizer(
-                            agent,
-                            api_call_count,
-                        )
-                    ):
-                        dynamic_transient_recovery_pending = False
-                        dynamic_evidence_continuation_call = False
-                        _dynamic_terminal_after_provider_error = True
-                        break
-
-                    if _finalize_only_call:
-                        if _strict_true_moa_mode(agent):
-                            _record_strict_terminal_usage(agent, response)
-                        return _strict_failure_result(
-                            agent,
-                            messages,
-                            conversation_history,
-                            api_call_count=api_call_count,
-                            error=(
-                                "Finalize-only response was refused; "
-                                "automatic retry is disabled"
-                            ),
-                            partial=True,
-                            cleanup_task_id=effective_task_id,
-                        )
-
                     # Deterministic for the unchanged prompt — never retry.
                     # Try a configured fallback once (a different model may not
                     # refuse); otherwise surface the refusal terminally.
@@ -2519,28 +1562,8 @@ def run_conversation(
                     )
 
                 if finish_reason == "length":
-                    if (
-                        _strict_true_moa_mode(agent)
-                        or _finalize_only_call
-                        or dynamic_evidence_continuation_call
-                    ):
-                        if (
-                            (
-                                dynamic_transient_recovery_pending
-                                or dynamic_evidence_continuation_call
-                            )
-                            and not _finalize_only_call
-                            and _reserve_dynamic_terminal_finalizer(
-                                agent,
-                                api_call_count,
-                            )
-                        ):
-                            dynamic_transient_recovery_pending = False
-                            dynamic_evidence_continuation_call = False
-                            _dynamic_terminal_after_provider_error = True
-                            break
-                        if _strict_true_moa_mode(agent):
-                            _record_strict_terminal_usage(agent, response)
+                    if _strict_true_moa_mode(agent):
+                        _record_strict_terminal_usage(agent, response)
                         return _strict_failure_result(
                             agent,
                             messages,
@@ -2979,32 +2002,9 @@ def run_conversation(
                 if agent.thinking_callback:
                     agent.thinking_callback("")
 
-                if _strict_true_moa_mode(agent) or _finalize_only_call:
-                    if (
-                        (
-                            dynamic_transient_recovery_pending
-                            or dynamic_evidence_continuation_call
-                        )
-                        and not _finalize_only_call
-                        and not getattr(
-                            api_error,
-                            "usage_indeterminate",
-                            False,
-                        )
-                        and _reserve_dynamic_terminal_finalizer(
-                            agent,
-                            api_call_count,
-                        )
-                    ):
-                        # The one recovery provider call itself failed. Do not
-                        # retry the tool-enabled request or replay its prompt;
-                        # move once to the clean no-tool failure finalizer.
-                        dynamic_transient_recovery_pending = False
-                        dynamic_evidence_continuation_call = False
-                        _dynamic_terminal_after_provider_error = True
-                        break
+                if _strict_true_moa_mode(agent):
                     strict_error = (
-                        "Finalize-only response processing failed; "
+                        "Provider response processing failed; "
                         "automatic retry is disabled"
                         if _provider_response_received
                         else
@@ -4613,9 +3613,6 @@ def run_conversation(
             _turn_exit_reason = "interrupted_during_api_call"
             break
 
-        if _dynamic_terminal_after_provider_error:
-            continue
-
         if _retry.restart_with_compressed_messages:
             api_call_count -= 1
             agent.iteration_budget.refund()
@@ -4750,23 +3747,6 @@ def run_conversation(
                 agent._incomplete_scratchpad_retries += 1
                 
                 agent._buffer_vprint(f"⚠️  Incomplete <REASONING_SCRATCHPAD> detected (opened but never closed)")
-                if _finalize_only_call:
-                    return _strict_failure_result(
-                        agent,
-                        messages,
-                        conversation_history,
-                        api_call_count=api_call_count,
-                        error=(
-                            "Finalize-only response contained an incomplete "
-                            "reasoning scratchpad; automatic retry is disabled"
-                        ),
-                        partial=True,
-                        cleanup_task_id=effective_task_id,
-                        fallback_exit_reason=(
-                            "text_response(finalize_incomplete_scratchpad)"
-                        ),
-                    )
-                
                 if agent._incomplete_scratchpad_retries <= 2:
                     agent._buffer_vprint(f"🔄 Retrying API call ({agent._incomplete_scratchpad_retries}/2)...")
                     # Don't add the broken message, just retry
@@ -4794,22 +3774,6 @@ def run_conversation(
             agent._incomplete_scratchpad_retries = 0
 
             if agent.api_mode == "codex_responses" and finish_reason == "incomplete":
-                if _finalize_only_call:
-                    return _strict_failure_result(
-                        agent,
-                        messages,
-                        conversation_history,
-                        api_call_count=api_call_count,
-                        error=(
-                            "Finalize-only response remained incomplete; "
-                            "automatic retry is disabled"
-                        ),
-                        partial=True,
-                        cleanup_task_id=effective_task_id,
-                        fallback_exit_reason=(
-                            "text_response(finalize_incomplete_response)"
-                        ),
-                    )
                 agent._codex_incomplete_retries += 1
 
                 interim_msg = agent._build_assistant_message(assistant_message, finish_reason)
@@ -4868,25 +3832,6 @@ def run_conversation(
             elif hasattr(agent, "_codex_incomplete_retries"):
                 agent._codex_incomplete_retries = 0
             
-            # A finalize-only request never executes a model-emitted tool call,
-            # even if a provider returns one despite receiving no tool schema.
-            if _finalize_only_call and assistant_message.tool_calls:
-                return _strict_failure_result(
-                    agent,
-                    messages,
-                    conversation_history,
-                    api_call_count=api_call_count,
-                    error="Model attempted a tool call after tool access closed",
-                    partial=True,
-                    fallback_exit_reason=(
-                        "text_response(finalize_tool_call_rejected)"
-                    ),
-                    failure_exit_reason=(
-                        "strict_iteration_budget_reached"
-                        "(finalize_tool_call_rejected)"
-                    ),
-                )
-
             # Check for tool calls
             if assistant_message.tool_calls:
                 if not agent.quiet_mode:
@@ -4911,15 +3856,6 @@ def run_conversation(
                 ]
                 if invalid_tool_calls:
                     if _strict_true_moa_mode(agent):
-                        if (
-                            not _finalize_only_call
-                            and _reserve_dynamic_terminal_finalizer(
-                                agent,
-                                api_call_count,
-                            )
-                        ):
-                            dynamic_transient_recovery_pending = False
-                            continue
                         return _strict_failure_result(
                             agent,
                             messages,
@@ -5012,15 +3948,6 @@ def run_conversation(
                 
                 if invalid_json_args:
                     if _strict_true_moa_mode(agent):
-                        if (
-                            not _finalize_only_call
-                            and _reserve_dynamic_terminal_finalizer(
-                                agent,
-                                api_call_count,
-                            )
-                        ):
-                            dynamic_transient_recovery_pending = False
-                            continue
                         return _strict_failure_result(
                             agent,
                             messages,
@@ -5101,41 +4028,6 @@ def run_conversation(
                 # Reset retry counter on successful JSON validation
                 agent._invalid_json_retries = 0
 
-                if not dynamic_transient_recovery_pending:
-                    assistant_message.tool_calls = (
-                        _cap_dynamic_evidence_tool_calls(
-                            list(assistant_message.tool_calls)
-                        )
-                    )
-                if (
-                    dynamic_transient_recovery_pending
-                    and not _dynamic_transient_tool_calls_valid(
-                        list(assistant_message.tool_calls)
-                    )
-                ):
-                    # Reject the whole recovery response before de-duplication
-                    # or handler dispatch. A duplicate parallel call, changed
-                    # target, changed arguments, or extra read gets zero
-                    # physical actions and falls through to one clean failure
-                    # finalizer.
-                    dynamic_transient_recovery_pending = False
-                    if _reserve_dynamic_terminal_finalizer(
-                        agent,
-                        api_call_count,
-                    ):
-                        continue
-                    return _strict_failure_result(
-                        agent,
-                        messages,
-                        conversation_history,
-                        api_call_count=api_call_count,
-                        error=(
-                            "Transient recovery did not match the single "
-                            "server-approved read"
-                        ),
-                        partial=True,
-                    )
-
                 # ── Post-call guardrails ──────────────────────────
                 assistant_message.tool_calls = agent._cap_delegate_task_calls(
                     assistant_message.tool_calls
@@ -5152,178 +4044,23 @@ def run_conversation(
                 # turn. If the follow-up turn after tools is empty, we use this.
                 turn_content = assistant_message.content or ""
                 agent._last_content_tools_all_housekeeping = False
-                agent._current_tool_call_execution_contexts = {}
                 from agent.agent_runtime_helpers import (
                     is_post_response_housekeeping_tool,
-                )
-                from agent.tool_outcome_lineage import (
-                    action_fingerprint,
-                    normalize_lineage_action,
-                    unresolved_failure_ids,
-                    used_recovery_targets,
                 )
 
                 _has_visible_turn_content = bool(
                     turn_content
                     and agent._has_content_after_think_block(turn_content)
                 )
-                _has_user_task_tool = any(
-                    not is_post_response_housekeeping_tool(
-                        tc.function.name
-                    )
-                    for tc in assistant_message.tool_calls
-                )
-                _prior_outcomes = [
-                    item
-                    for item in (
-                        getattr(agent, "_turn_tool_outcomes", None) or []
-                    )
-                    if isinstance(item, dict)
-                ]
-                _server_recovery_grants = getattr(
-                    agent,
-                    "_turn_tool_recovery_grants",
-                    None,
-                )
-                _unresolved_failure_ids = set(
-                    unresolved_failure_ids(
-                        _prior_outcomes,
-                        server_grants=(
-                            _server_recovery_grants
-                            if isinstance(
-                                _server_recovery_grants,
-                                dict,
-                            )
-                            else {}
-                        ),
-                        expected_turn_id=str(
-                            getattr(
-                                agent,
-                                "_current_turn_id",
-                                "",
-                            )
-                            or ""
-                        ),
-                    )
-                )
-                _used_recovery_ids = used_recovery_targets(
-                    _prior_outcomes
-                )
-                _claimed_recovery_ids: set[str] = set()
-                for tc in assistant_message.tool_calls:
-                    _call_id = str(getattr(tc, "id", "") or "")
-                    if not _call_id:
-                        continue
-                    _tool_name = str(tc.function.name or "")
-                    try:
-                        _raw_arguments = json.loads(
-                            tc.function.arguments or "{}"
-                        )
-                    except (TypeError, ValueError):
-                        _raw_arguments = {}
-                    if not isinstance(_raw_arguments, dict):
-                        _raw_arguments = {}
-                    (
-                        _lineage_tool_name,
-                        _lineage_arguments,
-                        _,
-                    ) = normalize_lineage_action(
-                        _tool_name,
-                        _raw_arguments
-                    )
-                    _action_fingerprint = action_fingerprint(
-                        _lineage_tool_name,
-                        _lineage_arguments,
-                    )
-
-                    # The runtime, not the model, owns recovery lineage.
-                    # Identical canonical retries bind automatically. A
-                    # different action can bind only by consuming an internal,
-                    # target-bound, one-use server grant.
-                    _recovery_of = ""
-                    _recovery_authority = ""
-                    _recovery_grant_id = ""
-                    for _candidate in reversed(_prior_outcomes):
-                        _candidate_id = str(
-                            _candidate.get("tool_call_id") or ""
-                        )
-                        if (
-                            _candidate_id
-                            in _unresolved_failure_ids
-                            and _candidate_id
-                            not in _used_recovery_ids
-                            and _candidate_id
-                            not in _claimed_recovery_ids
-                            and str(
-                                _candidate.get(
-                                    "action_fingerprint"
-                                )
-                                or ""
-                            )
-                            == _action_fingerprint
-                            and int(
-                                _candidate.get("batch_id") or 0
-                            )
-                            < api_call_count
-                        ):
-                            _recovery_of = _candidate_id
-                            _recovery_authority = "exact-action"
-                            break
-                    if not _recovery_of:
-                        (
-                            _recovery_of,
-                            _recovery_grant_id,
-                        ) = agent._claim_turn_tool_recovery_grant(
-                            action_fingerprint_value=(
-                                _action_fingerprint
-                            ),
-                            unresolved_failure_ids=(
-                                _unresolved_failure_ids
-                            ),
-                            used_recovery_ids=_used_recovery_ids,
-                            claimed_recovery_ids=(
-                                _claimed_recovery_ids
-                            ),
-                            batch_id=api_call_count,
-                        )
-                        if _recovery_of:
-                            _recovery_authority = "server-grant"
-                    if _recovery_of:
-                        _claimed_recovery_ids.add(_recovery_of)
-                    if _recovery_of:
-                        _execution_role = "task-recovery"
-                    elif (
-                        is_post_response_housekeeping_tool(_tool_name)
-                        and (
-                            _has_visible_turn_content
-                            or _has_user_task_tool
-                        )
-                    ):
-                        _execution_role = "maintenance-side-effect"
-                    else:
-                        _execution_role = "user-task"
-                    _context = {
-                        "execution_role": _execution_role,
-                        "action_fingerprint": _action_fingerprint,
-                    }
-                    if _recovery_of:
-                        _context["recovery_of"] = _recovery_of
-                        _context["recovery_authority"] = (
-                            _recovery_authority
-                        )
-                    if _recovery_grant_id:
-                        _context["recovery_grant_id"] = (
-                            _recovery_grant_id
-                        )
-                    agent._current_tool_call_execution_contexts[
-                        _call_id
-                    ] = _context
 
                 if _has_visible_turn_content:
                     agent._last_content_with_tools = turn_content
                     # Only mute subsequent output when EVERY tool call in
-                    # this turn is post-response housekeeping (memory, todo,
-                    # skill_manage, etc.).  If any substantive tool is present
+                    # this turn is post-response housekeeping (memory,
+                    # skill_manage, etc.). Planning tools such as todo are
+                    # substantive: their ToolResult must return to the model
+                    # before it forms the user-facing final answer. If any
+                    # substantive tool is present
                     # (search_files, read_file, write_file, terminal, ...),
                     # keep output visible so the user sees progress.
                     _all_housekeeping = all(
@@ -5380,16 +4117,12 @@ def run_conversation(
                     except Exception:
                         pass
 
-                try:
-                    agent._execute_tool_calls(
-                        assistant_message,
-                        messages,
-                        effective_task_id,
-                        api_call_count,
-                    )
-                finally:
-                    agent._current_tool_call_execution_contexts = {}
-                dynamic_transient_recovery_pending = False
+                agent._execute_tool_calls(
+                    assistant_message,
+                    messages,
+                    effective_task_id,
+                    api_call_count,
+                )
 
                 if agent._tool_guardrail_halt_decision is not None:
                     decision = agent._tool_guardrail_halt_decision
@@ -5538,33 +4271,12 @@ def run_conversation(
                         agent._response_was_previewed = True
                         break
 
-                    if _finalize_only_call:
-                        return _strict_failure_result(
-                            agent,
-                            messages,
-                            conversation_history,
-                            api_call_count=api_call_count,
-                            error=(
-                                "Finalize-only model returned no visible "
-                                "content; automatic retry is disabled"
-                            ),
-                            partial=True,
-                            drop_scaffolding=True,
-                            fallback_exit_reason=(
-                                "text_response(finalize_empty_content)"
-                            ),
-                            failure_exit_reason=(
-                                "strict_iteration_budget_reached"
-                                "(finalize_empty_content)"
-                            ),
-                        )
-
                     # If the previous turn already delivered real content alongside
                     # HOUSEKEEPING tool calls (e.g. "You're welcome!" + memory save),
                     # the model has nothing more to say. Use the earlier content
                     # immediately instead of wasting API calls on retries.
                     # NOTE: Only use this shortcut when ALL tools in that turn were
-                    # housekeeping (memory, todo, etc.).  When substantive tools
+                    # housekeeping (memory, skill_manage, etc.). When substantive tools
                     # were called (terminal, search_files, etc.), the content was
                     # likely mid-task narration ("I'll scan the directory...") and
                     # the empty follow-up means the model choked — let the
@@ -5586,12 +4298,6 @@ def run_conversation(
                         break
 
                     if _strict_true_moa_mode(agent):
-                        if _reserve_dynamic_terminal_finalizer(
-                            agent,
-                            api_call_count,
-                        ):
-                            dynamic_transient_recovery_pending = False
-                            continue
                         return _strict_failure_result(
                             agent,
                             messages,
@@ -5829,26 +4535,6 @@ def run_conversation(
                         messages=messages,
                     )
                 )
-                if _finalize_only_call and codex_intermediate_ack:
-                    return _strict_failure_result(
-                        agent,
-                        messages,
-                        conversation_history,
-                        api_call_count=api_call_count,
-                        error=(
-                            "Finalize-only model returned an intermediate "
-                            "acknowledgement; automatic retry is disabled"
-                        ),
-                        partial=True,
-                        drop_scaffolding=True,
-                        fallback_exit_reason=(
-                            "text_response(finalize_intermediate_ack)"
-                        ),
-                        failure_exit_reason=(
-                            "strict_iteration_budget_reached"
-                            "(finalize_intermediate_ack)"
-                        ),
-                    )
                 if (
                     codex_intermediate_ack
                     and codex_ack_continuations < 2
@@ -5876,94 +4562,7 @@ def run_conversation(
                     truncated_response_parts = []
                     length_continue_retries = 0
 
-                protocol_failure = _reject_finalize_only_protocol_candidate(
-                    agent,
-                    messages,
-                    conversation_history,
-                    api_call_count=api_call_count,
-                    candidate=final_response,
-                    finalize_only=_finalize_only_call,
-                )
-                if protocol_failure is not None:
-                    return protocol_failure
-
                 final_response = agent._strip_think_blocks(final_response).strip()
-                if dynamic_transient_recovery_pending:
-                    # The bounded recovery call declined to execute another
-                    # safe read.  Its unbound prose is not a terminal result;
-                    # reserve the next call for the trusted failure finalizer.
-                    dynamic_transient_recovery_pending = False
-                    final_response = None
-                    continue
-                dynamic_incomplete_fingerprint = (
-                    _dynamic_incomplete_work_fingerprint()
-                    if not _finalize_only_call
-                    else ""
-                )
-                if (
-                    dynamic_incomplete_fingerprint
-                    and not dynamic_evidence_continuation_used
-                    and agent.max_iterations - api_call_count >= 2
-                    and agent.iteration_budget.remaining >= 2
-                ):
-                    # The first zero-action answer is untrusted and never
-                    # enters the transcript. Give the model one generic,
-                    # request-local chance to execute the appropriate site
-                    # tool; a second refusal falls through to CompletionGuard.
-                    dynamic_evidence_continuation_used = True
-                    dynamic_evidence_continuation_pending = True
-                    final_response = None
-                    continue
-                if dynamic_incomplete_fingerprint:
-                    try:
-                        from xiaoban.trusted_runtime.dynamic_completion import (
-                            mark_dynamic_execution_no_progress,
-                        )
-                        from xiaoban.trusted_runtime.turns import current_turn
-
-                        trusted_turn = current_turn()
-                        no_progress_marked = bool(
-                            trusted_turn is not None
-                            and mark_dynamic_execution_no_progress(
-                                trusted_turn
-                            )
-                        )
-                    except Exception:
-                        no_progress_marked = False
-                    if (
-                        no_progress_marked
-                        and agent.max_iterations - api_call_count >= 1
-                        and agent.iteration_budget.remaining >= 1
-                    ):
-                        # One request-local continuation already failed to
-                        # produce a read. Discard its unbound prose and spend
-                        # the reserved last call on a clean no-tool failure
-                        # explanation instead of ending silently.
-                        final_response = None
-                        continue
-                if _finalize_only_call:
-                    try:
-                        from xiaoban.trusted_runtime.turns import current_turn
-
-                        trusted_turn = current_turn()
-                    except Exception:
-                        trusted_turn = None
-                    if (
-                        trusted_turn is not None
-                        and getattr(
-                            trusted_turn,
-                            "completion_protocol",
-                            "",
-                        )
-                        == "dynamic-evidence-v2"
-                    ):
-                        setattr(
-                            trusted_turn,
-                            "completion_finalization_output_digest",
-                            hashlib.sha256(
-                                final_response.encode("utf-8")
-                            ).hexdigest(),
-                        )
 
                 final_msg = agent._build_assistant_message(assistant_message, finish_reason)
 
@@ -6014,23 +4613,6 @@ def run_conversation(
             # recover the call site.  logger.exception() includes the
             # traceback automatically and emits at ERROR.
             logger.exception("Outer loop error in API call #%d", api_call_count)
-            if _finalize_only_call:
-                return _strict_failure_result(
-                    agent,
-                    messages,
-                    conversation_history,
-                    api_call_count=api_call_count,
-                    error=(
-                        "Finalize-only response processing failed; "
-                        "automatic retry is disabled"
-                    ),
-                    partial=True,
-                    cleanup_task_id=effective_task_id,
-                    fallback_exit_reason=(
-                        "text_response(finalize_processing_error)"
-                    ),
-                )
-            
             # If an assistant message with tool_calls was already appended,
             # the API expects a role="tool" result for every tool_call_id.
             # Fill in error results for any that weren't answered yet.
