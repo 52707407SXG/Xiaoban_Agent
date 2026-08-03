@@ -106,41 +106,7 @@ def execute_llm_request(
         controller = getattr(agent, "_paid_call_cancel_controller", None)
 
     def accounted_provider_call(next_api_kwargs: dict[str, Any]) -> Any:
-        if true_moa_ledger is not None:
-            from xiaoban.trusted_runtime.true_moa import (
-                enforce_true_moa_dispatch_budget,
-                enforce_true_moa_final_route,
-            )
-
-            enforce_true_moa_final_route(
-                provider=getattr(agent, "provider", ""),
-                model=next_api_kwargs.get("model"),
-            )
-            enforce_true_moa_dispatch_budget(
-                role="final_executor",
-                payload=next_api_kwargs,
-            )
-        elif normal_policy is not None:
-            from xiaoban.trusted_runtime.paid_call_policy import (
-                enforce_fixed_paid_call_route,
-                enforce_paid_call_dispatch_budget,
-                enforce_signed_mystand_policy_revision,
-            )
-
-            enforce_signed_mystand_policy_revision(
-                getattr(agent, "_paid_call_policy_revision", "")
-            )
-            enforce_fixed_paid_call_route(
-                normal_policy,
-                provider=getattr(agent, "provider", ""),
-                model=next_api_kwargs.get("model"),
-                error_code="signed_mystand_fixed_route_mismatch",
-            )
-            enforce_paid_call_dispatch_budget(
-                normal_policy,
-                payload=next_api_kwargs,
-                error_prefix="signed_mystand_paid_call",
-            )
+        enforce_strict_paid_request(agent, next_api_kwargs)
         if controller is not None and not controller.try_begin_dispatch(
             f"final-llm-reservation:{api_request_id}"
         ):
@@ -319,10 +285,12 @@ def strict_failure_result(
     *,
     api_call_count: int,
     error: str,
+    failure_code: str = "agent_incomplete",
+    failure_phase: str = "agent_loop",
+    failure_retryable: bool = False,
     partial: bool = False,
     cleanup_task_id: str | None = None,
     drop_scaffolding: bool = False,
-    include_final_response: bool = True,
 ) -> dict[str, Any]:
     if cleanup_task_id is not None:
         agent._cleanup_task_resources(cleanup_task_id)
@@ -336,12 +304,241 @@ def strict_failure_result(
         "completed": False,
         "failed": True,
         "error": error,
+        "turn_exit_reason": (
+            f"fatal({failure_phase}:{failure_code})"
+        ),
+        "failure": build_agent_failure(
+            code=failure_code,
+            phase=failure_phase,
+            reason=error,
+            retryable=failure_retryable,
+        ),
     }
-    if include_final_response:
-        result["final_response"] = None
+    result["final_response"] = None
     if partial:
         result["partial"] = True
     return result
+
+
+def build_agent_failure(
+    *,
+    code: str,
+    phase: str,
+    reason: str,
+    retryable: bool = False,
+) -> dict[str, Any]:
+    """Build one plaintext-safe fatal item without assistant-authored text."""
+
+    return {
+        "schema": "xiaoban.agent-failure.v1",
+        "kind": "fatal",
+        "code": str(code or "agent_incomplete"),
+        "phase": str(phase or "agent_loop"),
+        "reason": str(reason or "Agent execution failed"),
+        "retryable": bool(retryable),
+    }
+
+
+def enforce_strict_paid_request(
+    agent: Any,
+    payload: dict[str, Any],
+) -> int | None:
+    """Apply the exact physical paid-call contract before dispatch.
+
+    The conversation loop calls this once as a recoverable preflight and the
+    provider boundary calls it again as the final fence.  Both sites therefore
+    measure the same canonical JSON bytes and use the same fixed route policy.
+    """
+
+    true_moa_ledger = getattr(agent, "_true_moa_usage_ledger", None)
+    if true_moa_ledger is not None:
+        from xiaoban.trusted_runtime.true_moa import (
+            TRUE_MOA_FINAL_PAID_CALL_POLICY,
+            enforce_true_moa_final_route,
+        )
+        from xiaoban.trusted_runtime.paid_call_policy import (
+            enforce_openai_chat_paid_call_dispatch_budget,
+        )
+
+        enforce_true_moa_final_route(
+            provider=getattr(agent, "provider", ""),
+            model=payload.get("model"),
+        )
+        return enforce_openai_chat_paid_call_dispatch_budget(
+            TRUE_MOA_FINAL_PAID_CALL_POLICY,
+            payload=payload,
+            error_prefix="true_moa",
+        )
+
+    ledger = getattr(agent, "_paid_call_usage_ledger", None)
+    if ledger is None:
+        return None
+
+    from xiaoban.trusted_runtime.paid_call_policy import (
+        enforce_fixed_paid_call_route,
+        enforce_openai_chat_paid_call_dispatch_budget,
+        enforce_signed_mystand_policy_revision,
+        resolve_signed_mystand_agent_policy,
+    )
+
+    policy = resolve_signed_mystand_agent_policy(
+        getattr(agent, "_paid_call_policy_revision", "")
+    )
+    enforce_signed_mystand_policy_revision(
+        getattr(agent, "_paid_call_policy_revision", "")
+    )
+    enforce_fixed_paid_call_route(
+        policy,
+        provider=getattr(agent, "provider", ""),
+        model=payload.get("model"),
+        error_code="signed_mystand_fixed_route_mismatch",
+    )
+    return enforce_openai_chat_paid_call_dispatch_budget(
+        policy,
+        payload=payload,
+        error_prefix="signed_mystand_paid_call",
+    )
+
+
+def compact_strict_paid_history(
+    agent: Any,
+    messages: list[Any],
+    current_turn_user_idx: int,
+) -> tuple[list[Any], int, bool]:
+    """Deterministically compact only history before the active user turn.
+
+    This reuses the built-in compressor's local, redacting fallback summary and
+    never calls an auxiliary model.  The current user request and its complete
+    assistant/tool-result tail (including trusted ToolResult/steer sidecars)
+    remain byte-for-byte intact.
+    """
+
+    if (
+        not isinstance(current_turn_user_idx, int)
+        or current_turn_user_idx <= 0
+        or current_turn_user_idx >= len(messages)
+    ):
+        return messages, current_turn_user_idx, False
+    current_user = messages[current_turn_user_idx]
+    if not isinstance(current_user, dict) or current_user.get("role") != "user":
+        return messages, current_turn_user_idx, False
+
+    historical = list(messages[:current_turn_user_idx])
+    active_tail = list(messages[current_turn_user_idx:])
+    if not historical:
+        return messages, current_turn_user_idx, False
+
+    # System/developer instructions are not conversational history and must
+    # survive compaction verbatim.  Only earlier user/assistant/tool turns are
+    # eligible for the local redacting summary.
+    prefix_end = 0
+    while prefix_end < len(historical):
+        item = historical[prefix_end]
+        if not isinstance(item, dict) or item.get("role") not in {
+            "system",
+            "developer",
+        }:
+            break
+        prefix_end += 1
+    preserved_prefix = historical[:prefix_end]
+    compressible_history = historical[prefix_end:]
+    if not compressible_history:
+        return messages, current_turn_user_idx, False
+
+    compressor = getattr(agent, "context_compressor", None)
+    summary_builder = getattr(
+        compressor,
+        "_build_static_fallback_summary",
+        None,
+    )
+    if not callable(summary_builder):
+        return messages, current_turn_user_idx, False
+    summary = summary_builder(
+        compressible_history,
+        reason="strict paid request exceeded its exact input byte cap",
+    )
+    if not isinstance(summary, str) or not summary.strip():
+        return messages, current_turn_user_idx, False
+
+    compacted = [
+        *preserved_prefix,
+        {
+            "role": "assistant",
+            "content": summary.strip(),
+        },
+        *active_tail,
+    ]
+    return compacted, len(preserved_prefix) + 1, compacted != messages
+
+
+def strict_exception_failure_result(
+    agent: Any,
+    messages: list[Any],
+    conversation_history: list[Any],
+    *,
+    api_call_count: int,
+    error: BaseException,
+    failure_source: str,
+) -> dict[str, Any]:
+    """Project a strict exception to a stable, plaintext-safe fatal item."""
+
+    from xiaoban.trusted_runtime.paid_call_policy import PaidCallPolicyError
+    from xiaoban.trusted_runtime.true_moa import TrueMoACostCapError
+
+    policy_error = isinstance(
+        error,
+        (PaidCallPolicyError, TrueMoACostCapError),
+    )
+    raw_code = (
+        str(getattr(error, "code", "") or "").strip()
+        if policy_error or failure_source == "request_preflight"
+        else ""
+    )
+    if raw_code.endswith("_input_byte_cap_exceeded"):
+        code = "input_payload_too_large"
+        phase = "request_preflight"
+        reason = "The exact provider request exceeded the 131072-byte input limit"
+    elif raw_code.endswith("_output_token_cap_exceeded"):
+        code = "output_token_limit_exceeded"
+        phase = "request_preflight"
+        reason = "The requested model output exceeded the fixed 4096-token limit"
+    elif raw_code.endswith("_output_token_cap_invalid"):
+        code = "output_token_limit_invalid"
+        phase = "request_preflight"
+        reason = "The provider request carried an invalid output-token limit"
+    elif "fixed_route_mismatch" in raw_code:
+        code = "provider_route_mismatch"
+        phase = "request_preflight"
+        reason = "The configured provider route did not match the signed request policy"
+    elif raw_code.endswith("_input_payload_invalid"):
+        code = "input_payload_invalid"
+        phase = "request_preflight"
+        reason = "The provider request could not be serialized safely"
+    elif raw_code:
+        code = "paid_call_policy_rejected"
+        phase = "request_preflight"
+        reason = "The provider request failed its signed pre-dispatch policy check"
+    elif failure_source == "response_processing":
+        code = "provider_response_processing_failed"
+        phase = "response_processing"
+        reason = "The model service responded, but Xiaoban could not safely process the response"
+    else:
+        code = "provider_call_failed"
+        phase = "provider_call"
+        reason = "The model service call failed before Xiaoban received a usable response"
+    return strict_failure_result(
+        agent,
+        messages,
+        conversation_history,
+        api_call_count=api_call_count,
+        error=reason,
+        failure_code=code,
+        failure_phase=phase,
+        failure_retryable=code in {
+            "provider_call_failed",
+            "provider_response_processing_failed",
+        },
+    )
 
 
 def claim_response_consumption(agent: Any, api_request_id: str) -> bool:

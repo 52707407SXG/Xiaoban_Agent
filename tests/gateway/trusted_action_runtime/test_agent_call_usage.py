@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import httpx
+from openai import OpenAI
 
 from agent import chat_completion_helpers as helpers
 from agent import true_moa_conversation_policy as conversation_policy
@@ -29,11 +31,14 @@ from xiaoban.trusted_runtime.agent_call_usage import (
     project_agent_call_usage,
 )
 from xiaoban.trusted_runtime.paid_call_policy import (
+    PaidCallPolicyError,
     SIGNED_MYSTAND_AGENT_POLICY,
     SIGNED_MYSTAND_AGENT_POLICY_REGISTRY,
     SIGNED_MYSTAND_AGENT_POLICY_REVISION,
     SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
+    enforce_openai_chat_paid_call_dispatch_budget,
     resolve_signed_mystand_agent_policy,
+    serialize_openai_chat_request_body,
 )
 from xiaoban.trusted_runtime.true_moa_durable import TrueMoADurableStore
 from xiaoban.trusted_runtime.true_moa import (
@@ -54,6 +59,115 @@ def _usage(input_tokens: int, output_tokens: int):
         total_tokens=input_tokens + output_tokens,
         cached_input_tokens=0,
     )
+
+
+def test_signed_chat_byte_preflight_matches_openai_sdk_wire_body():
+    captured: list[bytes] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(request.content)
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "chatcmpl-byte-proof",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "deepseek-v4-pro",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "ok",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    payload = {
+        "model": "deepseek-v4-pro",
+        "messages": [{"role": "user", "content": "中文字节核对"}],
+        "max_tokens": 4096,
+        "timeout": 17,
+        "extra_headers": {"x-local-proof": "header-not-body"},
+        "extra_query": {"local": "query-not-body"},
+        "extra_body": {"thinking": {"type": "enabled"}},
+    }
+    client = OpenAI(
+        api_key="local-test-key",
+        base_url="https://local.invalid/v1",
+        max_retries=0,
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(_capture),
+        ),
+    )
+    client.chat.completions.create(**payload)
+
+    encoded = serialize_openai_chat_request_body(payload)
+    assert captured == [encoded]
+    assert b'"timeout"' not in encoded
+    assert b'"extra_body"' not in encoded
+    assert b'"thinking":{"type":"enabled"}' in encoded
+
+
+@pytest.mark.parametrize(
+    "extra_body",
+    [
+        {"model": "unexpected-model"},
+        {"max_tokens": 4097},
+        {"messages": [{"role": "user", "content": "replacement"}]},
+        {"tools": [{"type": "function", "function": {"name": "late"}}]},
+    ],
+)
+def test_signed_chat_rejects_extra_body_controlled_field_override(extra_body):
+    with pytest.raises(
+        PaidCallPolicyError,
+        match="signed_test_protected_field_override",
+    ):
+        enforce_openai_chat_paid_call_dispatch_budget(
+            SIGNED_MYSTAND_AGENT_POLICY,
+            payload={
+                "model": "deepseek-v4-pro",
+                "messages": [{"role": "user", "content": "original"}],
+                "max_tokens": 4096,
+                "extra_body": extra_body,
+            },
+            error_prefix="signed_test",
+        )
+
+
+def test_signed_chat_wire_byte_boundary_is_exact():
+    payload = {
+        "model": "deepseek-v4-pro",
+        "messages": [{"role": "user", "content": ""}],
+        "max_tokens": 4096,
+    }
+    base_size = enforce_openai_chat_paid_call_dispatch_budget(
+        SIGNED_MYSTAND_AGENT_POLICY,
+        payload=payload,
+        error_prefix="signed_test",
+    )
+    payload["messages"][0]["content"] = "x" * (
+        SIGNED_MYSTAND_AGENT_POLICY.input_max_bytes - base_size
+    )
+    assert enforce_openai_chat_paid_call_dispatch_budget(
+        SIGNED_MYSTAND_AGENT_POLICY,
+        payload=payload,
+        error_prefix="signed_test",
+    ) == SIGNED_MYSTAND_AGENT_POLICY.input_max_bytes
+    payload["messages"][0]["content"] += "x"
+    with pytest.raises(
+        PaidCallPolicyError,
+        match="signed_test_input_byte_cap_exceeded",
+    ):
+        enforce_openai_chat_paid_call_dispatch_budget(
+            SIGNED_MYSTAND_AGENT_POLICY,
+            payload=payload,
+            error_prefix="signed_test",
+        )
 
 
 def _agent(ledger: AgentCallUsageLedger):

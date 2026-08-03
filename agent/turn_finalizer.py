@@ -548,6 +548,27 @@ def finalize_turn(
     }
     if _strict_terminal_cancelled:
         result["error"] = "completion stopped"
+    elif strict_paid_call and failed and final_response is None:
+        from agent.true_moa_conversation_policy import build_agent_failure
+
+        result["failure"] = build_agent_failure(
+            code=(
+                "iteration_budget_exhausted"
+                if str(_turn_exit_reason).startswith(
+                    "strict_iteration_budget_reached"
+                )
+                else "agent_incomplete"
+            ),
+            phase="agent_loop",
+            reason=(
+                "The signed execution used all model calls without producing "
+                "a complete final reply"
+                if str(_turn_exit_reason).startswith(
+                    "strict_iteration_budget_reached"
+                )
+                else "The agent loop ended without a complete final reply"
+            ),
+        )
     if agent._tool_guardrail_halt_decision is not None:
         result["error"] = "tool execution did not produce a usable result"
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()

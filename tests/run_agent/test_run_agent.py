@@ -4711,6 +4711,337 @@ class TestRunConversation:
         assert all(item["usageStatus"] == "reported" for item in final_calls)
         assert all(item["status"] == "completed" for item in final_calls)
 
+    def test_strict_paid_tool_turn_emits_model_commentary_and_feeds_failed_result(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        events = []
+        agent.interim_assistant_callback = (
+            lambda text, *, already_streamed=False: events.append(
+                ("commentary", text, already_streamed)
+            )
+        )
+        tc = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"结算卡确认状态"}',
+            call_id="strict-commentary-tool",
+        )
+        tool_turn = _mock_response(
+            content="我先核对结算卡的确认状态。",
+            finish_reason="tool_calls",
+            tool_calls=[tc],
+        )
+        natural_final = _mock_response(
+            content="核对没有完成：读取工具被门禁拒绝了。",
+            finish_reason="stop",
+        )
+
+        def _failed_tool(*_args, **_kwargs):
+            events.append(("tool", "web_search"))
+            return '{"ok":false,"error":"access denied"}'
+
+        session_tokens = set_session_vars(
+            platform="api_server",
+            source="mystand",
+            user_id="ZYJ005",
+            user_message="帮我查还有几个人没确认结算卡",
+            message_id="strict-commentary-message",
+            session_id="strict-commentary-session",
+            session_key="strict-commentary-key",
+            async_delivery=False,
+        )
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_api_call",
+                    side_effect=[tool_turn, natural_final],
+                ) as api_call,
+                patch(
+                    "xiaoban.trusted_runtime.turns.current_turn",
+                    return_value=SimpleNamespace(
+                        request_id="strict-commentary-request",
+                        turn_id="strict-commentary-turn",
+                    ),
+                ),
+                patch(
+                    "run_agent.handle_function_call",
+                    side_effect=_failed_tool,
+                ),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation(
+                    "帮我查还有几个人没确认结算卡"
+                )
+        finally:
+            clear_session_vars(session_tokens)
+
+        assert events == [
+            ("commentary", "我先核对结算卡的确认状态。", False),
+            ("tool", "web_search"),
+        ]
+        assert result["final_response"] == "核对没有完成：读取工具被门禁拒绝了。"
+        assert api_call.call_count == 2
+        second_messages = api_call.call_args_list[1].args[0]["messages"]
+        projected = [
+            json.loads(item["content"])
+            for item in second_messages
+            if item.get("role") == "tool"
+        ]
+        assert len(projected) == 1
+        assert projected[0]["callId"] == "strict-commentary-tool"
+        assert projected[0]["outcome"] == "failed"
+        assert projected[0]["modelError"]["code"] == "failed"
+        assert api_call.call_args_list[0].args[0]["model"] == (
+            api_call.call_args_list[1].args[0]["model"]
+        )
+
+    def test_strict_paid_last_slot_is_same_model_tooled_off_final_reply(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        agent.max_iterations = 2
+        tc = _mock_tool_call(
+            name="web_search",
+            arguments="{}",
+            call_id="strict-final-slot-tool",
+        )
+        responses = [
+            _mock_response(
+                content="我先读取资料。",
+                finish_reason="tool_calls",
+                tool_calls=[tc],
+            ),
+            _mock_response(
+                content="资料读取完成，这是最终说明。",
+                finish_reason="stop",
+            ),
+        ]
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=responses,
+            ) as api_call,
+            patch("run_agent.handle_function_call", return_value="trusted result"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("读取后说明")
+
+        assert result["final_response"] == "资料读取完成，这是最终说明。"
+        assert result["completed"] is True
+        assert api_call.call_count == 2
+        final_payload = api_call.call_args_list[1].args[0]
+        assert "tools" not in final_payload
+        assert "tool_choice" not in final_payload
+        assert "final model call allowed" in final_payload["messages"][-1]["content"]
+
+    def test_strict_paid_eighth_call_is_same_model_final_not_ninth_tool(
+        self,
+        agent,
+    ):
+        from xiaoban.trusted_runtime.true_moa import (
+            TRUE_MOA_MODE,
+            TRUE_MOA_PRESET_ID,
+            TRUE_MOA_PRESET_REVISION,
+            TrueMoASnapshot,
+            TrueMoAUsageLedger,
+        )
+
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        agent.provider = "deepseek"
+        agent.model = "deepseek-v4-pro"
+        agent.max_tokens = 4096
+        agent.max_iterations = 8
+        ledger = TrueMoAUsageLedger(
+            TrueMoASnapshot(
+                mode=TRUE_MOA_MODE,
+                mode_epoch="strict-eight-call",
+                preset_id=TRUE_MOA_PRESET_ID,
+                preset_revision=TRUE_MOA_PRESET_REVISION,
+            ),
+            wave_id="strict-eight-call-wave",
+        )
+        agent._true_moa_usage_ledger = ledger
+        responses = []
+        for index in range(7):
+            responses.append(
+                _mock_response(
+                    content=f"正在处理第 {index + 1} 步。",
+                    finish_reason="tool_calls",
+                    tool_calls=[
+                        _mock_tool_call(
+                            name="web_search",
+                            arguments="{}",
+                            call_id=f"strict-eight-tool-{index + 1}",
+                        )
+                    ],
+                    usage={
+                        "prompt_tokens": 10 + index,
+                        "completion_tokens": 2,
+                        "total_tokens": 12 + index,
+                    },
+                )
+            )
+        responses.append(
+            _mock_response(
+                content="七步工具结果已经汇总，这是最终说明。",
+                finish_reason="stop",
+                usage={
+                    "prompt_tokens": 30,
+                    "completion_tokens": 5,
+                    "total_tokens": 35,
+                },
+            )
+        )
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=responses,
+            ) as api_call,
+            patch(
+                "run_agent.handle_function_call",
+                return_value="trusted result",
+            ) as tool_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("连续核对后给我最终说明")
+
+        assert result["completed"] is True
+        assert result["final_response"] == "七步工具结果已经汇总，这是最终说明。"
+        assert result["api_calls"] == 8
+        assert api_call.call_count == 8
+        assert tool_call.call_count == 7
+        final_payload = api_call.call_args_list[7].args[0]
+        assert final_payload["model"] == "deepseek-v4-pro"
+        assert "tools" not in final_payload
+        assert len(
+            [
+                item
+                for item in ledger.to_dict()["calls"]
+                if item["role"] == "final_executor"
+            ]
+        ) == 8
+
+    def test_strict_paid_exact_byte_preflight_compacts_only_prior_history(
+        self,
+        agent,
+    ):
+        from xiaoban.trusted_runtime.true_moa import (
+            TRUE_MOA_MODE,
+            TRUE_MOA_PRESET_ID,
+            TRUE_MOA_PRESET_REVISION,
+            TrueMoASnapshot,
+            TrueMoAUsageLedger,
+        )
+
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        agent.provider = "deepseek"
+        agent.model = "deepseek-v4-pro"
+        agent.max_tokens = 4096
+        agent._true_moa_usage_ledger = TrueMoAUsageLedger(
+            TrueMoASnapshot(
+                mode=TRUE_MOA_MODE,
+                mode_epoch="strict-byte-compact",
+                preset_id=TRUE_MOA_PRESET_ID,
+                preset_revision=TRUE_MOA_PRESET_REVISION,
+            ),
+            wave_id="strict-byte-compact-wave",
+        )
+        history = []
+        for index in range(12):
+            history.extend(
+                [
+                    {
+                        "role": "user",
+                        "content": f"历史问题 {index} " + ("甲" * 7_000),
+                    },
+                    {
+                        "role": "assistant",
+                        "content": f"历史回答 {index} " + ("乙" * 7_000),
+                    },
+                ]
+            )
+        final = _mock_response(
+            content="当前任务已完成。",
+            finish_reason="stop",
+            usage={
+                "prompt_tokens": 20,
+                "completion_tokens": 4,
+                "total_tokens": 24,
+            },
+        )
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                return_value=final,
+            ) as api_call,
+            patch.object(
+                agent.context_compressor,
+                "_generate_summary",
+                side_effect=AssertionError("strict compact called an auxiliary model"),
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                "只处理当前任务",
+                conversation_history=history,
+            )
+
+        assert result["completed"] is True
+        assert result["final_response"] == "当前任务已完成。"
+        assert result["api_calls"] == 1
+        assert api_call.call_count == 1
+        sent_messages = api_call.call_args.args[0]["messages"]
+        assert sent_messages[0]["role"] == "system"
+        assert sent_messages[0]["content"] == "You are helpful."
+        assert any(
+            item.get("role") == "assistant"
+            and "CONTEXT COMPACTION" in item.get("content", "")
+            for item in sent_messages
+        )
+        assert any(
+            item.get("role") == "user"
+            and item.get("content") == "只处理当前任务"
+            for item in sent_messages
+        )
+        assert all("甲" * 7_000 not in item.get("content", "") for item in sent_messages)
+
     @pytest.mark.parametrize(
         ("max_tokens", "user_message"),
         [
@@ -4768,9 +5099,21 @@ class TestRunConversation:
 
         assert result["completed"] is False
         assert result["failed"] is True
-        assert result["error"] == (
-            "Provider call failed; automatic retry is disabled"
-        )
+        if max_tokens > 4096:
+            assert result["failure"] == {
+                "schema": "xiaoban.agent-failure.v1",
+                "kind": "fatal",
+                "code": "output_token_limit_exceeded",
+                "phase": "request_preflight",
+                "reason": (
+                    "The requested model output exceeded the fixed "
+                    "4096-token limit"
+                ),
+                "retryable": False,
+            }
+        else:
+            assert result["failure"]["code"] == "input_payload_too_large"
+            assert result["failure"]["phase"] == "request_preflight"
         api_call.assert_not_called()
         assert [
             item
@@ -5111,7 +5454,7 @@ class TestRunConversation:
                 "_interruptible_api_call",
                 return_value=only_response,
             ) as api_call,
-            patch("run_agent.handle_function_call", return_value="tool result"),
+            patch("run_agent.handle_function_call", return_value="tool result") as tool_call,
             patch.object(
                 agent,
                 "_handle_max_iterations",
@@ -5126,9 +5469,11 @@ class TestRunConversation:
         assert api_call.call_count == 1
         assert result["completed"] is False
         assert result["failed"] is True
-        assert result["turn_exit_reason"].startswith(
-            "strict_iteration_budget_reached",
+        assert result["turn_exit_reason"] == (
+            "fatal(tool_proposal:final_slot_requested_tool)"
         )
+        assert result["failure"]["code"] == "final_slot_requested_tool"
+        tool_call.assert_not_called()
 
     def test_strict_paid_length_is_terminal_and_preserves_usage(self, agent):
         self._setup_agent(agent)
@@ -5215,11 +5560,17 @@ class TestRunConversation:
             finish_reason="stop",
         )
 
+        class _ProviderErrorWithCode(RuntimeError):
+            code = "rate_limit_exceeded"
+
         with (
             patch.object(
                 agent,
                 "_interruptible_api_call",
-                side_effect=[RuntimeError("provider failed"), later_success],
+                side_effect=[
+                    _ProviderErrorWithCode("PRIVATE provider failed"),
+                    later_success,
+                ],
             ) as api_call,
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
@@ -5230,6 +5581,19 @@ class TestRunConversation:
         assert api_call.call_count == 1
         assert result["completed"] is False
         assert result["failed"] is True
+        assert result["final_response"] is None
+        assert result["failure"] == {
+            "schema": "xiaoban.agent-failure.v1",
+            "kind": "fatal",
+            "code": "provider_call_failed",
+            "phase": "provider_call",
+            "reason": (
+                "The model service call failed before Xiaoban received "
+                "a usable response"
+            ),
+            "retryable": True,
+        }
+        assert "PRIVATE" not in json.dumps(result, ensure_ascii=False)
 
     def test_strict_paid_invalid_response_is_terminal_and_preserves_usage(
         self,
@@ -5268,8 +5632,68 @@ class TestRunConversation:
         assert api_call.call_count == 1
         assert result["completed"] is False
         assert result["failed"] is True
+        assert result["final_response"] is None
+        assert result["failure"]["code"] == "provider_response_invalid"
+        assert result["failure"]["phase"] == "response_validation"
         assert agent.session_prompt_tokens == 17
         assert agent.session_completion_tokens == 0
+        assert agent.session_total_tokens == 17
+
+    def test_strict_paid_incomplete_scratchpad_is_typed_without_retry(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        incomplete = _mock_response(
+            content="<REASONING_SCRATCHPAD>unfinished private reasoning",
+            finish_reason="stop",
+            usage={
+                "prompt_tokens": 13,
+                "completion_tokens": 4,
+                "total_tokens": 17,
+            },
+        )
+        forbidden_retry = _mock_response(
+            content="must not run",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=[incomplete, forbidden_retry],
+            ) as api_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("one incomplete strict response")
+
+        assert api_call.call_count == 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert result["final_response"] is None
+        assert result["failure"] == {
+            "schema": "xiaoban.agent-failure.v1",
+            "kind": "fatal",
+            "code": "incomplete_reasoning_scratchpad",
+            "phase": "response_generation",
+            "reason": (
+                "The model response ended inside an unfinished "
+                "reasoning scratchpad"
+            ),
+            "retryable": False,
+        }
+        assert "private reasoning" not in json.dumps(
+            result["failure"],
+            ensure_ascii=False,
+        )
+        assert agent.session_prompt_tokens == 13
+        assert agent.session_completion_tokens == 4
         assert agent.session_total_tokens == 17
 
     @pytest.mark.parametrize(

@@ -60,10 +60,13 @@ from agent.trajectory import has_incomplete_scratchpad
 from agent.true_moa_conversation_policy import (
     claim_public_result as _claim_true_moa_public_result,
     claim_response_consumption as _claim_true_moa_response_consumption,
+    compact_strict_paid_history as _compact_strict_paid_history,
     emit_post_api_request as _emit_post_api_request,
+    enforce_strict_paid_request as _enforce_strict_paid_request,
     execute_llm_request as _execute_llm_request,
     initialize_session_side_effects as _initialize_session_side_effects,
     prepare_llm_request as _prepare_llm_request,
+    strict_exception_failure_result as _strict_exception_failure_result,
     strict_failure_result as _strict_failure_result,
     strict_mode as _strict_true_moa_mode,
 )
@@ -428,6 +431,13 @@ _CONTENT_POLICY_RECOVERY_HINT = (
     "adding a fallback provider with `xiaoban fallback add`."
 )
 
+_STRICT_FINAL_SLOT_INSTRUCTION = (
+    "[System: This is the final model call allowed for the current task. "
+    "Do not call any more tools. Reply naturally to the user now, using only "
+    "the tool results already present. State what was completed, what remains "
+    "incomplete, and the concrete reason for any failure.]"
+)
+
 
 def _content_policy_blocked_result(
     messages: List[Dict],
@@ -577,6 +587,7 @@ def run_conversation(
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
+    strict_payload_compaction_attempts = 0
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
 
     # Optional opt-in runtime: if api_mode == codex_app_server, hand the
@@ -608,6 +619,10 @@ def run_conversation(
         api_call_count += 1
         agent._api_call_count = api_call_count
         agent._touch_activity(f"starting API call #{api_call_count}")
+        _strict_final_slot = bool(
+            _strict_true_moa_mode(agent)
+            and api_call_count >= agent.max_iterations
+        )
 
         # Grace call: the budget is exhausted but we gave the model one
         # more chance.  Consume the grace flag so the loop exits after
@@ -841,6 +856,31 @@ def run_conversation(
             drop_codex_reasoning_items=agent.api_mode != "codex_responses",
         )
 
+        # Reserve the already-budgeted final physical call for a natural model
+        # reply.  This is the same loop and the same model: the complete current
+        # ToolResult tail stays in context, while tool schemas are removed below
+        # so the eighth signed call cannot start a ninth-step action.
+        if _strict_final_slot:
+            if api_messages and api_messages[-1].get("role") == "user":
+                _last_content = api_messages[-1].get("content", "")
+                if isinstance(_last_content, str):
+                    api_messages[-1] = {
+                        **api_messages[-1],
+                        "content": (
+                            _last_content.rstrip()
+                            + "\n\n"
+                            + _STRICT_FINAL_SLOT_INSTRUCTION
+                        ),
+                    }
+                else:
+                    api_messages.append(
+                        {"role": "user", "content": _STRICT_FINAL_SLOT_INSTRUCTION}
+                    )
+            else:
+                api_messages.append(
+                    {"role": "user", "content": _STRICT_FINAL_SLOT_INSTRUCTION}
+                )
+
         # Normalize message whitespace and tool-call JSON for consistent
         # prefix matching.  Ensures bit-perfect prefixes across turns,
         # which enables KV cache reuse on local inference servers
@@ -1024,6 +1064,48 @@ def run_conversation(
                     api_request_id=api_request_id,
                     api_call_count=api_call_count,
                 )
+                if _strict_final_slot:
+                    api_kwargs.pop("tools", None)
+                    api_kwargs.pop("tool_choice", None)
+                    api_kwargs.pop("parallel_tool_calls", None)
+
+                if _strict_paid_call:
+                    try:
+                        _enforce_strict_paid_request(agent, api_kwargs)
+                    except Exception as _strict_preflight_error:
+                        _strict_preflight_code = str(
+                            getattr(_strict_preflight_error, "code", "") or ""
+                        )
+                        if (
+                            _strict_preflight_code.endswith(
+                                "_input_byte_cap_exceeded"
+                            )
+                            and strict_payload_compaction_attempts < 1
+                        ):
+                            (
+                                compacted_messages,
+                                compacted_user_idx,
+                                compacted,
+                            ) = _compact_strict_paid_history(
+                                agent,
+                                messages,
+                                current_turn_user_idx,
+                            )
+                            if compacted:
+                                messages = compacted_messages
+                                current_turn_user_idx = compacted_user_idx
+                                conversation_history = None
+                                strict_payload_compaction_attempts += 1
+                                _retry.restart_with_compressed_messages = True
+                                break
+                        return _strict_exception_failure_result(
+                            agent,
+                            messages,
+                            conversation_history,
+                            api_call_count=api_call_count,
+                            error=_strict_preflight_error,
+                            failure_source="request_preflight",
+                        )
 
                 try:
                     from xiaoban_cli.plugins import (
@@ -1284,7 +1366,8 @@ def run_conversation(
                             error=(
                                 "Invalid API response; automatic retry is disabled"
                             ),
-                            include_final_response=False,
+                            failure_code="provider_response_invalid",
+                            failure_phase="response_validation",
                         )
                     
                     # Invalid response — could be rate limiting, provider timeout,
@@ -1570,6 +1653,8 @@ def run_conversation(
                             conversation_history,
                             api_call_count=api_call_count,
                             error="Response truncated; automatic retry is disabled",
+                            failure_code="response_truncated",
+                            failure_phase="response_generation",
                             partial=True,
                             cleanup_task_id=effective_task_id,
                         )
@@ -2003,19 +2088,17 @@ def run_conversation(
                     agent.thinking_callback("")
 
                 if _strict_true_moa_mode(agent):
-                    strict_error = (
-                        "Provider response processing failed; "
-                        "automatic retry is disabled"
-                        if _provider_response_received
-                        else
-                        "Provider call failed; automatic retry is disabled"
-                    )
-                    return _strict_failure_result(
+                    return _strict_exception_failure_result(
                         agent,
                         messages,
                         conversation_history,
                         api_call_count=api_call_count,
-                        error=strict_error,
+                        error=api_error,
+                        failure_source=(
+                            "response_processing"
+                            if _provider_response_received
+                            else "provider_call"
+                        ),
                     )
 
                 # -----------------------------------------------------------
@@ -3744,6 +3827,21 @@ def run_conversation(
             # Check for incomplete <REASONING_SCRATCHPAD> (opened but never closed)
             # This means the model ran out of output tokens mid-reasoning — retry up to 2 times
             if has_incomplete_scratchpad(assistant_message.content or ""):
+                if _strict_paid_call:
+                    return _strict_failure_result(
+                        agent,
+                        messages,
+                        conversation_history,
+                        api_call_count=api_call_count,
+                        error=(
+                            "The model response ended inside an unfinished "
+                            "reasoning scratchpad"
+                        ),
+                        failure_code="incomplete_reasoning_scratchpad",
+                        failure_phase="response_generation",
+                        partial=True,
+                        cleanup_task_id=effective_task_id,
+                    )
                 agent._incomplete_scratchpad_retries += 1
                 
                 agent._buffer_vprint(f"⚠️  Incomplete <REASONING_SCRATCHPAD> detected (opened but never closed)")
@@ -3834,6 +3932,19 @@ def run_conversation(
             
             # Check for tool calls
             if assistant_message.tool_calls:
+                if _strict_final_slot:
+                    return _strict_failure_result(
+                        agent,
+                        messages,
+                        conversation_history,
+                        api_call_count=api_call_count,
+                        error=(
+                            "The model requested another tool after the reserved "
+                            "final reply slot"
+                        ),
+                        failure_code="final_slot_requested_tool",
+                        failure_phase="tool_proposal",
+                    )
                 if not agent.quiet_mode:
                     agent._vprint(f"{agent.log_prefix}🔧 Processing {len(assistant_message.tool_calls)} tool call(s)...")
                 
@@ -3862,6 +3973,8 @@ def run_conversation(
                             conversation_history,
                             api_call_count=api_call_count,
                             error="Model generated an invalid tool call",
+                            failure_code="invalid_tool_call",
+                            failure_phase="tool_proposal",
                             partial=True,
                         )
                     # Track retries for invalid tool calls
@@ -3954,6 +4067,8 @@ def run_conversation(
                             conversation_history,
                             api_call_count=api_call_count,
                             error="Model generated invalid tool arguments",
+                            failure_code="invalid_tool_arguments",
+                            failure_phase="tool_proposal",
                             partial=True,
                         )
                     # Check if the invalid JSON is due to truncation rather
@@ -4102,7 +4217,11 @@ def run_conversation(
                 agent._post_tool_empty_retried = False
 
                 messages.append(assistant_msg)
-                if not _strict_paid_call:
+                # Reuse the existing typed Commentary callback for strict My
+                # Stand turns too.  Only model-authored visible content attached
+                # to a real tool-call turn reaches this path; reasoning and tool
+                # output remain excluded by _emit_interim_assistant_message().
+                if not _strict_paid_call or _ctx.is_mystand_turn:
                     agent._emit_interim_assistant_message(assistant_msg)
 
                 # Close any open streaming display (response box, reasoning
@@ -4307,6 +4426,8 @@ def run_conversation(
                                 "Model returned no visible content; "
                                 "automatic retry is disabled"
                             ),
+                            failure_code="empty_model_response",
+                            failure_phase="response_generation",
                             drop_scaffolding=True,
                         )
 
