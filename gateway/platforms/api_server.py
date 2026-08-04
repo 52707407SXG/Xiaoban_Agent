@@ -3,6 +3,8 @@ OpenAI-compatible API server platform adapter.
 
 Exposes an HTTP server with endpoints:
 - POST /v1/chat/completions        — OpenAI Chat Completions format (stateless; opt-in session continuity via X-Xiaoban-Session-Id header; opt-in long-term memory scoping via X-Xiaoban-Session-Key header)
+- POST /v1/chat/completions/approval — resolve one exact active tool approval
+- POST /v1/chat/completions/steer  — supplement one active tool turn
 - POST /v1/responses               — OpenAI Responses API format (stateful via previous_response_id; X-Xiaoban-Session-Key supported)
 - GET  /v1/responses/{response_id} — Retrieve a stored response
 - DELETE /v1/responses/{response_id} — Delete a stored response
@@ -41,6 +43,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import socket as _socket
 import re
@@ -103,6 +106,96 @@ _CANONICAL_TOOL_TERMINAL_STATUSES = {
     "unknown": "failed",
     "cancelled": "stopped",
 }
+
+_AGENT_FAILURE_PUBLIC_CONTRACTS = {
+    "input_payload_too_large": (
+        "request_preflight", False, "请求内容超过本轮允许的输入上限。"
+    ),
+    "output_token_limit_exceeded": (
+        "request_preflight", False, "请求的输出上限超过本轮固定限制。"
+    ),
+    "output_token_limit_invalid": (
+        "request_preflight", False, "请求携带的输出上限无效。"
+    ),
+    "provider_route_mismatch": (
+        "request_preflight", False, "模型线路与本轮固定策略不一致。"
+    ),
+    "input_payload_invalid": (
+        "request_preflight", False, "请求内容无法安全序列化。"
+    ),
+    "paid_call_policy_rejected": (
+        "request_preflight", False, "请求未通过调用前策略校验。"
+    ),
+    "provider_call_failed": (
+        "provider_call", True, "模型服务调用失败，未取得可用响应。"
+    ),
+    "provider_response_processing_failed": (
+        "response_processing", True, "模型响应无法被安全处理。"
+    ),
+    "provider_response_invalid": (
+        "response_validation", False, "模型响应未通过完整性校验。"
+    ),
+    "response_truncated": (
+        "response_generation", False, "模型响应在生成过程中被截断。"
+    ),
+    "incomplete_reasoning_scratchpad": (
+        "response_generation", False, "模型响应包含未闭合的内部推理片段。"
+    ),
+    "empty_model_response": (
+        "response_generation", False, "模型没有生成可用内容。"
+    ),
+    "final_slot_requested_tool": (
+        "tool_proposal", False, "最终回复槽仍请求了新的工具调用。"
+    ),
+    "invalid_tool_call": (
+        "tool_proposal", False, "模型提出了无效的工具调用。"
+    ),
+    "invalid_tool_arguments": (
+        "tool_proposal", False, "模型提出的工具参数无效。"
+    ),
+    "iteration_budget_exhausted": (
+        "agent_loop", False, "本轮已用完允许的模型调用次数。"
+    ),
+    "agent_incomplete": (
+        "agent_loop", False, "本轮没有生成完整的最终回复。"
+    ),
+}
+
+
+def _canonical_agent_failure_projection(value: Any) -> Optional[Dict[str, Any]]:
+    """Allowlist the R2-A fatal shape without reflecting its raw reason."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "schema",
+        "kind",
+        "code",
+        "phase",
+        "reason",
+        "retryable",
+    }:
+        return None
+    if value.get("schema") != "xiaoban.agent-failure.v1" or value.get("kind") != "fatal":
+        return None
+    code = str(value.get("code") or "")
+    contract = _AGENT_FAILURE_PUBLIC_CONTRACTS.get(code)
+    if contract is None:
+        return None
+    expected_phase, expected_retry_safe, public_summary = contract
+    if (
+        value.get("phase") != expected_phase
+        or type(value.get("retryable")) is not bool
+        or value.get("retryable") is not expected_retry_safe
+        or not isinstance(value.get("reason"), str)
+        or not value.get("reason")
+        or len(value.get("reason")) > 1_000
+    ):
+        return None
+    return {
+        "phase": expected_phase,
+        "errorCategory": code,
+        "retrySafe": expected_retry_safe,
+        "summary": public_summary,
+    }
 
 
 def _canonical_tool_terminal_projection(
@@ -179,9 +272,11 @@ def _canonical_turn_start_projection(
     ):
         return None
     return {
+        "progressSchema": _XIAOBAN_PROGRESS_SCHEMA_V2,
         "type": "turn.started",
         "requestId": request,
         "turnId": turn,
+        "status": "running",
     }
 
 
@@ -189,7 +284,7 @@ def _canonical_turn_terminal_projection(
     expected_delivery_id: Any,
     started: Any,
     result: Any,
-) -> Optional[Dict[str, str]]:
+) -> Optional[Dict[str, Any]]:
     """Project the final settled result for one authenticated started turn."""
     if not isinstance(started, dict) or not isinstance(result, dict):
         return None
@@ -210,12 +305,18 @@ def _canonical_turn_terminal_projection(
         status = "failed"
     else:
         status = "completed"
-    return {
+    terminal: Dict[str, Any] = {
+        "progressSchema": _XIAOBAN_PROGRESS_SCHEMA_V2,
         "type": f"turn.{status}",
         "requestId": validated_start["requestId"],
         "turnId": validated_start["turnId"],
         "status": status,
     }
+    if status == "failed":
+        failure = _canonical_agent_failure_projection(result.get("failure"))
+        if failure is not None:
+            terminal.update(failure)
+    return terminal
 
 
 def _xiaoban_version() -> str:
@@ -363,6 +464,459 @@ _MYSTAND_STREAM_DELIVERY_ID_RE = re.compile(r"xbd_[0-9a-f]{40}")
 _MYSTAND_TURN_ID_RE = re.compile(r"[0-9a-f]{16}")
 _MYSTAND_STREAM_ATTEMPT_RE = re.compile(r"[0-9]{1,9}")
 _MYSTAND_STREAM_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
+_XIAOBAN_PROGRESS_SCHEMA_V2 = "xiaoban.progress.v2"
+_PROGRESS_SUMMARY_MAX_CHARS = 240
+_PROGRESS_BATCH_MAX_TOOL_CALLS = 64
+_PROGRESS_BATCH_MAX_SERIALIZED_CHARS = 65_536
+_PROGRESS_BATCH_MAX_PROTECTED_VALUES = 512
+_PROGRESS_PRIOR_MAX_PROTECTED_VALUES = 128
+_PROGRESS_DERIVED_FRAGMENT_SENTINEL = (
+    "__xiaoban_suppress_derived_progress_fragment__"
+)
+_PROGRESS_TOOL_CALL_ID_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z"
+)
+_PROGRESS_TOOL_NAME_RE = re.compile(
+    r"[A-Za-z][A-Za-z0-9_.:-]{0,127}\Z"
+)
+_CHAT_CONTROL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}\Z")
+_CHAT_APPROVAL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}\Z")
+_CHAT_STEER_MAX_CHARS = 8_000
+_CHAT_STEER_MAX_BYTES = 24_000
+_CHAT_CONTROL_MAX_UNIQUE = 8
+_ECMASCRIPT_TRIM_CHARS = (
+    "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def _canonical_chat_steer_message(value: Any) -> str:
+    """Match ECMAScript String.prototype.trim across the Python boundary."""
+
+    return str(value or "").strip(_ECMASCRIPT_TRIM_CHARS)
+
+
+class _ChatControlConflict(RuntimeError):
+    """Stable fail-closed error returned by trusted chat control endpoints."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+class _ChatControlBridge:
+    """Bind approval and steer controls to one live public tool lifecycle."""
+
+    def __init__(
+        self,
+        *,
+        request_id: str,
+        approval_session_key: str,
+        lifecycle_lock: threading.Lock,
+        started_turn_getter,
+        open_tool_calls: Dict[str, Any],
+        agent_ref: list,
+        emit,
+    ):
+        self.request_id = str(request_id or "")
+        self.approval_session_key = str(approval_session_key or "")
+        self._lifecycle_lock = lifecycle_lock
+        self._started_turn_getter = started_turn_getter
+        self._open_tool_calls = open_tool_calls
+        self._agent_ref = agent_ref
+        self._emit = emit
+        self._pending_approvals: Dict[str, Dict[str, str]] = {}
+        self._receipts: Dict[str, tuple[str, Dict[str, Any]]] = {}
+        self._closed = False
+
+    @staticmethod
+    def _copy_receipt(receipt: Mapping[str, Any]) -> Dict[str, Any]:
+        return json.loads(json.dumps(dict(receipt), ensure_ascii=False))
+
+    @staticmethod
+    def _control_digest(kind: str, payload: Mapping[str, Any]) -> str:
+        canonical = json.dumps(
+            {"kind": kind, **dict(payload)},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _replay_or_conflict(
+        self,
+        control_id: str,
+        digest: str,
+    ) -> Optional[Dict[str, Any]]:
+        prior = self._receipts.get(control_id)
+        if prior is None:
+            return None
+        prior_digest, receipt = prior
+        if prior_digest != digest:
+            raise _ChatControlConflict(
+                "control_id_conflict",
+                "controlId was reused with a different control payload",
+            )
+        return self._copy_receipt(receipt)
+
+    def _remember(
+        self,
+        control_id: str,
+        digest: str,
+        receipt: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        stored = self._copy_receipt(receipt)
+        self._receipts[control_id] = (digest, stored)
+        return self._copy_receipt(stored)
+
+    def _current_turn_locked(self) -> Dict[str, str]:
+        turn = self._started_turn_getter()
+        if not isinstance(turn, Mapping):
+            return {}
+        request_id = str(turn.get("requestId") or "")
+        turn_id = str(turn.get("turnId") or "")
+        if request_id != self.request_id or not turn_id:
+            return {}
+        return {"requestId": request_id, "turnId": turn_id}
+
+    def approval_notify(self, approval_data: Dict[str, Any]) -> None:
+        """Project one private command approval into a fixed public frame."""
+
+        data = dict(approval_data or {})
+        approval_id = str(data.get("approvalId") or "").strip()
+        request_id = str(data.get("requestId") or "").strip()
+        turn_id = str(data.get("turnId") or "").strip()
+        call_id = str(data.get("callId") or "").strip()
+        if not _CHAT_APPROVAL_ID_RE.fullmatch(approval_id):
+            raise RuntimeError("approval request has no valid approvalId")
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("chat control lifecycle is closed")
+            current_turn = self._current_turn_locked()
+            open_call = self._open_tool_calls.get(call_id)
+            binding = open_call[1] if isinstance(open_call, tuple) and len(open_call) > 1 else None
+            if (
+                not current_turn
+                or request_id != current_turn["requestId"]
+                or turn_id != current_turn["turnId"]
+                or not isinstance(binding, tuple)
+                or binding != (request_id, turn_id)
+            ):
+                raise RuntimeError("approval request is outside the active tool lifecycle")
+            prior = self._pending_approvals.get(approval_id)
+            correlated = {
+                "requestId": request_id,
+                "turnId": turn_id,
+                "callId": call_id,
+            }
+            if prior is not None:
+                if prior != correlated:
+                    raise RuntimeError("approvalId correlation changed")
+                return
+            if (
+                len(self._receipts) + len(self._pending_approvals)
+                >= _CHAT_CONTROL_MAX_UNIQUE
+            ):
+                raise _ChatControlConflict(
+                    "chat_control_limit_reached",
+                    "This delivery has reached its control limit",
+                )
+            self._pending_approvals[approval_id] = correlated
+            payload = {
+                "progressSchema": _XIAOBAN_PROGRESS_SCHEMA_V2,
+                "type": "approval.request",
+                "requestId": request_id,
+                "turnId": turn_id,
+                "callId": call_id,
+                "approvalId": approval_id,
+                "status": "running",
+                "choices": ["once", "session", "deny"],
+                "summary": "需要确认后继续当前操作。",
+            }
+            self._emit("approval.request", payload)
+
+    def respond(
+        self,
+        *,
+        control_id: str,
+        approval_id: str,
+        choice: str,
+    ) -> Dict[str, Any]:
+        """Emit a response frame, then unblock only the exact approval."""
+
+        normalized_choice = str(choice or "").strip().lower()
+        digest = self._control_digest("approval", {
+            "approvalId": approval_id,
+            "choice": normalized_choice,
+        })
+        with self._lifecycle_lock:
+            replay = self._replay_or_conflict(control_id, digest)
+            if replay is not None:
+                return replay
+            if len(self._receipts) >= _CHAT_CONTROL_MAX_UNIQUE:
+                raise _ChatControlConflict(
+                    "chat_control_limit_reached",
+                    "This delivery has reached its control limit",
+                )
+            if self._closed:
+                raise _ChatControlConflict(
+                    "approval_not_active",
+                    "The chat approval lifecycle is closed",
+                )
+            pending = self._pending_approvals.get(approval_id)
+            if pending is None:
+                raise _ChatControlConflict(
+                    "approval_not_pending",
+                    "The approvalId is stale or no longer pending",
+                )
+            if normalized_choice not in {"once", "session", "deny"}:
+                raise _ChatControlConflict(
+                    "invalid_approval_choice",
+                    "Expected one of: once, session, deny",
+                )
+            event = {
+                "progressSchema": _XIAOBAN_PROGRESS_SCHEMA_V2,
+                "type": "approval.responded",
+                **pending,
+                "approvalId": approval_id,
+                "controlId": control_id,
+                "choice": normalized_choice,
+                "status": "completed",
+                "summary": {
+                    "once": "已同意本次操作。",
+                    "session": "已同意本次会话内同类操作。",
+                    "deny": "已拒绝当前操作。",
+                }[normalized_choice],
+            }
+            from tools.approval import resolve_gateway_approval_exact
+
+            resolved = resolve_gateway_approval_exact(
+                self.approval_session_key,
+                approval_id,
+                normalized_choice,
+                before_unblock=lambda _data: self._emit(
+                    "approval.responded",
+                    event,
+                ),
+            )
+            if resolved != 1:
+                raise _ChatControlConflict(
+                    "approval_not_pending",
+                    "The approvalId is stale or no longer pending",
+                )
+            self._pending_approvals.pop(approval_id, None)
+            receipt = {
+                "ok": True,
+                "status": "accepted",
+                "controlId": control_id,
+                "approvalId": approval_id,
+                "choice": normalized_choice,
+                "event": event,
+            }
+            return self._remember(control_id, digest, receipt)
+
+    def steer(
+        self,
+        *,
+        control_id: str,
+        message: str,
+        approval_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Close pending approval waits and inject one same-turn supplement."""
+
+        cleaned = _canonical_chat_steer_message(message)
+        expected_approval_id = str(approval_id or "").strip()
+        message_digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
+        digest = self._control_digest("steer", {
+            "messageDigest": message_digest,
+            "approvalId": expected_approval_id,
+        })
+        with self._lifecycle_lock:
+            replay = self._replay_or_conflict(control_id, digest)
+            if replay is not None:
+                return replay
+            if len(self._receipts) >= _CHAT_CONTROL_MAX_UNIQUE:
+                raise _ChatControlConflict(
+                    "chat_control_limit_reached",
+                    "This delivery has reached its control limit",
+                )
+            current_turn = self._current_turn_locked()
+            if (
+                self._closed
+                or not current_turn
+                or not self._open_tool_calls
+            ):
+                raise _ChatControlConflict(
+                    "steer_not_active",
+                    "Steer is accepted only while a tool is running",
+                )
+            if (
+                not cleaned
+                or len(cleaned) > _CHAT_STEER_MAX_CHARS
+                or len(cleaned.encode("utf-8")) > _CHAT_STEER_MAX_BYTES
+            ):
+                raise _ChatControlConflict(
+                    "invalid_steer_message",
+                    "Steer message must be non-empty and within the size limit",
+                )
+
+            if self._pending_approvals and not expected_approval_id:
+                raise _ChatControlConflict(
+                    "steer_approval_id_required",
+                    "approvalId is required while an approval is pending",
+                )
+            if expected_approval_id and expected_approval_id not in self._pending_approvals:
+                raise _ChatControlConflict(
+                    "steer_approval_changed",
+                    "The pending approval changed before steer was accepted",
+                )
+            if not self._pending_approvals and len(self._open_tool_calls) != 1:
+                raise _ChatControlConflict(
+                    "steer_tool_ambiguous",
+                    "Steer requires one unambiguous active tool",
+                )
+
+            if expected_approval_id:
+                target_pending = self._pending_approvals[expected_approval_id]
+                target_call_id = target_pending["callId"]
+                target_open = self._open_tool_calls.get(target_call_id)
+                target_binding = (
+                    target_open[1]
+                    if isinstance(target_open, tuple) and len(target_open) > 1
+                    else None
+                )
+                if target_binding != (
+                    current_turn["requestId"],
+                    current_turn["turnId"],
+                ):
+                    raise _ChatControlConflict(
+                        "steer_approval_changed",
+                        "The approval tool is no longer active",
+                    )
+                if any(
+                    approval_id != expected_approval_id
+                    and pending.get("requestId") == target_pending["requestId"]
+                    and pending.get("turnId") == target_pending["turnId"]
+                    and pending.get("callId") == target_call_id
+                    for approval_id, pending in self._pending_approvals.items()
+                ):
+                    raise _ChatControlConflict(
+                        "steer_approval_ambiguous",
+                        "Steer cannot choose between approvals on the same tool call",
+                    )
+            else:
+                target_call_id = next(iter(self._open_tool_calls))
+            from tools.approval import resolve_gateway_approval_exact
+
+            pending_items = (
+                [(
+                    expected_approval_id,
+                    self._pending_approvals[expected_approval_id],
+                )]
+                if expected_approval_id
+                else []
+            )
+            for pending_approval_id, pending in pending_items:
+                event = {
+                    "progressSchema": _XIAOBAN_PROGRESS_SCHEMA_V2,
+                    "type": "approval.responded",
+                    **pending,
+                    "approvalId": pending_approval_id,
+                    "controlId": control_id,
+                    # Internal supersession deliberately reuses an existing
+                    # fail-closed decision; it is not a fourth public choice.
+                    "choice": "deny",
+                    "status": "completed",
+                    "summary": "内容补充已关闭原审批等待。",
+                }
+                resolved = resolve_gateway_approval_exact(
+                    self.approval_session_key,
+                    pending_approval_id,
+                    "deny",
+                    before_unblock=lambda _data, event=event: self._emit(
+                        "approval.responded",
+                        event,
+                    ),
+                )
+                if resolved != 1:
+                    raise _ChatControlConflict(
+                        "steer_approval_changed",
+                        "The pending approval changed before steer was accepted",
+                    )
+                self._pending_approvals.pop(pending_approval_id, None)
+                target_call_id = pending["callId"]
+
+            agent = self._agent_ref[0] if self._agent_ref else None
+            steer_method = getattr(agent, "steer", None)
+            if not callable(steer_method) or steer_method(cleaned) is not True:
+                raise _ChatControlConflict(
+                    "steer_not_active",
+                    "The active Agent did not accept the steer message",
+                )
+            event = {
+                "progressSchema": _XIAOBAN_PROGRESS_SCHEMA_V2,
+                "type": "steer.accepted",
+                "requestId": current_turn["requestId"],
+                "turnId": current_turn["turnId"],
+                "callId": target_call_id,
+                "controlId": control_id,
+                "messageDigest": message_digest,
+                "status": "completed",
+                "summary": "已收到内容补充，将在当前任务中继续处理。",
+            }
+            self._emit("steer.accepted", event)
+            receipt = {
+                "ok": True,
+                "status": "accepted",
+                "controlId": control_id,
+                "approvalId": expected_approval_id,
+                "messageDigest": message_digest,
+                "event": event,
+            }
+            return self._remember(control_id, digest, receipt)
+
+    def close(self) -> None:
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            # Publish each still-pending approval close while the shared tool
+            # lifecycle lock is held.  The caller wakes blocked approval
+            # threads only after this method returns, so a resumed tool cannot
+            # race its terminal frame ahead of the approval close.
+            for approval_id, pending in self._pending_approvals.items():
+                close_digest = hashlib.sha256(
+                    (
+                        f"{self.request_id}\0{approval_id}\0system-close"
+                    ).encode("utf-8")
+                ).hexdigest()[:32]
+                self._emit("approval.responded", {
+                    "progressSchema": _XIAOBAN_PROGRESS_SCHEMA_V2,
+                    "type": "approval.responded",
+                    **pending,
+                    "approvalId": approval_id,
+                    "controlId": f"control_system_close_{close_digest}",
+                    "choice": "deny",
+                    "status": "completed",
+                    "summary": "运行已结束，审批等待已安全关闭。",
+                })
+            self._pending_approvals.clear()
+
+    def has_pending_approval_locked(self) -> bool:
+        """Read under the shared tool lifecycle lock."""
+
+        return bool(self._pending_approvals)
+
+_PROGRESS_EXECUTOR_ERROR_RE = re.compile(
+    r"\AError executing tool '[A-Za-z][A-Za-z0-9_.:-]{0,127}':\s+(.+)\Z",
+    re.DOTALL,
+)
+_PROGRESS_INLINE_WRAPPED_ERROR_RE = re.compile(
+    r"\A(?:Context engine|Memory) tool "
+    r"'[A-Za-z][A-Za-z0-9_.:-]{0,127}' failed:\s+(.+)\Z",
+    re.DOTALL,
+)
 _LOCAL_PATH_RE = re.compile(
     r"(?<![:/\w])/(?:root|opt|srv|var|etc)(?:/[^\s`'\"<>()\[\]{}，。；;]*)*"
 )
@@ -381,6 +935,671 @@ def _sanitize_user_visible_text(text: Any) -> str:
     value = _LOCAL_FILE_URL_RE.sub("本地文件链接", value)
     value = _LOCAL_PATH_RE.sub("本地路径", value)
     return value
+
+
+_PROGRESS_PRIVATE_BLOCK_RE = re.compile(
+    r"<\s*(?P<private_tag>think|thinking|reasoning|analysis|"
+    r"reasoning[_-]?scratchpad|memory[_-]?context)\b[^>]*>.*?"
+    r"<\s*/\s*(?P=private_tag)\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_PROGRESS_PRIVATE_TAG_FRAGMENT_RE = re.compile(
+    r"<\s*/?\s*(?:think|thinking|reasoning|analysis|"
+    r"reasoning[_-]?scratchpad|memory[_-]?context)\b",
+    re.IGNORECASE,
+)
+_PROGRESS_UNSAFE_MARKUP_RE = re.compile(
+    r"(?:```|<\s*/?\s*invoke\b|<\|{2}DSML\|{2}>|\btool[_-]?calls?\b|"
+    r"\b(?:arguments?|args|results?)\s*[:=])",
+    re.IGNORECASE,
+)
+_PROGRESS_URL_RE = re.compile(r"(?:https?|wss?)://\S+", re.IGNORECASE)
+_PROGRESS_EMAIL_RE = re.compile(
+    r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![\w.-])"
+)
+_PROGRESS_PHONE_RE = re.compile(
+    r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)"
+)
+_PROGRESS_LONG_NUMBER_RE = re.compile(r"(?<!\d)\d{12,19}(?!\d)")
+_PROGRESS_MONEY_RE = re.compile(
+    r"(?:[¥￥$]|人民币|美元)\s*\d[\d,.]*|"
+    r"\d[\d,.]*\s*(?:元|万元|人民币|美元)"
+)
+_PROGRESS_SENSITIVE_KEY_RE = re.compile(
+    r"(?:customer|client|owner|contact|name|company|organisation|organization|"
+    r"estate|property|phone|mobile|email|idcard|identity|bank|account|address|"
+    r"auth|resource(?:uid|id)?|uid|finance|amount|note|content|body|text|"
+    r"客户|业主|联系人|姓名|公司|企业|楼盘|小区|项目|电话|手机|证件|"
+    r"银行|账号|地址|授权|资源|财务|金额|正文|备注)",
+    re.IGNORECASE,
+)
+_PROGRESS_DERIVED_ENTITY_KEY_RE = re.compile(
+    r"(?:customer|client|owner|contact|name|company|organisation|organization|"
+    r"estate|property|phone|mobile|email|idcard|identity|bank|account|address|"
+    r"auth|resource(?:uid|id)?|uid|客户|业主|联系人|姓名|公司|企业|楼盘|"
+    r"小区|项目|电话|手机|邮箱|证件|银行|账号|地址|授权|资源)",
+    re.IGNORECASE,
+)
+_PROGRESS_CJK_RUN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
+_PROGRESS_DIGIT_RUN_RE = re.compile(r"\d+")
+_PROGRESS_ASCII_IDENTIFIER_TOKEN_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9_.:@-]*"
+)
+_PROGRESS_STRONG_IDENTIFIER_RE = re.compile(
+    r"(?:AUTH-|OUT-)[A-Za-z0-9_.:@-]+|"
+    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|"
+    r"(?<!\d)\d{8,}(?!\d)",
+    re.IGNORECASE,
+)
+_MYSTAND_STREAM_REPLAY_SCHEMA = "xiaoban.public-stream-replay.v1"
+_MYSTAND_STREAM_REPLAY_MAX_FRAMES = 4_096
+_MYSTAND_STREAM_REPLAY_MAX_BYTES = 262_144
+_MYSTAND_STREAM_REPLAY_MAX_USAGE_BYTES = 65_536
+_MYSTAND_STREAM_REPLAY_PROGRESS_KEYS = frozenset({
+    "tool",
+    "emoji",
+    "label",
+    "toolCallId",
+    "status",
+    "progressSchema",
+    "schema",
+    "requestId",
+    "turnId",
+    "dispatchState",
+    "outcome",
+    "retrySafe",
+    "summary",
+    "type",
+    "phase",
+    "errorCategory",
+})
+
+
+def _progress_sensitive_values(
+    value: Any,
+    *,
+    protect_all_strings: bool = False,
+    limit: int = 128,
+) -> tuple[list[tuple[str, str]], bool]:
+    """Collect bounded in-memory canaries used only to redact progress text."""
+
+    found: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    bounded_limit = max(0, min(_PROGRESS_BATCH_MAX_PROTECTED_VALUES, int(limit)))
+    complete = True
+
+    def _add(candidate: Any, replacement: str) -> None:
+        nonlocal complete
+        text = str(candidate or "").strip()
+        if not text:
+            return
+        if len(text) < 2:
+            # Replacing a one-character value globally would corrupt ordinary
+            # prose.  Suppress the whole summary instead of leaking it or
+            # performing an unsafe broad replacement.
+            complete = False
+            return
+        if len(text) > 512:
+            complete = False
+            return
+        item = (text, replacement)
+        if item in seen:
+            return
+        if len(found) >= bounded_limit:
+            complete = False
+            return
+        seen.add(item)
+        found.append(item)
+
+    def _add_windows(token: str, width: int, full_text: str) -> None:
+        nonlocal complete
+        if len(token) < width:
+            return
+        if len(token) == width:
+            if token != full_text:
+                _add(token, _PROGRESS_DERIVED_FRAGMENT_SENTINEL)
+            return
+        for index in range(len(token) - width + 1):
+            fragment = token[index:index + width]
+            if fragment != full_text:
+                _add(fragment, _PROGRESS_DERIVED_FRAGMENT_SENTINEL)
+            if not complete:
+                return
+
+    def _add_derived_fragments(
+        text: str,
+        *,
+        explicit_entity: bool,
+        protect_all_leaf: bool,
+    ) -> None:
+        """Add bounded proper-substring canaries without broad replacement.
+
+        A model may abbreviate an entity or expose only the last four digits of
+        an identifier.  Exact replacement cannot cover those derived summaries.
+        Every tool leaf is untrusted progress material.  Bounded two-character
+        windows cover short CJK names, mixed door numbers, and ordinary ASCII
+        business identifiers.  A hit suppresses the model-authored summary;
+        the caller may then choose a fixed tool-category sentence.
+        """
+
+        nonlocal complete
+        if explicit_entity or protect_all_leaf:
+            _add(text, _PROGRESS_DERIVED_FRAGMENT_SENTINEL)
+            for index in range(len(text) - 1):
+                _add(
+                    text[index:index + 2],
+                    _PROGRESS_DERIVED_FRAGMENT_SENTINEL,
+                )
+                if not complete:
+                    return
+        for match in _PROGRESS_STRONG_IDENTIFIER_RE.finditer(text):
+            token = match.group(0)
+            if token.isdigit():
+                _add_windows(token, 4, text)
+            else:
+                _add_windows(token, 4, text)
+            if not complete:
+                return
+
+    def _walk(item: Any, key: str = "", depth: int = 0) -> None:
+        nonlocal complete
+        if not complete:
+            return
+        if depth > 5:
+            complete = False
+            return
+        if isinstance(item, Mapping):
+            if len(item) > 128:
+                complete = False
+                return
+            for nested_key, nested_value in item.items():
+                _walk(nested_value, str(nested_key or ""), depth + 1)
+            return
+        if isinstance(item, (list, tuple)):
+            if len(item) > 128:
+                complete = False
+                return
+            for nested_value in item:
+                _walk(nested_value, key, depth + 1)
+            return
+        if item is None or isinstance(item, bool):
+            return
+        replacement = (
+            "相关客户"
+            if re.search(r"(?:customer|client|owner|contact|name|客户|业主|联系人|姓名)", key, re.IGNORECASE)
+            else "相关资料"
+        )
+        sensitive_key = bool(_PROGRESS_SENSITIVE_KEY_RE.search(key))
+        explicit_entity_key = bool(
+            _PROGRESS_DERIVED_ENTITY_KEY_RE.search(key)
+        )
+        if isinstance(item, int):
+            if protect_all_strings or sensitive_key:
+                canonical = str(item)
+                _add(canonical, replacement)
+                _add_derived_fragments(
+                    canonical,
+                    explicit_entity=explicit_entity_key,
+                    protect_all_leaf=protect_all_strings,
+                )
+            return
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                complete = False
+                return
+            if protect_all_strings or sensitive_key:
+                canonical = str(item)
+                _add(canonical, replacement)
+                _add_derived_fragments(
+                    canonical,
+                    explicit_entity=explicit_entity_key,
+                    protect_all_leaf=protect_all_strings,
+                )
+                if item.is_integer():
+                    integer_canonical = str(int(item))
+                    _add(integer_canonical, replacement)
+                    _add_derived_fragments(
+                        integer_canonical,
+                        explicit_entity=explicit_entity_key,
+                        protect_all_leaf=protect_all_strings,
+                    )
+            return
+        if not isinstance(item, str):
+            complete = False
+            return
+        text = item.strip()
+        if not text:
+            return
+        should_derive_fragments = bool(
+            explicit_entity_key
+            or _PROGRESS_STRONG_IDENTIFIER_RE.search(text)
+            or protect_all_strings
+        )
+        if sensitive_key:
+            _add(text, replacement)
+        elif protect_all_strings:
+            _add(text, "相关资料")
+        elif 8 <= len(text) <= 256:
+            # Exact repeats of tool input/result prose are not progress copy.
+            _add(text, "相关资料")
+        if not complete:
+            return
+        lowered = text.lstrip().lower()
+        if lowered.startswith(("context engine tool", "memory tool")):
+            wrapped_error = _PROGRESS_INLINE_WRAPPED_ERROR_RE.fullmatch(text)
+            if wrapped_error is None:
+                complete = False
+                return
+            reason = wrapped_error.group(1).strip()
+            if not reason:
+                complete = False
+                return
+            _walk(reason, "error", depth + 1)
+            return
+        if lowered.startswith("error executing tool"):
+            executor_error = _PROGRESS_EXECUTOR_ERROR_RE.fullmatch(text)
+            if executor_error is None:
+                complete = False
+                return
+            reason = executor_error.group(1).strip()
+            if not reason:
+                complete = False
+                return
+            _walk(reason, "error", depth + 1)
+            return
+        if text[:1] in "[{" and text[-1:] in "]}":
+            try:
+                decoded = json.loads(text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                complete = False
+                return
+            _walk(decoded, key, depth + 1)
+            return
+        if should_derive_fragments:
+            _add_derived_fragments(
+                text,
+                explicit_entity=explicit_entity_key,
+                protect_all_leaf=protect_all_strings,
+            )
+
+    _walk(value)
+    return found, complete
+
+
+def _progress_tool_batch_context(
+    value: Any,
+) -> tuple[dict[str, str], list[tuple[str, str]], bool]:
+    """Collect every bounded argument leaf before a parallel batch starts.
+
+    The callback payload remains process-local.  If the complete batch cannot
+    be represented inside the fixed bounds, callers suppress commentary rather
+    than risk emitting a summary protected by only a prefix of the arguments.
+    """
+
+    if not isinstance(value, (list, tuple)) or not value:
+        return {}, [], False
+    tool_calls = list(value)
+    if len(tool_calls) > _PROGRESS_BATCH_MAX_TOOL_CALLS:
+        return {}, [], False
+
+    call_bindings: dict[str, str] = {}
+    protected: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    serialized_chars = 0
+    protection_complete = True
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, Mapping):
+            return {}, [], False
+        call_id = tool_call.get("id")
+        function = tool_call.get("function")
+        if (
+            not isinstance(call_id, str)
+            or _PROGRESS_TOOL_CALL_ID_RE.fullmatch(call_id) is None
+            or not isinstance(function, Mapping)
+        ):
+            return {}, [], False
+        function_name = function.get("name")
+        if (
+            tool_call.get("type") != "function"
+            or not isinstance(function_name, str)
+            or _PROGRESS_TOOL_NAME_RE.fullmatch(function_name) is None
+            or call_id in call_bindings
+        ):
+            return {}, [], False
+        arguments = function.get("arguments", {})
+        try:
+            if isinstance(arguments, str):
+                serialized = arguments
+                argument_source = json.loads(arguments)
+            else:
+                serialized = json.dumps(arguments, ensure_ascii=False)
+                argument_source = arguments
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}, [], False
+        if not isinstance(argument_source, Mapping):
+            return {}, [], False
+        serialized_chars += len(serialized)
+        if serialized_chars > _PROGRESS_BATCH_MAX_SERIALIZED_CHARS:
+            protection_complete = False
+        if protection_complete:
+            remaining = _PROGRESS_BATCH_MAX_PROTECTED_VALUES - len(protected)
+            if remaining <= 0:
+                protection_complete = False
+            else:
+                argument_values, arguments_complete = (
+                    _progress_sensitive_values(
+                        argument_source,
+                        protect_all_strings=True,
+                        limit=remaining,
+                    )
+                )
+                if not arguments_complete:
+                    protection_complete = False
+                else:
+                    for item in argument_values:
+                        if item not in seen:
+                            seen.add(item)
+                            protected.append(item)
+        call_bindings[call_id] = function_name
+    return (
+        call_bindings,
+        protected if protection_complete else [],
+        bool(call_bindings) and protection_complete,
+    )
+
+
+def _public_progress_summary(
+    value: Any,
+    *protected_sources: Any,
+) -> str:
+    """Return a one-line natural progress projection, never raw business data."""
+
+    text = str(value or "")
+    if len(text) > 2_000:
+        return ""
+    if not text:
+        return ""
+    text = _PROGRESS_PRIVATE_BLOCK_RE.sub("", text)
+    if _PROGRESS_PRIVATE_TAG_FRAGMENT_RE.search(text):
+        return ""
+    try:
+        from agent.redact import redact_sensitive_text
+
+        text = redact_sensitive_text(text, force=True)
+    except Exception:
+        # Redaction is defense in depth; the fixed filters below remain active.
+        pass
+    text = _sanitize_user_visible_text(text)
+    text = _PROGRESS_URL_RE.sub("相关链接", text)
+    all_protected_items: list[tuple[str, str]] = []
+    for source in protected_sources:
+        if (
+            isinstance(source, list)
+            and all(
+                isinstance(item, tuple)
+                and len(item) == 2
+                and all(isinstance(part, str) for part in item)
+                for item in source
+            )
+        ):
+            protected_items = list(source)
+            source_complete = True
+        else:
+            protected_items, source_complete = _progress_sensitive_values(source)
+        if not source_complete:
+            return ""
+        all_protected_items.extend(protected_items)
+    for protected, replacement in sorted(
+        all_protected_items,
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        if (
+            replacement == _PROGRESS_DERIVED_FRAGMENT_SENTINEL
+            and protected in text
+        ):
+            return ""
+    for protected, replacement in sorted(
+        all_protected_items,
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        if replacement == _PROGRESS_DERIVED_FRAGMENT_SENTINEL:
+            continue
+        text = text.replace(protected, replacement)
+    text = _PROGRESS_EMAIL_RE.sub("相关联系方式", text)
+    text = _PROGRESS_PHONE_RE.sub("相关联系方式", text)
+    text = _PROGRESS_LONG_NUMBER_RE.sub("相关编号", text)
+    text = _PROGRESS_MONEY_RE.sub("相关金额", text)
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text or _PROGRESS_UNSAFE_MARKUP_RE.search(text):
+        return ""
+    return text[:_PROGRESS_SUMMARY_MAX_CHARS].rstrip()
+
+
+def _fixed_tool_progress_summary(function_name: Any) -> str:
+    """Return parameter-free progress copy based only on a validated tool name."""
+
+    name = str(function_name or "")
+    if name in {"web_search", "web_extract"}:
+        return "我先查找公开资料。"
+    if name in {"mystand_authorization", "mystand_authorization_write"}:
+        return "我先核对授权状态。"
+    if name in {
+        "mystand_query",
+        "mystand_resource_index",
+        "mystand_parse",
+        "read_file",
+        "search_files",
+    }:
+        return "我先核对相关资料。"
+    return "我先处理相关资料。"
+
+
+def _mystand_stream_result_succeeded(result: Any) -> bool:
+    return bool(
+        isinstance(result, dict)
+        and result.get("completed") is True
+        and not result.get("failed")
+        and not result.get("partial")
+        and not result.get("interrupted")
+        and not result.get("stopped")
+    )
+
+
+def _build_mystand_stream_replay_envelope(
+    items: Any,
+    result: Any,
+    usage: Any,
+) -> Optional[Dict[str, Any]]:
+    """Copy only bounded, already-public SSE projections for local replay."""
+
+    if (
+        not _mystand_stream_result_succeeded(result)
+        or not isinstance(items, list)
+        or not isinstance(usage, Mapping)
+    ):
+        return None
+
+    encoded_items: list[Dict[str, Any]] = []
+    has_public_text = False
+    for item in items:
+        if isinstance(item, str):
+            public_text = _sanitize_user_visible_text(item)
+            if public_text != item:
+                return None
+            if encoded_items and encoded_items[-1].get("kind") == "content":
+                encoded_items[-1]["text"] += public_text
+            else:
+                encoded_items.append({
+                    "kind": "content",
+                    "text": public_text,
+                })
+            has_public_text = has_public_text or bool(public_text)
+        elif (
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or item[0] != "__tool_progress__"
+            or not isinstance(item[1], Mapping)
+            or not set(item[1]).issubset(
+                _MYSTAND_STREAM_REPLAY_PROGRESS_KEYS
+            )
+        ):
+            return None
+        else:
+            payload = dict(item[1])
+            if any(
+                not isinstance(value, (str, int, bool, type(None)))
+                for value in payload.values()
+            ):
+                return None
+            try:
+                public_payload = json.loads(json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return None
+            encoded_items.append({
+                "kind": "progress",
+                "payload": public_payload,
+            })
+        if len(encoded_items) > _MYSTAND_STREAM_REPLAY_MAX_FRAMES:
+            return None
+
+    final_text = _sanitize_user_visible_text(result.get("final_response", ""))
+    if not final_text and not has_public_text:
+        return None
+    result_projection: Dict[str, Any] = {
+        "final_response": final_text,
+        "completed": True,
+        "failed": False,
+        "partial": False,
+        "interrupted": False,
+    }
+    if is_mystand_egress_sealed(result):
+        output_digest = result.get("_mystand_egress_output_digest")
+        if (
+            not isinstance(output_digest, str)
+            or not _MYSTAND_STREAM_FINGERPRINT_RE.fullmatch(output_digest)
+        ):
+            return None
+        result_projection.update({
+            "_mystand_egress_finalized": True,
+            "_mystand_egress_output_digest": output_digest,
+        })
+    outcome_id = result.get("_true_moa_outcome_id")
+    if outcome_id is not None:
+        if (
+            not isinstance(outcome_id, str)
+            or not _MYSTAND_STREAM_FINGERPRINT_RE.fullmatch(outcome_id)
+        ):
+            return None
+        result_projection["_true_moa_outcome_id"] = outcome_id
+
+    public_usage = {
+        key: usage[key]
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "true_moa",
+            "agent_calls",
+        )
+        if key in usage
+    }
+    try:
+        usage_wire = json.dumps(
+            public_usage,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(usage_wire) > _MYSTAND_STREAM_REPLAY_MAX_USAGE_BYTES:
+            return None
+        public_usage = json.loads(usage_wire.decode("utf-8"))
+        envelope: Dict[str, Any] = {
+            "schema": _MYSTAND_STREAM_REPLAY_SCHEMA,
+            "items": encoded_items,
+            "result": result_projection,
+            "usage": public_usage,
+        }
+        envelope_wire = json.dumps(
+            envelope,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if len(envelope_wire) > _MYSTAND_STREAM_REPLAY_MAX_BYTES:
+        return None
+    return envelope
+
+
+def _decode_mystand_stream_replay_envelope(
+    envelope: Any,
+) -> Optional[tuple[list[Any], Dict[str, Any], Dict[str, Any]]]:
+    """Validate a local replay envelope again before placing it on the wire."""
+
+    if not isinstance(envelope, Mapping):
+        return None
+    try:
+        wire = json.dumps(
+            dict(envelope),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    if len(wire) > _MYSTAND_STREAM_REPLAY_MAX_BYTES:
+        return None
+    if envelope.get("schema") != _MYSTAND_STREAM_REPLAY_SCHEMA:
+        return None
+    encoded_items = envelope.get("items")
+    result = envelope.get("result")
+    usage = envelope.get("usage")
+    if (
+        not isinstance(encoded_items, list)
+        or len(encoded_items) > _MYSTAND_STREAM_REPLAY_MAX_FRAMES
+        or not isinstance(result, dict)
+        or not isinstance(usage, dict)
+        or not _mystand_stream_result_succeeded(result)
+    ):
+        return None
+    decoded_items: list[Any] = []
+    for encoded in encoded_items:
+        if not isinstance(encoded, dict) or set(encoded) not in (
+            {"kind", "text"},
+            {"kind", "payload"},
+        ):
+            return None
+        if encoded.get("kind") == "content" and isinstance(
+            encoded.get("text"), str
+        ):
+            decoded_items.append(encoded["text"])
+        elif encoded.get("kind") == "progress" and isinstance(
+            encoded.get("payload"), dict
+        ):
+            if not set(encoded["payload"]).issubset(
+                _MYSTAND_STREAM_REPLAY_PROGRESS_KEYS
+            ):
+                return None
+            decoded_items.append((
+                "__tool_progress__",
+                dict(encoded["payload"]),
+            ))
+        else:
+            return None
+    if result.get("_mystand_egress_finalized") is True:
+        try:
+            seal_mystand_egress_projection(result)
+        except RuntimeError:
+            return None
+    return decoded_items, result, usage
 
 
 def _content_to_visible_text(content: Any) -> str:
@@ -1781,6 +3000,7 @@ class APIServerAdapter(
         ephemeral_system_prompt: Optional[str] = None,
         session_id: Optional[str] = None,
         stream_delta_callback=None,
+        interim_assistant_callback=None,
         tool_progress_callback=None,
         tool_start_callback=None,
         tool_complete_callback=None,
@@ -1853,6 +3073,7 @@ class APIServerAdapter(
             session_id=session_id,
             platform="api_server",
             stream_delta_callback=stream_delta_callback,
+            interim_assistant_callback=interim_assistant_callback,
             tool_progress_callback=tool_progress_callback,
             tool_start_callback=tool_start_callback,
             tool_complete_callback=tool_complete_callback,
@@ -2831,6 +4052,7 @@ class APIServerAdapter(
             stream_binding_key = ""
             stream_idem_fp = ""
             stream_outcome_binding = None
+            stream_replay_state = "missing"
             if stream_delivery_id:
                 try:
                     stream_scoped_key = self._scoped_idempotency_key(
@@ -2853,11 +4075,12 @@ class APIServerAdapter(
                         _openai_error(str(e), code="invalid_idempotency_scope"),
                         status=400,
                     )
-                if _idem_cache.lookup_state(
+                stream_replay_state = _idem_cache.lookup_state(
                     stream_scoped_key,
                     stream_idem_fp,
                     durable=durable_request,
-                ) == "conflict":
+                )
+                if stream_replay_state == "conflict":
                     return web.json_response(
                         _openai_error(
                             "idempotency key was reused with a different request",
@@ -2886,12 +4109,53 @@ class APIServerAdapter(
                         ),
                         status=409,
                     )
-            limited = self._concurrency_limited_response()
-            if limited is not None:
-                return limited
+            if not stream_scoped_key or stream_replay_state == "missing":
+                limited = self._concurrency_limited_response()
+                if limited is not None:
+                    return limited
             import queue as _q
             _stream_q: _q.Queue = _q.Queue()
             guard_stream_deltas = true_moa_snapshot is not None
+            _replay_capture_lock = threading.Lock()
+            _replay_candidate_items: list[Any] = []
+
+            def _put_public_stream_item(item: Any) -> None:
+                """Queue one public item and retain its same-process order."""
+
+                with _replay_capture_lock:
+                    _stream_q.put(item)
+                    if (
+                        mystand_request
+                        and stream_scoped_key
+                        # Control frames are live interaction receipts.  A
+                        # completed chat replay must not resurrect approval
+                        # buttons or a prior steer acknowledgement.
+                        and not (
+                            isinstance(item, tuple)
+                            and len(item) == 2
+                            and item[0] == "__chat_control__"
+                        )
+                    ):
+                        _replay_candidate_items.append(item)
+
+            # A trusted My Stand provider can stream model-authored text before
+            # revealing that the same response contains tool calls.  Keep that
+            # round local until the Agent's structural ``None`` boundary tells
+            # us whether it was commentary or the final answer.  This prevents
+            # tool preambles from becoming persisted reply text.
+            _tool_lifecycle_lock = threading.Lock()
+            _pending_stream_chunks: list[str] = []
+            _staged_final_stream_chunks: list[str] = []
+            _pending_progress_summary = ""
+            _active_progress_summary = ""
+            _pending_progress_call_bindings: dict[str, str] = {}
+            _active_progress_call_bindings: dict[str, str] = {}
+            _pending_progress_batch_values: list[tuple[str, str]] = []
+            _active_progress_batch_values: list[tuple[str, str]] = []
+            _pending_progress_batch_complete = False
+            _active_progress_batch_complete = False
+            _progress_protected_values: list[tuple[str, str]] = []
+            _progress_protected_values_complete = True
 
             def _on_delta(delta):
                 # Filter out None — the agent fires stream_delta_callback(None)
@@ -2901,22 +4165,128 @@ class APIServerAdapter(
                 # response, causing Open WebUI (and similar frontends) to miss
                 # the final answer after tool calls.  The SSE loop detects
                 # completion via agent_task.done() instead.
-                if delta is not None and not guard_stream_deltas:
-                    _stream_q.put(_sanitize_user_visible_text(delta))
+                nonlocal _pending_progress_summary, _active_progress_summary
+                nonlocal _pending_progress_batch_complete
+                nonlocal _active_progress_batch_complete
+                if delta is None:
+                    if not mystand_request:
+                        return
+                    with _tool_lifecycle_lock:
+                        # Everything streamed in this provider round belongs to
+                        # the model's tool preamble, not the final reply.
+                        _pending_stream_chunks.clear()
+                        _active_progress_summary = _pending_progress_summary
+                        _pending_progress_summary = ""
+                        _active_progress_call_bindings.clear()
+                        _active_progress_call_bindings.update(
+                            _pending_progress_call_bindings
+                        )
+                        _pending_progress_call_bindings.clear()
+                        _active_progress_batch_values[:] = (
+                            _pending_progress_batch_values
+                        )
+                        _pending_progress_batch_values.clear()
+                        _active_progress_batch_complete = (
+                            _pending_progress_batch_complete
+                        )
+                        _pending_progress_batch_complete = False
+                    return
+                if guard_stream_deltas:
+                    return
+                visible = _sanitize_user_visible_text(delta)
+                if not mystand_request:
+                    _put_public_stream_item(visible)
+                    return
+                with _tool_lifecycle_lock:
+                    _pending_stream_chunks.append(visible)
+
+            def _on_interim_summary(
+                text,
+                *,
+                already_streamed=False,
+                tool_calls=None,
+            ):
+                """Hold only Agent-authored commentary until a real tool starts."""
+                del already_streamed
+                nonlocal _pending_progress_summary
+                nonlocal _pending_progress_batch_complete
+                if not mystand_request:
+                    return
+                call_bindings, protected_values, complete = (
+                    _progress_tool_batch_context(tool_calls)
+                )
+                raw_summary = str(text or "")
+                if len(raw_summary) > 2_000:
+                    raw_summary = ""
+                    call_bindings = {}
+                    protected_values = []
+                    complete = False
+                with _tool_lifecycle_lock:
+                    _pending_progress_summary = raw_summary
+                    _pending_progress_call_bindings.clear()
+                    _pending_progress_call_bindings.update(call_bindings)
+                    _pending_progress_batch_values[:] = protected_values
+                    _pending_progress_batch_complete = complete
+
+            setattr(
+                _on_interim_summary,
+                "_xiaoban_accepts_tool_calls",
+                True,
+            )
 
             # Tool callbacks run in the agent executor thread while task
             # cancellation and final cleanup run in the event-loop thread.
             # Keep one locked lifecycle ledger so every visible call id gets
             # exactly one terminal event, including interrupted tool batches.
-            _tool_lifecycle_lock = threading.Lock()
             _open_tool_calls: dict[
                 str,
                 tuple[str, Optional[tuple[str, str]]],
             ] = {}
             _seen_tool_call_ids: set[str] = set()
             _tool_lifecycle_closed = False
+            _tool_lifecycle_integrity_failed = False
             _started_turn: Optional[Dict[str, str]] = None
             _turn_lifecycle_closed = False
+            _sealed_final_commit_lifecycle_ready: Optional[bool] = None
+
+            def _stream_lifecycle_ready_for_final_commit() -> bool:
+                """Read the live or already sealed public lifecycle decision."""
+                with _tool_lifecycle_lock:
+                    if _sealed_final_commit_lifecycle_ready is not None:
+                        return _sealed_final_commit_lifecycle_ready
+                    return bool(
+                        not _tool_lifecycle_integrity_failed
+                        and not _open_tool_calls
+                        and not chat_control_bridge.has_pending_approval_locked()
+                        and _canonical_turn_start_projection(
+                            stream_delivery_id,
+                            (_started_turn or {}).get("type"),
+                            (_started_turn or {}).get("requestId"),
+                            (_started_turn or {}).get("turnId"),
+                        )
+                        is not None
+                    )
+
+            def _seal_stream_lifecycle_for_final_commit() -> bool:
+                """Atomically decide true-MoA commit and close late callbacks."""
+                nonlocal _tool_lifecycle_closed
+                nonlocal _sealed_final_commit_lifecycle_ready
+                with _tool_lifecycle_lock:
+                    if _sealed_final_commit_lifecycle_ready is None:
+                        _sealed_final_commit_lifecycle_ready = bool(
+                            not _tool_lifecycle_integrity_failed
+                            and not _open_tool_calls
+                            and not chat_control_bridge.has_pending_approval_locked()
+                            and _canonical_turn_start_projection(
+                                stream_delivery_id,
+                                (_started_turn or {}).get("type"),
+                                (_started_turn or {}).get("requestId"),
+                                (_started_turn or {}).get("turnId"),
+                            )
+                            is not None
+                        )
+                        _tool_lifecycle_closed = True
+                    return _sealed_final_commit_lifecycle_ready
 
             def _on_agent_progress(
                 event_type,
@@ -2927,6 +4297,7 @@ class APIServerAdapter(
             ):
                 """Accept only a trusted TurnContext start from Agent progress."""
                 nonlocal _started_turn
+                nonlocal _tool_lifecycle_integrity_failed
                 started = _canonical_turn_start_projection(
                     stream_delivery_id,
                     event_type,
@@ -2934,12 +4305,24 @@ class APIServerAdapter(
                     turn_id,
                 )
                 if started is None:
+                    if mystand_request and event_type == "turn.started":
+                        with _tool_lifecycle_lock:
+                            if _tool_lifecycle_closed:
+                                return
+                            _tool_lifecycle_integrity_failed = True
                     return
                 with _tool_lifecycle_lock:
+                    if _tool_lifecycle_closed:
+                        return
                     if _turn_lifecycle_closed or _started_turn is not None:
+                        if mystand_request:
+                            _tool_lifecycle_integrity_failed = True
                         return
                     _started_turn = started
-                    _stream_q.put(("__tool_progress__", dict(started)))
+                    _put_public_stream_item((
+                        "__tool_progress__",
+                        dict(started),
+                    ))
 
             def _on_tool_start(tool_call_id, function_name, function_args):
                 """Emit ``xiaoban.tool.progress`` with ``status: running``.
@@ -2955,8 +4338,42 @@ class APIServerAdapter(
                 the prior ``_on_tool_progress`` filter exactly.
                 """
                 nonlocal _tool_lifecycle_closed
-                if not tool_call_id or function_name.startswith("_"):
+                nonlocal _tool_lifecycle_integrity_failed
+                with _tool_lifecycle_lock:
+                    if _tool_lifecycle_closed:
+                        return
+                if (
+                    isinstance(function_name, str)
+                    and function_name.startswith("_")
+                ):
                     return
+                if not isinstance(tool_call_id, str) or not isinstance(
+                    function_name, str
+                ):
+                    if mystand_request:
+                        with _tool_lifecycle_lock:
+                            if _tool_lifecycle_closed:
+                                return
+                            _tool_lifecycle_integrity_failed = True
+                    return
+                if mystand_request and (
+                    _PROGRESS_TOOL_CALL_ID_RE.fullmatch(tool_call_id) is None
+                    or _PROGRESS_TOOL_NAME_RE.fullmatch(function_name) is None
+                ):
+                    with _tool_lifecycle_lock:
+                        if _tool_lifecycle_closed:
+                            return
+                        _tool_lifecycle_integrity_failed = True
+                    return
+                if not tool_call_id or not function_name:
+                    return
+                current_values, current_values_complete = (
+                    _progress_sensitive_values(
+                        function_args,
+                        protect_all_strings=True,
+                        limit=_PROGRESS_BATCH_MAX_PROTECTED_VALUES,
+                    )
+                )
                 from agent.display import build_tool_preview, get_tool_emoji
                 label = (
                     function_name
@@ -2964,7 +4381,11 @@ class APIServerAdapter(
                     else (build_tool_preview(function_name, function_args) or function_name)
                 )
                 with _tool_lifecycle_lock:
-                    if _tool_lifecycle_closed or tool_call_id in _seen_tool_call_ids:
+                    if _tool_lifecycle_closed:
+                        return
+                    if tool_call_id in _seen_tool_call_ids:
+                        if mystand_request:
+                            _tool_lifecycle_integrity_failed = True
                         return
                     binding: Optional[tuple[str, str]] = None
                     if mystand_request:
@@ -2975,6 +4396,7 @@ class APIServerAdapter(
                             (_started_turn or {}).get("turnId"),
                         )
                         if started is None:
+                            _tool_lifecycle_integrity_failed = True
                             return
                         binding = (
                             started["requestId"],
@@ -2994,10 +4416,35 @@ class APIServerAdapter(
                     }
                     if binding is not None:
                         payload.update({
+                            "progressSchema": _XIAOBAN_PROGRESS_SCHEMA_V2,
                             "requestId": binding[0],
                             "turnId": binding[1],
                         })
-                    _stream_q.put(("__tool_progress__", payload))
+                        commentary_bound = bool(
+                            str(_active_progress_summary or "").strip()
+                            and _active_progress_call_bindings.get(
+                                tool_call_id
+                            ) == function_name
+                        )
+                        summary = ""
+                        if commentary_bound and (
+                            _active_progress_batch_complete
+                            and current_values_complete
+                            and _progress_protected_values_complete
+                        ):
+                            summary = _public_progress_summary(
+                                _active_progress_summary,
+                                _active_progress_batch_values,
+                                current_values,
+                                _progress_protected_values,
+                            )
+                        if not summary:
+                            summary = _fixed_tool_progress_summary(
+                                function_name
+                            )
+                        if summary:
+                            payload["summary"] = summary
+                    _put_public_stream_item(("__tool_progress__", payload))
 
             def _on_tool_complete(
                 tool_call_id,
@@ -3012,13 +4459,51 @@ class APIServerAdapter(
                 id, or never seen) so clients never get an orphaned
                 terminal update they can't correlate to a prior ``running``.
                 """
-                if not tool_call_id:
+                nonlocal _progress_protected_values_complete
+                nonlocal _tool_lifecycle_integrity_failed
+                with _tool_lifecycle_lock:
+                    if _tool_lifecycle_closed:
+                        return
+                if (
+                    isinstance(function_name, str)
+                    and function_name.startswith("_")
+                ):
+                    return
+                if not isinstance(tool_call_id, str) or not isinstance(
+                    function_name, str
+                ):
+                    if mystand_request:
+                        with _tool_lifecycle_lock:
+                            if _tool_lifecycle_closed:
+                                return
+                            _tool_lifecycle_integrity_failed = True
+                    return
+                if mystand_request and (
+                    _PROGRESS_TOOL_CALL_ID_RE.fullmatch(tool_call_id) is None
+                    or _PROGRESS_TOOL_NAME_RE.fullmatch(function_name) is None
+                ):
+                    with _tool_lifecycle_lock:
+                        if _tool_lifecycle_closed:
+                            return
+                        _tool_lifecycle_integrity_failed = True
+                    return
+                if not tool_call_id or not function_name:
                     return
                 with _tool_lifecycle_lock:
+                    if _tool_lifecycle_closed:
+                        return
                     open_call = _open_tool_calls.pop(tool_call_id, None)
                     if open_call is None:
+                        if mystand_request:
+                            _tool_lifecycle_integrity_failed = True
                         return
                     open_function_name, binding = open_call
+                    function_name_mismatch = bool(
+                        binding is not None
+                        and function_name != open_function_name
+                    )
+                    if function_name_mismatch:
+                        _tool_lifecycle_integrity_failed = True
                     started_turn = (
                         {
                             "type": "turn.started",
@@ -3028,31 +4513,39 @@ class APIServerAdapter(
                         if binding is not None
                         else None
                     )
-                    canonical_terminal = _canonical_tool_terminal_projection(
-                        tool_call_id,
-                        open_function_name,
-                        tool_result_metadata,
-                        expected_delivery_id=stream_delivery_id,
-                        started_turn=started_turn,
-                        require_turn_binding=mystand_request,
+                    canonical_terminal = (
+                        None
+                        if function_name_mismatch
+                        else _canonical_tool_terminal_projection(
+                            tool_call_id,
+                            open_function_name,
+                            tool_result_metadata,
+                            expected_delivery_id=stream_delivery_id,
+                            started_turn=started_turn,
+                            require_turn_binding=mystand_request,
+                        )
                     )
                     if canonical_terminal is None:
-                        status = (
-                            "failed"
-                            if _mystand_tool_result_failed(
-                                open_function_name,
-                                function_result,
-                            )
-                            else "completed"
-                        )
-                        public_metadata = (
-                            {
+                        if binding is not None:
+                            status = "failed"
+                            public_metadata = {
+                                "schema": "xiaoban.tool-result.v1",
                                 "requestId": binding[0],
                                 "turnId": binding[1],
+                                "dispatchState": "dispatched",
+                                "outcome": "unknown",
+                                "retrySafe": False,
                             }
-                            if binding is not None
-                            else {}
-                        )
+                        else:
+                            status = (
+                                "failed"
+                                if _mystand_tool_result_failed(
+                                    open_function_name,
+                                    function_result,
+                                )
+                                else "completed"
+                            )
+                            public_metadata = {}
                     else:
                         status, public_metadata = canonical_terminal
                     payload = {
@@ -3061,7 +4554,39 @@ class APIServerAdapter(
                         "status": status,
                     }
                     payload.update(public_metadata)
-                    _stream_q.put(("__tool_progress__", payload))
+                    if binding is not None:
+                        payload["progressSchema"] = (
+                            _XIAOBAN_PROGRESS_SCHEMA_V2
+                        )
+                    _put_public_stream_item(("__tool_progress__", payload))
+                    if binding is not None and _progress_protected_values_complete:
+                        for source in (function_args, function_result):
+                            remaining = (
+                                _PROGRESS_PRIOR_MAX_PROTECTED_VALUES
+                                - len(_progress_protected_values)
+                            )
+                            source_values, source_complete = (
+                                _progress_sensitive_values(
+                                    source,
+                                    protect_all_strings=True,
+                                    limit=remaining,
+                                )
+                            )
+                            if not source_complete:
+                                _progress_protected_values_complete = False
+                                break
+                            for item in source_values:
+                                if item in _progress_protected_values:
+                                    continue
+                                if (
+                                    len(_progress_protected_values)
+                                    >= _PROGRESS_PRIOR_MAX_PROTECTED_VALUES
+                                ):
+                                    _progress_protected_values_complete = False
+                                    break
+                                _progress_protected_values.append(item)
+                            if not _progress_protected_values_complete:
+                                break
 
             def _close_open_tool_calls() -> None:
                 """Fail every visible call left open when the agent exits."""
@@ -3077,10 +4602,18 @@ class APIServerAdapter(
                         }
                         if binding is not None:
                             payload.update({
+                                "progressSchema": _XIAOBAN_PROGRESS_SCHEMA_V2,
+                                "schema": "xiaoban.tool-result.v1",
                                 "requestId": binding[0],
                                 "turnId": binding[1],
+                                "dispatchState": "dispatched",
+                                "outcome": "unknown",
+                                "retrySafe": False,
                             })
-                        _stream_q.put(("__tool_progress__", payload))
+                        _put_public_stream_item((
+                            "__tool_progress__",
+                            payload,
+                        ))
                     _open_tool_calls.clear()
 
             def _close_turn_lifecycle(result: Any) -> None:
@@ -3096,7 +4629,57 @@ class APIServerAdapter(
                         result,
                     )
                     if terminal is not None:
-                        _stream_q.put(("__tool_progress__", terminal))
+                        _put_public_stream_item((
+                            "__tool_progress__",
+                            terminal,
+                        ))
+
+            def _flush_mystand_final_stream(result: Any) -> None:
+                """Stage only the last non-tool round until settlement succeeds."""
+                nonlocal _pending_progress_summary, _active_progress_summary
+                nonlocal _pending_progress_batch_complete
+                nonlocal _active_progress_batch_complete
+                nonlocal _progress_protected_values_complete
+                if not mystand_request or guard_stream_deltas:
+                    return
+                with _tool_lifecycle_lock:
+                    chunks = list(_pending_stream_chunks)
+                    _pending_stream_chunks.clear()
+                    _pending_progress_summary = ""
+                    _active_progress_summary = ""
+                    _pending_progress_call_bindings.clear()
+                    _active_progress_call_bindings.clear()
+                    _pending_progress_batch_values.clear()
+                    _active_progress_batch_values.clear()
+                    _pending_progress_batch_complete = False
+                    _active_progress_batch_complete = False
+                    _progress_protected_values.clear()
+                    _progress_protected_values_complete = True
+                    lifecycle_integrity_failed = (
+                        _tool_lifecycle_integrity_failed
+                    )
+                if (
+                    lifecycle_integrity_failed
+                    or
+                    not isinstance(result, dict)
+                    or result.get("completed") is not True
+                    or bool(
+                        result.get("failed")
+                        or result.get("partial")
+                        or result.get("interrupted")
+                        or result.get("stopped")
+                    )
+                ):
+                    return
+                if chunks:
+                    _staged_final_stream_chunks.extend(chunks)
+                    return
+                if isinstance(result, dict):
+                    final_text = _sanitize_user_visible_text(
+                        result.get("final_response", "")
+                    )
+                    if final_text:
+                        _staged_final_stream_chunks.append(final_text)
 
             # Start agent in background.  agent_ref is a mutable container
             # so the SSE writer can interrupt the agent on client disconnect.
@@ -3110,8 +4693,72 @@ class APIServerAdapter(
             # the same delivery key interrupts this agent and a stop-before-
             # register race fails closed instead of running.
             agent_ref = [None, False, None]
+            approval_session_key = (
+                gateway_session_key or session_id or stream_delivery_id
+            )
+
+            def _emit_chat_control(
+                event_name: str,
+                payload: Dict[str, Any],
+            ) -> None:
+                _put_public_stream_item((
+                    "__chat_control__",
+                    {
+                        "event": event_name,
+                        "payload": dict(payload),
+                    },
+                ))
+
+            chat_control_bridge = _ChatControlBridge(
+                request_id=stream_delivery_id,
+                approval_session_key=approval_session_key,
+                lifecycle_lock=_tool_lifecycle_lock,
+                started_turn_getter=lambda: _started_turn,
+                open_tool_calls=_open_tool_calls,
+                agent_ref=agent_ref,
+                emit=_emit_chat_control,
+            )
+            agent_ref.append(chat_control_bridge)
+            _stream_compute_ran = False
+
+            def _persist_stream_paid_usage(ledger: Any) -> None:
+                # The Agent may publish a terminal completed ledger before the
+                # gateway has validated its turn/tool lifecycle.  Intermediate
+                # and failure snapshots remain durable, but successful terminal
+                # settlement is owned by get_or_set after the lifecycle check.
+                if (
+                    isinstance(ledger, Mapping)
+                    and ledger.get("status") == "completed"
+                ):
+                    return
+                _idem_cache.persist_usage(
+                    stream_scoped_key,
+                    stream_idem_fp,
+                    ledger,
+                )
+
+            def _fail_stream_usage_ledger(usage: Any, result: Any) -> None:
+                ledgers = []
+                if isinstance(usage, dict):
+                    ledgers.extend((
+                        usage.get("true_moa"),
+                        usage.get("agent_calls"),
+                    ))
+                if isinstance(result, dict):
+                    ledgers.extend((
+                        result.get("_true_moa_usage"),
+                        result.get("_agent_call_usage"),
+                    ))
+                seen_ids: set[int] = set()
+                for ledger in ledgers:
+                    if not isinstance(ledger, dict) or id(ledger) in seen_ids:
+                        continue
+                    seen_ids.add(id(ledger))
+                    ledger["status"] = "failed"
 
             async def _stream_compute():
+                nonlocal _stream_compute_ran
+                _stream_compute_ran = True
                 if (
                     stream_scoped_key
                     and agent_ref[1]
@@ -3120,32 +4767,77 @@ class APIServerAdapter(
                     )
                 ):
                     raise CompletionStoppedError("request stopped before execution")
-                result, usage = await self._run_agent(
-                    user_message=user_message,
-                    conversation_history=history,
-                    ephemeral_system_prompt=system_prompt,
-                    session_id=session_id,
-                    stream_delta_callback=_on_delta,
-                    tool_progress_callback=_on_agent_progress,
-                    tool_start_callback=_on_tool_start,
-                    tool_complete_callback=_on_tool_complete,
-                    agent_ref=agent_ref,
-                    gateway_session_key=gateway_session_key,
-                    request_headers=request.headers,
-                    async_delivery=self._session_events_requested(request),
-                    true_moa_snapshot=true_moa_snapshot,
-                    paid_call_usage_callback=(
-                        (
-                            lambda ledger: _idem_cache.persist_usage(
-                                stream_scoped_key,
-                                stream_idem_fp,
-                                ledger,
-                            )
-                        )
-                        if durable_request
-                        else None
-                    ),
+                from tools.approval import (
+                    register_gateway_notify,
+                    unregister_gateway_notify,
                 )
+
+                approval_notify_registered = False
+                if mystand_request:
+                    register_gateway_notify(
+                        approval_session_key,
+                        chat_control_bridge.approval_notify,
+                    )
+                    approval_notify_registered = True
+                try:
+                    result, usage = await self._run_agent(
+                        user_message=user_message,
+                        conversation_history=history,
+                        ephemeral_system_prompt=system_prompt,
+                        session_id=session_id,
+                        stream_delta_callback=_on_delta,
+                        interim_assistant_callback=_on_interim_summary,
+                        tool_progress_callback=_on_agent_progress,
+                        tool_start_callback=_on_tool_start,
+                        tool_complete_callback=_on_tool_complete,
+                        agent_ref=agent_ref,
+                        gateway_session_key=gateway_session_key,
+                        request_headers=request.headers,
+                        async_delivery=self._session_events_requested(request),
+                        true_moa_snapshot=true_moa_snapshot,
+                        paid_call_usage_callback=(
+                            (
+                                _persist_stream_paid_usage
+                            )
+                            if durable_request
+                            else None
+                        ),
+                        final_commit_guard=(
+                            _seal_stream_lifecycle_for_final_commit
+                            if mystand_request
+                            and true_moa_snapshot is not None
+                            else None
+                        ),
+                    )
+                finally:
+                    if approval_notify_registered:
+                        try:
+                            chat_control_bridge.close()
+                        finally:
+                            unregister_gateway_notify(approval_session_key)
+                lifecycle_invalid = (
+                    not _stream_lifecycle_ready_for_final_commit()
+                )
+                if (
+                    mystand_request
+                    and lifecycle_invalid
+                    and _mystand_stream_result_succeeded(result)
+                ):
+                    settled = dict(result) if isinstance(result, dict) else {}
+                    settled.update({
+                        "final_response": "",
+                        "completed": False,
+                        "failed": True,
+                        "partial": False,
+                        "interrupted": False,
+                    })
+                    if isinstance(result, dict):
+                        result.clear()
+                        result.update(settled)
+                    else:
+                        result = settled
+                    _fail_stream_usage_ledger(usage, result)
+                _flush_mystand_final_stream(result)
                 if (
                     true_moa_snapshot is not None
                     and isinstance(result, dict)
@@ -3165,6 +4857,44 @@ class APIServerAdapter(
                     )
                 return result, usage
 
+            def _finalize_stream_response(
+                resp: Any,
+            ) -> Optional[Dict[str, Any]]:
+                """Close public lifecycle and cache replay before resp caching."""
+
+                if isinstance(resp, tuple) and len(resp) == 2:
+                    result, usage = resp
+                else:
+                    result, usage = resp, {}
+                succeeded = _mystand_stream_result_succeeded(result)
+                with _tool_lifecycle_lock:
+                    staged_final = list(_staged_final_stream_chunks)
+                    _staged_final_stream_chunks.clear()
+                if succeeded:
+                    for chunk in staged_final:
+                        _put_public_stream_item(chunk)
+                    if guard_stream_deltas:
+                        guarded_final = _resolved_mystand_egress_text(
+                            result,
+                            user_message=user_message,
+                            conversation_history=history,
+                        )
+                        if guarded_final:
+                            _put_public_stream_item(guarded_final)
+                chat_control_bridge.close()
+                _close_open_tool_calls()
+                _close_turn_lifecycle(result)
+                if not (succeeded and stream_scoped_key):
+                    return None
+                with _replay_capture_lock:
+                    replay_items = list(_replay_candidate_items)
+                envelope = _build_mystand_stream_replay_envelope(
+                    replay_items,
+                    result,
+                    usage,
+                )
+                return envelope
+
             async def _stream_owner():
                 settled_result = None
                 try:
@@ -3176,9 +4906,49 @@ class APIServerAdapter(
                             agent_ref=agent_ref,
                             durable=durable_request,
                             outcome_binding=stream_outcome_binding,
+                            before_response_cache=_finalize_stream_response,
+                            control_fingerprint=self._header_value(
+                                request.headers,
+                                "X-Xiaoban-Request-Fingerprint",
+                            ).lower(),
                         )
+                        if not _stream_compute_ran:
+                            replay = None
+                            if _mystand_stream_result_succeeded(
+                                settled_result
+                            ):
+                                replay = (
+                                    _decode_mystand_stream_replay_envelope(
+                                        _idem_cache.load_stream_replay(
+                                            stream_scoped_key,
+                                            stream_idem_fp,
+                                        )
+                                    )
+                                )
+                            if replay is None:
+                                # A process restart, overflow, failed settlement,
+                                # or stopped run has no complete public envelope.
+                                # Fail closed instead of manufacturing a success
+                                # body or lifecycle from the durable projection.
+                                settled_result = {
+                                    "final_response": "",
+                                    "completed": False,
+                                    "failed": True,
+                                    "partial": False,
+                                    "interrupted": False,
+                                }
+                                usage = {
+                                    "input_tokens": 0,
+                                    "output_tokens": 0,
+                                    "total_tokens": 0,
+                                }
+                            else:
+                                replay_items, settled_result, usage = replay
+                                for item in replay_items:
+                                    _stream_q.put(item)
                     else:
                         settled_result, usage = await _stream_compute()
+                        _finalize_stream_response((settled_result, usage))
                     return settled_result, usage
                 except BaseException as terminal_error:
                     stopped = isinstance(
@@ -3204,6 +4974,7 @@ class APIServerAdapter(
                     # Open tools close first.  A validated turn terminal is then
                     # queued from the final idempotency/settlement result before
                     # the task done callback appends the SSE EOS sentinel.
+                    chat_control_bridge.close()
                     _close_open_tool_calls()
                     _close_turn_lifecycle(settled_result)
 
@@ -3220,6 +4991,7 @@ class APIServerAdapter(
                     "user_message": user_message,
                     "conversation_history": history,
                 } if guard_stream_deltas else None,
+                guarded_final_in_stream_queue=guard_stream_deltas,
             )
 
         # Non-streaming: run the agent (with optional Idempotency-Key)
@@ -3568,6 +5340,7 @@ class APIServerAdapter(
         created: int, stream_q, agent_task, agent_ref=None, session_id: str = None,
         gateway_session_key: str = None,
         evidence_guard_context: Optional[Dict[str, Any]] = None,
+        guarded_final_in_stream_queue: bool = False,
     ) -> "web.StreamResponse":
         """Write real streaming SSE from agent's stream_delta_callback queue.
 
@@ -3645,6 +5418,29 @@ class APIServerAdapter(
                     await response.write(
                         f"event: xiaoban.tool.progress\ndata: {event_data}\n\n".encode()
                     )
+                elif (
+                    isinstance(item, tuple)
+                    and len(item) == 2
+                    and item[0] == "__chat_control__"
+                    and isinstance(item[1], Mapping)
+                    and item[1].get("event") in {
+                        "approval.request",
+                        "approval.responded",
+                        "steer.accepted",
+                    }
+                    and isinstance(item[1].get("payload"), Mapping)
+                ):
+                    event_name = str(item[1]["event"])
+                    event_data = json.dumps(
+                        dict(item[1]["payload"]),
+                        ensure_ascii=False,
+                    )
+                    await response.write(
+                        (
+                            f"event: xiaoban.{event_name}\n"
+                            f"data: {event_data}\n\n"
+                        ).encode("utf-8")
+                    )
                 else:
                     content_chunk = {
                         "id": completion_id, "object": "chat.completion.chunk",
@@ -3691,7 +5487,10 @@ class APIServerAdapter(
             try:
                 result, agent_usage = await agent_task
                 usage = agent_usage or usage
-                if evidence_guard_context is not None:
+                if (
+                    evidence_guard_context is not None
+                    and not guarded_final_in_stream_queue
+                ):
                     guarded_final = _resolved_mystand_egress_text(
                         result,
                         user_message=evidence_guard_context.get("user_message", ""),
@@ -3699,7 +5498,20 @@ class APIServerAdapter(
                     )
             except Exception as exc:
                 result = None
-                logger.warning("Agent task %s failed, usage data lost: %s", completion_id, exc)
+                if self._header_present(
+                    request.headers,
+                    "X-Xiaoban-Toolset-Policy",
+                ):
+                    logger.warning(
+                        "Trusted My Stand Agent task %s failed; usage data lost",
+                        completion_id,
+                    )
+                else:
+                    logger.warning(
+                        "Agent task %s failed, usage data lost: %s",
+                        completion_id,
+                        exc,
+                    )
 
             # A stopped/interrupted run must never emit business text, even
             # if the guard would otherwise pass the buffered final answer.
@@ -6355,6 +8167,11 @@ class APIServerAdapter(
             body = await request.json()
         except Exception:
             return web.json_response(_openai_error("Invalid JSON"), status=400)
+        if not isinstance(body, dict):
+            return web.json_response(
+                _openai_error("JSON body must be an object"),
+                status=400,
+            )
 
         raw_choice = str(body.get("choice", "")).strip().lower()
         aliases = {"approve": "once", "approved": "once", "allow": "once"}
@@ -6365,6 +8182,24 @@ class APIServerAdapter(
                 _openai_error(
                     "Invalid approval choice; expected one of: once, session, always, deny",
                     code="invalid_approval_choice",
+                ),
+                status=400,
+            )
+        approval_id = str(body.get("approvalId") or "").strip()
+        control_id = str(body.get("controlId") or "").strip()
+        if approval_id and not _CHAT_APPROVAL_ID_RE.fullmatch(approval_id):
+            return web.json_response(
+                _openai_error(
+                    "Invalid approvalId",
+                    code="invalid_approval_id",
+                ),
+                status=400,
+            )
+        if control_id and not _CHAT_CONTROL_ID_RE.fullmatch(control_id):
+            return web.json_response(
+                _openai_error(
+                    "Invalid controlId",
+                    code="invalid_control_id",
                 ),
                 status=400,
             )
@@ -6383,14 +8218,49 @@ class APIServerAdapter(
             _coerce_request_bool(body.get("all"), default=False)
             or _coerce_request_bool(body.get("resolve_all"), default=False)
         )
-        try:
-            from tools.approval import resolve_gateway_approval
-
-            resolved = resolve_gateway_approval(
-                approval_session_key,
-                choice,
-                resolve_all=resolve_all,
+        if approval_id and resolve_all:
+            return web.json_response(
+                _openai_error(
+                    "Exact approvalId cannot be combined with resolve_all",
+                    code="invalid_approval_resolution",
+                ),
+                status=400,
             )
+        q = self._run_streams.get(run_id)
+        response_event = {
+            "event": "approval.responded",
+            "run_id": run_id,
+            "timestamp": time.time(),
+            "choice": choice,
+            "status": "completed",
+            **({"approvalId": approval_id} if approval_id else {}),
+            **({"controlId": control_id} if control_id else {}),
+        }
+        response_frame_enqueued = False
+        try:
+            if approval_id:
+                from tools.approval import resolve_gateway_approval_exact
+
+                def _enqueue_before_unblock(_approval_data) -> None:
+                    nonlocal response_frame_enqueued
+                    if q is not None:
+                        q.put_nowait(dict(response_event))
+                    response_frame_enqueued = True
+
+                resolved = resolve_gateway_approval_exact(
+                    approval_session_key,
+                    approval_id,
+                    choice,
+                    before_unblock=_enqueue_before_unblock,
+                )
+            else:
+                from tools.approval import resolve_gateway_approval
+
+                resolved = resolve_gateway_approval(
+                    approval_session_key,
+                    choice,
+                    resolve_all=resolve_all,
+                )
         except Exception as exc:
             logger.exception("[api_server] approval resolution failed for run %s", run_id)
             return web.json_response(_openai_error(str(exc)), status=500)
@@ -6405,16 +8275,10 @@ class APIServerAdapter(
             )
 
         self._set_run_status(run_id, "running", last_event="approval.responded")
-        q = self._run_streams.get(run_id)
-        if q is not None:
+        response_event["resolved"] = resolved
+        if q is not None and not response_frame_enqueued:
             try:
-                q.put_nowait({
-                    "event": "approval.responded",
-                    "run_id": run_id,
-                    "timestamp": time.time(),
-                    "choice": choice,
-                    "resolved": resolved,
-                })
+                q.put_nowait(response_event)
             except Exception:
                 pass
 
@@ -6423,6 +8287,8 @@ class APIServerAdapter(
             "run_id": run_id,
             "choice": choice,
             "resolved": resolved,
+            **({"approvalId": approval_id} if approval_id else {}),
+            **({"controlId": control_id} if control_id else {}),
         })
 
     async def _handle_stop_run(self, request: "web.Request") -> "web.Response":
@@ -6537,6 +8403,14 @@ class APIServerAdapter(
             self._app.router.add_get("/api/sessions/{session_id}/events/stream", self._handle_session_events_stream)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/v1/chat/completions/stop", self._handle_stop_idempotent_chat_completion)
+            self._app.router.add_post(
+                "/v1/chat/completions/approval",
+                self._handle_chat_completion_approval,
+            )
+            self._app.router.add_post(
+                "/v1/chat/completions/steer",
+                self._handle_chat_completion_steer,
+            )
             self._app.router.add_post("/v1/chat/completions/usage", self._handle_chat_completion_usage)
             self._app.router.add_post("/v1/responses", self._handle_responses)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)

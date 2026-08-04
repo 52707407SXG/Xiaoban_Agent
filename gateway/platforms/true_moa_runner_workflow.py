@@ -33,6 +33,7 @@ class TrueMoARunRequest:
     effective_system_prompt: Optional[str]
     session_id: Optional[str]
     stream_delta_callback: Any
+    interim_assistant_callback: Any
     tool_progress_callback: Any
     tool_start_callback: Any
     tool_complete_callback: Any
@@ -44,6 +45,7 @@ class TrueMoARunRequest:
     async_delivery: bool
     true_moa_snapshot: Any
     paid_call_usage_callback: Any
+    final_commit_guard: Any
     request_user_id: str
     request_message_id: str
     request_delivery_id: str
@@ -267,6 +269,13 @@ class TrueMoARunWorkflow(
                     session_id=request.session_id,
                     stream_delta_callback=(
                         request.stream_delta_callback
+                    ),
+                    interim_assistant_callback=(
+                        getattr(
+                            request,
+                            "interim_assistant_callback",
+                            None,
+                        )
                     ),
                     tool_progress_callback=(
                         request.tool_progress_callback

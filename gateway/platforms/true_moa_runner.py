@@ -67,6 +67,7 @@ class TrueMoARunnerMixin:
         ephemeral_system_prompt: Optional[str] = None,
         session_id: Optional[str] = None,
         stream_delta_callback=None,
+        interim_assistant_callback=None,
         tool_progress_callback=None,
         tool_start_callback=None,
         tool_complete_callback=None,
@@ -76,6 +77,7 @@ class TrueMoARunnerMixin:
         async_delivery: bool = False,
         true_moa_snapshot: Any = None,
         paid_call_usage_callback=None,
+        final_commit_guard=None,
     ) -> tuple:
         """Create an Agent and run one thread-isolated conversation."""
 
@@ -226,6 +228,7 @@ class TrueMoARunnerMixin:
             effective_system_prompt=effective_system_prompt,
             session_id=session_id,
             stream_delta_callback=stream_delta_callback,
+            interim_assistant_callback=interim_assistant_callback,
             tool_progress_callback=tool_progress_callback,
             tool_start_callback=tool_start_callback,
             tool_complete_callback=tool_complete_callback,
@@ -237,6 +240,7 @@ class TrueMoARunnerMixin:
             async_delivery=async_delivery,
             true_moa_snapshot=true_moa_snapshot,
             paid_call_usage_callback=paid_call_usage_callback,
+            final_commit_guard=final_commit_guard,
             request_user_id=request_user_id,
             request_message_id=request_message_id,
             request_delivery_id=request_delivery_id,

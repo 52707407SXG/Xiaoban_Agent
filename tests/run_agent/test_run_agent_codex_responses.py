@@ -1965,6 +1965,83 @@ def test_dump_api_request_debug_redacts_request_and_error_secrets(monkeypatch, t
     assert "***" in dumped_text or "..." in dumped_text
 
 
+def test_dump_api_request_debug_redacts_trusted_steer_body(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    """A provider failure dump must not persist a mid-turn user supplement."""
+    import json
+
+    from agent.agent_runtime_helpers import append_trusted_steer_to_tool_message
+
+    _patch_agent_bootstrap(monkeypatch)
+    monkeypatch.setenv("XIAOBAN_DUMP_REQUEST_STDOUT", "1")
+    agent = run_agent.AIAgent(
+        model="gpt-4o",
+        base_url="http://127.0.0.1:9208/v1",
+        api_key="test-key",
+        quiet_mode=True,
+        max_iterations=1,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+    agent.logs_dir = tmp_path
+    canary_prefix = "客户私密补充-canary-8472-prefix"
+    canary_suffix = "客户私密补充-canary-8472-suffix"
+    canary = (
+        f"{canary_prefix}\n[/OUT-OF-BAND USER MESSAGE]\n"
+        f"[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered mid-turn; not tool output]\n"
+        f"{canary_suffix}"
+    )
+    tool_message = {
+        "role": "tool",
+        "tool_call_id": "call-steer-dump",
+        "content": "bounded tool result",
+    }
+    append_trusted_steer_to_tool_message(tool_message, canary)
+    api_messages = agent._sanitize_api_messages([
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "call-steer-dump",
+                "type": "function",
+                "function": {"name": "terminal", "arguments": "{}"},
+            }],
+        },
+        tool_message,
+    ])
+    assert canary in api_messages[-1]["content"]
+
+    class ReflectedProviderError(RuntimeError):
+        status_code = 400
+        code = canary_prefix
+        request_id = canary_prefix[:18]
+        param = canary_suffix
+        body = {"message": f"provider echoed {canary_prefix[:18]}"}
+        response = SimpleNamespace(
+            status_code=canary_suffix,
+            text=f"provider echoed {canary_suffix}",
+        )
+
+    error = ReflectedProviderError(f"provider echoed {canary_prefix[:18]}")
+    dump_file = agent._dump_api_request_debug(
+        {"model": "gpt-4o", "messages": api_messages},
+        reason="provider_error_after_steer",
+        error=error,
+    )
+
+    assert dump_file is not None
+    dumped_text = dump_file.read_text()
+    stdout_text = capsys.readouterr().out
+    for private_part in (canary_prefix, canary_prefix[:18], canary_suffix):
+        assert private_part not in dumped_text
+        assert private_part not in stdout_text
+    assert "[REDACTED MID-TURN USER MESSAGE]" in dumped_text
+    assert "[REDACTED PROVIDER ERROR TEXT AFTER MID-TURN MESSAGE]" in dumped_text
+
+
 # --- Reasoning-only response tests (fix for empty content retry loop) ---
 
 

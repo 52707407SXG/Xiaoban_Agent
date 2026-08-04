@@ -433,9 +433,12 @@ _CONTENT_POLICY_RECOVERY_HINT = (
 
 _STRICT_FINAL_SLOT_INSTRUCTION = (
     "[System: This is the final model call allowed for the current task. "
-    "Do not call any more tools. Reply naturally to the user now, using only "
-    "the tool results already present. State what was completed, what remains "
-    "incomplete, and the concrete reason for any failure.]"
+    "Do not call any more tools. Give the user a concise but complete "
+    "end-of-task summary in the user's language, using only the tool results "
+    "already present. Do not answer with a one-line status or imitate a system "
+    "receipt. Summarize what you did, the actual result, anything still "
+    "incomplete and its concrete reason, plus a useful next step when one "
+    "exists.]"
 )
 
 
@@ -694,6 +697,7 @@ def run_conversation(
                     append_trusted_steer_to_tool_message(
                         _sm, _pre_api_steer
                     )
+                    agent._trusted_steer_sensitive_turn = True
                     _injected = True
                     logger.debug(
                         "Pre-API-call steer drain: injected into tool msg at index %d",
@@ -2101,6 +2105,10 @@ def run_conversation(
                         ),
                     )
 
+                _sensitive_provider_error = bool(
+                    getattr(agent, "_trusted_steer_sensitive_turn", False)
+                )
+
                 # -----------------------------------------------------------
                 # UnicodeEncodeError recovery.  Two common causes:
                 #   1. Lone surrogates (U+D800..U+DFFF) from clipboard paste
@@ -2528,7 +2536,7 @@ def run_conversation(
                     except Exception:
                         pass
                     print(f"{agent.log_prefix}🔐 Nous 401 — Portal authentication failed.")
-                    if _body_text:
+                    if _body_text and not _sensitive_provider_error:
                         print(f"{agent.log_prefix}   Response: {_body_text}")
                     if not _print_nous_entitlement_guidance(agent, "Nous model access"):
                         print(f"{agent.log_prefix}   Most likely: Portal OAuth expired, account out of credits, or agent key revoked.")
@@ -2729,7 +2737,11 @@ def run_conversation(
                 
                 error_type = type(api_error).__name__
                 error_msg = str(api_error).lower()
-                _error_summary = agent._summarize_api_error(api_error)
+                _error_summary = (
+                    f"provider request failed (HTTP {status_code or 'unknown'})"
+                    if _sensitive_provider_error
+                    else agent._summarize_api_error(api_error)
+                )
                 logger.warning(
                     "API call failed (attempt %s/%s) error_type=%s %s summary=%s",
                     retry_count,
@@ -2747,7 +2759,11 @@ def run_conversation(
                 agent._buffer_vprint(f"   🔌 Provider: {_provider}  Model: {_model}")
                 agent._buffer_vprint(f"   🌐 Endpoint: {_base}")
                 agent._buffer_vprint(f"   📝 Error: {_error_summary}")
-                if status_code and status_code < 500:
+                if (
+                    not _sensitive_provider_error
+                    and status_code
+                    and status_code < 500
+                ):
                     _err_body = getattr(api_error, "body", None)
                     _err_body_str = str(_err_body)[:300] if _err_body else None
                     if _err_body_str:
@@ -3411,7 +3427,11 @@ def run_conversation(
                     # returned ``error`` field and downstream consumers deliver
                     # it verbatim (e.g. a cron failure notification dumped a
                     # ~60KB Cloudflare challenge page as 31 Discord messages).
-                    _nonretryable_summary = agent._summarize_api_error(api_error)
+                    _nonretryable_summary = (
+                        f"provider request failed (HTTP {status_code or 'unknown'})"
+                        if _sensitive_provider_error
+                        else agent._summarize_api_error(api_error)
+                    )
                     if classified.reason == FailoverReason.content_policy_blocked:
                         agent._emit_status(
                             f"❌ Provider safety filter blocked this request: "
@@ -3490,7 +3510,15 @@ def run_conversation(
                             f"{agent.log_prefix}        xiaoban fallback add   (interactive picker — same as `xiaoban model`)",
                             force=True,
                         )
-                    logger.error(f"{agent.log_prefix}Non-retryable client error: {api_error}")
+                    if _sensitive_provider_error:
+                        logger.error(
+                            "%sNon-retryable client error: provider text withheld "
+                            "after mid-turn user message (HTTP %s)",
+                            agent.log_prefix,
+                            status_code or "unknown",
+                        )
+                    else:
+                        logger.error(f"{agent.log_prefix}Non-retryable client error: {api_error}")
                     # Skip session persistence when the error is likely
                     # context-overflow related (status 400 + large session).
                     # Persisting the failed user message would make the
@@ -3549,7 +3577,11 @@ def run_conversation(
                         continue
                     # Terminal — flush buffered retry/fallback trace.
                     agent._flush_status_buffer()
-                    _final_summary = agent._summarize_api_error(api_error)
+                    _final_summary = (
+                        f"provider request failed (HTTP {status_code or 'unknown'})"
+                        if _sensitive_provider_error
+                        else agent._summarize_api_error(api_error)
+                    )
                     _billing_guidance = ""
                     if classified.reason == FailoverReason.billing:
                         agent._emit_status(f"❌ Billing or credits exhausted — {_final_summary}")

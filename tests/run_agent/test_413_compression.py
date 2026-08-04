@@ -845,7 +845,10 @@ class TestToolResultPreflightCompression:
         large_result = "x" * 100_000
 
         with (
-            patch("run_agent.handle_function_call", return_value=large_result),
+            patch(
+                "run_agent.handle_function_call",
+                return_value=large_result,
+            ) as execute_tool,
             patch.object(agent, "_compress_context") as mock_compress,
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
@@ -857,7 +860,9 @@ class TestToolResultPreflightCompression:
             result = agent.run_conversation("hello")
 
         mock_compress.assert_called_once()
+        execute_tool.assert_called_once()
         assert result["completed"] is True
+        assert result["final_response"] == "Done after compression"
 
     def test_anthropic_prompt_too_long_safety_net(self, agent):
         """Anthropic 'prompt is too long' error triggers compression as safety net."""

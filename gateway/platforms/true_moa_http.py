@@ -107,6 +107,262 @@ class TrueMoAHttpHandlersMixin:
             )
         return web.json_response({"ok": True, "status": "stopping"}, status=202)
 
+    async def _trusted_chat_control_context(self, request: "web.Request"):
+        """Resolve one owner- and fingerprint-bound live chat control bridge."""
+
+        from gateway.platforms.api_server import (
+            InvalidToolsetPolicy,
+            _CHAT_CONTROL_ID_RE,
+            _MYSTAND_STREAM_FINGERPRINT_RE,
+            _idem_cache,
+            _openai_error,
+            web,
+        )
+
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return None, None, auth_err
+        policy_err = self._request_toolset_policy_error(request.headers)
+        if policy_err is not None:
+            return None, None, policy_err
+        if not self._header_present(request.headers, "X-Xiaoban-Toolset-Policy"):
+            return None, None, web.json_response(
+                _openai_error(
+                    "My Stand tool policy is required",
+                    code="mystand_policy_required",
+                ),
+                status=403,
+            )
+        if not self._api_key:
+            return None, None, web.json_response(
+                _openai_error(
+                    "My Stand requests require configured API authentication",
+                    code="mystand_auth_unavailable",
+                ),
+                status=503,
+            )
+        contract_error = self._trusted_runtime_contract_error(
+            request,
+            web=web,
+            error_response=_openai_error,
+        )
+        if contract_error is not None:
+            return None, None, contract_error
+        _snapshot, true_moa_error = self._true_moa_snapshot_error(
+            request.headers,
+            mystand_request=True,
+            api_authenticated=True,
+        )
+        if true_moa_error is not None:
+            return None, None, true_moa_error
+        if not _idem_cache.durable_ready:
+            return None, None, web.json_response(
+                _openai_error(
+                    "My Stand provider-call ledger is unavailable",
+                    code="mystand_durable_ledger_unavailable",
+                ),
+                status=503,
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return None, None, web.json_response(
+                _openai_error("Invalid JSON"),
+                status=400,
+            )
+        if not isinstance(body, dict):
+            return None, None, web.json_response(
+                _openai_error("JSON body must be an object"),
+                status=400,
+            )
+        control_id = str(body.get("controlId") or "").strip()
+        if not _CHAT_CONTROL_ID_RE.fullmatch(control_id):
+            return None, None, web.json_response(
+                _openai_error(
+                    "A valid controlId is required",
+                    code="invalid_control_id",
+                ),
+                status=400,
+            )
+        identity_error, delivery_id = self._stream_delivery_identity_error(
+            request.headers
+        )
+        if identity_error is not None:
+            return None, None, identity_error
+        raw_key = str(body.get("idempotency_key") or "").strip()
+        if not raw_key or raw_key != delivery_id:
+            return None, None, web.json_response(
+                _openai_error(
+                    "Control delivery identity does not match the trusted headers",
+                    code="invalid_control_delivery_identity",
+                ),
+                status=400,
+            )
+        request_fingerprint = self._header_value(
+            request.headers,
+            "X-Xiaoban-Request-Fingerprint",
+        ).lower()
+        if not _MYSTAND_STREAM_FINGERPRINT_RE.fullmatch(request_fingerprint):
+            return None, None, web.json_response(
+                _openai_error(
+                    "A valid request fingerprint is required",
+                    code="invalid_control_fingerprint",
+                ),
+                status=400,
+            )
+        try:
+            scoped_key = self._scoped_idempotency_key(
+                request.headers,
+                raw_key,
+            )
+        except InvalidToolsetPolicy as exc:
+            return None, None, web.json_response(
+                _openai_error(str(exc), code="invalid_idempotency_key"),
+                status=400,
+            )
+        agent_ref = _idem_cache.active_agent_ref(
+            scoped_key,
+            request_fingerprint,
+        )
+        bridge = (
+            agent_ref[3]
+            if isinstance(agent_ref, list) and len(agent_ref) > 3
+            else None
+        )
+        if bridge is None:
+            return None, None, web.json_response(
+                _openai_error(
+                    "No active completion for this control",
+                    code="chat_control_not_active",
+                ),
+                status=409,
+            )
+        return body, bridge, None
+
+    async def _handle_chat_completion_approval(
+        self,
+        request: "web.Request",
+    ) -> "web.Response":
+        """Resolve one exact approval in an active trusted chat stream."""
+
+        from gateway.platforms.api_server import (
+            _CHAT_APPROVAL_ID_RE,
+            _ChatControlConflict,
+            _openai_error,
+            web,
+        )
+
+        body, bridge, error = await self._trusted_chat_control_context(request)
+        if error is not None:
+            return error
+        approval_id = str(body.get("approvalId") or "").strip()
+        choice = str(body.get("choice") or "").strip().lower()
+        if not _CHAT_APPROVAL_ID_RE.fullmatch(approval_id):
+            return web.json_response(
+                _openai_error(
+                    "A valid approvalId is required",
+                    code="invalid_approval_id",
+                ),
+                status=400,
+            )
+        if choice not in {"once", "session", "deny"}:
+            return web.json_response(
+                _openai_error(
+                    "Invalid approval choice; expected one of: once, session, deny",
+                    code="invalid_approval_choice",
+                ),
+                status=400,
+            )
+        try:
+            receipt = bridge.respond(
+                control_id=str(body["controlId"]).strip(),
+                approval_id=approval_id,
+                choice=choice,
+            )
+        except _ChatControlConflict as exc:
+            return web.json_response(
+                _openai_error(str(exc), code=exc.code),
+                status=409,
+            )
+        except Exception:
+            return web.json_response(
+                _openai_error(
+                    "Chat approval control failed closed",
+                    code="chat_control_failed",
+                ),
+                status=500,
+            )
+        return web.json_response(receipt, status=202)
+
+    async def _handle_chat_completion_steer(
+        self,
+        request: "web.Request",
+    ) -> "web.Response":
+        """Inject a plaintext-free-receipt supplement into an active tool turn."""
+
+        from gateway.platforms.api_server import (
+            _CHAT_APPROVAL_ID_RE,
+            _CHAT_STEER_MAX_BYTES,
+            _CHAT_STEER_MAX_CHARS,
+            _canonical_chat_steer_message,
+            _ChatControlConflict,
+            _openai_error,
+            web,
+        )
+
+        body, bridge, error = await self._trusted_chat_control_context(request)
+        if error is not None:
+            return error
+        message = body.get("message")
+        cleaned_message = (
+            _canonical_chat_steer_message(message)
+            if isinstance(message, str)
+            else ""
+        )
+        raw_approval_id = body.get("approvalId")
+        approval_id = str(raw_approval_id or "").strip()
+        if (
+            not isinstance(message, str)
+            or not cleaned_message
+            or len(cleaned_message) > _CHAT_STEER_MAX_CHARS
+            or len(cleaned_message.encode("utf-8")) > _CHAT_STEER_MAX_BYTES
+        ):
+            return web.json_response(
+                _openai_error(
+                    "Steer message must be non-empty and within the size limit",
+                    code="invalid_steer_message",
+                ),
+                status=400,
+            )
+        if approval_id and not _CHAT_APPROVAL_ID_RE.fullmatch(approval_id):
+            return web.json_response(
+                _openai_error(
+                    "approvalId is invalid",
+                    code="invalid_approval_id",
+                ),
+                status=400,
+            )
+        try:
+            receipt = bridge.steer(
+                control_id=str(body["controlId"]).strip(),
+                message=cleaned_message,
+                approval_id=approval_id or None,
+            )
+        except _ChatControlConflict as exc:
+            return web.json_response(
+                _openai_error(str(exc), code=exc.code),
+                status=409,
+            )
+        except Exception:
+            return web.json_response(
+                _openai_error(
+                    "Chat steer control failed closed",
+                    code="chat_control_failed",
+                ),
+                status=500,
+            )
+        return web.json_response(receipt, status=202)
+
     async def _handle_chat_completion_usage(self, request: "web.Request") -> "web.Response":
         """Recover the terminal true-MoA usage ledger after SSE cancellation."""
         from gateway.platforms.api_server import (

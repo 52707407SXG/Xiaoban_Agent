@@ -32,7 +32,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from xiaoban_cli.timeouts import get_provider_request_timeout
-from agent.prompt_builder import format_steer_marker
+from agent.prompt_builder import (
+    STEER_MARKER_CLOSE,
+    STEER_MARKER_OPEN,
+    format_steer_marker,
+)
 from agent.tool_dispatch_helpers import _trajectory_normalize_msg, make_tool_result_message
 from agent.tool_result_classification import (
     CANONICAL_TOOL_RESULT_INTERNAL_KEY,
@@ -1178,6 +1182,47 @@ def extract_reasoning(agent, assistant_message) -> Optional[str]:
 
 
 
+_REQUEST_DUMP_STEER_REDACTION = "[REDACTED MID-TURN USER MESSAGE]"
+
+
+def _redact_trusted_steer_markers_for_dump(value: Any) -> tuple[Any, bool]:
+    """Remove authenticated steer bodies from a debug-only payload copy."""
+
+    found = False
+
+    def _walk(item: Any) -> Any:
+        nonlocal found
+        if isinstance(item, dict):
+            return {key: _walk(child) for key, child in item.items()}
+        if isinstance(item, list):
+            return [_walk(child) for child in item]
+        if isinstance(item, tuple):
+            return [_walk(child) for child in item]
+        if not isinstance(item, str):
+            return item
+        first = item.find(STEER_MARKER_OPEN)
+        if first < 0:
+            return item
+        found = True
+        last = item.rfind(STEER_MARKER_CLOSE)
+        body_start = first + len(STEER_MARKER_OPEN)
+        if last < body_start:
+            return (
+                item[:body_start]
+                + "\n"
+                + _REQUEST_DUMP_STEER_REDACTION
+            )
+        return (
+            item[:body_start]
+            + "\n"
+            + _REQUEST_DUMP_STEER_REDACTION
+            + "\n"
+            + item[last:]
+        )
+
+    return _walk(value), found
+
+
 def dump_api_request_debug(
     agent,
     api_kwargs: Dict[str, Any],
@@ -1196,6 +1241,9 @@ def dump_api_request_debug(
         body = copy.deepcopy(api_kwargs)
         body.pop("timeout", None)
         body = {k: v for k, v in body.items() if v is not None}
+        body, contains_trusted_steer = _redact_trusted_steer_markers_for_dump(
+            body
+        )
 
         api_key = None
         try:
@@ -1221,26 +1269,63 @@ def dump_api_request_debug(
         if error is not None:
             error_info: Dict[str, Any] = {
                 "type": type(error).__name__,
-                "message": str(error),
+                "message": (
+                    "[REDACTED PROVIDER ERROR TEXT AFTER MID-TURN MESSAGE]"
+                    if contains_trusted_steer
+                    else str(error)
+                ),
             }
             for attr_name in ("status_code", "request_id", "code", "param", "type"):
                 attr_value = getattr(error, attr_name, None)
                 if attr_value is not None:
-                    error_info[attr_name] = attr_value
+                    if contains_trusted_steer:
+                        error_info[attr_name] = (
+                            int(attr_value)
+                            if attr_name == "status_code"
+                            and not isinstance(attr_value, bool)
+                            and str(attr_value).isdigit()
+                            else "[REDACTED PROVIDER ERROR METADATA]"
+                        )
+                    else:
+                        error_info[attr_name] = attr_value
 
             body_attr = getattr(error, "body", None)
             if body_attr is not None:
-                error_info["body"] = body_attr
+                error_info["body"] = (
+                    "[REDACTED PROVIDER ERROR BODY AFTER MID-TURN MESSAGE]"
+                    if contains_trusted_steer
+                    else body_attr
+                )
 
             response_obj = getattr(error, "response", None)
             if response_obj is not None:
                 try:
-                    error_info["response_status"] = getattr(response_obj, "status_code", None)
-                    error_info["response_text"] = response_obj.text
+                    raw_response_status = getattr(
+                        response_obj,
+                        "status_code",
+                        None,
+                    )
+                    error_info["response_status"] = (
+                        raw_response_status
+                        if contains_trusted_steer
+                        and isinstance(raw_response_status, int)
+                        and not isinstance(raw_response_status, bool)
+                        and 100 <= raw_response_status <= 599
+                        else "[REDACTED PROVIDER RESPONSE METADATA]"
+                        if contains_trusted_steer
+                        else raw_response_status
+                    )
+                    error_info["response_text"] = (
+                        "[REDACTED PROVIDER RESPONSE TEXT AFTER MID-TURN MESSAGE]"
+                        if contains_trusted_steer
+                        else response_obj.text
+                    )
                 except Exception as e:
                     _ra().logger.debug("Could not extract error response details: %s", e)
 
             dump_payload["error"] = error_info
+
+        dump_payload, _ = _redact_trusted_steer_markers_for_dump(dump_payload)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         dump_file = agent.logs_dir / f"request_dump_{agent.session_id}_{timestamp}.json"
@@ -2633,10 +2718,10 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
             agent._pending_steer = (existing + "\n" + steer_text) if existing else steer_text
         return
     append_trusted_steer_to_tool_message(messages[target_idx], steer_text)
+    agent._trusted_steer_sensitive_turn = True
     _ra().logger.info(
-        "Delivered /steer to agent after tool batch (%d chars): %s",
+        "Delivered /steer to agent after tool batch (%d chars)",
         len(steer_text),
-        steer_text[:120] + ("..." if len(steer_text) > 120 else ""),
     )
 
 

@@ -39,8 +39,18 @@ def _cancel_chat_agent_ref(agent_ref: Optional[list], reason: str) -> bool:
 
     if agent_ref is None:
         return False
-    while len(agent_ref) < 3:
+    while len(agent_ref) < 4:
         agent_ref.append(None)
+    # The durable stop fence is already committed before this helper is
+    # called.  Close the live approval/steer bridge first so no concurrent
+    # control can release a waiting tool in the interval before Agent
+    # interruption becomes visible.
+    control_bridge = agent_ref[3]
+    if control_bridge is not None:
+        try:
+            control_bridge.close()
+        except BaseException:
+            logger.warning("Failed to close stopped chat control bridge", exc_info=False)
     controller = agent_ref[2]
     if controller is not None:
         try:

@@ -211,6 +211,13 @@ class TrueMoARunnerPreflightMixin:
                 ephemeral_system_prompt=run_system_prompt,
                 session_id=request.session_id,
                 stream_delta_callback=request.stream_delta_callback,
+                interim_assistant_callback=(
+                    getattr(
+                        request,
+                        "interim_assistant_callback",
+                        None,
+                    )
+                ),
                 tool_progress_callback=request.tool_progress_callback,
                 tool_start_callback=(
                     request.traced_tool_start

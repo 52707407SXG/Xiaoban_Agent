@@ -488,8 +488,32 @@ class TrueMoARunnerFinalMixin:
             )
             wave_status = "failed"
         else:
+            final_commit_allowed = True
+            final_commit_guard = getattr(
+                request,
+                "final_commit_guard",
+                None,
+            )
+            if callable(final_commit_guard):
+                try:
+                    final_commit_allowed = bool(final_commit_guard())
+                except BaseException:
+                    final_commit_allowed = False
             self.fence_expired_final_deadline()
-            if (
+            if not final_commit_allowed:
+                controller.fail()
+                result.update({
+                    "final_response": "",
+                    "completed": False,
+                    "failed": True,
+                    "interrupted": False,
+                    "error": "true MoA final executor failed",
+                })
+                result["messages"] = []
+                final_status = "failed"
+                final_error = "terminal_fence"
+                wave_status = "failed"
+            elif (
                 not self.final_deadline_timed_out
                 and controller.try_commit_final(
                     self.true_moa_final_commit_key,

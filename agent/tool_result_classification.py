@@ -16,6 +16,7 @@ CANONICAL_TOOL_RESULT_DISPATCH_STATES = frozenset({"not_dispatched", "dispatched
 CANONICAL_TOOL_RESULT_OUTCOMES = frozenset(
     {"success", "empty", "not_found", "denied", "failed", "unknown", "cancelled"}
 )
+_NOT_DISPATCHED_OUTCOMES = frozenset({"denied", "cancelled"})
 _STATUS_OUTCOMES = {
     "empty": "empty", "no_content": "empty",
     "not_found": "not_found", "not-found": "not_found", "404": "not_found",
@@ -137,9 +138,6 @@ def _decoded_top_level(result: Any) -> Any:
 
 
 def _classify_canonical_outcome(*, tool_name, result, dispatch_state, outcome_hint) -> str:
-    if outcome_hint in CANONICAL_TOOL_RESULT_OUTCOMES:
-        return str(outcome_hint)
-
     payload = _decoded_top_level(result)
     mapped = ""
     if isinstance(payload, Mapping):
@@ -152,10 +150,16 @@ def _classify_canonical_outcome(*, tool_name, result, dispatch_state, outcome_hi
                     break
         if payload.get("cancelled") is True or payload.get("canceled") is True:
             mapped = "cancelled"
+    if dispatch_state == "not_dispatched":
+        return (
+            "cancelled"
+            if outcome_hint == "cancelled" or mapped == "cancelled"
+            else "denied"
+        )
+    if outcome_hint in CANONICAL_TOOL_RESULT_OUTCOMES:
+        return str(outcome_hint)
     if mapped == "cancelled":
         return mapped
-    if dispatch_state == "not_dispatched":
-        return "denied"
     if mapped in {"not_found", "denied", "unknown"}:
         return mapped
     if mapped == "failed" or tool_result_failed(tool_name, result):
@@ -205,7 +209,7 @@ def normalize_tool_result(
         "outcome": outcome,
         "retrySafe": trusted.get("retrySafe") is True and outcome != "unknown",
     }
-    if dispatch_state == "not_dispatched" and outcome in {"denied", "cancelled"}:
+    if dispatch_state == "not_dispatched" and outcome in _NOT_DISPATCHED_OUTCOMES:
         return normalized
 
     refs = trusted.get("recordRefs")
@@ -243,6 +247,11 @@ def canonical_tool_result_for_persistence(
     if dispatch_state not in CANONICAL_TOOL_RESULT_DISPATCH_STATES:
         return None
     if outcome not in CANONICAL_TOOL_RESULT_OUTCOMES:
+        return None
+    if (
+        dispatch_state == "not_dispatched"
+        and outcome not in _NOT_DISPATCHED_OUTCOMES
+    ):
         return None
 
     identifiers: dict[str, str] = {}

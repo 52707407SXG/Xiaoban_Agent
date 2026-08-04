@@ -142,18 +142,28 @@ def log_stream_retry(
     downstream provider responsible, or is it random across runs?"
     """
     try:
-        try:
-            _summary = agent._summarize_api_error(error)
-        except Exception:
-            _summary = str(error)
+        _sensitive_provider_error = bool(
+            getattr(agent, "_strict_no_automatic_paid_retry", False)
+            or getattr(agent, "_trusted_steer_sensitive_turn", False)
+        )
+        if _sensitive_provider_error:
+            _summary = "provider text withheld for trusted turn"
+        else:
+            try:
+                _summary = agent._summarize_api_error(error)
+            except Exception:
+                _summary = str(error)
         if _summary and len(_summary) > 240:
             _summary = _summary[:240] + "…"
 
         # Inner-cause chain (httpx errors hide under openai.APIError).
-        try:
-            _chain = flatten_exception_chain(error)
-        except Exception:
+        if _sensitive_provider_error:
             _chain = type(error).__name__
+        else:
+            try:
+                _chain = flatten_exception_chain(error)
+            except Exception:
+                _chain = type(error).__name__
 
         # Per-attempt counters and upstream headers.
         _now = time.time()
@@ -181,6 +191,13 @@ def log_stream_retry(
                     _http_status = str(diag.get("http_status"))
             except Exception:
                 pass
+        if _sensitive_provider_error:
+            _headers_repr = "withheld-for-trusted-turn"
+            _raw_http_status = diag.get("http_status") if isinstance(diag, dict) else None
+            if type(_raw_http_status) is int and 100 <= _raw_http_status <= 599:
+                _http_status = str(_raw_http_status)
+            else:
+                _http_status = "withheld-for-trusted-turn"
 
         logger.warning(
             "Stream %s on attempt %s/%s — retrying. "

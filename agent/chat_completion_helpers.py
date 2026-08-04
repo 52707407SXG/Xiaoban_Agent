@@ -1937,6 +1937,12 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     if agent._interrupt_requested:
         raise InterruptedError("Agent interrupted before streaming API call")
 
+    def _provider_error_text_sensitive() -> bool:
+        return bool(
+            getattr(agent, "_strict_no_automatic_paid_retry", False)
+            or getattr(agent, "_trusted_steer_sensitive_turn", False)
+        )
+
     if agent.api_mode == "codex_responses":
         # Codex streams internally via _run_codex_stream. The main dispatch
         # in _interruptible_api_call already calls it; we just need to
@@ -2671,9 +2677,19 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                             # correct), or retries are exhausted, or the
                             # error isn't transient.  Fall through to the
                             # stub path.
-                            logger.warning(
-                                "Streaming failed after partial delivery, not retrying: %s", e
-                            )
+                            if _provider_error_text_sensitive():
+                                logger.warning(
+                                    "Streaming failed after partial delivery, "
+                                    "not retrying: provider text withheld "
+                                    "(error_type=%s)",
+                                    type(e).__name__,
+                                )
+                            else:
+                                logger.warning(
+                                    "Streaming failed after partial delivery, "
+                                    "not retrying: %s",
+                                    e,
+                                )
                             result["error"] = e
                             return
                         # Tool call was in-flight AND error is transient:
@@ -2836,10 +2852,17 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                                 "   To avoid this delay, set display.streaming: false "
                                 "in config.yaml\n"
                             )
-                        logger.info(
-                            "Streaming failed before delivery: %s",
-                            e,
-                        )
+                        if _provider_error_text_sensitive():
+                            logger.info(
+                                "Streaming failed before delivery: provider "
+                                "text withheld (error_type=%s)",
+                                type(e).__name__,
+                            )
+                        else:
+                            logger.info(
+                                "Streaming failed before delivery: %s",
+                                e,
+                            )
 
                     # Propagate the error to the main retry loop instead of
                     # falling back to non-streaming inline.  The main loop has
@@ -2989,21 +3012,41 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     agent._fire_stream_delta(_warn)
                 except Exception:
                     pass
-                logger.warning(
-                    "Partial stream dropped tool call(s) %s after %s chars "
-                    "of text; surfaced warning to user: %s",
-                    _partial_names, len(_partial_text or ""), result["error"],
-                )
+                if _provider_error_text_sensitive():
+                    logger.warning(
+                        "Partial stream dropped tool call(s) %s after %s chars "
+                        "of text; provider text withheld (error_type=%s)",
+                        _partial_names,
+                        len(_partial_text or ""),
+                        type(result["error"]).__name__,
+                    )
+                else:
+                    logger.warning(
+                        "Partial stream dropped tool call(s) %s after %s chars "
+                        "of text; surfaced warning to user: %s",
+                        _partial_names,
+                        len(_partial_text or ""),
+                        result["error"],
+                    )
                 _stub_finish_reason = FINISH_REASON_LENGTH
             else:
-                logger.warning(
-                    "Partial stream delivered before error; returning "
-                    "length-truncated stub with %s chars of recovered "
-                    "content so the loop can continue from where the "
-                    "stream died: %s",
-                    len(_partial_text or ""),
-                    result["error"],
-                )
+                if _provider_error_text_sensitive():
+                    logger.warning(
+                        "Partial stream delivered before error; returning "
+                        "length-truncated stub with %s chars of recovered "
+                        "content; provider text withheld (error_type=%s)",
+                        len(_partial_text or ""),
+                        type(result["error"]).__name__,
+                    )
+                else:
+                    logger.warning(
+                        "Partial stream delivered before error; returning "
+                        "length-truncated stub with %s chars of recovered "
+                        "content so the loop can continue from where the "
+                        "stream died: %s",
+                        len(_partial_text or ""),
+                        result["error"],
+                    )
                 _stub_finish_reason = FINISH_REASON_LENGTH
             _stub_msg = SimpleNamespace(
                 role="assistant", content=_partial_text, tool_calls=None,

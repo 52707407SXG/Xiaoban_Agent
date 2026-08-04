@@ -104,8 +104,11 @@ def begin_strict_tool_handler(
                 preview,
                 function_args,
             )
-        except Exception as exc:
-            logging.debug("Tool progress callback error: %s", exc)
+        except Exception:
+            logging.debug(
+                "Tool progress callback failed "
+                "(category=callback_failure; strict details redacted)"
+            )
     if agent.tool_start_callback:
         try:
             agent.tool_start_callback(
@@ -113,8 +116,11 @@ def begin_strict_tool_handler(
                 function_name,
                 function_args,
             )
-        except Exception as exc:
-            logging.debug("Tool start callback error: %s", exc)
+        except Exception:
+            logging.debug(
+                "Tool start callback failed "
+                "(category=callback_failure; strict details redacted)"
+            )
     return True
 
 

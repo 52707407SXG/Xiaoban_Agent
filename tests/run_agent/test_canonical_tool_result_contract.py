@@ -13,8 +13,71 @@ from agent.agent_runtime_helpers import (
 )
 from agent.prompt_builder import STEER_MARKER_OPEN
 from agent.tool_executor import _append_canonical_tool_result
+from agent.tool_result_classification import (
+    canonical_tool_result_for_persistence,
+    normalize_tool_result,
+)
 from run_agent import AIAgent
 from xiaoban_state import SessionDB
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    ["success", "empty", "not_found", "failed", "unknown"],
+)
+def test_not_dispatched_canonical_matrix_rejects_landed_outcomes(outcome):
+    assert canonical_tool_result_for_persistence({
+        "schema": "xiaoban.tool-result.v1",
+        "requestId": "request-matrix",
+        "turnId": "turn-matrix",
+        "callId": "call-matrix",
+        "toolName": "mystand_query",
+        "dispatchState": "not_dispatched",
+        "outcome": outcome,
+        "retrySafe": False,
+    }) is None
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [("denied", "denied"), ("cancelled", "cancelled")],
+)
+def test_not_dispatched_canonical_matrix_accepts_only_pre_dispatch_outcomes(
+    outcome,
+    expected,
+):
+    projected = canonical_tool_result_for_persistence({
+        "schema": "xiaoban.tool-result.v1",
+        "requestId": "request-matrix",
+        "turnId": "turn-matrix",
+        "callId": "call-matrix",
+        "toolName": "mystand_query",
+        "dispatchState": "not_dispatched",
+        "outcome": outcome,
+        "retrySafe": False,
+    })
+
+    assert projected is not None
+    assert projected["outcome"] == expected
+
+
+@pytest.mark.parametrize(
+    ("hint", "expected"),
+    [("success", "denied"), ("failed", "denied"), ("cancelled", "cancelled")],
+)
+def test_normalizer_never_creates_invalid_not_dispatched_pair(hint, expected):
+    normalized = normalize_tool_result(
+        request_id="request-matrix",
+        turn_id="turn-matrix",
+        call_id="call-matrix",
+        tool_name="mystand_query",
+        dispatch_state="not_dispatched",
+        result={"ok": True},
+        outcome_hint=hint,
+    )
+
+    assert normalized["dispatchState"] == "not_dispatched"
+    assert normalized["outcome"] == expected
 
 
 def test_canonical_append_owns_terminal_callback_metadata():

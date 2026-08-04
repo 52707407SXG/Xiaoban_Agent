@@ -6,6 +6,7 @@ are made.
 """
 
 import ast
+from contextlib import ExitStack
 import hashlib
 import inspect
 import io
@@ -21,7 +22,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agent.codex_responses_adapter import _normalize_codex_response
-from agent.agent_runtime_helpers import append_trusted_steer_to_tool_message
+from agent.agent_runtime_helpers import (
+    append_trusted_steer_to_tool_message,
+    apply_pending_steer_to_tool_results,
+)
 
 import run_agent
 from run_agent import AIAgent
@@ -58,6 +62,29 @@ def test_is_destructive_command_treats_cp_as_mutating():
 
 def test_is_destructive_command_treats_install_as_mutating():
     assert run_agent._is_destructive_command("install template.env .env") is True
+
+
+def test_pending_steer_log_omits_plaintext():
+    secret = "客户私密补充：不要把这句话写进日志"
+    logger = MagicMock()
+    stub = SimpleNamespace(
+        _drain_pending_steer=MagicMock(return_value=secret),
+    )
+    messages = [{"role": "tool", "content": "bounded tool result"}]
+
+    with patch(
+        "agent.agent_runtime_helpers._ra",
+        return_value=SimpleNamespace(logger=logger),
+    ):
+        apply_pending_steer_to_tool_results(stub, messages, 1)
+
+    assert secret in messages[0]["content"]
+    log_format, *log_args = logger.info.call_args.args
+    assert log_format % tuple(log_args) == (
+        f"Delivered /steer to agent after tool batch ({len(secret)} chars)"
+    )
+    assert secret not in log_format
+    assert all(secret not in str(value) for value in log_args)
 
 
 @pytest.fixture()
@@ -2197,6 +2224,167 @@ class TestExecuteToolCalls:
         metadata = messages[0]["_xiaoban_tool_result"]
         assert metadata["dispatchState"] == "dispatched"
         assert metadata["outcome"] == "unknown"
+
+    @pytest.mark.parametrize(
+        ("branch", "tool_name"),
+        [
+            ("registry-quiet", "web_search"),
+            ("registry-visible", "web_search"),
+            ("context-engine", "lcm_grep"),
+            ("memory-manager", "hindsight_search"),
+            ("inline", "todo"),
+        ],
+    )
+    def test_strict_sequential_handler_exception_logs_are_redacted(
+        self,
+        agent,
+        caplog,
+        capsys,
+        branch,
+        tool_name,
+    ):
+        exception_canary = f"STRICT_EXCEPTION_{branch}_CANARY_781"
+        argument_canary = f"STRICT_ARGUMENT_{branch}_CANARY_781"
+        tc = _mock_tool_call(
+            name=tool_name,
+            arguments=json.dumps({"query": argument_canary}),
+            call_id=f"strict-{branch}",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+        agent._strict_no_automatic_paid_retry = True
+        agent.verbose_logging = True
+        agent.quiet_mode = branch == "registry-quiet"
+        agent.platform = "api_server"
+        caplog.set_level(logging.DEBUG)
+
+        with ExitStack() as stack:
+            if branch.startswith("registry"):
+                stack.enter_context(patch(
+                    "run_agent.handle_function_call",
+                    side_effect=RuntimeError(exception_canary),
+                ))
+            elif branch == "context-engine":
+                agent._context_engine_tool_names = {tool_name}
+                if agent.context_compressor is None:
+                    agent.context_compressor = MagicMock()
+                agent.context_compressor.handle_tool_call = MagicMock(
+                    side_effect=RuntimeError(exception_canary)
+                )
+            elif branch == "memory-manager":
+                manager = MagicMock()
+                manager.has_tool.return_value = True
+                manager.handle_tool_call.side_effect = RuntimeError(
+                    exception_canary
+                )
+                agent._memory_manager = manager
+            else:
+                stack.enter_context(patch(
+                    "tools.todo_tool.todo_tool",
+                    side_effect=RuntimeError(exception_canary),
+                ))
+
+            agent._execute_tool_calls_sequential(
+                mock_msg,
+                messages,
+                "task-strict-log",
+            )
+
+        captured = capsys.readouterr()
+        assert exception_canary not in caplog.text
+        assert argument_canary not in caplog.text
+        assert exception_canary not in captured.out
+        assert argument_canary not in captured.out
+        assert "category=handler_exception" in caplog.text
+        assert "Traceback" not in caplog.text
+
+    def test_strict_tool_callback_exception_logs_are_redacted(
+        self,
+        agent,
+        caplog,
+    ):
+        canaries = {
+            "start": "STRICT_START_CALLBACK_CANARY_781",
+            "progress": "STRICT_PROGRESS_CALLBACK_CANARY_781",
+            "complete": "STRICT_COMPLETE_CALLBACK_CANARY_781",
+        }
+
+        def _raise(kind):
+            def _callback(*_args, **_kwargs):
+                raise RuntimeError(canaries[kind])
+
+            return _callback
+
+        agent._strict_no_automatic_paid_retry = True
+        agent.platform = "api_server"
+        agent.tool_start_callback = _raise("start")
+        agent.tool_progress_callback = _raise("progress")
+        agent.tool_complete_callback = _raise("complete")
+        caplog.set_level(logging.DEBUG)
+        tc = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"safe"}',
+            call_id="strict-callback-log",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+
+        with patch("run_agent.handle_function_call", return_value="ok"):
+            agent._execute_tool_calls_sequential(
+                mock_msg,
+                [],
+                "task-strict-callback",
+            )
+
+        assert all(canary not in caplog.text for canary in canaries.values())
+        assert caplog.text.count("category=callback_failure") >= 3
+        assert "Traceback" not in caplog.text
+
+    def test_strict_concurrent_args_results_and_exceptions_are_redacted(
+        self,
+        agent,
+        caplog,
+        capsys,
+    ):
+        argument_canary = "STRICT_CONCURRENT_ARGUMENT_CANARY_781"
+        result_canary = "STRICT_CONCURRENT_RESULT_CANARY_781"
+        exception_canary = "STRICT_CONCURRENT_EXCEPTION_CANARY_781"
+        calls = [
+            _mock_tool_call(
+                name="web_search",
+                arguments=json.dumps({"query": argument_canary}),
+                call_id="strict-concurrent-one",
+            ),
+            _mock_tool_call(
+                name="web_search",
+                arguments='{"query":"safe"}',
+                call_id="strict-concurrent-two",
+            ),
+        ]
+        agent._strict_no_automatic_paid_retry = True
+        agent.quiet_mode = False
+        agent.verbose_logging = True
+        agent.platform = "api_server"
+        caplog.set_level(logging.DEBUG)
+
+        def _invoke(_name, args, *_rest, **_kwargs):
+            if args.get("query") == argument_canary:
+                raise RuntimeError(exception_canary)
+            return json.dumps({"ok": False, "error": result_canary})
+
+        with patch.object(agent, "_invoke_tool", side_effect=_invoke):
+            agent._execute_tool_calls_concurrent(
+                _mock_assistant_msg(content="", tool_calls=calls),
+                [],
+                "task-strict-concurrent",
+            )
+
+        captured = capsys.readouterr()
+        for canary in (argument_canary, result_canary, exception_canary):
+            assert canary not in caplog.text
+            assert canary not in captured.out
+        assert "category=handler_exception" in caplog.text
+        assert "category=tool_failure" in caplog.text
+        assert "Traceback" not in caplog.text
 
     def test_sequential_memory_remove_notifies_provider_with_tool_result(self, agent):
         old_text = "stale preference entry"
@@ -4714,6 +4902,7 @@ class TestRunConversation:
     def test_strict_paid_tool_turn_emits_model_commentary_and_feeds_failed_result(
         self,
         agent,
+        caplog,
     ):
         self._setup_agent(agent)
         agent._strict_no_automatic_paid_retry = True
@@ -4721,7 +4910,10 @@ class TestRunConversation:
         agent._api_max_retries = 1
         agent._fallback_chain = []
         agent._fallback_index = 0
+        agent.verbose_logging = True
+        caplog.set_level(logging.DEBUG)
         events = []
+        result_canary = "STRICT_TOOL_RESULT_LOG_CANARY_781"
         agent.interim_assistant_callback = (
             lambda text, *, already_streamed=False: events.append(
                 ("commentary", text, already_streamed)
@@ -4744,7 +4936,10 @@ class TestRunConversation:
 
         def _failed_tool(*_args, **_kwargs):
             events.append(("tool", "web_search"))
-            return '{"ok":false,"error":"access denied"}'
+            return json.dumps({
+                "ok": False,
+                "error": result_canary,
+            })
 
         session_tokens = set_session_vars(
             platform="api_server",
@@ -4800,9 +4995,341 @@ class TestRunConversation:
         assert projected[0]["callId"] == "strict-commentary-tool"
         assert projected[0]["outcome"] == "failed"
         assert projected[0]["modelError"]["code"] == "failed"
+        assert result_canary not in caplog.text
+        assert "category=tool_failure" in caplog.text
+        assert "web_search" in caplog.text
         assert api_call.call_args_list[0].args[0]["model"] == (
             api_call.call_args_list[1].args[0]["model"]
         )
+
+    def test_strict_paid_two_tool_stages_each_speak_before_one_natural_final(
+        self,
+        agent,
+    ):
+        """Same-model progress stays model-owned across consecutive tools."""
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        agent.max_iterations = 3
+        events = []
+        agent.interim_assistant_callback = (
+            lambda text, *, already_streamed=False: events.append(
+                ("commentary", text, already_streamed)
+            )
+        )
+        first_tool = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"第一项授权资料"}',
+            call_id="strict-two-stage-first",
+        )
+        second_tool = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"第二项登记状态"}',
+            call_id="strict-two-stage-second",
+        )
+        responses = [
+            _mock_response(
+                content="我先核对第一项授权资料。",
+                finish_reason="tool_calls",
+                tool_calls=[first_tool],
+            ),
+            _mock_response(
+                content="第一项已经查清，我接着核对第二项登记状态。",
+                finish_reason="tool_calls",
+                tool_calls=[second_tool],
+            ),
+            _mock_response(
+                content=(
+                    "这轮两项核对都已结束。第一项资料有效；第二项当前没有"
+                    "登记记录，所以我没有把它当作已完成。若要继续，建议"
+                    "补充第二项的登记主体或时间范围，我可以从这里接着查。"
+                ),
+                finish_reason="stop",
+            ),
+        ]
+
+        def _tool_result(_name, _args, *_rest, **kwargs):
+            call_id = kwargs["tool_call_id"]
+            events.append(("tool", call_id))
+            if call_id == "strict-two-stage-first":
+                return json.dumps({"ok": True, "status": "active"})
+            return json.dumps({"ok": True, "status": "empty", "rows": []})
+
+        session_tokens = set_session_vars(
+            platform="api_server",
+            source="mystand",
+            user_id="ZYJ005",
+            user_message="依次核对两项资料后告诉我结果",
+            message_id="strict-two-stage-message",
+            session_id="strict-two-stage-session",
+            session_key="strict-two-stage-key",
+            async_delivery=False,
+        )
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_api_call",
+                    side_effect=responses,
+                ) as api_call,
+                patch(
+                    "run_agent.handle_function_call",
+                    side_effect=_tool_result,
+                ) as tool_call,
+                patch(
+                    "xiaoban.trusted_runtime.turns.current_turn",
+                    return_value=SimpleNamespace(
+                        request_id="strict-two-stage-request",
+                        turn_id="strict-two-stage-turn",
+                    ),
+                ),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation(
+                    "依次核对两项资料后告诉我结果"
+                )
+        finally:
+            clear_session_vars(session_tokens)
+
+        assert events == [
+            ("commentary", "我先核对第一项授权资料。", False),
+            ("tool", "strict-two-stage-first"),
+            (
+                "commentary",
+                "第一项已经查清，我接着核对第二项登记状态。",
+                False,
+            ),
+            ("tool", "strict-two-stage-second"),
+        ]
+        assert result["final_response"] == (
+            "这轮两项核对都已结束。第一项资料有效；第二项当前没有"
+            "登记记录，所以我没有把它当作已完成。若要继续，建议"
+            "补充第二项的登记主体或时间范围，我可以从这里接着查。"
+        )
+        assert result["completed"] is True
+        assert api_call.call_count == 3
+        assert tool_call.call_count == 2
+        assert [
+            call.kwargs["tool_call_id"]
+            for call in tool_call.call_args_list
+        ] == ["strict-two-stage-first", "strict-two-stage-second"]
+        third_payload = api_call.call_args_list[2].args[0]
+        projected_results = [
+            json.loads(message["content"])
+            for message in third_payload["messages"]
+            if message.get("role") == "tool"
+        ]
+        assert [item["callId"] for item in projected_results] == [
+            "strict-two-stage-first",
+            "strict-two-stage-second",
+        ]
+        assert [item["outcome"] for item in projected_results] == [
+            "success",
+            "empty",
+        ]
+        assert "tools" not in third_payload
+        assert "tool_choice" not in third_payload
+        assert len({
+            call.args[0]["model"]
+            for call in api_call.call_args_list
+        }) == 1
+
+    @pytest.mark.parametrize(
+        (
+            "raw_tool_result",
+            "expected_outcome",
+            "projection_key",
+            "natural_final",
+        ),
+        [
+            pytest.param(
+                {"ok": True, "rows": [{"summary": "可用资料"}]},
+                "success",
+                "modelResult",
+                (
+                    "这轮资料核对已经完成。我找到了可用记录，并按实际"
+                    "结果整理好了结论。当前没有遗留项；如果你需要，我"
+                    "可以继续展开其中的明细。"
+                ),
+                id="success",
+            ),
+            pytest.param(
+                {"ok": True, "status": "empty", "rows": []},
+                "empty",
+                "modelResult",
+                (
+                    "这轮查询已经按当前条件完成，但范围内没有找到记录。"
+                    "因此我没有编造结论，也没有重复执行。若要继续，建议"
+                    "补充名称、时间或其他唯一线索后再查。"
+                ),
+                id="empty",
+            ),
+            pytest.param(
+                {"ok": False, "status": 403, "error": "PRIVATE_DENIED_781"},
+                "denied",
+                "modelError",
+                (
+                    "这轮已经核对到读取授权这一步，但当前权限不允许访问"
+                    "目标资料。我没有继续越权查询，也没有把它说成不存在。"
+                    "如需完成，请先补齐对应授权，我可以从这一步继续。"
+                ),
+                id="denied",
+            ),
+            pytest.param(
+                {
+                    "ok": False,
+                    "status": "failed",
+                    "code": "upstream_error",
+                    "error": "PRIVATE_FAILED_781",
+                },
+                "failed",
+                "modelError",
+                (
+                    "这轮已经发起资料读取，但读取服务没有成功返回可用"
+                    "结果，所以任务没有完成。我还不能据此给你业务结论；"
+                    "服务恢复后可从读取步骤重试。"
+                ),
+                id="failed",
+            ),
+            pytest.param(
+                {
+                    "status": "ambiguous",
+                    "writeMayHaveLanded": True,
+                    "error": "PRIVATE_UNKNOWN_781",
+                },
+                "unknown",
+                "modelError",
+                (
+                    "这轮操作已经发出，但最终是否落地目前无法确认。为"
+                    "避免重复执行，我没有再次派发，也不会把它报告为成功。"
+                    "下一步应先核对原回执，再决定是否继续。"
+                ),
+                id="unknown",
+            ),
+        ],
+    )
+    def test_strict_paid_tool_outcome_returns_to_same_model_for_natural_final(
+        self,
+        agent,
+        raw_tool_result,
+        expected_outcome,
+        projection_key,
+        natural_final,
+    ):
+        """Every canonical outcome reaches the same model before it speaks."""
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        agent.max_iterations = 2
+        tool_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"本轮授权资料"}',
+            call_id=f"strict-natural-{expected_outcome}",
+        )
+        responses = [
+            _mock_response(
+                content="我先核对本轮允许读取的资料。",
+                finish_reason="tool_calls",
+                tool_calls=[tool_call],
+            ),
+            _mock_response(content=natural_final, finish_reason="stop"),
+        ]
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=responses,
+            ) as api_call,
+            patch(
+                "run_agent.handle_function_call",
+                return_value=json.dumps(raw_tool_result, ensure_ascii=False),
+            ) as execute_tool,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("查完后用自然语言告诉我")
+
+        assert execute_tool.call_count == 1
+        assert api_call.call_count == 2
+        assert result["final_response"] == natural_final
+        assert result["completed"] is True
+        second_payload = api_call.call_args_list[1].args[0]
+        projected_results = [
+            json.loads(message["content"])
+            for message in second_payload["messages"]
+            if message.get("role") == "tool"
+        ]
+        assert len(projected_results) == 1
+        assert projected_results[0]["outcome"] == expected_outcome
+        assert projection_key in projected_results[0]
+        assert api_call.call_args_list[0].args[0]["model"] == (
+            second_payload["model"]
+        )
+        assert natural_final.count("。") >= 2
+        assert len(natural_final) >= 50
+        assert "PRIVATE_" not in result["final_response"]
+
+    def test_strict_interim_callback_receives_batch_and_redacts_exception_log(
+        self,
+        agent,
+        caplog,
+    ):
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        caplog.set_level(logging.DEBUG)
+        canary = "STRICT_INTERIM_CALLBACK_EXCEPTION_CANARY_781"
+        observed = {}
+
+        def _trusted_callback(
+            text,
+            *,
+            already_streamed=False,
+            tool_calls=None,
+        ):
+            observed.update({
+                "text": text,
+                "already_streamed": already_streamed,
+                "tool_calls": tool_calls,
+            })
+            raise RuntimeError(
+                tool_calls[0]["function"]["arguments"]
+            )
+
+        setattr(_trusted_callback, "_xiaoban_accepts_tool_calls", True)
+        agent.interim_assistant_callback = _trusted_callback
+        tool_calls = [{
+            "id": "strict-interim-tool",
+            "type": "function",
+            "function": {
+                "name": "mystand_query",
+                "arguments": canary,
+            },
+        }]
+
+        agent._emit_interim_assistant_message({
+            "role": "assistant",
+            "content": "我先核对。",
+            "tool_calls": tool_calls,
+        })
+
+        assert observed == {
+            "text": "我先核对。",
+            "already_streamed": False,
+            "tool_calls": tool_calls,
+        }
+        assert canary not in caplog.text
+        assert "category=callback_failure" in caplog.text
+        assert "Traceback" not in caplog.text
 
     def test_strict_paid_last_slot_is_same_model_tooled_off_final_reply(
         self,
@@ -4852,6 +5379,9 @@ class TestRunConversation:
         assert "tools" not in final_payload
         assert "tool_choice" not in final_payload
         assert "final model call allowed" in final_payload["messages"][-1]["content"]
+        assert "end-of-task summary" in final_payload["messages"][-1]["content"]
+        assert "one-line status" in final_payload["messages"][-1]["content"]
+        assert "useful next step" in final_payload["messages"][-1]["content"]
 
     def test_strict_paid_eighth_call_is_same_model_final_not_ninth_tool(
         self,
@@ -5594,6 +6124,86 @@ class TestRunConversation:
             "retryable": True,
         }
         assert "PRIVATE" not in json.dumps(result, ensure_ascii=False)
+
+    def test_strict_paid_provider_error_after_tool_keeps_completed_step_once(
+        self,
+        agent,
+    ):
+        """A final-call failure keeps the real tool step and never reruns it."""
+        self._setup_agent(agent)
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        agent.max_iterations = 2
+        tool_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"最后完成步骤"}',
+            call_id="strict-before-provider-failure",
+        )
+        tool_turn = _mock_response(
+            content="我已经开始核对最后一项资料。",
+            finish_reason="tool_calls",
+            tool_calls=[tool_call],
+        )
+
+        class _ProviderErrorWithCode(RuntimeError):
+            code = "service_unavailable"
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=[
+                    tool_turn,
+                    _ProviderErrorWithCode("PRIVATE FINAL FAILURE 781"),
+                ],
+            ) as api_call,
+            patch(
+                "run_agent.handle_function_call",
+                return_value=json.dumps({
+                    "ok": True,
+                    "summary": "最后一项资料已读取",
+                }, ensure_ascii=False),
+            ) as execute_tool,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("核对后说明")
+
+        assert api_call.call_count == 2
+        execute_tool.assert_called_once()
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["final_response"] is None
+        assert result["failure"]["code"] == "provider_call_failed"
+        assert result["failure"]["phase"] == "provider_call"
+        assert result["failure"]["reason"] == (
+            "The model service call failed before Xiaoban received "
+            "a usable response"
+        )
+        completed_tool_results = [
+            message["_xiaoban_tool_result"]
+            for message in result["messages"]
+            if message.get("role") == "tool"
+            and message.get("_xiaoban_tool_result")
+        ]
+        assert completed_tool_results == [{
+            "schema": "xiaoban.tool-result.v1",
+            "requestId": completed_tool_results[0]["requestId"],
+            "turnId": completed_tool_results[0]["turnId"],
+            "callId": "strict-before-provider-failure",
+            "toolName": "web_search",
+            "dispatchState": "dispatched",
+            "outcome": "success",
+            "retrySafe": False,
+        }]
+        assert "PRIVATE" not in json.dumps(
+            result["failure"],
+            ensure_ascii=False,
+        )
 
     def test_strict_paid_invalid_response_is_terminal_and_preserves_usage(
         self,

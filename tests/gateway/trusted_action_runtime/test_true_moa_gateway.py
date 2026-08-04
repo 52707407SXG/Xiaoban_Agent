@@ -1038,6 +1038,9 @@ async def test_completed_sse_buffers_until_sealed_and_emits_outcome_receipt(
     async def _fake_run_agent(**kwargs):
         nonlocal dispatches
         dispatches += 1
+        progress = kwargs.get("tool_progress_callback")
+        if progress is not None:
+            progress("turn.started", delivery_id, "7" * 16, None)
         callback = kwargs.get("stream_delta_callback")
         if callback is not None:
             callback("UNSEALED_PRIVATE_DELTA")
@@ -1088,6 +1091,10 @@ async def test_completed_sse_buffers_until_sealed_and_emits_outcome_receipt(
         assert response.status == 200
         assert "UNSEALED_PRIVATE_DELTA" not in wire
         assert "SSE sealed exact answer" in wire
+        assert wire.count("SSE sealed exact answer") == 1
+        assert wire.index("SSE sealed exact answer") < wire.index(
+            '"type": "turn.completed"'
+        )
         assert "event: xiaoban.moa.outcome" in wire
         assert "event: xiaoban.moa.usage" in wire
         assert wire.index("event: xiaoban.moa.outcome") < wire.index(
@@ -1118,6 +1125,1639 @@ async def test_completed_sse_buffers_until_sealed_and_emits_outcome_receipt(
         assert recovered_payload["outcomeId"] == outcome_payload["outcomeId"]
         assert dispatches == 1
     cache._durable.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_lifecycle", ["open-tool", "missing-turn"])
+async def test_true_moa_sse_lifecycle_failure_settles_durable_failed(
+    monkeypatch,
+    tmp_path,
+    invalid_lifecycle,
+):
+    from gateway.platforms import api_server
+
+    adapter = _adapter()
+    delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
+    headers = _mystand_headers(
+        f"true-moa-{invalid_lifecycle}",
+        epoch="87",
+    )
+    headers.pop("Idempotency-Key")
+    headers["X-Xiaoban-Delivery-Id"] = delivery_id
+    headers["X-Xiaoban-Delivery-Attempt"] = headers[
+        "X-Xiaoban-Attempt"
+    ]
+    snapshot = validate_true_moa_headers(
+        headers,
+        mystand_request=True,
+        api_authenticated=True,
+    )
+    usage = _completed_usage(snapshot, wave_id=uuid.uuid4().hex)
+    private_final = f"PRIVATE_TRUE_MOA_{invalid_lifecycle}_MUST_NOT_LEAK"
+    dispatches = 0
+
+    async def _fake_run_agent(**kwargs):
+        nonlocal dispatches
+        dispatches += 1
+        if invalid_lifecycle == "open-tool":
+            kwargs["tool_progress_callback"](
+                "turn.started", delivery_id, "8" * 16, None,
+            )
+            kwargs["tool_start_callback"](
+                "call-true-moa-left-open",
+                "mystand_query",
+                {"query": "private"},
+            )
+        kwargs["stream_delta_callback"](private_final)
+        return (
+            _sealed_mystand_result({
+                "final_response": private_final,
+                "completed": True,
+                "failed": False,
+                "partial": False,
+                "interrupted": False,
+                "messages": [],
+                "_mystand_request": True,
+                "_true_moa_usage": usage,
+            }),
+            {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "total_tokens": 14,
+                "true_moa": usage,
+            },
+        )
+
+    cache = api_server._IdempotencyCache(
+        durable_path=str(tmp_path / f"{invalid_lifecycle}.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    monkeypatch.setattr(adapter, "_run_agent", _fake_run_agent)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions",
+        adapter._handle_chat_completions,
+    )
+    body = {
+        "model": "xiaoban-agent",
+        "stream": True,
+        "messages": [{"role": "user", "content": "invalid lifecycle"}],
+    }
+    async with TestClient(TestServer(app)) as client:
+        first = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json=body,
+        )
+        first_wire = await first.text()
+        second = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json=body,
+        )
+        second_wire = await second.text()
+
+    assert first.status == second.status == 200
+    assert dispatches == 1
+    assert private_final not in first_wire + second_wire
+    assert '"finish_reason": "error"' in first_wire
+    assert '"finish_reason": "error"' in second_wire
+    if invalid_lifecycle == "open-tool":
+        assert '"type": "turn.failed"' in first_wire
+    else:
+        assert '"type": "turn.' not in first_wire
+    scoped_key = adapter._scoped_idempotency_key(headers, delivery_id)
+    record = cache.durable_record(scoped_key)
+    assert record["state"] == "failed"
+    assert record["usage"]["status"] == "failed"
+    assert record["outcomeState"] == "none"
+    assert cache._store[scoped_key]["resp"][0]["failed"] is True
+    cache._durable.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_lifecycle", ["open-tool", "missing-turn"])
+async def test_true_moa_runner_lifecycle_guard_blocks_hidden_persistence(
+    monkeypatch,
+    tmp_path,
+    invalid_lifecycle,
+):
+    """The real runner must reject persistence before API stream settlement."""
+    from gateway.platforms import api_server
+    from xiaoban.trusted_runtime import true_moa_providers
+    from xiaoban.trusted_runtime.turns import current_turn
+
+    adapter = _adapter()
+    delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
+    headers = _mystand_headers(
+        f"runner-lifecycle-{invalid_lifecycle}",
+        epoch="88",
+    )
+    headers.pop("Idempotency-Key")
+    headers["X-Xiaoban-Delivery-Id"] = delivery_id
+    headers["X-Xiaoban-Delivery-Attempt"] = headers[
+        "X-Xiaoban-Attempt"
+    ]
+
+    def _fake_strict_advisor(*, slot, dispatch_callback, **_kwargs):
+        dispatch_callback()
+        return StrictAdvisorResult(
+            content=f"safe {slot.slot_id}",
+            usage={
+                "input_tokens": 11,
+                "output_tokens": 3,
+                "total_tokens": 14,
+                "cached_input_tokens": 0,
+            },
+            cost_usd=0.01,
+            cost_status="reported",
+            cost_source="r2b-cross-runtime-fixture",
+        )
+
+    monkeypatch.setattr(
+        true_moa_providers,
+        "strict_advisor_call",
+        _fake_strict_advisor,
+    )
+
+    class LifecycleFinalAgent(_FakeFinalAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.callbacks: dict[str, object] = {}
+
+        def run_conversation(self, **kwargs):
+            turn = current_turn()
+            assert turn is not None
+            if invalid_lifecycle == "open-tool":
+                self.callbacks["tool_progress_callback"](
+                    "turn.started",
+                    turn.request_id,
+                    turn.turn_id,
+                    None,
+                )
+                self.callbacks["tool_start_callback"](
+                    "call-runner-left-open",
+                    "mystand_query",
+                    {"query": "private"},
+                )
+            return super().run_conversation(**kwargs)
+
+    final_agent = LifecycleFinalAgent()
+
+    def _fake_create_agent(**kwargs):
+        final_agent.callbacks = dict(kwargs)
+        return final_agent
+
+    monkeypatch.setattr(adapter, "_create_agent", _fake_create_agent)
+    cache = api_server._IdempotencyCache(
+        durable_path=str(tmp_path / f"runner-{invalid_lifecycle}.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+
+    async with TestClient(TestServer(_app(adapter))) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": "xiaoban-agent",
+                "stream": True,
+                "messages": [
+                    {"role": "user", "content": "invalid runner lifecycle"}
+                ],
+            },
+        )
+        wire = await response.text()
+
+    assert response.status == 200
+    assert "fake final synthesis" not in wire
+    assert '"finish_reason": "error"' in wire
+    if invalid_lifecycle == "open-tool":
+        assert '"type": "turn.failed"' in wire
+    else:
+        assert '"type": "turn.' not in wire
+    scoped_key = adapter._scoped_idempotency_key(headers, delivery_id)
+    record = cache.durable_record(scoped_key)
+    assert record["state"] == "failed"
+    assert record["usage"]["status"] == "failed"
+    assert record["outcomeState"] == "none"
+    assert final_agent.persisted_sessions == []
+    assert final_agent.saved_trajectories == []
+    cache._durable.close()
+
+
+@pytest.mark.asyncio
+async def test_true_moa_final_commit_seals_late_lifecycle_callbacks(
+    monkeypatch,
+    tmp_path,
+):
+    """Callbacks that lose the final-commit race cannot rewrite settlement."""
+    from gateway.platforms import api_server
+    from xiaoban.trusted_runtime import true_moa_providers
+    from xiaoban.trusted_runtime.turns import current_turn
+
+    adapter = _adapter()
+    delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
+    headers = _mystand_headers("late-lifecycle-after-commit", epoch="90")
+    headers.pop("Idempotency-Key")
+    headers["X-Xiaoban-Delivery-Id"] = delivery_id
+    headers["X-Xiaoban-Delivery-Attempt"] = headers[
+        "X-Xiaoban-Attempt"
+    ]
+
+    def _fake_strict_advisor(*, slot, dispatch_callback, **_kwargs):
+        dispatch_callback()
+        return StrictAdvisorResult(
+            content=f"safe {slot.slot_id}",
+            usage={
+                "input_tokens": 11,
+                "output_tokens": 3,
+                "total_tokens": 14,
+                "cached_input_tokens": 0,
+            },
+            cost_usd=0.01,
+            cost_status="reported",
+            cost_source="late-lifecycle-fixture",
+        )
+
+    monkeypatch.setattr(
+        true_moa_providers,
+        "strict_advisor_call",
+        _fake_strict_advisor,
+    )
+
+    late_call_id = "call-after-final-commit"
+    late_tool_name = "mystand_query"
+    late_args = {"query": "must remain private"}
+
+    class LateLifecycleFinalAgent(_FakeFinalAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.callbacks: dict[str, object] = {}
+            self.turn_binding: tuple[str, str] | None = None
+
+        def run_conversation(self, **kwargs):
+            turn = current_turn()
+            assert turn is not None
+            self.turn_binding = (turn.request_id, turn.turn_id)
+            self.callbacks["tool_progress_callback"](
+                "turn.started",
+                turn.request_id,
+                turn.turn_id,
+                None,
+            )
+            return super().run_conversation(**kwargs)
+
+        def _persist_session(self, messages, *args) -> None:
+            assert self.turn_binding is not None
+            request_id, turn_id = self.turn_binding
+            self.callbacks["tool_progress_callback"](
+                "turn.started",
+                request_id,
+                turn_id,
+                None,
+            )
+            self.callbacks["tool_start_callback"](
+                late_call_id,
+                late_tool_name,
+                late_args,
+            )
+            self.callbacks["tool_complete_callback"](
+                late_call_id,
+                late_tool_name,
+                late_args,
+                {"ok": True},
+                {
+                    "schema": "xiaoban.tool-result.v1",
+                    "requestId": request_id,
+                    "turnId": turn_id,
+                    "callId": late_call_id,
+                    "toolName": late_tool_name,
+                    "dispatchState": "dispatched",
+                    "outcome": "success",
+                    "retrySafe": False,
+                },
+            )
+            super()._persist_session(messages, *args)
+
+    final_agent = LateLifecycleFinalAgent()
+
+    def _fake_create_agent(**kwargs):
+        final_agent.callbacks = dict(kwargs)
+        return final_agent
+
+    monkeypatch.setattr(adapter, "_create_agent", _fake_create_agent)
+    cache = api_server._IdempotencyCache(
+        durable_path=str(tmp_path / "late-lifecycle.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+
+    async with TestClient(TestServer(_app(adapter))) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": "xiaoban-agent",
+                "stream": True,
+                "messages": [
+                    {"role": "user", "content": "late callback fixture"}
+                ],
+            },
+        )
+        wire = await response.text()
+
+    assert response.status == 200
+    assert wire.count("fake final synthesis") == 1
+    assert wire.count('"type": "turn.started"') == 1
+    assert '"type": "turn.completed"' in wire
+    assert '"type": "turn.failed"' not in wire
+    assert late_call_id not in wire
+    assert '"finish_reason": "stop"' in wire
+    assert len(final_agent.persisted_sessions) == 1
+    assert len(final_agent.saved_trajectories) == 1
+    assert final_agent._true_moa_cancel_controller.state == "completed"
+    scoped_key = adapter._scoped_idempotency_key(headers, delivery_id)
+    record = cache.durable_record(scoped_key)
+    assert record["usage"]["status"] == "completed"
+    assert record["outcomeState"] == "sealed"
+    cache._durable.close()
+
+
+@pytest.mark.asyncio
+async def test_true_moa_real_http_stream_is_accepted_by_node_bridge(
+    monkeypatch,
+    tmp_path,
+):
+    """Feed real runner/aiohttp bytes into the paired Node stream consumer."""
+    from gateway.platforms import api_server
+    from xiaoban.trusted_runtime import true_moa_providers
+    from xiaoban.trusted_runtime.turns import current_turn
+
+    node_worktree = os.environ.get("XIAOBAN_R2B_NODE_WORKTREE", "").strip()
+    if not node_worktree:
+        pytest.skip("set XIAOBAN_R2B_NODE_WORKTREE for paired R2-B acceptance")
+    bridge_path = (
+        Path(node_worktree)
+        / "server/features/xiaoban-agent/xiaobanStreamBridge.mjs"
+    )
+    delivery_store_path = (
+        Path(node_worktree)
+        / "server/features/xiaoban-agent/xiaobanDeliveryStore.mjs"
+    )
+    request_snapshot_path = (
+        Path(node_worktree)
+        / "server/features/xiaoban-agent/xiaobanRequestSnapshot.mjs"
+    )
+    reasoning_mode_path = (
+        Path(node_worktree)
+        / "server/features/xiaoban-agent/xiaobanReasoningMode.mjs"
+    )
+    for paired_path in (
+        bridge_path,
+        delivery_store_path,
+        request_snapshot_path,
+        reasoning_mode_path,
+    ):
+        if not paired_path.is_file():
+            pytest.fail(f"paired Node module missing: {paired_path}")
+
+    adapter = _adapter()
+    owner_user = "r2b-cross-owner"
+    conversation_id = "r2b-cross-conversation"
+    message_id = "r2b-cross-message"
+    delivery_id = "xbd_" + hashlib.sha256(
+        f"{owner_user}\n{conversation_id}\n{message_id}\n1".encode(),
+    ).hexdigest()[:40]
+    epoch = "89"
+    headers = _mystand_headers("runner-node-real-stream", epoch=epoch)
+    headers.pop("Idempotency-Key")
+    headers["X-Xiaoban-Delivery-Id"] = delivery_id
+    headers["X-Xiaoban-Delivery-Attempt"] = headers[
+        "X-Xiaoban-Attempt"
+    ]
+
+    def _cross_runtime_advisor(*, slot, dispatch_callback, **_kwargs):
+        dispatch_callback()
+        return StrictAdvisorResult(
+            content=f"safe {slot.slot_id}",
+            usage={
+                "input_tokens": 11,
+                "output_tokens": 3,
+                "total_tokens": 14,
+                "cached_input_tokens": 0,
+            },
+            cost_usd=0.01,
+            cost_status="reported",
+            cost_source="r2b-cross-runtime-fixture",
+        )
+
+    monkeypatch.setattr(
+        true_moa_providers,
+        "strict_advisor_call",
+        _cross_runtime_advisor,
+    )
+
+    prelude = "R2B_TOOL_PRELUDE_MUST_NOT_BECOME_REPLY"
+    final_text = "R2B_REAL_FINAL_REPLY"
+    tool_call_id = "call-r2b-real-tool"
+    tool_name = "mystand_query"
+    tool_args = {"query": "safe fixture"}
+
+    class StreamingFinalAgent(_FakeFinalAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.callbacks: dict[str, object] = {}
+
+        def run_conversation(self, **kwargs):
+            turn = current_turn()
+            assert turn is not None
+            self.callbacks["tool_progress_callback"](
+                "turn.started",
+                turn.request_id,
+                turn.turn_id,
+                None,
+            )
+            tool_calls = [{
+                "id": tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": json.dumps(tool_args),
+                },
+            }]
+            self.callbacks["stream_delta_callback"](prelude)
+            self.callbacks["interim_assistant_callback"](
+                prelude,
+                already_streamed=True,
+                tool_calls=tool_calls,
+            )
+            self.callbacks["stream_delta_callback"](None)
+            self.callbacks["tool_start_callback"](
+                tool_call_id,
+                tool_name,
+                tool_args,
+            )
+            self.callbacks["tool_complete_callback"](
+                tool_call_id,
+                tool_name,
+                tool_args,
+                {"ok": True},
+                {
+                    "schema": "xiaoban.tool-result.v1",
+                    "requestId": turn.request_id,
+                    "turnId": turn.turn_id,
+                    "callId": tool_call_id,
+                    "toolName": tool_name,
+                    "dispatchState": "dispatched",
+                    "outcome": "success",
+                    "retrySafe": False,
+                },
+            )
+            self.callbacks["stream_delta_callback"](final_text)
+            result = super().run_conversation(**kwargs)
+            result["final_response"] = final_text
+            result["messages"] = [
+                {"role": "user", "content": "real cross-runtime fixture"},
+                {"role": "assistant", "content": final_text},
+            ]
+            return result
+
+    final_agent = StreamingFinalAgent()
+
+    def _fake_create_agent(**kwargs):
+        final_agent.callbacks = dict(kwargs)
+        return final_agent
+
+    monkeypatch.setattr(adapter, "_create_agent", _fake_create_agent)
+    cache = api_server._IdempotencyCache(
+        durable_path=str(tmp_path / "runner-node-real-stream.sqlite"),
+        outcome_keys=_OUTCOME_KEYS,
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+
+    async with TestClient(TestServer(_app(adapter))) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": "xiaoban-agent",
+                "stream": True,
+                "messages": [
+                    {"role": "user", "content": "real cross-runtime fixture"}
+                ],
+            },
+        )
+        wire = await response.text()
+
+    assert response.status == 200
+    assert prelude not in wire
+    assert wire.count(final_text) == 1
+    ordered_markers = [
+        '"type": "turn.started"',
+        f'"toolCallId": "{tool_call_id}", "status": "running"',
+        f'"toolCallId": "{tool_call_id}", "status": "completed"',
+        final_text,
+        '"type": "turn.completed"',
+        "event: xiaoban.moa.outcome",
+        "event: xiaoban.moa.usage",
+        '"finish_reason": "stop"',
+        "data: [DONE]",
+    ]
+    positions = [wire.index(marker) for marker in ordered_markers]
+    assert positions == sorted(positions)
+    assert len(final_agent.persisted_sessions) == 1
+    assert len(final_agent.saved_trajectories) == 1
+    assert final_text in final_agent.persisted_sessions[0]
+    assert prelude not in final_agent.persisted_sessions[0]
+
+    node_program = textwrap.dedent(
+        """
+        import fs from 'node:fs';
+        import { createHash } from 'node:crypto';
+        import { pathToFileURL } from 'node:url';
+
+        const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+        const { consumeXiaobanChatSse } = await import(
+          pathToFileURL(input.bridgePath).href
+        );
+        const { createXiaobanDeliveryStore } = await import(
+          pathToFileURL(input.deliveryStorePath).href
+        );
+        const {
+          createXiaobanInvocationSnapshot,
+          createXiaobanRequestSnapshot,
+        } = await import(pathToFileURL(input.requestSnapshotPath).href);
+        const { XIAOBAN_TRUE_MOA_AUTHORIZATION_SOURCE } = await import(
+          pathToFileURL(input.reasoningModePath).href
+        );
+        const splitSseBlocks = wire => wire
+          .replace(/\\r\\n/g, '\\n')
+          .split('\\n\\n')
+          .filter(block => block.trim());
+        const parsedBlock = block => {
+          let event = 'message';
+          const data = [];
+          for (const line of block.split('\\n')) {
+            if (line.startsWith('event:')) {
+              event = line.slice('event:'.length).trim();
+            } else if (line.startsWith('data:')) {
+              data.push(line.slice('data:'.length).trimStart());
+            }
+          }
+          let payload = null;
+          try {
+            payload = JSON.parse(data.join('\\n'));
+          } catch {}
+          return { event, data: data.join('\\n'), payload };
+        };
+        const replacePayload = (block, payload) => block
+          .split('\\n')
+          .map(line => line.startsWith('data:')
+            ? `data: ${JSON.stringify(payload)}`
+            : line)
+          .join('\\n');
+        const joinedWire = blocks => `${blocks.join('\\n\\n')}\\n\\n`;
+        const progressType = (block, type) => {
+          const parsed = parsedBlock(block);
+          return parsed.event === 'xiaoban.tool.progress'
+            && parsed.payload?.type === type;
+        };
+        const moveBeforeTurnStart = (wire, predicate) => {
+          const blocks = splitSseBlocks(wire);
+          const targetIndex = blocks.findIndex(predicate);
+          if (targetIndex < 0) throw new Error('adversarial target missing');
+          const [target] = blocks.splice(targetIndex, 1);
+          const startIndex = blocks.findIndex(
+            block => progressType(block, 'turn.started'),
+          );
+          if (startIndex < 0) throw new Error('turn.started missing');
+          blocks.splice(startIndex, 0, target);
+          return joinedWire(blocks);
+        };
+        const conflictingTerminalWire = wire => {
+          const blocks = splitSseBlocks(wire);
+          const terminalIndex = blocks.findIndex(
+            block => progressType(block, 'turn.completed'),
+          );
+          if (terminalIndex < 0) throw new Error('turn.completed missing');
+          const payload = {
+            ...parsedBlock(blocks[terminalIndex]).payload,
+            type: 'turn.failed',
+            status: 'failed',
+          };
+          blocks.splice(
+            terminalIndex + 1,
+            0,
+            replacePayload(blocks[terminalIndex], payload),
+          );
+          return joinedWire(blocks);
+        };
+        const mixedToolSchemaWire = wire => joinedWire(
+          splitSseBlocks(wire).map(block => {
+            const parsed = parsedBlock(block);
+            if (
+              parsed.event !== 'xiaoban.tool.progress'
+              || !parsed.payload?.toolCallId
+            ) return block;
+            return replacePayload(block, {
+              ...parsed.payload,
+              progressSchema: 'xiaoban.progress.v1',
+            });
+          }),
+        );
+        const fingerprint = createHash('sha256')
+          .update('r2b-real-cross-runtime')
+          .digest('hex');
+        const requestSnapshot = createXiaobanRequestSnapshot({
+          ownerUser: input.ownerUser,
+          conversationId: input.conversationId,
+          messageId: input.messageId,
+          attempt: 1,
+          message: 'real cross-runtime fixture',
+          recentMessages: [],
+          attachments: [],
+          context: { pathname: '/r2b-cross-runtime' },
+          requestFingerprint: fingerprint,
+          reasoningMode: input.moaIdentity.mode,
+          modeEpoch: input.moaIdentity.modeEpoch,
+          presetId: input.moaIdentity.presetId,
+          presetRevision: input.moaIdentity.presetRevision,
+          modeAuthorizationSource: XIAOBAN_TRUE_MOA_AUTHORIZATION_SOURCE,
+        });
+        let store = createXiaobanDeliveryStore({
+          dbPath: input.dbPath,
+          mainDbPath: input.mainDbPath,
+        });
+        const begun = store.begin({
+          ownerUser: input.ownerUser,
+          conversationId: input.conversationId,
+          messageId: input.messageId,
+          fingerprint,
+          reasoningMode: input.moaIdentity.mode,
+          requestSnapshot,
+        });
+        if (begun.delivery.id !== input.requestId) {
+          throw new Error('paired delivery identity drift');
+        }
+        store.bindInvocationSnapshot(
+          input.requestId,
+          createXiaobanInvocationSnapshot({
+            requestSnapshot,
+            context: { pathname: '/r2b-cross-runtime', trusted: true },
+            attachments: [],
+          }),
+        );
+        store.markGenerating(input.requestId);
+        const encoded = new TextEncoder().encode(input.wire);
+        const body = new ReadableStream({
+          start(controller) {
+            let offset = 0;
+            let width = 1;
+            while (offset < encoded.length) {
+              const end = Math.min(encoded.length, offset + width);
+              controller.enqueue(encoded.slice(offset, end));
+              offset = end;
+              width = width === 31 ? 1 : width + 1;
+            }
+            controller.close();
+          },
+        });
+        const snapshots = [];
+        const progress = [];
+        const result = await consumeXiaobanChatSse(body, {
+          expectedRequestId: input.requestId,
+          expectedMoaUsageIdentity: input.moaIdentity,
+          onSnapshot: value => {
+            snapshots.push(value);
+            store.replaceOutput(input.requestId, value);
+          },
+          onProgress: value => {
+            progress.push(value);
+            if (String(value.type || '').startsWith('turn.')) {
+              store.appendProgress(input.requestId, {
+                id: `turn-${value.turnId}`,
+                schema: value.progressSchema,
+                type: value.type,
+                status: value.status,
+                turnId: value.turnId,
+              });
+              return;
+            }
+            const type = value.status === 'running'
+              ? 'tool.started'
+              : value.status === 'completed'
+                ? 'tool.completed'
+                : value.status === 'stopped'
+                  ? 'tool.stopped'
+                  : 'tool.failed';
+            store.appendProgress(input.requestId, {
+              id: `tool-${value.toolCallId}`,
+              schema: value.progressSchema,
+              type,
+              label: '检索站内资料',
+              status: value.status,
+              durationMs: value.durationMs,
+              turnId: value.turnId,
+              callId: value.toolCallId,
+              dispatchState: value.dispatchState,
+              outcome: value.outcome,
+              retrySafe: value.retrySafe,
+              summary: value.summary,
+            });
+          },
+        });
+        store.mergeUsageLedger(input.requestId, result.moaUsage);
+        store.markGenerated(input.requestId, {
+          outputText: result.text,
+          provider: 'deepseek',
+          model: 'deepseek-v4-pro',
+          usage: result.moaUsage,
+        });
+        store.markDelivering(input.requestId);
+        store.bindTrueMoaOutcomeAck(input.requestId, result.moaOutcome);
+        store.close();
+        store = createXiaobanDeliveryStore({
+          dbPath: input.dbPath,
+          mainDbPath: input.mainDbPath,
+        });
+        const durable = store.getByIdForOwner(
+          input.ownerUser,
+          input.requestId,
+        );
+        const outcomeAck = store.getTrueMoaOutcomeAckForOwner(
+          input.ownerUser,
+          input.requestId,
+        );
+        store.close();
+        const adversarialCases = [
+          {
+            name: 'conflicting-terminal',
+            expectedCode: 'xiaoban_progress_terminal_conflict',
+            wire: conflictingTerminalWire(input.wire),
+          },
+          {
+            name: 'outcome-before-turn',
+            expectedCode: 'xiaoban_progress_order_invalid',
+            wire: moveBeforeTurnStart(
+              input.wire,
+              block => parsedBlock(block).event === 'xiaoban.moa.outcome',
+            ),
+          },
+          {
+            name: 'usage-before-turn',
+            expectedCode: 'xiaoban_progress_order_invalid',
+            wire: moveBeforeTurnStart(
+              input.wire,
+              block => parsedBlock(block).event === 'xiaoban.moa.usage',
+            ),
+          },
+          {
+            name: 'aggregate-before-turn',
+            expectedCode: 'xiaoban_progress_order_invalid',
+            wire: moveBeforeTurnStart(input.wire, block => {
+              const payload = parsedBlock(block).payload;
+              return Boolean(
+                payload?.choices?.[0]?.finish_reason
+                && payload?.usage,
+              );
+            }),
+          },
+          {
+            name: 'v2-turn-v1-tool',
+            expectedCode: 'xiaoban_progress_schema_conflict',
+            wire: mixedToolSchemaWire(input.wire),
+          },
+        ];
+        const adversarial = [];
+        for (const [index, adversarialCase] of adversarialCases.entries()) {
+          let caseStore = createXiaobanDeliveryStore({
+            dbPath: `${input.dbPath}.adversarial-${index}`,
+            mainDbPath: `${input.mainDbPath}.adversarial-${index}`,
+          });
+          caseStore.begin({
+            ownerUser: input.ownerUser,
+            conversationId: input.conversationId,
+            messageId: input.messageId,
+            fingerprint,
+            reasoningMode: input.moaIdentity.mode,
+            requestSnapshot,
+          });
+          caseStore.bindInvocationSnapshot(
+            input.requestId,
+            createXiaobanInvocationSnapshot({
+              requestSnapshot,
+              context: { pathname: '/r2b-cross-runtime', trusted: true },
+              attachments: [],
+            }),
+          );
+          caseStore.markGenerating(input.requestId);
+          const caseEncoded = new TextEncoder().encode(adversarialCase.wire);
+          const caseBody = new ReadableStream({
+            start(controller) {
+              let offset = 0;
+              let width = 1;
+              while (offset < caseEncoded.length) {
+                const end = Math.min(caseEncoded.length, offset + width);
+                controller.enqueue(caseEncoded.slice(offset, end));
+                offset = end;
+                width = width === 31 ? 1 : width + 1;
+              }
+              controller.close();
+            },
+          });
+          const caseSnapshots = [];
+          const caseProgress = [];
+          const calls = {
+            markGenerated: 0,
+            markDelivering: 0,
+            bindTrueMoaOutcomeAck: 0,
+          };
+          let errorCode = '';
+          try {
+            const caseResult = await consumeXiaobanChatSse(caseBody, {
+              expectedRequestId: input.requestId,
+              expectedMoaUsageIdentity: input.moaIdentity,
+              onSnapshot: value => {
+                caseSnapshots.push(value);
+                caseStore.replaceOutput(input.requestId, value);
+              },
+              onProgress: value => {
+                caseProgress.push(value);
+                if (String(value.type || '').startsWith('turn.')) {
+                  caseStore.appendProgress(input.requestId, {
+                    id: `turn-${value.turnId}`,
+                    schema: value.progressSchema,
+                    type: value.type,
+                    status: value.status,
+                    turnId: value.turnId,
+                  });
+                  return;
+                }
+                const type = value.status === 'running'
+                  ? 'tool.started'
+                  : value.status === 'completed'
+                    ? 'tool.completed'
+                    : value.status === 'stopped'
+                      ? 'tool.stopped'
+                      : 'tool.failed';
+                caseStore.appendProgress(input.requestId, {
+                  id: `tool-${value.toolCallId}`,
+                  schema: value.progressSchema,
+                  type,
+                  label: '检索站内资料',
+                  status: value.status,
+                  durationMs: value.durationMs,
+                  turnId: value.turnId,
+                  callId: value.toolCallId,
+                  dispatchState: value.dispatchState,
+                  outcome: value.outcome,
+                  retrySafe: value.retrySafe,
+                  summary: value.summary,
+                });
+              },
+            });
+            caseStore.mergeUsageLedger(input.requestId, caseResult.moaUsage);
+            calls.markGenerated += 1;
+            caseStore.markGenerated(input.requestId, {
+              outputText: caseResult.text,
+              provider: 'deepseek',
+              model: 'deepseek-v4-pro',
+              usage: caseResult.moaUsage,
+            });
+            calls.markDelivering += 1;
+            caseStore.markDelivering(input.requestId);
+            calls.bindTrueMoaOutcomeAck += 1;
+            caseStore.bindTrueMoaOutcomeAck(
+              input.requestId,
+              caseResult.moaOutcome,
+            );
+          } catch (error) {
+            errorCode = String(error?.code || '');
+          }
+          caseStore.close();
+          caseStore = createXiaobanDeliveryStore({
+            dbPath: `${input.dbPath}.adversarial-${index}`,
+            mainDbPath: `${input.mainDbPath}.adversarial-${index}`,
+          });
+          const caseDurable = caseStore.getByIdForOwner(
+            input.ownerUser,
+            input.requestId,
+          );
+          const caseOutcomeAck = caseStore.getTrueMoaOutcomeAckForOwner(
+            input.ownerUser,
+            input.requestId,
+          );
+          caseStore.close();
+          adversarial.push({
+            name: adversarialCase.name,
+            expectedCode: adversarialCase.expectedCode,
+            errorCode,
+            snapshots: caseSnapshots,
+            progress: caseProgress,
+            calls,
+            durable: caseDurable,
+            outcomeAck: caseOutcomeAck,
+          });
+        }
+        process.stdout.write(JSON.stringify({
+          result,
+          snapshots,
+          progress,
+          durable,
+          outcomeAck,
+          adversarial,
+        }));
+        """
+    )
+    node = subprocess.run(
+        ["node", "--input-type=module", "--eval", node_program],
+        input=json.dumps({
+            "bridgePath": str(bridge_path),
+            "deliveryStorePath": str(delivery_store_path),
+            "requestSnapshotPath": str(request_snapshot_path),
+            "reasoningModePath": str(reasoning_mode_path),
+            "dbPath": str(tmp_path / "node-delivery.sqlite"),
+            "mainDbPath": str(tmp_path / "main.sqlite"),
+            "wire": wire,
+            "requestId": delivery_id,
+            "ownerUser": owner_user,
+            "conversationId": conversation_id,
+            "messageId": message_id,
+            "moaIdentity": {
+                "mode": TRUE_MOA_MODE,
+                "modeEpoch": epoch,
+                "presetId": TRUE_MOA_PRESET_ID,
+                "presetRevision": TRUE_MOA_PRESET_REVISION,
+            },
+        }),
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    assert node.returncode == 0, node.stderr
+    projected = json.loads(node.stdout)
+    assert projected["result"]["text"] == final_text
+    assert projected["result"]["finishReason"] == "stop"
+    assert projected["result"]["moaUsage"]["status"] == "completed"
+    assert projected["snapshots"] == [final_text]
+    assert len(projected["progress"]) == 4
+    assert projected["progress"][0]["type"] == "turn.started"
+    assert projected["progress"][-1]["type"] == "turn.completed"
+    tool_progress = [
+        item for item in projected["progress"] if item.get("toolCallId")
+    ]
+    assert [item["toolCallId"] for item in tool_progress] == [
+        tool_call_id,
+        tool_call_id,
+    ]
+    assert [item["status"] for item in tool_progress] == [
+        "running",
+        "completed",
+    ]
+    assert projected["durable"]["id"] == delivery_id
+    assert projected["durable"]["status"] == "delivering"
+    assert projected["durable"]["outputText"] == final_text
+    assert projected["durable"]["usage"]["status"] == "completed"
+    assert projected["outcomeAck"]["status"] == "pending"
+    assert projected["outcomeAck"]["outcomeId"] == (
+        projected["result"]["moaOutcome"]["outcomeId"]
+    )
+    assert projected["outcomeAck"]["outputDigest"] == (
+        projected["result"]["moaOutcome"]["outputDigest"]
+    )
+    assert [
+        item["type"] for item in projected["durable"]["progressEvents"]
+    ] == [
+        "request.completed",
+        "turn.completed",
+        "tool.completed",
+    ]
+    assert [item["name"] for item in projected["adversarial"]] == [
+        "conflicting-terminal",
+        "outcome-before-turn",
+        "usage-before-turn",
+        "aggregate-before-turn",
+        "v2-turn-v1-tool",
+    ]
+    for case in projected["adversarial"]:
+        assert case["errorCode"] == case["expectedCode"], case
+        assert case["snapshots"] == [], case
+        assert case["calls"] == {
+            "markGenerated": 0,
+            "markDelivering": 0,
+            "bindTrueMoaOutcomeAck": 0,
+        }, case
+        assert case["durable"]["outputText"] == "", case
+        assert case["durable"]["status"] not in {
+            "generated",
+            "delivering",
+            "delivered",
+        }, case
+        assert case["outcomeAck"] is None, case
+    cache._durable.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("control_case", "steer_prefix", "steer_suffix"),
+    [
+        ("approval", "", ""),
+        ("steer", "", ""),
+        ("steer-u0085", "\u0085", "\u0085"),
+        ("steer-ecma-trim", "\ufeff\u3000", "\u3000\ufeff"),
+    ],
+)
+async def test_chat_control_real_http_stream_is_accepted_by_node_bridge_and_store(
+    monkeypatch,
+    tmp_path,
+    caplog,
+    control_case,
+    steer_prefix,
+    steer_suffix,
+):
+    """Cross the real chat-control HTTP/SSE boundary into Node durability."""
+    from gateway.platforms import api_server
+    from tools import approval as approval_module
+
+    node_worktree = os.environ.get("XIAOBAN_R2B_NODE_WORKTREE", "").strip()
+    if not node_worktree:
+        pytest.skip("set XIAOBAN_R2B_NODE_WORKTREE for paired R2-C acceptance")
+    bridge_path = (
+        Path(node_worktree)
+        / "server/features/xiaoban-agent/xiaobanStreamBridge.mjs"
+    )
+    delivery_store_path = (
+        Path(node_worktree)
+        / "server/features/xiaoban-agent/xiaobanDeliveryStore.mjs"
+    )
+    request_snapshot_path = (
+        Path(node_worktree)
+        / "server/features/xiaoban-agent/xiaobanRequestSnapshot.mjs"
+    )
+    for paired_path in (
+        bridge_path,
+        delivery_store_path,
+        request_snapshot_path,
+    ):
+        if not paired_path.is_file():
+            pytest.fail(f"paired Node module missing: {paired_path}")
+
+    adapter = _adapter()
+    owner_user = f"r2c-control-{control_case}-owner"
+    conversation_id = f"r2c-control-{control_case}-conversation"
+    message_id = f"r2c-control-{control_case}-message"
+    delivery_id = "xbd_" + hashlib.sha256(
+        f"{owner_user}\n{conversation_id}\n{message_id}\n1".encode(),
+    ).hexdigest()[:40]
+    request_fingerprint = hashlib.sha256(
+        f"r2c-control:{control_case}".encode(),
+    ).hexdigest()
+    session_key = f"r2c-control-{control_case}-session"
+    headers = {
+        "Authorization": "Bearer sk-test-only",
+        "X-Xiaoban-Site-Id": "mystand-test-site",
+        "X-Xiaoban-User-Id": owner_user,
+        "X-Xiaoban-Toolset-Policy": "mystand-broker-basic",
+        "X-Xiaoban-Memory-Mode": "disabled",
+        "X-Xiaoban-Session-Key": session_key,
+        "X-Xiaoban-Session-Id": session_key,
+        "X-Xiaoban-Message-Id": message_id,
+        "X-Xiaoban-Attempt": "1",
+        "X-Xiaoban-Delivery-Id": delivery_id,
+        "X-Xiaoban-Delivery-Attempt": "1",
+        "X-Xiaoban-Request-Fingerprint": request_fingerprint,
+        TRUSTED_RUNTIME_CONTRACT_REVISION_HEADER:
+            TRUSTED_RUNTIME_CONTRACT_REVISION,
+        TRUSTED_RUNTIME_CONTRACT_DIGEST_HEADER:
+            TRUSTED_RUNTIME_CONTRACT_DIGEST,
+    }
+    turn_id = hashlib.sha256(
+        f"turn:{control_case}".encode(),
+    ).hexdigest()[:16]
+    call_id = f"call-r2c-control-{control_case}"
+    approval_id = f"approval-r2c-control-{control_case}"
+    control_id = f"control-r2c-control-{control_case}"
+    final_text = f"R2C_CONTROL_FINAL_{control_case.upper()}"
+    private_command = f"PRIVATE_R2C_COMMAND_{control_case.upper()}"
+    private_supplement_core = (
+        f"PRIVATE_R2C_SUPPLEMENT_{control_case.upper()}"
+    )
+    private_supplement = (
+        f"{steer_prefix}{private_supplement_core}{steer_suffix}"
+    )
+    canonical_supplement = (
+        private_supplement_core
+        if control_case == "steer-ecma-trim"
+        else private_supplement
+    )
+    is_steer = control_case.startswith("steer")
+    approval_ready = asyncio.Event()
+
+    class ControlledAgent:
+        def __init__(self) -> None:
+            self.steer_messages = []
+
+        def steer(self, message):
+            self.steer_messages.append(message)
+            return True
+
+    controlled_agent = ControlledAgent()
+    approval_entry = None
+
+    async def _controlled_run_agent(**kwargs):
+        nonlocal approval_entry
+        kwargs["agent_ref"][0] = controlled_agent
+        kwargs["tool_progress_callback"](
+            "turn.started",
+            delivery_id,
+            turn_id,
+            None,
+        )
+        kwargs["tool_start_callback"](
+            call_id,
+            "mystand_query",
+            {"query": private_command},
+        )
+        bridge = kwargs["agent_ref"][3]
+        approval_entry = approval_module._ApprovalEntry({
+            "approvalId": approval_id,
+        })
+        with approval_module._lock:
+            approval_module._gateway_queues.setdefault(
+                bridge.approval_session_key,
+                [],
+            ).append(approval_entry)
+        bridge.approval_notify({
+            "approvalId": approval_id,
+            "requestId": delivery_id,
+            "turnId": turn_id,
+            "callId": call_id,
+            "command": private_command,
+            "description": private_command,
+        })
+        approval_ready.set()
+        for _attempt in range(200):
+            if approval_entry.event.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert approval_entry.event.is_set() is True
+        assert approval_entry.result == (
+            "deny" if is_steer else "once"
+        )
+        if is_steer:
+            assert controlled_agent.steer_messages == [canonical_supplement]
+        kwargs["tool_complete_callback"](
+            call_id,
+            "mystand_query",
+            {"query": private_command},
+            {"ok": True},
+            {
+                "schema": "xiaoban.tool-result.v1",
+                "requestId": delivery_id,
+                "turnId": turn_id,
+                "callId": call_id,
+                "toolName": "mystand_query",
+                "dispatchState": "dispatched",
+                "outcome": "success",
+                "retrySafe": False,
+            },
+        )
+        kwargs["stream_delta_callback"](final_text)
+        ledger = AgentCallUsageLedger(
+            provider="local-fixture",
+            model="local-fixture",
+        )
+        provider_call_id = ledger.start_call()
+        ledger.mark_dispatched(provider_call_id)
+        ledger.finish_call(
+            provider_call_id,
+            status="completed",
+            usage={
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "total_tokens": 5,
+                "cached_input_tokens": 0,
+            },
+        )
+        ledger.set_status("completed")
+        return (
+            {
+                "final_response": final_text,
+                "completed": True,
+                "failed": False,
+                "partial": False,
+                "interrupted": False,
+                "messages": [],
+            },
+            {
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "total_tokens": 5,
+                "agent_calls": ledger.to_dict(),
+            },
+        )
+
+    cache = api_server._IdempotencyCache(
+        durable_path=str(tmp_path / f"r2c-control-{control_case}.sqlite"),
+    )
+    monkeypatch.setattr(api_server, "_idem_cache", cache)
+    app = web.Application()
+    app.router.add_post(
+        "/v1/chat/completions",
+        adapter._handle_chat_completions,
+    )
+    app.router.add_post(
+        "/v1/chat/completions/approval",
+        adapter._handle_chat_completion_approval,
+    )
+    app.router.add_post(
+        "/v1/chat/completions/steer",
+        adapter._handle_chat_completion_steer,
+    )
+    control_receipt = None
+    try:
+        async with TestClient(TestServer(app)) as client:
+            with monkeypatch.context() as context:
+                context.setattr(adapter, "_run_agent", _controlled_run_agent)
+                stream_task = asyncio.create_task(client.post(
+                    "/v1/chat/completions",
+                    headers=headers,
+                    json={
+                        "model": "local-fixture",
+                        "stream": True,
+                        "messages": [{
+                            "role": "user",
+                            "content": "local R2-C control fixture",
+                        }],
+                    },
+                ))
+                await asyncio.wait_for(approval_ready.wait(), timeout=2)
+                if not is_steer:
+                    control_response = await client.post(
+                        "/v1/chat/completions/approval",
+                        headers=headers,
+                        json={
+                            "idempotency_key": delivery_id,
+                            "controlId": control_id,
+                            "approvalId": approval_id,
+                            "choice": "once",
+                        },
+                    )
+                else:
+                    control_response = await client.post(
+                        "/v1/chat/completions/steer",
+                        headers=headers,
+                        json={
+                            "idempotency_key": delivery_id,
+                            "controlId": control_id,
+                            "approvalId": approval_id,
+                            "message": private_supplement,
+                        },
+                    )
+                control_receipt = await control_response.json()
+                stream_response = await asyncio.wait_for(
+                    stream_task,
+                    timeout=2,
+                )
+                wire = await asyncio.wait_for(
+                    stream_response.text(),
+                    timeout=2,
+                )
+    finally:
+        with approval_module._lock:
+            leftovers = approval_module._gateway_queues.pop(session_key, [])
+        for leftover in leftovers:
+            leftover.result = "deny"
+            leftover.event.set()
+
+    assert control_response.status == 202
+    assert control_receipt["status"] == "accepted"
+    assert control_receipt["controlId"] == control_id
+    assert wire.count(final_text) == 1
+    assert wire.count("data: [DONE]") == 1
+    assert private_command not in wire
+    assert private_command not in json.dumps(control_receipt, ensure_ascii=False)
+    assert private_supplement not in wire
+    assert private_supplement not in json.dumps(
+        control_receipt,
+        ensure_ascii=False,
+    )
+    request_index = wire.index("event: xiaoban.approval.request")
+    responded_index = wire.index("event: xiaoban.approval.responded")
+    tool_terminal_index = wire.index(
+        f'"toolCallId": "{call_id}", "status": "completed"'
+    )
+    final_index = wire.index(final_text)
+    turn_terminal_index = wire.index('"type": "turn.completed"')
+    if not is_steer:
+        assert control_receipt["event"]["summary"] == "已同意本次操作。"
+        assert (
+            request_index
+            < responded_index
+            < tool_terminal_index
+            < final_index
+            < turn_terminal_index
+        )
+    else:
+        message_digest = hashlib.sha256(
+            canonical_supplement.encode("utf-8"),
+        ).hexdigest()
+        assert control_receipt["messageDigest"] == message_digest
+        assert control_receipt["approvalId"] == approval_id
+        assert control_receipt["event"]["summary"] == (
+            "已收到内容补充，将在当前任务中继续处理。"
+        )
+        steer_index = wire.index("event: xiaoban.steer.accepted")
+        assert "内容补充已关闭原审批等待。" in wire
+        assert (
+            request_index
+            < responded_index
+            < steer_index
+            < tool_terminal_index
+            < final_index
+            < turn_terminal_index
+        )
+
+    node_program = textwrap.dedent(
+        """
+        import fs from 'node:fs';
+        import { createHash } from 'node:crypto';
+        import { pathToFileURL } from 'node:url';
+
+        const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+        const { consumeXiaobanChatSse } = await import(
+          pathToFileURL(input.bridgePath).href
+        );
+        const { createXiaobanDeliveryStore } = await import(
+          pathToFileURL(input.deliveryStorePath).href
+        );
+        const { createXiaobanRequestSnapshot } = await import(
+          pathToFileURL(input.requestSnapshotPath).href
+        );
+        const requestSnapshot = createXiaobanRequestSnapshot({
+          ownerUser: input.ownerUser,
+          conversationId: input.conversationId,
+          messageId: input.messageId,
+          attempt: 1,
+          message: 'local R2-C control fixture',
+          recentMessages: [],
+          attachments: [],
+          context: { pathname: '/r2c-control-fixture' },
+          requestFingerprint: input.requestFingerprint,
+          reasoningMode: 'normal',
+          modeEpoch: '0',
+        });
+        let store = createXiaobanDeliveryStore({
+          dbPath: input.dbPath,
+          mainDbPath: input.mainDbPath,
+        });
+        const begun = store.begin({
+          ownerUser: input.ownerUser,
+          conversationId: input.conversationId,
+          messageId: input.messageId,
+          fingerprint: input.requestFingerprint,
+          reasoningMode: 'normal',
+          requestSnapshot,
+        });
+        if (begun.delivery.id !== input.requestId) {
+          throw new Error('paired delivery identity drift');
+        }
+        store.markGenerating(input.requestId);
+        const encoded = new TextEncoder().encode(input.wire);
+        const body = new ReadableStream({
+          start(controller) {
+            let offset = 0;
+            let width = 1;
+            while (offset < encoded.length) {
+              const end = Math.min(encoded.length, offset + width);
+              controller.enqueue(encoded.slice(offset, end));
+              offset = end;
+              width = width === 31 ? 1 : width + 1;
+            }
+            controller.close();
+          },
+        });
+        const snapshots = [];
+        const progress = [];
+        const controlTypes = new Set([
+          'approval.request',
+          'approval.responded',
+          'steer.accepted',
+        ]);
+        const result = await consumeXiaobanChatSse(body, {
+          expectedRequestId: input.requestId,
+          expectedAgentUsage: true,
+          onSnapshot: value => {
+            snapshots.push(value);
+            store.replaceOutput(input.requestId, value);
+          },
+          onProgress: value => {
+            progress.push(value);
+            if (String(value.type || '').startsWith('turn.')) {
+              store.appendProgress(input.requestId, {
+                id: `turn-${value.turnId}`,
+                schema: value.progressSchema,
+                type: value.type,
+                status: value.status,
+                turnId: value.turnId,
+              });
+              return;
+            }
+            if (controlTypes.has(value.type)) {
+              store.appendProgress(input.requestId, {
+                id: value.type === 'steer.accepted'
+                  ? `steer-${value.controlId}`
+                  : `approval-${value.approvalId}`,
+                schema: value.progressSchema,
+                type: value.type,
+                status: value.status,
+                turnId: value.turnId,
+                callId: value.callId,
+                approvalId: value.approvalId,
+                controlId: value.controlId,
+                choice: value.choice,
+                messageDigest: value.messageDigest,
+                summary: value.summary,
+              });
+              return;
+            }
+            const type = value.status === 'running'
+              ? 'tool.started'
+              : value.status === 'completed'
+                ? 'tool.completed'
+                : value.status === 'stopped'
+                  ? 'tool.stopped'
+                  : 'tool.failed';
+            store.appendProgress(input.requestId, {
+              id: `tool-${value.toolCallId}`,
+              schema: value.progressSchema,
+              type,
+              label: '检索站内资料',
+              status: value.status,
+              durationMs: value.durationMs,
+              turnId: value.turnId,
+              callId: value.toolCallId,
+              dispatchState: value.dispatchState,
+              outcome: value.outcome,
+              retrySafe: value.retrySafe,
+              summary: value.summary,
+            });
+          },
+        });
+        store.mergeUsageLedger(input.requestId, result.agentUsage);
+        store.markGenerated(input.requestId, {
+          outputText: result.text,
+          provider: 'local-fixture',
+          model: 'local-fixture',
+          usage: result.agentUsage,
+        });
+        store.close();
+        store = createXiaobanDeliveryStore({
+          dbPath: input.dbPath,
+          mainDbPath: input.mainDbPath,
+        });
+        const durable = store.getByIdForOwner(
+          input.ownerUser,
+          input.requestId,
+        );
+        store.close();
+        const nodeCanonicalSupplement = String(input.rawSupplement).trim();
+        const nodeMessageDigest = createHash('sha256')
+          .update(nodeCanonicalSupplement, 'utf8')
+          .digest('hex');
+        process.stdout.write(JSON.stringify({
+          result,
+          snapshots,
+          progress,
+          durable,
+          nodeMessageDigest,
+        }));
+        """
+    )
+    node = subprocess.run(
+        ["node", "--input-type=module", "--eval", node_program],
+        input=json.dumps({
+            "bridgePath": str(bridge_path),
+            "deliveryStorePath": str(delivery_store_path),
+            "requestSnapshotPath": str(request_snapshot_path),
+            "dbPath": str(tmp_path / f"node-control-{control_case}.sqlite"),
+            "mainDbPath": str(tmp_path / "main.sqlite"),
+            "wire": wire,
+            "requestId": delivery_id,
+            "requestFingerprint": request_fingerprint,
+            "ownerUser": owner_user,
+            "conversationId": conversation_id,
+            "messageId": message_id,
+            "rawSupplement": private_supplement if is_steer else "",
+        }),
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    assert node.returncode == 0, node.stderr
+    assert private_command not in node.stdout + node.stderr
+    assert private_supplement not in node.stdout + node.stderr
+    assert private_supplement_core not in node.stdout + node.stderr
+    projected = json.loads(node.stdout)
+    assert projected["result"]["text"] == final_text
+    assert projected["result"]["finishReason"] == "stop"
+    assert projected["result"]["agentUsage"]["status"] == "completed"
+    assert projected["snapshots"] == [final_text]
+    assert projected["durable"]["status"] == "generated"
+    assert projected["durable"]["outputText"] == final_text
+    projected_progress = projected["progress"]
+    projected_request = next(
+        item for item in projected_progress
+        if item.get("type") == "approval.request"
+    )
+    assert projected_request["approvalId"] == approval_id
+    assert projected_request["callId"] == call_id
+    assert projected_request["status"] == "running"
+    assert projected_request["summary"] == "需要确认后继续当前操作。"
+    expected_control_types = ["approval.request", "approval.responded"]
+    if is_steer:
+        expected_control_types.append("steer.accepted")
+    assert [
+        item["type"]
+        for item in projected_progress
+        if item.get("type") in {
+            "approval.request",
+            "approval.responded",
+            "steer.accepted",
+        }
+    ] == expected_control_types
+    projected_request_index = projected_progress.index(projected_request)
+    projected_response_index = next(
+        index for index, item in enumerate(projected_progress)
+        if item.get("type") == "approval.responded"
+    )
+    projected_tool_terminal_index = next(
+        index for index, item in enumerate(projected_progress)
+        if item.get("toolCallId") == call_id
+        and item.get("status") == "completed"
+    )
+    projected_turn_terminal_index = next(
+        index for index, item in enumerate(projected_progress)
+        if item.get("type") == "turn.completed"
+    )
+    if not is_steer:
+        assert (
+            projected_request_index
+            < projected_response_index
+            < projected_tool_terminal_index
+            < projected_turn_terminal_index
+        )
+    else:
+        projected_steer_index = next(
+            index for index, item in enumerate(projected_progress)
+            if item.get("type") == "steer.accepted"
+        )
+        assert (
+            projected_request_index
+            < projected_response_index
+            < projected_steer_index
+            < projected_tool_terminal_index
+            < projected_turn_terminal_index
+        )
+    durable_events = projected["durable"]["progressEvents"]
+    responded = next(
+        item for item in durable_events if item["type"] == "approval.responded"
+    )
+    assert responded["approvalId"] == approval_id
+    assert responded["controlId"] == control_id
+    assert responded["choice"] == (
+        "deny" if is_steer else "once"
+    )
+    assert responded["pending"] is False
+    if not is_steer:
+        assert responded["summary"] == "已同意本次操作。"
+    else:
+        assert responded["summary"] == "内容补充已关闭原审批等待。"
+        persisted_steer = next(
+            item for item in durable_events if item["type"] == "steer.accepted"
+        )
+        assert persisted_steer["controlId"] == control_id
+        expected_message_digest = hashlib.sha256(
+            canonical_supplement.encode("utf-8"),
+        ).hexdigest()
+        assert persisted_steer["messageDigest"] == expected_message_digest
+        assert projected["nodeMessageDigest"] == expected_message_digest
+        assert persisted_steer["summary"] == "已将补充内容送入当前任务。"
+    assert any(item["type"] == "tool.completed" for item in durable_events)
+    assert any(item["type"] == "turn.completed" for item in durable_events)
+    cache._durable.close()
+    assert private_command not in caplog.text
+    assert private_supplement not in caplog.text
+    for fixture_path in tmp_path.iterdir():
+        if not fixture_path.is_file():
+            continue
+        fixture_bytes = fixture_path.read_bytes()
+        assert private_command.encode("utf-8") not in fixture_bytes
+        assert private_supplement.encode("utf-8") not in fixture_bytes
 
 
 
@@ -1596,6 +3236,9 @@ async def test_gateway_runs_two_fake_advisors_and_one_fake_final_with_one_ledger
     final_agent = _FakeFinalAgent()
     create_kwargs: dict[str, object] = {}
 
+    def interim_callback(*_args, **_kwargs):
+        return None
+
     def _fake_create_agent(**kwargs):
         create_kwargs.update(kwargs)
         final_agent.ephemeral_system_prompt = str(
@@ -1610,6 +3253,7 @@ async def test_gateway_runs_two_fake_advisors_and_one_fake_final_with_one_ledger
             {"role": "assistant", "content": "adjacent safe context"},
         ],
         session_id="gateway-test-session",
+        interim_assistant_callback=interim_callback,
         gateway_session_key="gateway-test-channel",
         request_headers=headers,
         agent_ref=[None, False, None],
@@ -1624,6 +3268,7 @@ async def test_gateway_runs_two_fake_advisors_and_one_fake_final_with_one_ledger
     )
     assert len(final_agent.run_calls) == 1
     assert create_kwargs["strict_no_automatic_paid_retry"] is True
+    assert create_kwargs["interim_assistant_callback"] is interim_callback
     assert final_agent.max_iterations == TRUE_MOA_FINAL_CALL_LIMIT
     assert final_agent.max_tokens == TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
     assert "[MY STAND TRUE MOA - UNTRUSTED ADVISORY CONTEXT]" in str(
@@ -4096,6 +5741,34 @@ def _assert_closed(result, usage, *, slot, wave, error):
         "wave": wave,
         "slot": slot,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guard_behavior", ["false", "raise"])
+async def test_final_commit_guard_failure_never_persists(
+    monkeypatch,
+    guard_behavior,
+):
+    case = _gateway_case(monkeypatch)
+
+    def _guard():
+        if guard_behavior == "raise":
+            raise RuntimeError("private lifecycle guard failure")
+        return False
+
+    result, usage = await _run_gateway_case(
+        case,
+        final_commit_guard=_guard,
+    )
+    _assert_closed(
+        result,
+        usage,
+        slot="failed",
+        wave="failed",
+        error="true MoA final executor failed",
+    )
+    assert case[3].saved_trajectories == case[3].persisted_sessions == []
+    assert case[3]._true_moa_cancel_controller.state == "failed"
 
 
 @pytest.mark.asyncio

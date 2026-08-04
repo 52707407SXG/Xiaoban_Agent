@@ -4258,9 +4258,30 @@ class AIAgent:
             return
         already_streamed = self._interim_content_was_streamed(visible)
         try:
-            cb(visible, already_streamed=already_streamed)
+            callback_kwargs: Dict[str, Any] = {
+                "already_streamed": already_streamed,
+            }
+            # The legacy callback contract is text + already_streamed.  A
+            # trusted adapter may explicitly opt in to the current assistant
+            # message's tool-call metadata so it can protect an entire
+            # parallel batch before any worker fires tool_start.  Unmarked
+            # callbacks keep receiving the exact legacy signature.
+            if getattr(cb, "_xiaoban_accepts_tool_calls", False):
+                tool_calls = assistant_msg.get("tool_calls")
+                callback_kwargs["tool_calls"] = (
+                    list(tool_calls)
+                    if isinstance(tool_calls, list)
+                    else []
+                )
+            cb(visible, **callback_kwargs)
         except Exception:
-            logger.debug("interim_assistant_callback error", exc_info=True)
+            if getattr(self, "_strict_no_automatic_paid_retry", False):
+                logger.debug(
+                    "interim_assistant_callback failed "
+                    "(category=callback_failure; strict details redacted)"
+                )
+            else:
+                logger.debug("interim_assistant_callback error", exc_info=True)
 
     def _fire_stream_delta(self, text: str) -> None:
         """Fire all registered stream delta callbacks (display + TTS)."""

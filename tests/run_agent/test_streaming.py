@@ -61,6 +61,118 @@ class TestStreamingAccumulator:
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_trusted_partial_stream_error_omits_reflected_steer_text(
+        self,
+        _mock_close,
+        mock_create,
+        monkeypatch,
+        caplog,
+        capsys,
+    ):
+        from run_agent import AIAgent
+
+        canary = "PRIVATE_STEER_REFLECTION_CANARY_9317"
+
+        def _reflected_error_stream():
+            yield _make_stream_chunk(content="bounded partial")
+            raise RuntimeError(f"provider echoed {canary}")
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = (
+            lambda *args, **kwargs: _reflected_error_stream()
+        )
+        mock_create.return_value = mock_client
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://example.com/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._strict_no_automatic_paid_retry = True
+        agent._trusted_steer_sensitive_turn = True
+        agent._disable_streaming = False
+        agent._current_streamed_assistant_text = "bounded partial"
+        agent._stream_diag_init = lambda: {
+            "started_at": 0.0,
+            "first_chunk_at": None,
+            "chunks": 0,
+            "bytes": 0,
+            "headers": {"x-request-id": f"provider-{canary}"},
+            "http_status": f"provider-{canary}",
+        }
+        monkeypatch.setenv("XIAOBAN_STREAM_RETRIES", "0")
+
+        response = agent._interruptible_streaming_api_call({})
+        agent._log_stream_retry(
+            kind="exhausted",
+            error=RuntimeError(f"provider echoed {canary}"),
+            attempt=1,
+            max_attempts=1,
+            mid_tool_call=False,
+            diag={
+                "started_at": 0.0,
+                "first_chunk_at": None,
+                "chunks": 0,
+                "bytes": 0,
+                "headers": {"x-request-id": f"provider-{canary}"},
+                "http_status": f"provider-{canary}",
+            },
+        )
+
+        assert response.choices[0].message.content == "bounded partial"
+        assert canary not in caplog.text
+        assert canary not in capsys.readouterr().out
+        assert "provider text withheld" in caplog.text
+        assert "http_status=withheld-for-trusted-turn" in caplog.text
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_trusted_pre_delta_stream_error_omits_reflected_steer_text(
+        self,
+        _mock_close,
+        mock_create,
+        monkeypatch,
+        caplog,
+    ):
+        from run_agent import AIAgent
+
+        canary = "PRIVATE_PRE_DELTA_STEER_CANARY_2648"
+
+        def _reflected_error_stream():
+            if False:
+                yield None
+            raise RuntimeError(f"provider echoed {canary}")
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = (
+            lambda *args, **kwargs: _reflected_error_stream()
+        )
+        mock_create.return_value = mock_client
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://example.com/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._strict_no_automatic_paid_retry = True
+        agent._trusted_steer_sensitive_turn = True
+        agent._disable_streaming = False
+        monkeypatch.setenv("XIAOBAN_STREAM_RETRIES", "0")
+
+        with pytest.raises(RuntimeError, match="provider echoed"):
+            agent._interruptible_streaming_api_call({})
+
+        assert canary not in caplog.text
+        assert "provider text withheld" in caplog.text
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
     def test_text_only_response(self, mock_close, mock_create):
         """Text-only stream produces correct response shape."""
         from run_agent import AIAgent

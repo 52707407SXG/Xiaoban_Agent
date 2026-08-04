@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import unicodedata
+import uuid
 from typing import Optional
 from xiaoban_cli.config import cfg_get
 
@@ -693,7 +694,8 @@ class _ApprovalEntry:
 
     def __init__(self, data: dict):
         self.event = threading.Event()
-        self.data = data          # command, description, pattern_keys, …
+        self.data = dict(data or {})
+        self.data.setdefault("approvalId", f"approval_{uuid.uuid4().hex}")
         self.result: Optional[str] = None  # "once"|"session"|"always"|"deny"
 
 
@@ -753,6 +755,57 @@ def resolve_gateway_approval(session_key: str, choice: str,
         entry.result = choice
         entry.event.set()
     return len(targets)
+
+
+def resolve_gateway_approval_exact(
+    session_key: str,
+    approval_id: str,
+    choice: str,
+    *,
+    before_unblock=None,
+) -> int:
+    """Resolve exactly one queued approval without any FIFO fallback.
+
+    Chat control UIs carry the opaque ``approvalId`` emitted with the request.
+    A duplicate or stale click must never consume a later approval in the same
+    session.  ``before_unblock`` is invoked after the exact entry is removed
+    from the queue but before its Event is set, allowing a transport to enqueue
+    the public response frame before the tool thread can continue.
+    """
+
+    expected_id = str(approval_id or "").strip()
+    if not expected_id:
+        return 0
+    with _lock:
+        queue = _gateway_queues.get(session_key)
+        if not queue:
+            return 0
+        entry = next(
+            (
+                candidate
+                for candidate in queue
+                if str(candidate.data.get("approvalId") or "") == expected_id
+            ),
+            None,
+        )
+        if entry is None:
+            return 0
+        queue.remove(entry)
+        if not queue:
+            _gateway_queues.pop(session_key, None)
+
+    try:
+        if before_unblock is not None:
+            before_unblock(dict(entry.data))
+    except Exception:
+        # Never strand the tool executor if the transport failed while trying
+        # to publish the response.  Deny is the safe internal fallback.
+        entry.result = "deny"
+        entry.event.set()
+        raise
+    entry.result = choice
+    entry.event.set()
+    return 1
 
 
 def has_blocking_approval(session_key: str) -> bool:
@@ -1369,7 +1422,27 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     primary_key = approval_data.get("pattern_key", "")
     all_keys = approval_data.get("pattern_keys", [primary_key])
 
-    entry = _ApprovalEntry(approval_data)
+    correlated_data = dict(approval_data or {})
+    correlated_data.setdefault("turnId", _approval_turn_id.get())
+    correlated_data.setdefault("callId", _approval_tool_call_id.get())
+    try:
+        from xiaoban.trusted_runtime.turns import current_turn
+
+        active_turn = current_turn()
+    except Exception:
+        active_turn = None
+    if active_turn is not None:
+        correlated_data.setdefault(
+            "requestId",
+            str(getattr(active_turn, "request_id", "") or ""),
+        )
+        correlated_data["turnId"] = str(
+            correlated_data.get("turnId")
+            or getattr(active_turn, "turn_id", "")
+            or ""
+        )
+    entry = _ApprovalEntry(correlated_data)
+    approval_data = entry.data
     with _lock:
         _gateway_queues.setdefault(session_key, []).append(entry)
 

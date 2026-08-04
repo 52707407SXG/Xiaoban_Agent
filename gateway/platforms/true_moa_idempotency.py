@@ -42,6 +42,7 @@ class _IdempotencyCache(_TrueMoAUsageDrainMixin):
         self._store = OrderedDict()
         self._inflight: Dict[tuple[str, str], "asyncio.Task[Any]"] = {}
         self._agent_refs: Dict[tuple[str, str], list] = {}
+        self._control_refs: Dict[tuple[str, str], tuple[str, str]] = {}
         self._stopped: Dict[str, float] = {}
         self._initialize_usage_drain_state(usage_drain_lease_seconds)
         self._ttl = ttl_seconds
@@ -209,6 +210,15 @@ class _IdempotencyCache(_TrueMoAUsageDrainMixin):
         while len(self._stopped) > self._max:
             oldest = min(self._stopped, key=self._stopped.get)
             self._stopped.pop(oldest, None)
+        self._control_refs = {
+            control_key: inflight_key
+            for control_key, inflight_key in self._control_refs.items()
+            if (
+                inflight_key in self._inflight
+                and not self._inflight[inflight_key].done()
+                and inflight_key in self._agent_refs
+            )
+        }
         with self._usage_drains_lock:
             self._closed_usage_drain_owners = {
                 key: expires_at
@@ -222,6 +232,23 @@ class _IdempotencyCache(_TrueMoAUsageDrainMixin):
                     key=self._closed_usage_drain_owners.get,
                 )
                 self._closed_usage_drain_owners.pop(oldest, None)
+
+    def load_stream_replay(
+        self,
+        key: str,
+        fingerprint: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return a copy of a same-process stream envelope, never durable data."""
+
+        self._purge()
+        item = self._store.get(key)
+        if item is None or item.get("fp") != fingerprint:
+            return None
+        envelope = item.get("stream_replay")
+        if not isinstance(envelope, Mapping):
+            return None
+        self._store.move_to_end(key)
+        return copy.deepcopy(dict(envelope))
 
     def lookup_state(
         self,
@@ -324,6 +351,8 @@ class _IdempotencyCache(_TrueMoAUsageDrainMixin):
         *,
         durable: bool = False,
         outcome_binding: Optional[Mapping[str, Any]] = None,
+        before_response_cache=None,
+        control_fingerprint: Optional[str] = None,
     ):
         state = self.lookup_state(key, fingerprint, durable=durable)
         if state == "conflict":
@@ -533,12 +562,27 @@ class _IdempotencyCache(_TrueMoAUsageDrainMixin):
                             raise RuntimeError(
                                 "durable terminal usage ledger is required"
                             )
+                    stream_replay = (
+                        before_response_cache(resp)
+                        if before_response_cache is not None
+                        else None
+                    )
+
                     import time as _t
 
                     self._store[key] = {
                         "resp": resp,
                         "fp": fingerprint,
                         "ts": _t.time(),
+                        **(
+                            {
+                                "stream_replay": copy.deepcopy(
+                                    dict(stream_replay)
+                                )
+                            }
+                            if isinstance(stream_replay, Mapping)
+                            else {}
+                        ),
                     }
                     self._purge()
                     return resp
@@ -557,6 +601,11 @@ class _IdempotencyCache(_TrueMoAUsageDrainMixin):
             self._inflight[inflight_key] = task
             if agent_ref is not None:
                 self._agent_refs[inflight_key] = agent_ref
+                if str(control_fingerprint or ""):
+                    self._control_refs[(
+                        key,
+                        str(control_fingerprint),
+                    )] = inflight_key
 
             def _clear_inflight(done_task: "asyncio.Task[Any]") -> None:
                 if self._inflight.get(inflight_key) is done_task:
@@ -572,10 +621,43 @@ class _IdempotencyCache(_TrueMoAUsageDrainMixin):
                     if release_usage_drain:
                         self._release_usage_drain_lease(key)
                     self._agent_refs.pop(inflight_key, None)
+                    stale_control_keys = [
+                        control_key
+                        for control_key, bound_inflight_key
+                        in self._control_refs.items()
+                        if bound_inflight_key == inflight_key
+                    ]
+                    for control_key in stale_control_keys:
+                        self._control_refs.pop(control_key, None)
 
             task.add_done_callback(_clear_inflight)
 
         return await asyncio.shield(task)
+
+    def active_agent_ref(
+        self,
+        key: str,
+        control_fingerprint: str,
+    ) -> Optional[list]:
+        """Return only the exact active Agent bound to one trusted request.
+
+        The public request fingerprint is intentionally paired with the
+        already owner-scoped delivery key.  Looking up by delivery alone would
+        let a stale or cross-owner control request reach the wrong in-flight
+        tool loop.
+        """
+
+        self._purge()
+        inflight_key = self._control_refs.get((
+            str(key or ""),
+            str(control_fingerprint or ""),
+        ))
+        if inflight_key is None:
+            return None
+        task = self._inflight.get(inflight_key)
+        if task is None or task.done():
+            return None
+        return self._agent_refs.get(inflight_key)
 
     def stop(self, key: str, *, durable: bool = False) -> bool:
         """Interrupt the one in-flight computation for a scoped key."""

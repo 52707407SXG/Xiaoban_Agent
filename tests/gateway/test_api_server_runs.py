@@ -393,6 +393,63 @@ class TestRunEvents:
         )
 
     @pytest.mark.asyncio
+    async def test_approval_id_uses_exact_resolver_without_fifo_fallback(
+        self,
+        adapter,
+    ):
+        app = _create_runs_app(adapter)
+        run_id = "run_exact_approval"
+        adapter._run_statuses[run_id] = {
+            "run_id": run_id,
+            "status": "waiting_for_approval",
+        }
+        adapter._run_approval_sessions[run_id] = "session-exact"
+        adapter._run_streams[run_id] = asyncio.Queue()
+        callback_seen = []
+
+        def _resolve_exact(
+            session_key,
+            approval_id,
+            choice,
+            *,
+            before_unblock,
+        ):
+            callback_seen.append((session_key, approval_id, choice))
+            before_unblock({"approvalId": approval_id})
+            return 1
+
+        async with TestClient(TestServer(app)) as cli:
+            with (
+                patch(
+                    "tools.approval.resolve_gateway_approval_exact",
+                    side_effect=_resolve_exact,
+                ),
+                patch(
+                    "tools.approval.resolve_gateway_approval",
+                ) as fifo_resolver,
+            ):
+                approval_resp = await cli.post(
+                    f"/v1/runs/{run_id}/approval",
+                    json={
+                        "choice": "once",
+                        "approvalId": "approval-exact",
+                        "controlId": "control-exact",
+                    },
+                )
+
+        assert approval_resp.status == 200
+        assert callback_seen == [(
+            "session-exact",
+            "approval-exact",
+            "once",
+        )]
+        fifo_resolver.assert_not_called()
+        queued = adapter._run_streams[run_id].get_nowait()
+        assert queued["event"] == "approval.responded"
+        assert queued["approvalId"] == "approval-exact"
+        assert queued["controlId"] == "control-exact"
+
+    @pytest.mark.asyncio
     async def test_events_not_found_returns_404(self, adapter):
         app = _create_runs_app(adapter)
         async with TestClient(TestServer(app)) as cli:
