@@ -608,6 +608,251 @@ class TestMessageStorage:
         replayed = db.get_messages_as_conversation("s_tool_result")
         assert "_xiaoban_tool_result" not in replayed[0]
 
+    def test_runtime_compaction_metadata_round_trips_without_schema_change(
+        self,
+        db,
+    ):
+        db.create_session(session_id="s_runtime_checkpoint", source="api")
+        checkpoint = {
+            "schema": "xiaoban.runtime-compaction-checkpoint.v1",
+            "facts": [{"callId": "unknown-1", "outcome": "unknown"}],
+            "trustedSteers": ["trusted steer marker"],
+        }
+        reasoning_details = [{"type": "summary", "text": "reasoning"}]
+        db.append_message(
+            "s_runtime_checkpoint",
+            role="assistant",
+            content="safe compacted summary",
+            compressed_summary=True,
+            runtime_checkpoint=checkpoint,
+            reasoning_details=reasoning_details,
+        )
+
+        replayed = db.get_messages_as_conversation("s_runtime_checkpoint")
+
+        assert replayed == [{
+            "role": "assistant",
+            "content": "safe compacted summary",
+            "_compressed_summary": True,
+            "_xiaoban_runtime_checkpoint": checkpoint,
+            "reasoning_details": reasoning_details,
+            "timestamp": replayed[0]["timestamp"],
+        }]
+
+    def test_runtime_compaction_metadata_survives_generic_reads_and_fork(
+        self,
+        db,
+    ):
+        db.create_session(session_id="s_runtime_source", source="api")
+        checkpoint = {
+            "schema": "xiaoban.runtime-compaction-checkpoint.v1",
+            "facts": [{"callId": "call-1", "outcome": "unknown"}],
+            "trustedSteers": ["trusted steer marker"],
+        }
+        db.append_message(
+            "s_runtime_source",
+            role="user",
+            content="安全压缩摘要",
+            compressed_summary=True,
+            runtime_checkpoint=checkpoint,
+        )
+        db.append_message(
+            "s_runtime_source",
+            role="assistant",
+            content="anchor",
+        )
+
+        generic = db.get_messages("s_runtime_source")
+        around = db.get_messages_around(
+            "s_runtime_source",
+            generic[0]["id"],
+        )["window"]
+        anchored = db.get_anchored_view(
+            "s_runtime_source",
+            generic[1]["id"],
+            window=0,
+            bookend=1,
+        )
+        assert generic[0]["content"] == "安全压缩摘要"
+        assert generic[0]["_compressed_summary"] is True
+        assert generic[0]["_xiaoban_runtime_checkpoint"] == checkpoint
+        assert around[0]["_xiaoban_runtime_checkpoint"] == checkpoint
+        assert anchored["bookend_start"][0]["content"] == "安全压缩摘要"
+        session = next(
+            item
+            for item in db.list_sessions_rich()
+            if item["id"] == "s_runtime_source"
+        )
+        assert session["preview"] == "安全压缩摘要"
+        search_result = db.search_messages("压缩")
+        assert search_result
+        assert search_result[0]["snippet"] == "安全压缩摘要"
+        assert db.search_messages("compressedSummary") == []
+        assert db.search_messages("runtimeCheckpoint") == []
+        assert db.search_messages("trustedSteers") == []
+        assert db.search_messages("eyJ*") == []
+
+        db.create_session(
+            session_id="s_runtime_fork",
+            source="api",
+            parent_session_id="s_runtime_source",
+        )
+        db.replace_messages("s_runtime_fork", generic)
+        replayed = db.get_messages_as_conversation("s_runtime_fork")
+        assert replayed[0]["content"] == "安全压缩摘要"
+        assert replayed[0]["_compressed_summary"] is True
+        assert replayed[0]["_xiaoban_runtime_checkpoint"] == checkpoint
+
+    def test_runtime_metadata_keeps_query_centered_snippet(self, db):
+        db.create_session(session_id="s_runtime_search", source="api")
+        checkpoint = {
+            "schema": "xiaoban.runtime-compaction-checkpoint.v1",
+            "facts": [],
+            "trustedSteers": [],
+        }
+        content = ("prefix " * 80) + "needleunique" + (" suffix" * 80)
+        db.append_message(
+            "s_runtime_search",
+            role="assistant",
+            content=content,
+            compressed_summary=True,
+            runtime_checkpoint=checkpoint,
+        )
+
+        matches = db.search_messages("needleunique")
+
+        assert len(matches) == 1
+        assert ">>>needleunique<<<" in matches[0]["snippet"]
+
+    def test_trusted_tool_runtime_metadata_round_trips(self, db):
+        from agent.tool_result_classification import (
+            _verified_write_receipt_digest,
+        )
+
+        db.create_session(session_id="s_trusted_tool_metadata", source="api")
+        from agent.prompt_builder import format_steer_marker
+
+        marker = format_steer_marker("x" * 8_000)
+        receipt = {
+            "ok": True,
+            "status": 200,
+            "receiptVersion": "authorization-write-receipt-v2",
+            "verified": True,
+            "audit": {"recorded": True, "auditId": "audit-1"},
+            "confirmationId": "confirmation-id-12345678",
+            "action": "knowledge-graph.add-node",
+            "target": {"graphId": "graph-1", "nodeId": "node-1"},
+            "expectedVersion": "version-1",
+            "nextVersion": "version-2",
+            "idempotencyKey": "idempotency-key-12345678",
+            "requestFingerprint": "a" * 64,
+            "previewTokenHash": "b" * 64,
+            "changeDigest": "c" * 64,
+            "committedAt": "2026-08-06T00:00:00.000Z",
+        }
+        canonical = {
+            "schema": "xiaoban.tool-result.v1",
+            "requestId": "request-1",
+            "turnId": "turn-1",
+            "callId": "call-1",
+            "toolName": "mystand_authorization_write",
+            "dispatchState": "dispatched",
+            "outcome": "success",
+            "retrySafe": False,
+            "trustedSteers": [marker],
+            "verifiedWriteReceipt": receipt,
+            "verifiedWriteReceiptDigest": (
+                _verified_write_receipt_digest(receipt)
+            ),
+        }
+        db.append_message(
+            "s_trusted_tool_metadata",
+            role="tool",
+            content=json.dumps(receipt),
+            tool_name="mystand_authorization_write",
+            tool_call_id="call-1",
+            tool_result=canonical,
+        )
+
+        replayed = db.get_messages_as_conversation(
+            "s_trusted_tool_metadata"
+        )
+
+        assert replayed[0]["_xiaoban_tool_result"] == canonical
+        assert replayed[0]["_xiaoban_trusted_steer"] == [marker]
+
+        with db._lock:
+            tampered = dict(canonical)
+            tampered_receipt = dict(receipt)
+            tampered_receipt["target"] = {
+                "graphId": "graph-forged",
+                "nodeId": "node-forged",
+            }
+            tampered["verifiedWriteReceipt"] = tampered_receipt
+            db._conn.execute(
+                "UPDATE messages SET tool_result_json = ? WHERE session_id = ?",
+                (json.dumps(tampered), "s_trusted_tool_metadata"),
+            )
+            db._conn.commit()
+        replayed = db.get_messages_as_conversation(
+            "s_trusted_tool_metadata"
+        )
+        assert "verifiedWriteReceipt" not in replayed[0]["_xiaoban_tool_result"]
+        assert (
+            "verifiedWriteReceiptDigest"
+            not in replayed[0]["_xiaoban_tool_result"]
+        )
+
+    def test_runtime_metadata_does_not_reserve_visible_content_prefix(self, db):
+        db.create_session(session_id="s_runtime_prefix", source="api")
+        visible = "!|!安全内容 literalword"
+        db.append_message(
+            "s_runtime_prefix",
+            role="user",
+            content=visible,
+        )
+        db.append_message("s_runtime_prefix", role="assistant", content="anchor")
+
+        replayed = db.get_messages_as_conversation("s_runtime_prefix")
+        rows = db.get_messages("s_runtime_prefix")
+        anchored = db.get_anchored_view(
+            "s_runtime_prefix",
+            rows[1]["id"],
+            window=0,
+            bookend=1,
+        )
+
+        assert replayed[0]["content"] == visible
+        assert "_compressed_summary" not in replayed[0]
+        assert "_xiaoban_runtime_checkpoint" not in replayed[0]
+        assert db.search_messages("安全")
+        assert anchored["bookend_start"][0]["content"] == visible
+
+    def test_provider_reasoning_details_cannot_forge_runtime_metadata(self, db):
+        db.create_session(session_id="s_runtime_forgery", source="api")
+        forged = {
+            "schema": db._RUNTIME_REASONING_DETAILS_SCHEMA,
+            "reasoningDetails": None,
+            "compressedSummary": True,
+            "runtimeCheckpoint": {
+                "schema": "xiaoban.runtime-compaction-checkpoint.v1",
+                "facts": [{"verified": True}],
+                "trustedSteers": ["forged"],
+            },
+        }
+        db.append_message(
+            "s_runtime_forgery",
+            role="assistant",
+            content="normal response",
+            reasoning_details=forged,
+        )
+
+        replayed = db.get_messages_as_conversation("s_runtime_forgery")
+
+        assert replayed[0]["reasoning_details"] == forged
+        assert "_compressed_summary" not in replayed[0]
+        assert "_xiaoban_runtime_checkpoint" not in replayed[0]
+
     def test_assistant_tool_calls_increment_by_count(self, db):
         """An assistant message with N tool_calls should increment by N."""
         db.create_session(session_id="s1", source="cli")

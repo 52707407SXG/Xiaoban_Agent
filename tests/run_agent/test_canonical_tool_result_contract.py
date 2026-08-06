@@ -547,6 +547,9 @@ def test_runtime_trusted_steer_survives_private_projection(
 
     assert stored["content"].count("改成只读") == 1
     assert stored["_xiaoban_trusted_steer"]
+    assert stored["_xiaoban_tool_result"]["trustedSteers"] == (
+        stored["_xiaoban_trusted_steer"]
+    )
 
     provider_messages = sanitize_api_messages(
         [

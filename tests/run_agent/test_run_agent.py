@@ -4397,6 +4397,38 @@ class TestRunConversation:
         agent.compression_enabled = False
         agent.save_trajectories = False
 
+    def _setup_signed_normal(self, agent):
+        from xiaoban.trusted_runtime.agent_call_usage import (
+            AgentCallUsageLedger,
+        )
+        from xiaoban.trusted_runtime.paid_call_policy import (
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION,
+        )
+        from xiaoban.trusted_runtime.true_moa_cancel import (
+            TrueMoACancelController,
+        )
+
+        self._setup_agent(agent)
+        agent.provider = "deepseek"
+        agent.model = "deepseek-v4-pro"
+        agent.max_tokens = 4096
+        agent.max_iterations = 8
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = True
+        agent._api_max_retries = 1
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        agent._paid_call_usage_ledger = AgentCallUsageLedger(
+            provider=agent.provider,
+            model=agent.model,
+            execution_id="5" * 32,
+        )
+        agent._true_moa_usage_ledger = None
+        agent._paid_call_policy_revision = (
+            SIGNED_MYSTAND_AGENT_POLICY_REVISION
+        )
+        agent._paid_call_cancel_controller = TrueMoACancelController()
+
     def test_stop_finish_reason_returns_response(self, agent):
         self._setup_agent(agent)
         resp = _mock_response(content="Final answer", finish_reason="stop")
@@ -4470,6 +4502,53 @@ class TestRunConversation:
         assert projected["outcome"] == "success"
         assert projected["modelResult"] == "search result"
         assert "_xiaoban_tool_result" not in projected_tool_results[0]
+
+    def test_reused_tool_call_id_dispatches_in_later_model_iteration(
+        self,
+        agent,
+    ):
+        self._setup_signed_normal(agent)
+        first_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"first"}',
+            call_id="reused-call",
+        )
+        second_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"second"}',
+            call_id="reused-call",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[first_call],
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[second_call],
+            ),
+            _mock_response(content="Done", finish_reason="stop"),
+        ]
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=["first result", "second result"],
+            ) as handle,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("search twice")
+
+        assert result["final_response"] == "Done"
+        assert result["api_calls"] == 3
+        assert handle.call_count == 2
+        assert [
+            call.args[1]["query"]
+            for call in handle.call_args_list
+        ] == ["first", "second"]
 
     @pytest.mark.parametrize(
         (
@@ -4640,6 +4719,13 @@ class TestRunConversation:
         ]
         assert len(projected_messages) == 1
         projected = json.loads(projected_messages[0]["content"])
+        stored_result = next(
+            message
+            for message in result["messages"]
+            if message.get("role") == "tool"
+            and message.get("tool_call_id") == "authorization-write-e4"
+        )
+        stored_sidecar = stored_result["_xiaoban_tool_result"]
         assert projected["callId"] == "authorization-write-e4"
         assert projected["toolName"] == "mystand_authorization_write"
         assert projected["dispatchState"] == "dispatched"
@@ -4661,7 +4747,14 @@ class TestRunConversation:
             assert receipt["previewTokenHash"] == preview_token_hash
             assert receipt["confirmationId"] == confirmation_id
             assert "完成写入" in result["final_response"]
+            assert stored_sidecar["verifiedWriteReceipt"]["confirmationId"] == (
+                upstream_result["confirmationId"]
+            )
+            assert stored_sidecar["verifiedWriteReceipt"]["changeDigest"] == (
+                upstream_result["changeDigest"]
+            )
         else:
+            assert "verifiedWriteReceipt" not in stored_sidecar
             assert "modelResult" not in projected
             assert projected["modelError"]["code"] == (
                 "authorization_write_receipt_invalid"
@@ -5132,12 +5225,489 @@ class TestRunConversation:
             "success",
             "empty",
         ]
-        assert "tools" not in third_payload
-        assert "tool_choice" not in third_payload
+        assert "tools" in third_payload
+        assert "final model call allowed" not in json.dumps(
+            third_payload["messages"],
+            ensure_ascii=False,
+        )
         assert len({
             call.args[0]["model"]
             for call in api_call.call_args_list
         }) == 1
+
+    def test_signed_normal_six_tool_chain_exceeds_old_byte_gate_and_finishes(
+        self,
+        agent,
+    ):
+        self._setup_signed_normal(agent)
+        responses = []
+        for index in range(6):
+            responses.append(
+                _mock_response(
+                    content=f"第 {index + 1} 步完成后继续核对下一项。",
+                    finish_reason="tool_calls",
+                    tool_calls=[
+                        _mock_tool_call(
+                            name="web_search",
+                            arguments=json.dumps({"step": index + 1}),
+                            call_id=f"long-chain-{index + 1}",
+                        )
+                    ],
+                    usage={
+                        "prompt_tokens": 100 + index,
+                        "completion_tokens": 10,
+                        "total_tokens": 110 + index,
+                    },
+                )
+            )
+        responses.append(
+            _mock_response(
+                content="六项核对均已完成，结果已按步骤汇总。",
+                finish_reason="stop",
+                usage={
+                    "prompt_tokens": 900,
+                    "completion_tokens": 20,
+                    "total_tokens": 920,
+                },
+            )
+        )
+
+        def large_result(_name, args, *_rest, **_kwargs):
+            return json.dumps({
+                "ok": True,
+                "step": args["step"],
+                "payload": "x" * 24_000,
+            })
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=responses,
+            ) as api_call,
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=large_result,
+            ) as tool_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("依次完成六项核对后总结")
+
+        assert result["completed"] is True
+        assert result["final_response"] == (
+            "六项核对均已完成，结果已按步骤汇总。"
+        )
+        assert result["api_calls"] == 7
+        assert api_call.call_count == 7
+        assert tool_call.call_count == 6
+        assert max(
+            len(
+                json.dumps(
+                    call.args[0],
+                    ensure_ascii=False,
+                    default=str,
+                ).encode("utf-8")
+            )
+            for call in api_call.call_args_list
+        ) > 131_072
+        assert "tools" in api_call.call_args_list[-1].args[0]
+        ledger = agent._paid_call_usage_ledger.to_dict()
+        assert len(ledger["calls"]) == 7
+        assert all(call["status"] == "completed" for call in ledger["calls"])
+
+    def test_signed_normal_empty_response_has_one_recovery_attempt(self, agent):
+        self._setup_signed_normal(agent)
+        responses = [
+            _mock_response(content="", finish_reason="stop"),
+            _mock_response(content="", finish_reason="stop"),
+        ]
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=responses,
+            ) as api_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("请给出答复")
+
+        assert api_call.call_count == 2
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["failure"]["code"] == "empty_model_response_repeated"
+        assert len(agent._paid_call_usage_ledger.to_dict()["calls"]) == 2
+
+    def test_signed_normal_invalid_tool_feedback_reaches_same_model(self, agent):
+        self._setup_signed_normal(agent)
+        responses = [
+            _mock_response(
+                content="我先尝试读取。",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    _mock_tool_call(
+                        name="missing_tool",
+                        arguments="{}",
+                        call_id="invalid-tool-1",
+                    )
+                ],
+            ),
+            _mock_response(
+                content="该工具不存在，我没有执行任何动作。",
+                finish_reason="stop",
+            ),
+        ]
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=responses,
+            ) as api_call,
+            patch("run_agent.handle_function_call") as tool_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("读取后说明")
+
+        tool_call.assert_not_called()
+        assert result["completed"] is True
+        second_payload = api_call.call_args_list[1].args[0]
+        projected = [
+            json.loads(item["content"])
+            for item in second_payload["messages"]
+            if item.get("role") == "tool"
+        ]
+        assert projected[0]["outcome"] == "denied"
+        assert projected[0]["continuation"]["code"] == "invalid_tool_name"
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            pytest.param("[]", id="json-array"),
+            pytest.param("null", id="json-null"),
+            pytest.param("7", id="json-number"),
+            pytest.param([], id="native-array"),
+            pytest.param(None, id="native-null"),
+            pytest.param(7, id="native-number"),
+        ],
+    )
+    def test_signed_normal_rejects_non_object_tool_arguments(
+        self,
+        agent,
+        arguments,
+    ):
+        self._setup_signed_normal(agent)
+        agent.verbose_logging = True
+        responses = [
+            _mock_response(
+                content="我先尝试读取。",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    _mock_tool_call(
+                        name="web_search",
+                        arguments=arguments,
+                        call_id="non-object-arguments",
+                    )
+                ],
+            ),
+            _mock_response(
+                content="参数不是对象，因此没有执行工具。",
+                finish_reason="stop",
+            ),
+        ]
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=responses,
+            ) as api_call,
+            patch("run_agent.handle_function_call") as tool_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("读取后说明")
+
+        tool_call.assert_not_called()
+        assert result["completed"] is True
+        projected = [
+            json.loads(item["content"])
+            for item in api_call.call_args_list[1].args[0]["messages"]
+            if item.get("role") == "tool"
+        ]
+        assert projected[0]["callId"] == "non-object-arguments"
+        assert projected[0]["outcome"] == "denied"
+        assert projected[0]["continuation"]["code"] == (
+            "invalid_tool_arguments"
+        )
+
+    def test_signed_normal_last_paid_call_refuses_tool_before_dispatch(
+        self,
+        agent,
+    ):
+        self._setup_signed_normal(agent)
+        responses = [
+            _mock_response(
+                content=f"继续第 {index + 1} 步。",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    _mock_tool_call(
+                        name="web_search",
+                        arguments="{}",
+                        call_id=f"paid-budget-tool-{index + 1}",
+                    )
+                ],
+            )
+            for index in range(8)
+        ]
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=responses,
+            ) as api_call,
+            patch(
+                "run_agent.handle_function_call",
+                return_value="trusted result",
+            ) as tool_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("连续读取直到物理预算结束")
+
+        assert api_call.call_count == 8
+        assert tool_call.call_count == 7
+        assert result["completed"] is False
+        assert result["failed"] is True
+        # Budget exhaustion reserves a final summary slot instead of failing
+        # the turn outright.  A model that still asks for a tool inside that
+        # reserved slot is a contract violation (K4), so it fails closed.
+        assert result["failure"]["code"] == "final_slot_requested_tool"
+
+    def test_signed_normal_runs_past_eight_calls_until_natural_final(
+        self,
+        agent,
+    ):
+        """Task-book scene 1: a long chain must run past 8 calls uncut."""
+        self._setup_signed_normal(agent)
+        agent.max_iterations = 12
+        responses = []
+        for index in range(9):
+            responses.append(
+                _mock_response(
+                    content=f"继续第 {index + 1} 步。",
+                    finish_reason="tool_calls",
+                    tool_calls=[
+                        _mock_tool_call(
+                            name="web_search",
+                            arguments="{}",
+                            call_id=f"long-chain-tool-{index + 1}",
+                        )
+                    ],
+                )
+            )
+        responses.append(
+            _mock_response(
+                content="九个步骤全部完成，这是最终总结。",
+                finish_reason="stop",
+            )
+        )
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=responses,
+            ) as api_call,
+            patch(
+                "run_agent.handle_function_call",
+                return_value="trusted result",
+            ) as tool_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("连续处理九个步骤后总结")
+
+        assert api_call.call_count == 10
+        assert tool_call.call_count == 9
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert result["final_response"] == (
+            "九个步骤全部完成，这是最终总结。"
+        )
+        # Every physical call was accounted — long chains must stay billed.
+        assert len(agent._paid_call_usage_ledger.to_dict()["calls"]) == 10
+
+    def test_signed_normal_response_processing_exception_is_terminal(
+        self,
+        agent,
+    ):
+        self._setup_signed_normal(agent)
+        responses = [
+            _mock_response(content="candidate", finish_reason="stop"),
+            _mock_response(content="must not run", finish_reason="stop"),
+        ]
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=responses,
+            ) as api_call,
+            patch.object(
+                agent,
+                "_build_assistant_message",
+                side_effect=RuntimeError("private response failure"),
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("只执行一次")
+
+        assert api_call.call_count == 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["failure"]["code"] == (
+            "provider_response_processing_failed"
+        )
+
+    def test_signed_normal_repeated_text_truncation_is_typed_failure(
+        self,
+        agent,
+    ):
+        self._setup_signed_normal(agent)
+        responses = [
+            _mock_response(
+                content=f"partial-{index}",
+                finish_reason="length",
+            )
+            for index in range(3)
+        ]
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=responses,
+            ) as api_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("give a complete answer")
+
+        assert api_call.call_count == 3
+        assert result["final_response"] is None
+        assert result["failed"] is True
+        assert result["failure"]["code"] == "response_truncated_repeated"
+
+    def test_signed_normal_repeated_incomplete_scratchpad_is_typed_failure(
+        self,
+        agent,
+    ):
+        self._setup_signed_normal(agent)
+        response = _mock_response(
+            content="<REASONING_SCRATCHPAD>unfinished",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                return_value=response,
+            ) as api_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("finish reasoning")
+
+        assert api_call.call_count == 3
+        assert result["final_response"] is None
+        assert result["failed"] is True
+        assert result["failure"]["code"] == (
+            "incomplete_reasoning_scratchpad_repeated"
+        )
+
+    def test_signed_normal_content_filter_is_typed_failure(self, agent):
+        self._setup_signed_normal(agent)
+        agent._fallback_chain = [{"provider": "fallback", "model": "other"}]
+        response = _mock_response(
+            content="declined candidate text",
+            finish_reason="content_filter",
+            usage={
+                "prompt_tokens": 10,
+                "completion_tokens": 2,
+                "total_tokens": 12,
+            },
+        )
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                return_value=response,
+            ) as api_call,
+            patch.object(
+                agent,
+                "_try_activate_fallback",
+                side_effect=AssertionError("strict content filter used fallback"),
+            ) as fallback,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("request")
+
+        assert api_call.call_count == 1
+        fallback.assert_not_called()
+        assert result["final_response"] is None
+        assert result["failed"] is True
+        assert result["api_calls"] == 1
+        assert result["failure"]["code"] == "content_policy_blocked"
+
+    def test_signed_normal_content_filter_exception_skips_fallback(
+        self,
+        agent,
+    ):
+        self._setup_signed_normal(agent)
+        agent._fallback_chain = [{"provider": "fallback", "model": "other"}]
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=RuntimeError("content_filter"),
+            ) as api_call,
+            patch.object(
+                agent,
+                "_try_activate_fallback",
+                side_effect=AssertionError("strict content filter used fallback"),
+            ) as fallback,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("request")
+
+        assert api_call.call_count == 1
+        fallback.assert_not_called()
+        assert result["final_response"] is None
+        assert result["failed"] is True
+        assert result["api_calls"] == 1
+        assert result["failure"]["code"] == "content_policy_blocked"
 
     @pytest.mark.parametrize(
         (
@@ -5331,7 +5901,7 @@ class TestRunConversation:
         assert "category=callback_failure" in caplog.text
         assert "Traceback" not in caplog.text
 
-    def test_strict_paid_last_slot_is_same_model_tooled_off_final_reply(
+    def test_strict_normal_final_keeps_tools_without_slot_instruction(
         self,
         agent,
     ):
@@ -5376,12 +5946,11 @@ class TestRunConversation:
         assert result["completed"] is True
         assert api_call.call_count == 2
         final_payload = api_call.call_args_list[1].args[0]
-        assert "tools" not in final_payload
-        assert "tool_choice" not in final_payload
-        assert "final model call allowed" in final_payload["messages"][-1]["content"]
-        assert "end-of-task summary" in final_payload["messages"][-1]["content"]
-        assert "one-line status" in final_payload["messages"][-1]["content"]
-        assert "useful next step" in final_payload["messages"][-1]["content"]
+        assert "tools" in final_payload
+        assert "final model call allowed" not in json.dumps(
+            final_payload["messages"],
+            ensure_ascii=False,
+        )
 
     def test_strict_paid_eighth_call_is_same_model_final_not_ninth_tool(
         self,
@@ -9218,6 +9787,7 @@ class TestPersistUserMessageOverride:
         agent._flush_messages_to_session_db.assert_called_once_with(
             messages,
             [],
+            persist_override_applied=True,
         )
 
     def test_persist_session_rewrites_current_turn_user_message(self, agent):

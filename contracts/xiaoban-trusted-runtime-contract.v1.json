@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "contract": "mystand.xiaoban-trusted-runtime-contract.v1",
-  "revision": "2026-08-03.3",
+  "revision": "2026-08-06.1",
   "compatibility": {
     "mode": "exact-match",
     "silentFallbackAllowed": false,
@@ -16,19 +16,20 @@
     "agentCallSchema": "mystand.agent-call-usage.v1",
     "trueMoaSchema": "mystand.true-moa.usage.v1",
     "maxBytes": 65536,
-    "normalCallLimit": 8,
+    "normalCallLimit": 90,
     "trueMoaTotalCallLimit": 10,
     "trueMoaFinalCallLimit": 8
   },
   "billing": {
     "normal": {
-      "policyRevision": "deepseek-v4-pro-20260729-v1",
+      "policyRevision": "deepseek-v4-pro-20260806-v3",
       "provider": "deepseek",
       "model": "deepseek-v4-pro",
       "role": "agent",
-      "inputMaxBytes": 131072,
+      "inputMaxBytes": null,
+      "reservationInputMaxTokens": 131072,
       "outputMaxTokens": 4096,
-      "callLimit": 8
+      "callLimit": 90
     },
     "trueMoa": {
       "presetId": "mystand-true-moa-v1",

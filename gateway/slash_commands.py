@@ -3277,6 +3277,11 @@ class GatewaySlashCommandsMixin:
                     reasoning_details=msg.get("reasoning_details"),
                     codex_reasoning_items=msg.get("codex_reasoning_items"),
                     codex_message_items=msg.get("codex_message_items"),
+                    tool_result=msg.get("_xiaoban_tool_result"),
+                    compressed_summary=bool(msg.get("_compressed_summary")),
+                    runtime_checkpoint=msg.get(
+                        "_xiaoban_runtime_checkpoint"
+                    ),
                 )
             except Exception:
                 pass  # Best-effort copy

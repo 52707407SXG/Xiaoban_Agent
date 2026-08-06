@@ -170,6 +170,9 @@ def bind_paid_call_ledger(workflow: Any, agent: Any) -> None:
         ),
         policy.call_limit,
     )
+    # Compression and natural stop own the loop shape; this cap remains only
+    # the signed physical-call safety boundary and never forces a final slot.
+    agent.compression_enabled = True
     agent.max_tokens = policy.output_max_tokens
     try:
         enforce_fixed_paid_call_route(

@@ -124,11 +124,9 @@ def finalize_turn(
     strict_paid_call = bool(
         getattr(agent, "_strict_no_automatic_paid_retry", False)
     )
-    _strict_controller = getattr(
-        agent,
-        "_true_moa_cancel_controller",
-        None,
-    )
+    from agent.true_moa_conversation_policy import strict_cancel_controller
+
+    _strict_controller = strict_cancel_controller(agent)
     _defer_true_moa_final_commit = bool(
         getattr(agent, "_defer_true_moa_final_commit", False)
     )
@@ -247,9 +245,13 @@ def finalize_turn(
                     exc_info=True,
                 )
 
-    if final_response is None and strict_paid_call and (
+    if (
+        final_response is None
+        and strict_paid_call
+        and (
         api_call_count >= agent.max_iterations
         or agent.iteration_budget.remaining <= 0
+        )
     ):
         _turn_exit_reason = (
             f"strict_iteration_budget_reached({api_call_count}/{agent.max_iterations})"

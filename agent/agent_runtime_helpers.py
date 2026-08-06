@@ -40,8 +40,10 @@ from agent.prompt_builder import (
 from agent.tool_dispatch_helpers import _trajectory_normalize_msg, make_tool_result_message
 from agent.tool_result_classification import (
     CANONICAL_TOOL_RESULT_INTERNAL_KEY,
+    RUNTIME_CHECKPOINT_INTERNAL_KEY,
     TRUSTED_STEER_INTERNAL_KEY,
     append_trusted_steer_markers_for_model,
+    project_runtime_checkpoint_for_model,
     project_tool_result_for_model,
 )
 from agent.trajectory import convert_scratchpad_to_think
@@ -50,6 +52,13 @@ from agent.error_classifier import FailoverReason
 from utils import base_url_host_matches, base_url_hostname, env_var_enabled, atomic_json_write
 
 logger = logging.getLogger(__name__)
+
+_CURRENT_TURN_USER_MARKER_INTERNAL_KEY = (
+    "_xiaoban_current_turn_user_marker"
+)
+_CURRENT_TURN_USER_CONTENT_INTERNAL_KEY = (
+    "_xiaoban_current_turn_user_content"
+)
 
 
 def _ra():
@@ -457,6 +466,14 @@ def repair_message_sequence(agent, messages: List[Dict]) -> int:
                     if prev_content and new_content
                     else (prev_content or new_content)
                 )
+                if _CURRENT_TURN_USER_MARKER_INTERNAL_KEY in msg:
+                    prev[_CURRENT_TURN_USER_MARKER_INTERNAL_KEY] = msg[
+                        _CURRENT_TURN_USER_MARKER_INTERNAL_KEY
+                    ]
+                if _CURRENT_TURN_USER_CONTENT_INTERNAL_KEY in msg:
+                    prev[_CURRENT_TURN_USER_CONTENT_INTERNAL_KEY] = msg[
+                        _CURRENT_TURN_USER_CONTENT_INTERNAL_KEY
+                    ]
                 repairs += 1
                 continue
         merged.append(msg)
@@ -504,6 +521,21 @@ def repair_message_sequence_with_cursor(agent, messages: List[Dict]) -> int:
             agent._last_flushed_db_idx = min(
                 agent._last_flushed_db_idx, len(messages)
             )
+
+    persisted_user_marker = getattr(
+        agent,
+        "_persist_user_message_marker",
+        None,
+    )
+    if persisted_user_marker:
+        for index, message in enumerate(messages):
+            if (
+                isinstance(message, dict)
+                and message.get(_CURRENT_TURN_USER_MARKER_INTERNAL_KEY)
+                == persisted_user_marker
+            ):
+                agent._persist_user_message_idx = index
+                break
 
     return repairs
 
@@ -2131,6 +2163,45 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
 
 
 
+def _project_runtime_checkpoint_content(content: Any, checkpoint: str) -> Any:
+    from agent.context_compressor import _SUMMARY_END_MARKER
+
+    if isinstance(content, str):
+        visible = content.rstrip()
+        if _SUMMARY_END_MARKER in visible:
+            before, after = visible.split(_SUMMARY_END_MARKER, 1)
+            return (
+                before.rstrip()
+                + "\n\n"
+                + checkpoint
+                + "\n\n"
+                + _SUMMARY_END_MARKER
+                + after
+            )
+        return visible + "\n\n" + checkpoint
+    if isinstance(content, list):
+        projected = copy.deepcopy(content)
+        for part in projected:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if not isinstance(text, str) or _SUMMARY_END_MARKER not in text:
+                continue
+            before, after = text.split(_SUMMARY_END_MARKER, 1)
+            part["text"] = (
+                before.rstrip()
+                + "\n\n"
+                + checkpoint
+                + "\n\n"
+                + _SUMMARY_END_MARKER
+                + after
+            )
+            return projected
+        projected.append({"type": "text", "text": checkpoint})
+        return projected
+    return content
+
+
 def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Fix orphaned tool_call / tool_result pairs before every LLM call.
 
@@ -2152,12 +2223,31 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
         if (
             CANONICAL_TOOL_RESULT_INTERNAL_KEY in msg
             or TRUSTED_STEER_INTERNAL_KEY in msg
+            or RUNTIME_CHECKPOINT_INTERNAL_KEY in msg
         ):
             api_msg = msg.copy()
             trusted_steer_markers = api_msg.pop(
                 TRUSTED_STEER_INTERNAL_KEY, None
             )
             metadata = api_msg.pop(CANONICAL_TOOL_RESULT_INTERNAL_KEY, None)
+            runtime_checkpoint = api_msg.pop(
+                RUNTIME_CHECKPOINT_INTERNAL_KEY,
+                None,
+            )
+            if (
+                role in {"assistant", "user"}
+                and msg.get("_compressed_summary") is True
+            ):
+                projected_checkpoint = project_runtime_checkpoint_for_model(
+                    runtime_checkpoint
+                )
+                if projected_checkpoint is not None:
+                    api_msg["content"] = _project_runtime_checkpoint_content(
+                        api_msg.get("content"),
+                        projected_checkpoint,
+                    )
+            if trusted_steer_markers is None and isinstance(metadata, dict):
+                trusted_steer_markers = metadata.get("trustedSteers")
             if role == "tool" and isinstance(metadata, dict):
                 try:
                     api_msg["content"] = project_tool_result_for_model(
@@ -2672,6 +2762,9 @@ def append_trusted_steer_to_tool_message(message: dict, steer_text: str) -> None
         markers = []
     markers.append(marker)
     message[TRUSTED_STEER_INTERNAL_KEY] = markers
+    sidecar = message.get(CANONICAL_TOOL_RESULT_INTERNAL_KEY)
+    if isinstance(sidecar, dict):
+        sidecar["trustedSteers"] = list(markers)
 
 
 def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: int) -> None:

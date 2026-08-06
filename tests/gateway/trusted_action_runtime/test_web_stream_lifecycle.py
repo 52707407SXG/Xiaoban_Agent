@@ -345,8 +345,13 @@ async def test_r2_stream_rejects_conflicting_attempt_headers():
 async def test_plain_chat_forwards_real_deltas_once():
     adapter = _make_adapter()
     answer_parts = ["你好，", "我是站小伴。"]
+    delivery_id = "xbd_" + "0d" * 20
+    turn_id = "0e" * 8
 
     async def _mock_run_agent(**kwargs):
+        kwargs["tool_progress_callback"](
+            "turn.started", delivery_id, turn_id, None,
+        )
         callback = kwargs.get("stream_delta_callback")
         for part in answer_parts:
             callback(part)
@@ -355,6 +360,10 @@ async def test_plain_chat_forwards_real_deltas_once():
                 "_mystand_request": True,
                 "final_response": "".join(answer_parts),
                 "messages": [],
+                "completed": True,
+                "failed": False,
+                "partial": False,
+                "interrupted": False,
             },
             dict(_USAGE),
         )
@@ -364,7 +373,7 @@ async def test_plain_chat_forwards_real_deltas_once():
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.post(
                 "/v1/chat/completions",
-                headers=_mystand_stream_headers("xbd_" + "0d" * 20),
+                headers=_mystand_stream_headers(delivery_id),
                 json=_stream_body("你好，介绍一下你自己"),
             )
             body = await resp.text()

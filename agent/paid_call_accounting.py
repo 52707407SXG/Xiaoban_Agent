@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Any
 
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
+
+
+def _usage_with_attributes(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    return SimpleNamespace(
+        **{
+            str(key): _usage_with_attributes(item)
+            for key, item in value.items()
+        }
+    )
 
 
 def record_strict_terminal_usage(agent: Any, response: Any) -> None:
@@ -14,7 +27,7 @@ def record_strict_terminal_usage(agent: Any, response: Any) -> None:
     if raw_usage is None:
         return
     canonical = normalize_usage(
-        raw_usage,
+        _usage_with_attributes(raw_usage),
         provider=agent.provider,
         api_mode=agent.api_mode,
     )
@@ -60,7 +73,7 @@ def finish_paid_provider_call(
     cost_source = None
     if raw_usage is not None:
         canonical = normalize_usage(
-            raw_usage,
+            _usage_with_attributes(raw_usage),
             provider=agent.provider,
             api_mode=agent.api_mode,
         )

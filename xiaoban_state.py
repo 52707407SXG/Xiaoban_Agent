@@ -2294,13 +2294,9 @@ class SessionDB:
         sessions = []
         for row in rows:
             s = dict(row)
-            # Build the preview from the raw substring
-            raw = s.pop("_preview_raw", "").strip()
-            if raw:
-                text = raw[:60]
-                s["preview"] = text + ("..." if len(raw) > 60 else "")
-            else:
-                s["preview"] = ""
+            s["preview"] = self._preview_from_stored_content(
+                s.pop("_preview_raw", "")
+            )
             # Drop the internal ordering column so callers see a clean dict.
             s.pop("_effective_last_active", None)
             sessions.append(s)
@@ -2398,12 +2394,9 @@ class SessionDB:
         runs: List[Dict[str, Any]] = []
         for row in rows:
             s = dict(row)
-            raw = s.pop("_preview_raw", "").strip()
-            if raw:
-                text = raw[:60]
-                s["preview"] = text + ("..." if len(raw) > 60 else "")
-            else:
-                s["preview"] = ""
+            s["preview"] = self._preview_from_stored_content(
+                s.pop("_preview_raw", "")
+            )
             runs.append(s)
         return runs
 
@@ -2434,23 +2427,167 @@ class SessionDB:
         if not row:
             return None
         s = dict(row)
-        raw = s.pop("_preview_raw", "").strip()
-        if raw:
-            text = raw[:60]
-            s["preview"] = text + ("..." if len(raw) > 60 else "")
-        else:
-            s["preview"] = ""
+        s["preview"] = self._preview_from_stored_content(
+            s.pop("_preview_raw", "")
+        )
         return s
 
     # =========================================================================
     # Message storage
     # =========================================================================
 
-    # Sentinel prefix used to distinguish JSON-encoded structured content
-    # (multimodal messages: lists of parts like text + image_url) from plain
-    # string content. The NUL byte is not legal in normal text, so this
-    # cannot collide with real user content.
+    # Sentinel used to distinguish JSON-encoded structured content.
     _CONTENT_JSON_PREFIX = "\x00json:"
+    _RUNTIME_REASONING_DETAILS_SCHEMA = "xiaoban.runtime-message-metadata.v1"
+    _RUNTIME_REASONING_DETAILS_PREFIX = "\x00xiaoban-runtime:"
+
+    @staticmethod
+    def _canonical_runtime_checkpoint(value: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(value, dict) or set(value) != {
+            "schema",
+            "facts",
+            "trustedSteers",
+        }:
+            return None
+        if value.get("schema") != "xiaoban.runtime-compaction-checkpoint.v1":
+            return None
+        facts = value.get("facts")
+        steers = value.get("trustedSteers")
+        if not isinstance(facts, list) or len(facts) > 64:
+            return None
+        if not isinstance(steers, list) or len(steers) > 32:
+            return None
+        if any(
+            not isinstance(item, str) or len(item) > 8_192
+            for item in steers
+        ):
+            return None
+        try:
+            encoded = json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            )
+            if len(encoded.encode("utf-8")) > 1_000_000:
+                return None
+            return json.loads(encoded)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    @classmethod
+    def _encode_reasoning_details(
+        cls,
+        reasoning_details: Any,
+        *,
+        compressed_summary: bool = False,
+        runtime_checkpoint: Any = None,
+    ) -> Optional[str]:
+        checkpoint = cls._canonical_runtime_checkpoint(runtime_checkpoint)
+        if not compressed_summary and checkpoint is None:
+            return json.dumps(reasoning_details) if reasoning_details else None
+        metadata = {
+            "schema": cls._RUNTIME_REASONING_DETAILS_SCHEMA,
+            "reasoningDetails": reasoning_details,
+            "compressedSummary": bool(compressed_summary),
+            "runtimeCheckpoint": checkpoint,
+        }
+        try:
+            return (
+                cls._RUNTIME_REASONING_DETAILS_PREFIX
+                + json.dumps(
+                    metadata,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )
+            )
+        except (TypeError, ValueError):
+            return json.dumps(reasoning_details) if reasoning_details else None
+
+    @classmethod
+    def _decode_reasoning_details(
+        cls,
+        value: Any,
+    ) -> tuple[Any, bool, Optional[Dict[str, Any]]]:
+        if not value:
+            return None, False, None
+        if isinstance(value, str):
+            if not value.startswith(cls._RUNTIME_REASONING_DETAILS_PREFIX):
+                try:
+                    return json.loads(value), False, None
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return None, False, None
+            try:
+                decoded = json.loads(
+                    value[len(cls._RUNTIME_REASONING_DETAILS_PREFIX):]
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return None, False, None
+        else:
+            return value, False, None
+        if not isinstance(decoded, dict) or set(decoded) != {
+            "schema",
+            "reasoningDetails",
+            "compressedSummary",
+            "runtimeCheckpoint",
+        } or decoded.get("schema") != cls._RUNTIME_REASONING_DETAILS_SCHEMA:
+            return decoded, False, None
+        compressed_summary = decoded.get("compressedSummary") is True
+        checkpoint = (
+            cls._canonical_runtime_checkpoint(
+                decoded.get("runtimeCheckpoint")
+            )
+            if compressed_summary
+            else None
+        )
+        return (
+            decoded.get("reasoningDetails"),
+            compressed_summary,
+            checkpoint,
+        )
+
+    @classmethod
+    def _restore_runtime_metadata_on_message(
+        cls,
+        message: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if "content" in message:
+            message["content"] = cls._decode_content(message["content"])
+        reasoning_details, compressed_summary, runtime_checkpoint = (
+            cls._decode_reasoning_details(message.get("reasoning_details"))
+        )
+        if reasoning_details is not None:
+            message["reasoning_details"] = reasoning_details
+        else:
+            message.pop("reasoning_details", None)
+        if compressed_summary:
+            message["_compressed_summary"] = True
+        else:
+            message.pop("_compressed_summary", None)
+        if runtime_checkpoint is not None:
+            message["_xiaoban_runtime_checkpoint"] = runtime_checkpoint
+        else:
+            message.pop("_xiaoban_runtime_checkpoint", None)
+        return message
+
+    @classmethod
+    def _preview_from_stored_content(cls, value: Any) -> str:
+        content = cls._decode_content(value)
+        if isinstance(content, list):
+            text = " ".join(
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            ).strip()
+            if not text:
+                text = "[multimodal content]"
+        elif isinstance(content, str):
+            text = content
+        else:
+            text = ""
+        text = " ".join(text.split())
+        return text[:60] + ("..." if len(text) > 60 else "") if text else ""
 
     @classmethod
     def _encode_content(cls, content: Any) -> Any:
@@ -2568,6 +2705,9 @@ class SessionDB:
         )
         if canonical is not None:
             message["_xiaoban_tool_result"] = canonical
+            trusted_steers = canonical.get("trustedSteers")
+            if isinstance(trusted_steers, list) and trusted_steers:
+                message["_xiaoban_trusted_steer"] = list(trusted_steers)
         return message
 
     def append_message(
@@ -2589,6 +2729,8 @@ class SessionDB:
         observed: bool = False,
         timestamp: Any = None,
         tool_result: Any = None,
+        compressed_summary: bool = False,
+        runtime_checkpoint: Any = None,
     ) -> int:
         """
         Append a message to a session. Returns the message row ID.
@@ -2603,9 +2745,10 @@ class SessionDB:
         message by its platform-side identifier.
         """
         # Serialize structured fields to JSON before entering the write txn
-        reasoning_details_json = (
-            json.dumps(reasoning_details)
-            if reasoning_details else None
+        reasoning_details_json = self._encode_reasoning_details(
+            reasoning_details,
+            compressed_summary=compressed_summary,
+            runtime_checkpoint=runtime_checkpoint,
         )
         codex_items_json = (
             json.dumps(codex_reasoning_items)
@@ -2717,8 +2860,12 @@ class SessionDB:
             codex_message_items = (
                 msg.get("codex_message_items") if role == "assistant" else None
             )
-            reasoning_details_json = (
-                json.dumps(reasoning_details) if reasoning_details else None
+            reasoning_details_json = self._encode_reasoning_details(
+                reasoning_details,
+                compressed_summary=bool(msg.get("_compressed_summary")),
+                runtime_checkpoint=msg.get(
+                    "_xiaoban_runtime_checkpoint"
+                ),
             )
             codex_items_json = (
                 json.dumps(codex_reasoning_items) if codex_reasoning_items else None
@@ -2879,8 +3026,7 @@ class SessionDB:
         result = []
         for row in rows:
             msg = dict(row)
-            if "content" in msg:
-                msg["content"] = self._decode_content(msg["content"])
+            self._restore_runtime_metadata_on_message(msg)
             if msg.get("tool_calls"):
                 try:
                     msg["tool_calls"] = json.loads(msg["tool_calls"])
@@ -2947,8 +3093,7 @@ class SessionDB:
         result = []
         for row in rows:
             msg = dict(row)
-            if "content" in msg:
-                msg["content"] = self._decode_content(msg["content"])
+            self._restore_runtime_metadata_on_message(msg)
             if msg.get("tool_calls"):
                 try:
                     msg["tool_calls"] = json.loads(msg["tool_calls"])
@@ -3070,8 +3215,7 @@ class SessionDB:
 
         def _hydrate(row) -> Dict[str, Any]:
             msg = dict(row)
-            if "content" in msg:
-                msg["content"] = self._decode_content(msg["content"])
+            self._restore_runtime_metadata_on_message(msg)
             if msg.get("tool_calls"):
                 try:
                     msg["tool_calls"] = json.loads(msg["tool_calls"])
@@ -3206,9 +3350,18 @@ class SessionDB:
         messages = []
         for row in rows:
             content = self._decode_content(row["content"])
+            (
+                reasoning_details,
+                compressed_summary,
+                runtime_checkpoint,
+            ) = self._decode_reasoning_details(row["reasoning_details"])
             if row["role"] in {"user", "assistant"} and isinstance(content, str):
                 content = sanitize_context(content).strip()
             msg = {"role": row["role"], "content": content}
+            if compressed_summary:
+                msg["_compressed_summary"] = True
+            if runtime_checkpoint is not None:
+                msg["_xiaoban_runtime_checkpoint"] = runtime_checkpoint
             if row["timestamp"]:
                 msg["timestamp"] = row["timestamp"]
             if row["tool_call_id"]:
@@ -3228,6 +3381,11 @@ class SessionDB:
             ) if row["role"] == "tool" else None
             if canonical_tool_result is not None:
                 msg["_xiaoban_tool_result"] = canonical_tool_result
+                trusted_steers = canonical_tool_result.get(
+                    "trustedSteers"
+                )
+                if isinstance(trusted_steers, list) and trusted_steers:
+                    msg["_xiaoban_trusted_steer"] = list(trusted_steers)
             # Surface the platform-side message id (e.g. yuanbao msg_id,
             # telegram update_id) so platform-specific flows like recall
             # can match by external identifier instead of having to fall
@@ -3247,12 +3405,8 @@ class SessionDB:
                     msg["reasoning"] = row["reasoning"]
                 if row["reasoning_content"] is not None:
                     msg["reasoning_content"] = row["reasoning_content"]
-                if row["reasoning_details"]:
-                    try:
-                        msg["reasoning_details"] = json.loads(row["reasoning_details"])
-                    except (json.JSONDecodeError, TypeError):
-                        logger.warning("Failed to deserialize reasoning_details, falling back to None")
-                        msg["reasoning_details"] = None
+                if reasoning_details is not None:
+                    msg["reasoning_details"] = reasoning_details
                 if row["codex_reasoning_items"]:
                     try:
                         msg["codex_reasoning_items"] = json.loads(row["codex_reasoning_items"])
@@ -3357,7 +3511,7 @@ class SessionDB:
             )
 
         # Decode content for callers (prefill the prompt buffer).
-        target_row["content"] = self._decode_content(target_row.get("content"))
+        self._restore_runtime_metadata_on_message(target_row)
 
         rewound: List[int] = []
 
@@ -4937,8 +5091,9 @@ class SessionDB:
         sessions: List[Dict[str, Any]] = []
         for row in rows:
             session = dict(row)
-            raw = str(session.pop("_preview_raw", "") or "").strip()
-            session["preview"] = raw[:60] + ("..." if len(raw) > 60 else "") if raw else ""
+            session["preview"] = self._preview_from_stored_content(
+                session.pop("_preview_raw", "")
+            )
             sessions.append(session)
         return sessions
 

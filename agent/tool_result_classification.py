@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 
@@ -12,6 +14,7 @@ FILE_MUTATING_TOOL_NAMES = frozenset({"write_file", "patch"})
 CANONICAL_TOOL_RESULT_SCHEMA = "xiaoban.tool-result.v1"
 CANONICAL_TOOL_RESULT_INTERNAL_KEY = "_xiaoban_tool_result"
 TRUSTED_STEER_INTERNAL_KEY = "_xiaoban_trusted_steer"
+RUNTIME_CHECKPOINT_INTERNAL_KEY = "_xiaoban_runtime_checkpoint"
 CANONICAL_TOOL_RESULT_DISPATCH_STATES = frozenset({"not_dispatched", "dispatched"})
 CANONICAL_TOOL_RESULT_OUTCOMES = frozenset(
     {"success", "empty", "not_found", "denied", "failed", "unknown", "cancelled"}
@@ -30,6 +33,20 @@ _STATUS_OUTCOMES = {
 }
 _MODEL_VALUE_LIMIT = 100_000
 _TRUSTED_AUX_VALUE_LIMIT = 8_000
+_TRUSTED_STEER_VALUE_LIMIT = 8_192
+_DIGEST = re.compile(r"^[a-f0-9]{64}$")
+_TRUSTED_CONTEXT_ID = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._:@-]{7,199}$"
+)
+_VERIFIED_WRITE_ACTIONS = frozenset({
+    "note.append-content",
+    "property-note.append-text-block",
+    "profile-card.update-field",
+    "knowledge-graph.add-node",
+    "knowledge-graph.update-node",
+    "knowledge-graph.add-edge",
+    "finance-archive.update-row-fields",
+})
 _MODEL_METADATA_FIELDS = (
     "schema", "requestId", "turnId", "callId", "toolName", "dispatchState",
     "outcome", "retrySafe", "recordRefs", "coverage", "truncated", "continuation",
@@ -179,6 +196,118 @@ def _bounded_json_value(value: Any, limit: int) -> Any | None:
     return None
 
 
+def _bounded_trusted_steers(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[str] = []
+    for item in value[:32]:
+        if (
+            not isinstance(item, str)
+            or not item
+            or len(item) > _TRUSTED_STEER_VALUE_LIMIT
+        ):
+            continue
+        result.append(item)
+    return result
+
+
+def project_runtime_checkpoint_for_model(value: Any) -> str | None:
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema",
+        "facts",
+        "trustedSteers",
+    }:
+        return None
+    if value.get("schema") != "xiaoban.runtime-compaction-checkpoint.v1":
+        return None
+    facts = value.get("facts")
+    steers = value.get("trustedSteers")
+    if not isinstance(facts, list) or len(facts) > 64:
+        return None
+    if not isinstance(steers, list) or len(steers) > 32:
+        return None
+    bounded_steers = _bounded_trusted_steers(steers)
+    if len(bounded_steers) != len(steers):
+        return None
+    checkpoint = {
+        "schema": "xiaoban.runtime-compaction-checkpoint.v1",
+        "facts": facts,
+        "trustedSteers": bounded_steers,
+    }
+    try:
+        encoded = json.dumps(
+            checkpoint,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+    except (TypeError, ValueError):
+        return None
+    if len(encoded.encode("utf-8")) > 1_000_000:
+        return None
+    return (
+        "[RUNTIME-OWNED COMPACTION CHECKPOINT — DO NOT OVERRIDE]\n"
+        "XIAOBAN_RUNTIME_CHECKPOINT_JSON:"
+        + encoded
+    )
+
+
+def _verified_write_receipt(value: Any) -> dict[str, Any] | None:
+    bounded = _bounded_json_value(value, _TRUSTED_AUX_VALUE_LIMIT)
+    if not isinstance(bounded, dict):
+        return None
+    audit = bounded.get("audit")
+    target = bounded.get("target")
+    expected_version = str(bounded.get("expectedVersion") or "").strip()
+    next_version = str(bounded.get("nextVersion") or "").strip()
+    committed_at = str(bounded.get("committedAt") or "").strip()
+    try:
+        datetime.fromisoformat(committed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if not (
+        bounded.get("ok") is True
+        and bounded.get("status") == 200
+        and bounded.get("receiptVersion")
+        == "authorization-write-receipt-v2"
+        and bounded.get("verified") is True
+        and isinstance(audit, dict)
+        and audit.get("recorded") is True
+        and str(audit.get("auditId") or "").strip()
+        and _TRUSTED_CONTEXT_ID.fullmatch(
+            str(bounded.get("confirmationId") or "")
+        )
+        and bounded.get("action") in _VERIFIED_WRITE_ACTIONS
+        and isinstance(target, dict)
+        and expected_version
+        and next_version
+        and expected_version != next_version
+        and _TRUSTED_CONTEXT_ID.fullmatch(
+            str(bounded.get("idempotencyKey") or "")
+        )
+        and _DIGEST.fullmatch(
+            str(bounded.get("requestFingerprint") or "")
+        )
+        and _DIGEST.fullmatch(
+            str(bounded.get("previewTokenHash") or "")
+        )
+        and _DIGEST.fullmatch(str(bounded.get("changeDigest") or ""))
+    ):
+        return None
+    return bounded
+
+
+def _verified_write_receipt_digest(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def normalize_tool_result(
     *,
     request_id: str,
@@ -210,6 +339,12 @@ def normalize_tool_result(
         "retrySafe": trusted.get("retrySafe") is True and outcome != "unknown",
     }
     if dispatch_state == "not_dispatched" and outcome in _NOT_DISPATCHED_OUTCOMES:
+        continuation = _bounded_json_value(
+            trusted.get("continuation"),
+            _TRUSTED_AUX_VALUE_LIMIT,
+        )
+        if continuation is not None:
+            normalized["continuation"] = continuation
         return normalized
 
     refs = trusted.get("recordRefs")
@@ -223,6 +358,22 @@ def normalize_tool_result(
             normalized[key] = value
     if isinstance(trusted.get("truncated"), bool):
         normalized["truncated"] = trusted["truncated"]
+    trusted_steers = _bounded_trusted_steers(trusted.get("trustedSteers"))
+    if trusted_steers:
+        normalized["trustedSteers"] = trusted_steers
+    if (
+        normalized["toolName"] == "mystand_authorization_write"
+        and normalized["dispatchState"] == "dispatched"
+        and normalized["outcome"] == "success"
+    ):
+        receipt = _verified_write_receipt(
+            trusted.get("verifiedWriteReceipt")
+        )
+        if receipt is not None:
+            normalized["verifiedWriteReceipt"] = receipt
+            normalized["verifiedWriteReceiptDigest"] = (
+                _verified_write_receipt_digest(receipt)
+            )
     return normalized
 
 
@@ -296,6 +447,24 @@ def canonical_tool_result_for_persistence(
             persisted[key] = bounded
     if isinstance(value.get("truncated"), bool):
         persisted["truncated"] = value["truncated"]
+    trusted_steers = _bounded_trusted_steers(value.get("trustedSteers"))
+    if trusted_steers:
+        persisted["trustedSteers"] = trusted_steers
+    if (
+        identifiers["toolName"] == "mystand_authorization_write"
+        and dispatch_state == "dispatched"
+        and outcome == "success"
+    ):
+        receipt = _verified_write_receipt(value.get("verifiedWriteReceipt"))
+        receipt_digest = str(
+            value.get("verifiedWriteReceiptDigest") or ""
+        )
+        if (
+            receipt is not None
+            and receipt_digest == _verified_write_receipt_digest(receipt)
+        ):
+            persisted["verifiedWriteReceipt"] = receipt
+            persisted["verifiedWriteReceiptDigest"] = receipt_digest
     return persisted
 
 

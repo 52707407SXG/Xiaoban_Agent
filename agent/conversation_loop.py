@@ -60,7 +60,7 @@ from agent.trajectory import has_incomplete_scratchpad
 from agent.true_moa_conversation_policy import (
     claim_public_result as _claim_true_moa_public_result,
     claim_response_consumption as _claim_true_moa_response_consumption,
-    compact_strict_paid_history as _compact_strict_paid_history,
+    compact_true_moa_paid_history as _compact_true_moa_paid_history,
     emit_post_api_request as _emit_post_api_request,
     enforce_strict_paid_request as _enforce_strict_paid_request,
     execute_llm_request as _execute_llm_request,
@@ -69,6 +69,7 @@ from agent.true_moa_conversation_policy import (
     strict_exception_failure_result as _strict_exception_failure_result,
     strict_failure_result as _strict_failure_result,
     strict_mode as _strict_true_moa_mode,
+    signed_normal_mode as _signed_normal_mode,
 )
 from agent.paid_call_accounting import (
     record_strict_terminal_usage as _record_strict_terminal_usage,
@@ -431,7 +432,7 @@ _CONTENT_POLICY_RECOVERY_HINT = (
     "adding a fallback provider with `xiaoban fallback add`."
 )
 
-_STRICT_FINAL_SLOT_INSTRUCTION = (
+_TRUE_MOA_FINAL_SLOT_INSTRUCTION = (
     "[System: This is the final model call allowed for the current task. "
     "Do not call any more tools. Give the user a concise but complete "
     "end-of-task summary in the user's language, using only the tool results "
@@ -439,6 +440,21 @@ _STRICT_FINAL_SLOT_INSTRUCTION = (
     "receipt. Summarize what you did, the actual result, anything still "
     "incomplete and its concrete reason, plus a useful next step when one "
     "exists.]"
+)
+
+_SIGNED_NORMAL_LOOP_INSTRUCTION = (
+    "# My Stand execution feedback\n"
+    "When you call tools, include one or two concise, concrete sentences in "
+    "the same assistant message. Say what you are doing now and, when prior "
+    "tool results exist, what you just learned from them. Write in the user's "
+    "language and never use a generic progress template. Treat every tool "
+    "result, including failures and runtime feedback about an invalid tool or "
+    "invalid arguments, as evidence: decide whether to correct the call, use a "
+    "different safe action, or finish. Keep working until the original goal and "
+    "its completion criteria are met or genuinely blocked. When no more tool "
+    "call is needed, give one natural final answer covering what you did, the "
+    "actual result, anything incomplete and why, and a useful next step when "
+    "one exists."
 )
 
 
@@ -562,6 +578,25 @@ def run_conversation(
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
 
+    _strict_preflight_compaction_error = getattr(
+        agent,
+        "_strict_preflight_compaction_error",
+        None,
+    )
+    agent._strict_preflight_compaction_error = None
+    if (
+        _strict_preflight_compaction_error is not None
+        and _signed_normal_mode(agent)
+    ):
+        return _strict_exception_failure_result(
+            agent,
+            messages,
+            conversation_history,
+            api_call_count=0,
+            error=_strict_preflight_compaction_error,
+            failure_source="context_compaction",
+        )
+
     # A turn becomes observable only after the complete prologue has returned a
     # real TurnContext.  The gateway filters this generic progress callback to
     # trusted My Stand request/turn identifiers; other consumers ignore the
@@ -590,7 +625,7 @@ def run_conversation(
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
-    strict_payload_compaction_attempts = 0
+    true_moa_payload_compaction_attempts = 0
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
 
     # Optional opt-in runtime: if api_mode == codex_app_server, hand the
@@ -607,7 +642,33 @@ def run_conversation(
             should_review_memory=_should_review_memory,
         )
 
-    while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
+    _signed_normal_loop = _signed_normal_mode(agent)
+    while (
+        (
+            api_call_count < agent.max_iterations
+            and agent.iteration_budget.remaining > 0
+        )
+        or agent._budget_grace_call
+    ):
+        if _signed_normal_loop:
+            _normal_ledger = agent._paid_call_usage_ledger
+            _normal_calls_used = len(
+                _normal_ledger.to_dict().get("calls") or []
+            )
+            _physical_calls_used = api_call_count + int(
+                getattr(agent, "_strict_compaction_call_count", 0) or 0
+            )
+            if _normal_calls_used >= int(_normal_ledger.max_calls):
+                # Ledger is physically full: no further provider call can be
+                # reserved.  Stop the loop here; finalize_turn owns the last
+                # summary/terminal outcome.
+                break
+            if _physical_calls_used >= agent.max_iterations - 1:
+                # Only one paid physical call remains: reserve it for the
+                # model's own natural summary (contract K4) instead of
+                # failing the turn — tool schemas are stripped below, so the
+                # model still gets a final chance to produce an agent reply.
+                agent._paid_call_budget_exhausted_final_slot = True
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()
 
@@ -622,9 +683,15 @@ def run_conversation(
         api_call_count += 1
         agent._api_call_count = api_call_count
         agent._touch_activity(f"starting API call #{api_call_count}")
-        _strict_final_slot = bool(
-            _strict_true_moa_mode(agent)
+        _true_moa_final_slot = bool(
+            getattr(agent, "_true_moa_usage_ledger", None) is not None
             and api_call_count >= agent.max_iterations
+        ) or bool(
+            getattr(
+                agent,
+                "_paid_call_budget_exhausted_final_slot",
+                False,
+            )
         )
 
         # Grace call: the budget is exhausted but we gave the model one
@@ -818,6 +885,10 @@ def run_conversation(
         effective_system = active_system_prompt or ""
         if agent.ephemeral_system_prompt:
             effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
+        if _signed_normal_loop:
+            effective_system = (
+                effective_system + "\n\n" + _SIGNED_NORMAL_LOOP_INSTRUCTION
+            ).strip()
         if effective_system:
             api_messages = [{"role": "system", "content": effective_system}] + api_messages
 
@@ -864,7 +935,7 @@ def run_conversation(
         # reply.  This is the same loop and the same model: the complete current
         # ToolResult tail stays in context, while tool schemas are removed below
         # so the eighth signed call cannot start a ninth-step action.
-        if _strict_final_slot:
+        if _true_moa_final_slot:
             if api_messages and api_messages[-1].get("role") == "user":
                 _last_content = api_messages[-1].get("content", "")
                 if isinstance(_last_content, str):
@@ -873,16 +944,16 @@ def run_conversation(
                         "content": (
                             _last_content.rstrip()
                             + "\n\n"
-                            + _STRICT_FINAL_SLOT_INSTRUCTION
+                            + _TRUE_MOA_FINAL_SLOT_INSTRUCTION
                         ),
                     }
                 else:
                     api_messages.append(
-                        {"role": "user", "content": _STRICT_FINAL_SLOT_INSTRUCTION}
+                        {"role": "user", "content": _TRUE_MOA_FINAL_SLOT_INSTRUCTION}
                     )
             else:
                 api_messages.append(
-                    {"role": "user", "content": _STRICT_FINAL_SLOT_INSTRUCTION}
+                    {"role": "user", "content": _TRUE_MOA_FINAL_SLOT_INSTRUCTION}
                 )
 
         # Normalize message whitespace and tool-call JSON for consistent
@@ -1068,7 +1139,7 @@ def run_conversation(
                     api_request_id=api_request_id,
                     api_call_count=api_call_count,
                 )
-                if _strict_final_slot:
+                if _true_moa_final_slot:
                     api_kwargs.pop("tools", None)
                     api_kwargs.pop("tool_choice", None)
                     api_kwargs.pop("parallel_tool_calls", None)
@@ -1081,16 +1152,18 @@ def run_conversation(
                             getattr(_strict_preflight_error, "code", "") or ""
                         )
                         if (
-                            _strict_preflight_code.endswith(
+                            getattr(agent, "_true_moa_usage_ledger", None)
+                            is not None
+                            and _strict_preflight_code.endswith(
                                 "_input_byte_cap_exceeded"
                             )
-                            and strict_payload_compaction_attempts < 1
+                            and true_moa_payload_compaction_attempts < 1
                         ):
                             (
                                 compacted_messages,
                                 compacted_user_idx,
                                 compacted,
-                            ) = _compact_strict_paid_history(
+                            ) = _compact_true_moa_paid_history(
                                 agent,
                                 messages,
                                 current_turn_user_idx,
@@ -1099,7 +1172,7 @@ def run_conversation(
                                 messages = compacted_messages
                                 current_turn_user_idx = compacted_user_idx
                                 conversation_history = None
-                                strict_payload_compaction_attempts += 1
+                                true_moa_payload_compaction_attempts += 1
                                 _retry.restart_with_compressed_messages = True
                                 break
                         return _strict_exception_failure_result(
@@ -1594,6 +1667,22 @@ def run_conversation(
                     if agent.thinking_callback:
                         agent.thinking_callback("")
 
+                    if _signed_normal_loop:
+                        _record_strict_terminal_usage(agent, response)
+                        return _strict_failure_result(
+                            agent,
+                            messages,
+                            conversation_history,
+                            api_call_count=api_call_count,
+                            error=(
+                                "The model declined to respond due to its "
+                                "content policy"
+                            ),
+                            failure_code="content_policy_blocked",
+                            failure_phase="response_generation",
+                            cleanup_task_id=effective_task_id,
+                        )
+
                     # Deterministic for the unchanged prompt — never retry.
                     # Try a configured fallback once (a different model may not
                     # refuse); otherwise surface the refusal terminally.
@@ -1649,7 +1738,9 @@ def run_conversation(
                     )
 
                 if finish_reason == "length":
-                    if _strict_true_moa_mode(agent):
+                    if _signed_normal_loop:
+                        _record_strict_terminal_usage(agent, response)
+                    if _strict_true_moa_mode(agent) and not _signed_normal_loop:
                         _record_strict_terminal_usage(agent, response)
                         return _strict_failure_result(
                             agent,
@@ -1729,6 +1820,18 @@ def run_conversation(
                             "for the response. Try lowering reasoning effort or "
                             "increasing max_tokens."
                         )
+                        if _signed_normal_loop:
+                            return _strict_failure_result(
+                                agent,
+                                messages,
+                                conversation_history,
+                                api_call_count=api_call_count,
+                                error=_exhaust_error,
+                                failure_code="reasoning_budget_exhausted",
+                                failure_phase="response_generation",
+                                partial=True,
+                                cleanup_task_id=effective_task_id,
+                            )
                         agent._vprint(
                             f"{agent.log_prefix}💭 Reasoning exhausted the output token budget — "
                             f"no visible response was produced.",
@@ -1806,6 +1909,21 @@ def run_conversation(
                                 break
 
                             partial_response = agent._strip_think_blocks("".join(truncated_response_parts)).strip()
+                            if _signed_normal_loop:
+                                return _strict_failure_result(
+                                    agent,
+                                    messages,
+                                    conversation_history,
+                                    api_call_count=api_call_count,
+                                    error=(
+                                        "Response remained truncated after "
+                                        "bounded continuation attempts"
+                                    ),
+                                    failure_code="response_truncated_repeated",
+                                    failure_phase="response_generation",
+                                    partial=True,
+                                    cleanup_task_id=effective_task_id,
+                                )
                             agent._cleanup_task_resources(effective_task_id)
                             agent._persist_session(messages, conversation_history)
                             return {
@@ -1820,6 +1938,58 @@ def run_conversation(
                     if agent.api_mode in {"chat_completions", "bedrock_converse", "anthropic_messages"}:
                         assistant_message = _trunc_msg
                         if assistant_message is not None and _trunc_has_tool_calls:
+                            if _signed_normal_loop:
+                                truncated_tool_call_retries += 1
+                                if truncated_tool_call_retries >= 3:
+                                    return _strict_failure_result(
+                                        agent,
+                                        messages,
+                                        conversation_history,
+                                        api_call_count=api_call_count,
+                                        error=(
+                                            "Model repeatedly returned a "
+                                            "truncated tool call"
+                                        ),
+                                        failure_code=(
+                                            "truncated_tool_call_repeated"
+                                        ),
+                                        failure_phase="tool_proposal",
+                                        partial=True,
+                                    )
+                                recovery_assistant = (
+                                    agent._build_assistant_message(
+                                        assistant_message,
+                                        finish_reason,
+                                    )
+                                )
+                                messages.append(recovery_assistant)
+                                from agent.tool_executor import (
+                                    _append_canonical_tool_result,
+                                )
+
+                                for tc in assistant_message.tool_calls:
+                                    _append_canonical_tool_result(
+                                        agent,
+                                        messages,
+                                        tc.function.name,
+                                        "Tool call arguments were truncated.",
+                                        tc.id,
+                                        "not_dispatched",
+                                        "denied",
+                                        trusted_fields={
+                                            "continuation": {
+                                                "code": (
+                                                    "truncated_tool_arguments"
+                                                ),
+                                                "message": (
+                                                    "Retry this tool call with "
+                                                    "complete valid JSON."
+                                                ),
+                                            }
+                                        },
+                                    )
+                                _retry.restart_with_length_continuation = True
+                                break
                             _is_stub_stall = (
                                 getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID
                             )
@@ -1881,6 +2051,19 @@ def run_conversation(
                                     else "Response truncated due to output length limit"
                                 ),
                             }
+
+                    if _signed_normal_loop:
+                        return _strict_failure_result(
+                            agent,
+                            messages,
+                            conversation_history,
+                            api_call_count=api_call_count,
+                            error="Response truncated before a complete result",
+                            failure_code="response_truncated",
+                            failure_phase="response_generation",
+                            partial=True,
+                            cleanup_task_id=effective_task_id,
+                        )
 
                     # If we have prior messages, roll back to last complete state
                     if len(messages) > 1:
@@ -2092,6 +2275,126 @@ def run_conversation(
                     agent.thinking_callback("")
 
                 if _strict_true_moa_mode(agent):
+                    if _signed_normal_loop:
+                        if getattr(api_error, "usage", None) is not None:
+                            _record_strict_terminal_usage(agent, api_error)
+                        _compressor = getattr(
+                            agent,
+                            "context_compressor",
+                            None,
+                        )
+                        _ctx_len = getattr(
+                            _compressor,
+                            "context_length",
+                            200000,
+                        )
+                        classified = classify_api_error(
+                            api_error,
+                            provider=getattr(agent, "provider", "") or "",
+                            model=getattr(agent, "model", "") or "",
+                            approx_tokens=approx_tokens,
+                            context_length=_ctx_len,
+                            num_messages=(
+                                len(api_messages) if api_messages else 0
+                            ),
+                        )
+                        _normal_usage_calls = (
+                            agent._paid_call_usage_ledger.to_dict().get(
+                                "calls",
+                                [],
+                            )
+                        )
+                        _latest_usage_call = (
+                            _normal_usage_calls[-1]
+                            if _normal_usage_calls
+                            else {}
+                        )
+                        _failed_call_has_trusted_usage = bool(
+                            _latest_usage_call.get("usageStatus")
+                            in {"partial", "reported"}
+                            and all(
+                                isinstance(_latest_usage_call.get(field), int)
+                                for field in (
+                                    "inputTokens",
+                                    "outputTokens",
+                                    "totalTokens",
+                                )
+                            )
+                        )
+                        if (
+                            classified.reason
+                            == FailoverReason.content_policy_blocked
+                        ):
+                            return _strict_failure_result(
+                                agent,
+                                messages,
+                                conversation_history,
+                                api_call_count=api_call_count,
+                                error=(
+                                    "The model declined to respond due to its "
+                                    "content policy"
+                                ),
+                                failure_code="content_policy_blocked",
+                                failure_phase="response_generation",
+                                cleanup_task_id=effective_task_id,
+                            )
+                        if (
+                            classified.should_compress
+                            and compression_attempts < 1
+                            and agent.compression_enabled
+                        ):
+                            if not _failed_call_has_trusted_usage:
+                                return _strict_exception_failure_result(
+                                    agent,
+                                    messages,
+                                    conversation_history,
+                                    api_call_count=api_call_count,
+                                    error=api_error,
+                                    failure_source=(
+                                        "context_overflow_usage_unavailable"
+                                    ),
+                                )
+                            original_messages = messages
+                            try:
+                                compressed_messages, active_system_prompt = (
+                                    agent._compress_context(
+                                        messages,
+                                        system_message,
+                                        approx_tokens=approx_tokens,
+                                        task_id=effective_task_id,
+                                    )
+                                )
+                            except BaseException as compression_error:
+                                return _strict_exception_failure_result(
+                                    agent,
+                                    messages,
+                                    conversation_history,
+                                    api_call_count=api_call_count,
+                                    error=compression_error,
+                                    failure_source="context_compaction",
+                                )
+                            if compressed_messages != original_messages:
+                                messages = compressed_messages
+                                conversation_history = None
+                                current_turn_user_idx = int(
+                                    getattr(
+                                        agent,
+                                        "_persist_user_message_idx",
+                                        0,
+                                    )
+                                    or 0
+                                )
+                                compression_attempts += 1
+                                _retry.restart_with_compressed_messages = True
+                                break
+                            return _strict_exception_failure_result(
+                                agent,
+                                messages,
+                                conversation_history,
+                                api_call_count=api_call_count,
+                                error=api_error,
+                                failure_source="context_compaction",
+                            )
                     return _strict_exception_failure_result(
                         agent,
                         messages,
@@ -3402,12 +3705,23 @@ def run_conversation(
                     # exists; otherwise "trying fallback..." is a lie and the
                     # session looks like it's recovering when it's about to
                     # abort silently (#35314, #17446).
-                    if agent._has_pending_fallback():
+                    strict_content_policy_block = bool(
+                        _signed_normal_loop
+                        and classified.reason
+                        == FailoverReason.content_policy_blocked
+                    )
+                    if (
+                        not strict_content_policy_block
+                        and agent._has_pending_fallback()
+                    ):
                         if classified.reason == FailoverReason.content_policy_blocked:
                             agent._buffer_status("⚠️ Provider safety filter blocked this request — trying fallback...")
                         else:
                             agent._buffer_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
-                    if agent._try_activate_fallback():
+                    if (
+                        not strict_content_policy_block
+                        and agent._try_activate_fallback()
+                    ):
                         active_system_prompt = _sync_failover_system_message(
                             agent, api_messages, active_system_prompt)
                         retry_count = 0
@@ -3519,6 +3833,17 @@ def run_conversation(
                         )
                     else:
                         logger.error(f"{agent.log_prefix}Non-retryable client error: {api_error}")
+                    if strict_content_policy_block:
+                        return _strict_failure_result(
+                            agent,
+                            messages,
+                            conversation_history,
+                            api_call_count=api_call_count,
+                            error=_nonretryable_summary,
+                            failure_code="content_policy_blocked",
+                            failure_phase="response_generation",
+                            cleanup_task_id=effective_task_id,
+                        )
                     # Skip session persistence when the error is likely
                     # context-overflow related (status 400 + large session).
                     # Persisting the failed user message would make the
@@ -3729,8 +4054,13 @@ def run_conversation(
             break
 
         if _retry.restart_with_compressed_messages:
-            api_call_count -= 1
-            agent.iteration_budget.refund()
+            # A signed normal overflow is observed only after a physical paid
+            # request was dispatched. Keep its ordinal and iteration consumed
+            # so the rebuilt request gets a fresh api_request_id and cannot
+            # reuse the controller's one-shot dispatch key.
+            if not _signed_normal_loop:
+                api_call_count -= 1
+                agent.iteration_budget.refund()
             # Count compression restarts toward the retry limit to prevent
             # infinite loops when compression reduces messages but not enough
             # to fit the context window.
@@ -3739,19 +4069,17 @@ def run_conversation(
             continue
 
         if _retry.restart_with_length_continuation:
-            # Progressively boost the output token budget on each retry.
-            # Retry 1 → 2× base, retry 2 → 3× base, capped at 32 768.
-            # Applies to all providers via _ephemeral_max_output_tokens.
-            # If the original request already used a larger provider/model
-            # default budget, keep that floor so continuation retries do
-            # not accidentally downshift to a much smaller cap.
-            _boost_base = agent.max_tokens if agent.max_tokens else 4096
-            _boost = _boost_base * (length_continue_retries + 1)
-            _requested_cap = agent._requested_output_cap_from_api_kwargs(api_kwargs)
-            if _requested_cap is not None:
-                _boost = max(_boost, _requested_cap)
-            _boost_cap = max(32768, _requested_cap or 0)
-            agent._ephemeral_max_output_tokens = min(_boost, _boost_cap)
+            if not _signed_normal_loop:
+                # Progressively boost the output token budget on legacy
+                # routes. Signed normal calls keep their configured output
+                # cap and continue in a fresh, fully-accounted model call.
+                _boost_base = agent.max_tokens if agent.max_tokens else 4096
+                _boost = _boost_base * (length_continue_retries + 1)
+                _requested_cap = agent._requested_output_cap_from_api_kwargs(api_kwargs)
+                if _requested_cap is not None:
+                    _boost = max(_boost, _requested_cap)
+                _boost_cap = max(32768, _requested_cap or 0)
+                agent._ephemeral_max_output_tokens = min(_boost, _boost_cap)
             continue
 
         # Guard: if all retries exhausted without a successful response
@@ -3859,7 +4187,7 @@ def run_conversation(
             # Check for incomplete <REASONING_SCRATCHPAD> (opened but never closed)
             # This means the model ran out of output tokens mid-reasoning — retry up to 2 times
             if has_incomplete_scratchpad(assistant_message.content or ""):
-                if _strict_paid_call:
+                if _strict_paid_call and not _signed_normal_loop:
                     return _strict_failure_result(
                         agent,
                         messages,
@@ -3888,6 +4216,23 @@ def run_conversation(
                     agent._incomplete_scratchpad_retries = 0
                     
                     rolled_back_messages = agent._get_messages_up_to_last_assistant(messages)
+                    if _signed_normal_loop:
+                        return _strict_failure_result(
+                            agent,
+                            messages,
+                            conversation_history,
+                            api_call_count=api_call_count,
+                            error=(
+                                "Model repeatedly ended inside an unfinished "
+                                "reasoning scratchpad"
+                            ),
+                            failure_code=(
+                                "incomplete_reasoning_scratchpad_repeated"
+                            ),
+                            failure_phase="response_generation",
+                            partial=True,
+                            cleanup_task_id=effective_task_id,
+                        )
                     agent._cleanup_task_resources(effective_task_id)
                     agent._persist_session(messages, conversation_history)
                     
@@ -3964,7 +4309,11 @@ def run_conversation(
             
             # Check for tool calls
             if assistant_message.tool_calls:
-                if _strict_final_slot:
+                if _true_moa_final_slot or (
+                    _strict_true_moa_mode(agent)
+                    and not _signed_normal_loop
+                    and api_call_count >= agent.max_iterations
+                ):
                     return _strict_failure_result(
                         agent,
                         messages,
@@ -3977,12 +4326,64 @@ def run_conversation(
                         failure_code="final_slot_requested_tool",
                         failure_phase="tool_proposal",
                     )
+                if _signed_normal_loop:
+                    _normal_ledger = getattr(
+                        agent,
+                        "_paid_call_usage_ledger",
+                        None,
+                    )
+                    _normal_call_limit = int(
+                        getattr(_normal_ledger, "max_calls", 0) or 0
+                    )
+                    _normal_calls_used = len(
+                        (_normal_ledger.to_dict().get("calls") or [])
+                        if _normal_ledger is not None
+                        else []
+                    )
+                    if (
+                        api_call_count
+                        + int(
+                            getattr(
+                                agent,
+                                "_strict_compaction_call_count",
+                                0,
+                            )
+                            or 0
+                        )
+                        >= agent.max_iterations
+                        or (
+                            _normal_call_limit > 0
+                            and _normal_calls_used >= _normal_call_limit
+                        )
+                    ):
+                        return _strict_failure_result(
+                            agent,
+                            messages,
+                            conversation_history,
+                            api_call_count=api_call_count,
+                            error=(
+                                "The model requested another tool after the "
+                                "physical paid-call budget was exhausted"
+                            ),
+                            failure_code="paid_call_budget_requested_tool",
+                            failure_phase="tool_proposal",
+                        )
                 if not agent.quiet_mode:
                     agent._vprint(f"{agent.log_prefix}🔧 Processing {len(assistant_message.tool_calls)} tool call(s)...")
                 
                 if agent.verbose_logging:
                     for tc in assistant_message.tool_calls:
-                        logging.debug(f"Tool call: {tc.function.name} with args: {tc.function.arguments[:200]}...")
+                        if _strict_paid_call:
+                            logging.debug(
+                                "Tool call: %s (arguments redacted)",
+                                tc.function.name,
+                            )
+                        else:
+                            logging.debug(
+                                "Tool call: %s with args: %s...",
+                                tc.function.name,
+                                str(tc.function.arguments)[:200],
+                            )
                 
                 # Validate tool call names - detect model hallucinations
                 # Repair mismatched tool names before validating
@@ -3998,7 +4399,7 @@ def run_conversation(
                     if tc.function.name not in agent.valid_tool_names
                 ]
                 if invalid_tool_calls:
-                    if _strict_true_moa_mode(agent):
+                    if _strict_true_moa_mode(agent) and not _signed_normal_loop:
                         return _strict_failure_result(
                             agent,
                             messages,
@@ -4013,15 +4414,37 @@ def run_conversation(
                     agent._invalid_tool_retries += 1
 
                     # Return helpful error to model — model can agent-correct next turn
-                    available = ", ".join(sorted(agent.valid_tool_names))
+                    available = ", ".join(
+                        sorted(agent.valid_tool_names)[:64]
+                    )
                     invalid_name = invalid_tool_calls[0]
                     invalid_preview = invalid_name[:80] + "..." if len(invalid_name) > 80 else invalid_name
-                    agent._buffer_vprint(f"⚠️  Unknown tool '{invalid_preview}' — sending error to model for agent-correction ({agent._invalid_tool_retries}/3)")
+                    agent._buffer_vprint(
+                        f"⚠️  Unknown tool '{invalid_preview}' — sending "
+                        "the failed result to the model for correction"
+                    )
 
                     if agent._invalid_tool_retries >= 3:
                         agent._flush_status_buffer()
-                        agent._vprint(f"{agent.log_prefix}❌ Max retries (3) for invalid tool calls exceeded. Stopping as partial.", force=True)
+                        agent._vprint(
+                            f"{agent.log_prefix}❌ Max retries (3) for invalid "
+                            "tool calls exceeded.",
+                            force=True,
+                        )
                         agent._invalid_tool_retries = 0
+                        if _signed_normal_loop:
+                            return _strict_failure_result(
+                                agent,
+                                messages,
+                                conversation_history,
+                                api_call_count=api_call_count,
+                                error=(
+                                    "Model repeatedly generated an invalid "
+                                    "tool call"
+                                ),
+                                failure_code="invalid_tool_call_repeated",
+                                failure_phase="tool_proposal",
+                            )
                         agent._persist_session(messages, conversation_history)
                         return {
                             "final_response": None,
@@ -4058,15 +4481,40 @@ def run_conversation(
                                     "otherwise reply in plain text."
                                 )
                             else:
-                                content = f"Tool '{_tc_name}' does not exist. Available tools: {available}"
+                                safe_name = str(_tc_name)[:160]
+                                content = (
+                                    f"Tool '{safe_name}' does not exist. "
+                                    f"Available tools: {available}"
+                                )
                         else:
                             content = "Skipped: another tool call in this turn used an invalid name. Please retry this tool call."
-                        messages.append({
-                            "role": "tool",
-                            "name": tc.function.name,
-                            "tool_call_id": tc.id,
-                            "content": content,
-                        })
+                        if _signed_normal_loop:
+                            from agent.tool_executor import (
+                                _append_canonical_tool_result,
+                            )
+
+                            _append_canonical_tool_result(
+                                agent,
+                                messages,
+                                tc.function.name,
+                                content,
+                                tc.id,
+                                "not_dispatched",
+                                "denied",
+                                trusted_fields={
+                                    "continuation": {
+                                        "code": "invalid_tool_name",
+                                        "message": content,
+                                    }
+                                },
+                            )
+                        else:
+                            messages.append({
+                                "role": "tool",
+                                "name": tc.function.name,
+                                "tool_call_id": tc.id,
+                                "content": content,
+                            })
                     continue
                 # Reset retry counter on successful tool call validation
                 agent._invalid_tool_retries = 0
@@ -4076,10 +4524,20 @@ def run_conversation(
                 invalid_json_args = []
                 for tc in assistant_message.tool_calls:
                     args = tc.function.arguments
-                    if isinstance(args, (dict, list)):
+                    if isinstance(args, dict):
                         tc.function.arguments = json.dumps(args)
                         continue
-                    if args is not None and not isinstance(args, str):
+                    if args is None:
+                        if _signed_normal_loop or _strict_true_moa_mode(agent):
+                            invalid_json_args.append((
+                                tc.id,
+                                tc.function.name,
+                                "arguments must be a JSON object, not null",
+                            ))
+                            continue
+                        tc.function.arguments = "{}"
+                        continue
+                    if not isinstance(args, str):
                         tc.function.arguments = str(args)
                         args = tc.function.arguments
                     # Treat empty/whitespace strings as empty object
@@ -4087,12 +4545,23 @@ def run_conversation(
                         tc.function.arguments = "{}"
                         continue
                     try:
-                        json.loads(args)
+                        parsed_args = json.loads(args)
                     except json.JSONDecodeError as e:
-                        invalid_json_args.append((tc.function.name, str(e)))
+                        invalid_json_args.append((
+                            tc.id,
+                            tc.function.name,
+                            str(e),
+                        ))
+                    else:
+                        if not isinstance(parsed_args, dict):
+                            invalid_json_args.append((
+                                tc.id,
+                                tc.function.name,
+                                "arguments must decode to a JSON object",
+                            ))
                 
                 if invalid_json_args:
-                    if _strict_true_moa_mode(agent):
+                    if _strict_true_moa_mode(agent) and not _signed_normal_loop:
                         return _strict_failure_result(
                             agent,
                             messages,
@@ -4103,74 +4572,129 @@ def run_conversation(
                             failure_phase="tool_proposal",
                             partial=True,
                         )
-                    # Check if the invalid JSON is due to truncation rather
-                    # than a model formatting mistake.  Routers sometimes
-                    # rewrite finish_reason from "length" to "tool_calls",
-                    # hiding the truncation from the length handler above.
-                    # Detect truncation: args that don't end with } or ]
-                    # (after stripping whitespace) are cut off mid-stream.
-                    _truncated = any(
-                        not (tc.function.arguments or "").rstrip().endswith(("}", "]"))
-                        for tc in assistant_message.tool_calls
-                        if tc.function.name in {n for n, _ in invalid_json_args}
-                    )
-                    if _truncated:
-                        agent._vprint(
-                            f"{agent.log_prefix}⚠️  Truncated tool call arguments detected "
-                            f"(finish_reason={finish_reason!r}) — refusing to execute.",
-                            force=True,
-                        )
-                        agent._invalid_json_retries = 0
-                        agent._cleanup_task_resources(effective_task_id)
-                        agent._persist_session(messages, conversation_history)
-                        return {
-                            "final_response": None,
-                            "messages": messages,
-                            "api_calls": api_call_count,
-                            "completed": False,
-                            "partial": True,
-                            "error": "Response truncated due to output length limit",
-                        }
-
-                    # Track retries for invalid JSON arguments
-                    agent._invalid_json_retries += 1
-
-                    tool_name, error_msg = invalid_json_args[0]
-                    agent._buffer_vprint(f"⚠️  Invalid JSON in tool call arguments for '{tool_name}': {error_msg}")
-
-                    if agent._invalid_json_retries < 3:
-                        agent._buffer_vprint(f"🔄 Retrying API call ({agent._invalid_json_retries}/3)...")
-                        # Don't add anything to messages, just retry the API call
-                        continue
+                    if _signed_normal_loop:
+                        agent._invalid_json_retries += 1
+                        if agent._invalid_json_retries >= 3:
+                            agent._invalid_json_retries = 0
+                            return _strict_failure_result(
+                                agent,
+                                messages,
+                                conversation_history,
+                                api_call_count=api_call_count,
+                                error=(
+                                    "Model repeatedly generated invalid tool "
+                                    "arguments"
+                                ),
+                                failure_code=(
+                                    "invalid_tool_arguments_repeated"
+                                ),
+                                failure_phase="tool_proposal",
+                            )
                     else:
-                        # Instead of returning partial, inject tool error results so the model can recover.
-                        # Using tool results (not user messages) preserves role alternation.
-                        agent._buffer_vprint(f"⚠️  Injecting recovery tool results for invalid JSON...")
-                        agent._invalid_json_retries = 0  # Reset for next attempt
-                        
-                        # Append the assistant message with its (broken) tool_calls
-                        recovery_assistant = agent._build_assistant_message(assistant_message, finish_reason)
-                        messages.append(recovery_assistant)
-                        
-                        # Respond with tool error results for each tool call
-                        invalid_names = {name for name, _ in invalid_json_args}
-                        for tc in assistant_message.tool_calls:
-                            if tc.function.name in invalid_names:
-                                err = next(e for n, e in invalid_json_args if n == tc.function.name)
-                                tool_result = (
-                                    f"Error: Invalid JSON arguments. {err}. "
-                                    f"For tools with no required parameters, use an empty object: {{}}. "
-                                    f"Please retry with valid JSON."
-                                )
-                            else:
-                                tool_result = "Skipped: other tool call in this response had invalid JSON."
+                        # Routers sometimes rewrite a truncated response to
+                        # finish_reason=tool_calls. Preserve the legacy handling
+                        # outside the signed normal loop.
+                        _truncated = any(
+                            not (tc.function.arguments or "").rstrip().endswith(("}", "]"))
+                            for tc in assistant_message.tool_calls
+                            if tc.id in {
+                                call_id
+                                for call_id, _name, _error in invalid_json_args
+                            }
+                        )
+                        if _truncated:
+                            agent._vprint(
+                                f"{agent.log_prefix}⚠️  Truncated tool call arguments detected "
+                                f"(finish_reason={finish_reason!r}) — refusing to execute.",
+                                force=True,
+                            )
+                            agent._invalid_json_retries = 0
+                            agent._cleanup_task_resources(effective_task_id)
+                            agent._persist_session(messages, conversation_history)
+                            return {
+                                "final_response": None,
+                                "messages": messages,
+                                "api_calls": api_call_count,
+                                "completed": False,
+                                "partial": True,
+                                "error": "Response truncated due to output length limit",
+                            }
+
+                        agent._invalid_json_retries += 1
+                        _call_id, tool_name, error_msg = invalid_json_args[0]
+                        agent._buffer_vprint(
+                            f"⚠️  Invalid JSON in tool call arguments for "
+                            f"'{tool_name}': {error_msg}"
+                        )
+                        if agent._invalid_json_retries < 3:
+                            agent._buffer_vprint(
+                                f"🔄 Retrying API call "
+                                f"({agent._invalid_json_retries}/3)..."
+                            )
+                            continue
+
+                    # Signed normal calls report malformed arguments on the
+                    # first occurrence. The original call/result pairing gives
+                    # the same model the information needed to self-correct.
+                    agent._buffer_vprint(
+                        "⚠️  Injecting recovery tool results for invalid JSON..."
+                    )
+                    if not _signed_normal_loop:
+                        agent._invalid_json_retries = 0
+                    recovery_assistant = agent._build_assistant_message(
+                        assistant_message,
+                        finish_reason,
+                    )
+                    messages.append(recovery_assistant)
+                    invalid_call_ids = {
+                        call_id
+                        for call_id, _name, _error in invalid_json_args
+                    }
+                    for tc in assistant_message.tool_calls:
+                        if tc.id in invalid_call_ids:
+                            err = next(
+                                error
+                                for call_id, _name, error in invalid_json_args
+                                if call_id == tc.id
+                            )
+                            tool_result = (
+                                f"Error: Invalid JSON arguments. {err}. "
+                                "For tools with no required parameters, use "
+                                "an empty object: {}. Please retry with valid JSON."
+                            )
+                        else:
+                            tool_result = (
+                                "Skipped: another tool call in this response "
+                                "had invalid JSON."
+                            )
+                        if _signed_normal_loop:
+                            from agent.tool_executor import (
+                                _append_canonical_tool_result,
+                            )
+
+                            _append_canonical_tool_result(
+                                agent,
+                                messages,
+                                tc.function.name,
+                                tool_result,
+                                tc.id,
+                                "not_dispatched",
+                                "denied",
+                                trusted_fields={
+                                    "continuation": {
+                                        "code": "invalid_tool_arguments",
+                                        "message": tool_result,
+                                    }
+                                },
+                            )
+                        else:
                             messages.append({
                                 "role": "tool",
                                 "name": tc.function.name,
                                 "tool_call_id": tc.id,
                                 "content": tool_result,
                             })
-                        continue
+                    continue
                 
                 # Reset retry counter on successful JSON validation
                 agent._invalid_json_retries = 0
@@ -4346,7 +4870,22 @@ def run_conversation(
                 # a session can grow unbounded after disconnects because
                 # should_compress(0) never fires.  (#2153)
                 _compressor = agent.context_compressor
-                if _compressor.last_prompt_tokens > 0:
+                if _signed_normal_loop:
+                    # Match Codex's post-sampling accounting: Provider prompt
+                    # usage does not include the ToolResult items just appended
+                    # locally, so include a token estimate of the next request.
+                    _next_request_tokens = estimate_request_tokens_rough(
+                        messages,
+                        system_prompt=active_system_prompt or "",
+                        tools=agent.tools or None,
+                    )
+                    _real_tokens = max(
+                        _next_request_tokens,
+                        _compressor.last_prompt_tokens
+                        if _compressor.last_prompt_tokens > 0
+                        else 0,
+                    )
+                elif _compressor.last_prompt_tokens > 0:
                     # Only use prompt_tokens — completion/reasoning
                     # tokens don't consume context window space.
                     # Thinking models (GLM-5.1, QwQ, DeepSeek R1)
@@ -4369,15 +4908,36 @@ def run_conversation(
 
                 if agent.compression_enabled and _compressor.should_compress(_real_tokens):
                     agent._safe_print("  ⟳ compacting context…")
-                    messages, active_system_prompt = agent._compress_context(
-                        messages, system_message,
-                        approx_tokens=agent.context_compressor.last_prompt_tokens,
-                        task_id=effective_task_id,
-                    )
+                    try:
+                        messages, active_system_prompt = agent._compress_context(
+                            messages,
+                            system_message,
+                            approx_tokens=_real_tokens,
+                            task_id=effective_task_id,
+                        )
+                    except BaseException as compression_error:
+                        if isinstance(
+                            compression_error,
+                            (KeyboardInterrupt, SystemExit),
+                        ):
+                            raise
+                        if _signed_normal_loop:
+                            return _strict_exception_failure_result(
+                                agent,
+                                messages,
+                                conversation_history,
+                                api_call_count=api_call_count,
+                                error=compression_error,
+                                failure_source="context_compaction",
+                            )
+                        raise
                     # Compression created a new session — clear history so
                     # _flush_messages_to_session_db writes compressed messages
                     # to the new session (see preflight compression comment).
                     conversation_history = None
+                    current_turn_user_idx = int(
+                        getattr(agent, "_persist_user_message_idx", 0) or 0
+                    )
                 
                 # Save session log incrementally (so progress is visible even if interrupted)
                 agent._session_messages = messages
@@ -4448,7 +5008,7 @@ def run_conversation(
                         agent._response_was_previewed = True
                         break
 
-                    if _strict_true_moa_mode(agent):
+                    if _strict_true_moa_mode(agent) and not _signed_normal_loop:
                         return _strict_failure_result(
                             agent,
                             messages,
@@ -4530,6 +5090,63 @@ def run_conversation(
                         })
                         continue
 
+                    _has_structured = bool(
+                        getattr(assistant_message, "reasoning", None)
+                        or getattr(assistant_message, "reasoning_content", None)
+                        or getattr(assistant_message, "reasoning_details", None)
+                        or _has_inline_thinking
+                    )
+                    if _signed_normal_loop:
+                        if (
+                            agent._empty_content_retries >= 1
+                            or getattr(
+                                agent,
+                                "_post_tool_empty_retried",
+                                False,
+                            )
+                        ):
+                            return _strict_failure_result(
+                                agent,
+                                messages,
+                                conversation_history,
+                                api_call_count=api_call_count,
+                                error=(
+                                    "Model returned no visible content after "
+                                    "one bounded recovery attempt"
+                                ),
+                                failure_code="empty_model_response_repeated",
+                                failure_phase="response_generation",
+                                drop_scaffolding=True,
+                            )
+                        # Empty output has no legitimate tool call id. Keep one
+                        # recovery pair and let the same model continue once.
+                        while (
+                            messages
+                            and isinstance(messages[-1], dict)
+                            and messages[-1].get("_empty_recovery_synthetic")
+                        ):
+                            messages.pop()
+                        empty_message = agent._build_assistant_message(
+                            assistant_message,
+                            finish_reason,
+                        )
+                        empty_message["content"] = "(empty)"
+                        empty_message["_empty_recovery_synthetic"] = True
+                        messages.append(empty_message)
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "Your previous response had no visible content. "
+                                "Continue the original task now: call a valid "
+                                "tool if more evidence is needed, otherwise give "
+                                "the complete natural final answer."
+                            ),
+                            "_empty_recovery_synthetic": True,
+                        })
+                        agent._empty_content_retries += 1
+                        agent._session_messages = messages
+                        continue
+
                     # ── Thinking-only prefill continuation ──────────
                     # The model produced structured reasoning (via API
                     # fields) but no visible text content.  Rather than
@@ -4539,12 +5156,6 @@ def run_conversation(
                     # Inspired by clawdbot's "incomplete-text" recovery.
                     # Also covers Qwen3/Ollama in-content <think> blocks
                     # (detected above as _has_inline_thinking).
-                    _has_structured = bool(
-                        getattr(assistant_message, "reasoning", None)
-                        or getattr(assistant_message, "reasoning_content", None)
-                        or getattr(assistant_message, "reasoning_details", None)
-                        or _has_inline_thinking
-                    )
                     if _has_structured and agent._thinking_prefill_retries < 2:
                         agent._thinking_prefill_retries += 1
                         logger.info(
@@ -4753,7 +5364,14 @@ def run_conversation(
                 break
             
         except Exception as e:
-            error_msg = f"Error during OpenAI-compatible API call #{api_call_count}: {str(e)}"
+            error_msg = (
+                "Strict My Stand loop processing failed"
+                if _signed_normal_loop
+                else (
+                    "Error during OpenAI-compatible API call "
+                    f"#{api_call_count}: {str(e)}"
+                )
+            )
             try:
                 print(f"❌ {error_msg}")
             except (OSError, ValueError):
@@ -4765,7 +5383,17 @@ def run_conversation(
             # — users would see a one-line summary on screen with no way to
             # recover the call site.  logger.exception() includes the
             # traceback automatically and emits at ERROR.
-            logger.exception("Outer loop error in API call #%d", api_call_count)
+            if _signed_normal_loop:
+                logger.error(
+                    "Outer loop error in signed My Stand API call #%d "
+                    "(details redacted)",
+                    api_call_count,
+                )
+            else:
+                logger.exception(
+                    "Outer loop error in API call #%d",
+                    api_call_count,
+                )
             # If an assistant message with tool_calls was already appended,
             # the API expects a role="tool" result for every tool_call_id.
             # Fill in error results for any that weren't answered yet.
@@ -4784,13 +5412,39 @@ def run_conversation(
                     for tc in msg["tool_calls"]:
                         if not tc or not isinstance(tc, dict): continue
                         if tc["id"] not in answered_ids:
-                            err_msg = {
-                                "role": "tool",
-                                "name": _ra().AIAgent._get_tool_call_name_static(tc),
-                                "tool_call_id": tc["id"],
-                                "content": f"Error executing tool: {error_msg}",
-                            }
-                            messages.append(err_msg)
+                            tool_name = (
+                                _ra().AIAgent._get_tool_call_name_static(tc)
+                            )
+                            if _signed_normal_loop:
+                                from agent.tool_executor import (
+                                    _append_canonical_tool_result,
+                                )
+
+                                _append_canonical_tool_result(
+                                    agent,
+                                    messages,
+                                    tool_name,
+                                    {
+                                        "code": "tool_runtime_interrupted",
+                                        "message": (
+                                            "The runtime could not confirm the "
+                                            "tool result. Do not repeat a "
+                                            "side effect without readback."
+                                        ),
+                                    },
+                                    tc["id"],
+                                    "dispatched",
+                                    "unknown",
+                                )
+                            else:
+                                messages.append({
+                                    "role": "tool",
+                                    "name": tool_name,
+                                    "tool_call_id": tc["id"],
+                                    "content": (
+                                        f"Error executing tool: {error_msg}"
+                                    ),
+                                })
                 break
             
             # Non-tool errors don't need a synthetic message injected.
@@ -4799,8 +5453,21 @@ def run_conversation(
             # message pollutes history, burns tokens, and risks violating
             # role-alternation invariants.
 
+            if _signed_normal_loop:
+                return _strict_exception_failure_result(
+                    agent,
+                    messages,
+                    conversation_history,
+                    api_call_count=api_call_count,
+                    error=e,
+                    failure_source="response_processing",
+                )
+
             # If we're near the limit, break to avoid infinite loops
-            if api_call_count >= agent.max_iterations - 1:
+            if (
+                not _signed_normal_loop
+                and api_call_count >= agent.max_iterations - 1
+            ):
                 _turn_exit_reason = f"error_near_max_iterations({error_msg[:80]})"
                 final_response = f"I apologize, but I encountered repeated errors: {error_msg}"
                 # Append as assistant so the history stays valid for
@@ -4815,7 +5482,10 @@ def run_conversation(
     return finalize_turn(
         agent,
         final_response=final_response,
-        api_call_count=api_call_count,
+        api_call_count=(
+            api_call_count
+            + int(getattr(agent, "_strict_compaction_call_count", 0) or 0)
+        ),
         interrupted=interrupted,
         failed=failed,
         messages=messages,

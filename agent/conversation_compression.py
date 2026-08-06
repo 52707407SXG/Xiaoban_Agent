@@ -28,6 +28,8 @@ these paths see no behavioural change.
 
 from __future__ import annotations
 
+import copy
+import json
 import logging
 import os
 import tempfile
@@ -48,6 +50,12 @@ logger = logging.getLogger(__name__)
 COMPACTION_STATUS_MARKER = "Compacting context"
 COMPACTION_STATUS = (
     f"🗜️ {COMPACTION_STATUS_MARKER} — summarizing earlier conversation so I can continue..."
+)
+CURRENT_TURN_USER_MARKER_INTERNAL_KEY = (
+    "_xiaoban_current_turn_user_marker"
+)
+CURRENT_TURN_USER_CONTENT_INTERNAL_KEY = (
+    "_xiaoban_current_turn_user_content"
 )
 
 
@@ -311,6 +319,21 @@ def compress_context(
         prompt — the session is NOT rotated.  Callers should detect the
         no-op via ``len(returned) == len(input)`` and stop the retry loop.
     """
+    from agent.true_moa_conversation_policy import (
+        signed_normal_runtime_checkpoint,
+        signed_normal_mode,
+        summarize_signed_normal_context,
+    )
+    from agent.context_compressor import (
+        COMPRESSED_SUMMARY_METADATA_KEY,
+        _SUMMARY_END_MARKER,
+    )
+    from agent.tool_result_classification import (
+        RUNTIME_CHECKPOINT_INTERNAL_KEY,
+    )
+
+    strict_normal = signed_normal_mode(agent)
+
     # Lazy feasibility check — run the auxiliary-provider probe + context
     # length lookup just-in-time on the first compression attempt instead of
     # at AIAgent.__init__. Saves ~400ms cold off every short session that
@@ -318,7 +341,10 @@ def compress_context(
     # The check itself sets ``agent._compression_warning`` so the
     # status-callback replay machinery still emits the warning to the user
     # the first time it would matter.
-    if not getattr(agent, "_compression_feasibility_checked", False):
+    if (
+        not strict_normal
+        and not getattr(agent, "_compression_feasibility_checked", False)
+    ):
         # Mark as checked only after the probe completes. If the check
         # raises (e.g. a fatal aux-context ValueError that aborts the
         # session), leaving the flag unset is harmless; a non-fatal
@@ -328,6 +354,24 @@ def compress_context(
         agent._compression_feasibility_checked = True
 
     _pre_msg_count = len(messages)
+    _persisted_user = None
+    _persisted_user_marker = None
+    _persisted_user_idx = getattr(agent, "_persist_user_message_idx", None)
+    if (
+        isinstance(_persisted_user_idx, int)
+        and 0 <= _persisted_user_idx < len(messages)
+        and isinstance(messages[_persisted_user_idx], dict)
+        and messages[_persisted_user_idx].get("role") == "user"
+    ):
+        _persisted_user_marker = uuid.uuid4().hex
+        messages[_persisted_user_idx][
+            CURRENT_TURN_USER_MARKER_INTERNAL_KEY
+        ] = _persisted_user_marker
+        messages[_persisted_user_idx][
+            CURRENT_TURN_USER_CONTENT_INTERNAL_KEY
+        ] = copy.deepcopy(messages[_persisted_user_idx].get("content"))
+        agent._persist_user_message_marker = _persisted_user_marker
+        _persisted_user = copy.deepcopy(messages[_persisted_user_idx])
     # In-place compaction (config: compression.in_place, see #38763). When True,
     # this compaction rewrites the message list + rebuilds the system prompt but
     # keeps the SAME session_id — no end_session, no parent_session_id child, no
@@ -433,6 +477,10 @@ def compress_context(
             _existing_sp = getattr(agent, "_cached_system_prompt", None)
             if not _existing_sp:
                 _existing_sp = agent._build_system_prompt(system_message)
+            if strict_normal:
+                raise RuntimeError(
+                    "same-model context compaction lock unavailable"
+                )
             return messages, _existing_sp
 
     def _release_lock() -> None:
@@ -451,11 +499,32 @@ def compress_context(
             pass
 
     try:
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
-    except TypeError:
-        # Plugin context engine with strict signature that doesn't accept
-        # focus_topic / force — fall back to calling without them.
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
+        if strict_normal:
+            compressed = agent.context_compressor.compress(
+                messages,
+                current_tokens=approx_tokens,
+                focus_topic=focus_topic,
+                force=force,
+                summary_generator=lambda turns, focus: (
+                    summarize_signed_normal_context(agent, turns, focus)
+                ),
+                abort_on_summary_failure=True,
+            )
+        else:
+            try:
+                compressed = agent.context_compressor.compress(
+                    messages,
+                    current_tokens=approx_tokens,
+                    focus_topic=focus_topic,
+                    force=force,
+                )
+            except TypeError:
+                # Plugin context engine with strict signature that doesn't
+                # accept focus_topic / force — fall back without them.
+                compressed = agent.context_compressor.compress(
+                    messages,
+                    current_tokens=approx_tokens,
+                )
     except BaseException:
         # ANY exception during compress() must release the lock so the
         # session isn't permanently blocked from future compression.
@@ -480,7 +549,102 @@ def compress_context(
         if not _existing_sp:
             _existing_sp = agent._build_system_prompt(system_message)
         _release_lock()  # compression aborted — no rotation will happen
+        if strict_normal:
+            raise RuntimeError(_err)
         return messages, _existing_sp
+
+    if compressed == messages:
+        _existing_sp = getattr(agent, "_cached_system_prompt", None)
+        if not _existing_sp:
+            _existing_sp = agent._build_system_prompt(system_message)
+        _release_lock()
+        if strict_normal:
+            raise RuntimeError(
+                "same-model context compaction made no progress"
+            )
+        return messages, _existing_sp
+
+    runtime_checkpoint = (
+        signed_normal_runtime_checkpoint(agent, messages)
+        if strict_normal
+        else ""
+    )
+    runtime_checkpoint_payload = None
+    if runtime_checkpoint:
+        for line in runtime_checkpoint.splitlines():
+            if not line.startswith("XIAOBAN_RUNTIME_CHECKPOINT_JSON:"):
+                continue
+            try:
+                candidate = json.loads(line.split(":", 1)[1])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(candidate, dict):
+                runtime_checkpoint_payload = candidate
+            break
+    if runtime_checkpoint_payload is not None:
+        for item in compressed:
+            if (
+                isinstance(item, dict)
+                and item.get(COMPRESSED_SUMMARY_METADATA_KEY)
+            ):
+                item[RUNTIME_CHECKPOINT_INTERNAL_KEY] = (
+                    runtime_checkpoint_payload
+                )
+                break
+
+    if _persisted_user is not None:
+        persisted_user_index = None
+        for index in range(len(compressed) - 1, -1, -1):
+            item = compressed[index]
+            content = item.get("content") if isinstance(item, dict) else None
+            original_content = _persisted_user.get("content")
+            exact_user = content == original_content
+            marked_user = bool(
+                _persisted_user_marker
+                and item.get(CURRENT_TURN_USER_MARKER_INTERNAL_KEY)
+                == _persisted_user_marker
+            ) if isinstance(item, dict) else False
+            merged_text_user = bool(
+                isinstance(content, str)
+                and isinstance(original_content, str)
+                and item.get(COMPRESSED_SUMMARY_METADATA_KEY)
+                and content.endswith(original_content)
+            ) if isinstance(item, dict) else False
+            merged_multimodal_user = bool(
+                isinstance(content, list)
+                and isinstance(original_content, list)
+                and original_content
+                and item.get(COMPRESSED_SUMMARY_METADATA_KEY)
+                and content[-len(original_content):] == original_content
+            ) if isinstance(item, dict) else False
+            if (
+                isinstance(item, dict)
+                and item.get("role") == "user"
+                and (
+                    exact_user
+                    or marked_user
+                    or merged_text_user
+                    or merged_multimodal_user
+                )
+            ):
+                persisted_user_index = index
+                break
+        if persisted_user_index is None:
+            insert_at = len(compressed)
+            original_tail = messages[_persisted_user_idx + 1:]
+            for index, item in enumerate(compressed):
+                if any(item == tail_item for tail_item in original_tail):
+                    insert_at = index
+                    break
+            compressed.insert(insert_at, copy.deepcopy(_persisted_user))
+            persisted_user_index = insert_at
+        compressed[persisted_user_index][
+            CURRENT_TURN_USER_MARKER_INTERNAL_KEY
+        ] = _persisted_user_marker or True
+        compressed[persisted_user_index][
+            CURRENT_TURN_USER_CONTENT_INTERNAL_KEY
+        ] = copy.deepcopy(_persisted_user.get("content"))
+        agent._persist_user_message_idx = persisted_user_index
 
     summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
     if summary_error:

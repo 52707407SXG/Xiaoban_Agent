@@ -31,6 +31,8 @@ from xiaoban.trusted_runtime.agent_call_usage import (
     project_agent_call_usage,
 )
 from xiaoban.trusted_runtime.paid_call_policy import (
+    LEGACY_SIGNED_MYSTAND_AGENT_POLICY,
+    LEGACY_SIGNED_MYSTAND_AGENT_POLICY_REVISION,
     PaidCallPolicyError,
     SIGNED_MYSTAND_AGENT_POLICY,
     SIGNED_MYSTAND_AGENT_POLICY_REGISTRY,
@@ -139,7 +141,7 @@ def test_signed_chat_rejects_extra_body_controlled_field_override(extra_body):
         )
 
 
-def test_signed_chat_wire_byte_boundary_is_exact():
+def test_signed_normal_has_no_artificial_wire_byte_boundary():
     payload = {
         "model": "deepseek-v4-pro",
         "messages": [{"role": "user", "content": ""}],
@@ -150,24 +152,15 @@ def test_signed_chat_wire_byte_boundary_is_exact():
         payload=payload,
         error_prefix="signed_test",
     )
-    payload["messages"][0]["content"] = "x" * (
-        SIGNED_MYSTAND_AGENT_POLICY.input_max_bytes - base_size
-    )
-    assert enforce_openai_chat_paid_call_dispatch_budget(
+    assert SIGNED_MYSTAND_AGENT_POLICY.input_max_bytes is None
+    payload["messages"][0]["content"] = "x" * 140_519
+    encoded_size = enforce_openai_chat_paid_call_dispatch_budget(
         SIGNED_MYSTAND_AGENT_POLICY,
         payload=payload,
         error_prefix="signed_test",
-    ) == SIGNED_MYSTAND_AGENT_POLICY.input_max_bytes
-    payload["messages"][0]["content"] += "x"
-    with pytest.raises(
-        PaidCallPolicyError,
-        match="signed_test_input_byte_cap_exceeded",
-    ):
-        enforce_openai_chat_paid_call_dispatch_budget(
-            SIGNED_MYSTAND_AGENT_POLICY,
-            payload=payload,
-            error_prefix="signed_test",
-        )
+    )
+    assert encoded_size > base_size
+    assert encoded_size > 131_072
 
 
 def _agent(ledger: AgentCallUsageLedger):
@@ -223,21 +216,25 @@ def _normal_workflow(
     )
 
 
-def _execute(agent, provider_call, *, request_id: str, count: int):
+def _execute(
+    agent,
+    provider_call,
+    *,
+    request_id: str,
+    count: int,
+    payload=None,
+):
+    request = payload or {
+        "model": "deepseek-v4-pro",
+        "messages": [],
+        "max_tokens": 4096,
+    }
     return execute_llm_request(
         agent,
-        {
-            "model": "deepseek-v4-pro",
-            "messages": [],
-            "max_tokens": 4096,
-        },
+        request,
         provider_call,
         strict=True,
-        original_request={
-            "model": "deepseek-v4-pro",
-            "messages": [],
-            "max_tokens": 4096,
-        },
+        original_request=dict(request),
         middleware_trace=[],
         task_id="task",
         turn_id="turn",
@@ -1211,7 +1208,9 @@ def test_signed_normal_route_binds_shared_caps_before_dispatch():
     bind_paid_call_ledger(workflow, agent)
 
     assert workflow.agent_call_ledger is agent._paid_call_usage_ledger
-    assert agent.max_iterations == 8
+    # v3 policy raises the physical-call safety ceiling to 90 (task-book
+    # scene 1: long chains must run past 8 calls without being cut off).
+    assert agent.max_iterations == 90
     assert agent.max_tokens == 4096
 
 
@@ -1264,15 +1263,6 @@ def test_pre_agent_stop_settles_zero_call_ledger_without_dispatch():
     [
         (
             lambda payload: {**payload, "max_tokens": 4_097},
-            "signed_mystand_paid_call",
-        ),
-        (
-            lambda payload: {
-                **payload,
-                "messages": [
-                    {"role": "user", "content": "x" * 131_072},
-                ],
-            },
             "signed_mystand_paid_call",
         ),
         (
@@ -1331,6 +1321,36 @@ def test_execution_middleware_cannot_bypass_physical_budget(
 
     assert provider_calls == 0
     assert ledger.to_dict()["calls"] == []
+
+
+def test_signed_normal_input_is_not_rejected_by_the_retired_byte_gate():
+    provider_calls = 0
+    ledger = AgentCallUsageLedger(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        execution_id="4" * 32,
+    )
+    agent = _agent(ledger)
+
+    def provider(_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        return SimpleNamespace(usage=_usage(1, 1))
+
+    _execute(
+        agent,
+        provider,
+        request_id="large-normal-input",
+        count=1,
+        payload={
+            "model": "deepseek-v4-pro",
+            "messages": [{"role": "user", "content": "x" * 140_519}],
+            "max_tokens": 4_096,
+        },
+    )
+
+    assert provider_calls == 1
+    assert ledger.to_dict()["calls"][0]["status"] == "completed"
 
 
 def test_true_moa_route_guard_is_independent_at_physical_dispatch():
@@ -1464,6 +1484,9 @@ def test_billing_policy_registry_keeps_revision_specific_policy():
         is SIGNED_MYSTAND_AGENT_POLICY
     )
     assert SIGNED_MYSTAND_AGENT_POLICY_REGISTRY == {
+        LEGACY_SIGNED_MYSTAND_AGENT_POLICY_REVISION: (
+            LEGACY_SIGNED_MYSTAND_AGENT_POLICY
+        ),
         SIGNED_MYSTAND_AGENT_POLICY_REVISION: (
             SIGNED_MYSTAND_AGENT_POLICY
         ),
@@ -1472,6 +1495,13 @@ def test_billing_policy_registry_keeps_revision_specific_policy():
         SIGNED_MYSTAND_AGENT_POLICY_REGISTRY["future"] = (
             SIGNED_MYSTAND_AGENT_POLICY
         )
+    assert (
+        resolve_signed_mystand_agent_policy(
+            LEGACY_SIGNED_MYSTAND_AGENT_POLICY_REVISION
+        )
+        is LEGACY_SIGNED_MYSTAND_AGENT_POLICY
+    )
+    assert LEGACY_SIGNED_MYSTAND_AGENT_POLICY.input_max_bytes == 131072
 
 
 def test_agent_constructor_failure_settles_prebound_zero_call_ledger():

@@ -24,7 +24,7 @@ class PaidCallBudget:
     """Provider payload and physical-call ceilings for one paid role."""
 
     policy_id: str
-    input_max_bytes: int
+    input_max_bytes: int | None
     output_max_tokens: int
     call_limit: int
 
@@ -46,8 +46,20 @@ class PaidCallPolicyError(RuntimeError):
         super().__init__(self.code)
 
 
-SIGNED_MYSTAND_AGENT_POLICY = FixedPaidCallPolicy(
+LEGACY_SIGNED_MYSTAND_AGENT_POLICY_REVISION = (
+    "deepseek-v4-pro-20260729-v1"
+)
+LEGACY_SIGNED_MYSTAND_AGENT_POLICY = FixedPaidCallPolicy(
     policy_id="mystand.signed-normal-paid-call.v1",
+    provider="deepseek",
+    model="deepseek-v4-pro",
+    role="agent",
+    input_max_bytes=131072,
+    output_max_tokens=4096,
+    call_limit=8,
+)
+SIGNED_MYSTAND_AGENT_POLICY = FixedPaidCallPolicy(
+    policy_id="mystand.signed-normal-paid-call.v2",
     provider=MYSTAND_NORMAL_PROVIDER,
     model=MYSTAND_NORMAL_MODEL,
     role=MYSTAND_NORMAL_ROLE,
@@ -63,6 +75,9 @@ SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER = (
 )
 SIGNED_MYSTAND_AGENT_POLICY_REGISTRY = MappingProxyType(
     {
+        LEGACY_SIGNED_MYSTAND_AGENT_POLICY_REVISION: (
+            LEGACY_SIGNED_MYSTAND_AGENT_POLICY
+        ),
         SIGNED_MYSTAND_AGENT_POLICY_REVISION: (
             SIGNED_MYSTAND_AGENT_POLICY
         ),
@@ -176,7 +191,10 @@ def enforce_paid_call_dispatch_budget(
         raise PaidCallPolicyError(
             f"{error_prefix}_input_payload_invalid"
         ) from exc
-    if len(encoded) > policy.input_max_bytes:
+    if (
+        policy.input_max_bytes is not None
+        and len(encoded) > policy.input_max_bytes
+    ):
         raise PaidCallPolicyError(
             f"{error_prefix}_input_byte_cap_exceeded"
         )
@@ -304,7 +322,10 @@ def enforce_openai_chat_paid_call_dispatch_budget(
             raise PaidCallPolicyError(
                 f"{error_prefix}_fixed_route_mismatch"
             )
-    if len(encoded) > policy.input_max_bytes:
+    if (
+        policy.input_max_bytes is not None
+        and len(encoded) > policy.input_max_bytes
+    ):
         raise PaidCallPolicyError(
             f"{error_prefix}_input_byte_cap_exceeded"
         )
@@ -313,6 +334,8 @@ def enforce_openai_chat_paid_call_dispatch_budget(
 
 __all__ = [
     "FixedPaidCallPolicy",
+    "LEGACY_SIGNED_MYSTAND_AGENT_POLICY",
+    "LEGACY_SIGNED_MYSTAND_AGENT_POLICY_REVISION",
     "PaidCallBudget",
     "PaidCallPolicyError",
     "SIGNED_MYSTAND_AGENT_POLICY",

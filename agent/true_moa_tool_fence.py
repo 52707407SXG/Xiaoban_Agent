@@ -10,6 +10,21 @@ def strict_tool_mode(agent: Any) -> bool:
     return bool(getattr(agent, "_strict_no_automatic_paid_retry", False))
 
 
+def _strict_controller(agent: Any) -> Any:
+    from agent.true_moa_conversation_policy import strict_cancel_controller
+
+    return strict_cancel_controller(agent)
+
+
+def _tool_fence_key(agent: Any, phase: str, tool_call_id: str) -> str:
+    request_id = str(
+        getattr(agent, "_current_api_request_id", "") or ""
+    ).strip()
+    if request_id:
+        return f"{phase}:{request_id}:{tool_call_id}"
+    return f"{phase}:{tool_call_id}"
+
+
 def claim_strict_tool_dispatch(agent: Any, tool_call_id: str) -> bool:
     """Atomically fence a true-MoA tool handler against terminal stop."""
 
@@ -17,10 +32,12 @@ def claim_strict_tool_dispatch(agent: Any, tool_call_id: str) -> bool:
         return True
     if getattr(agent, "_interrupt_requested", False):
         return False
-    controller = getattr(agent, "_true_moa_cancel_controller", None)
+    controller = _strict_controller(agent)
     if controller is None:
         return True
-    return controller.try_begin_dispatch(f"final-tool:{tool_call_id}")
+    return controller.try_begin_dispatch(
+        _tool_fence_key(agent, "final-tool", tool_call_id)
+    )
 
 
 def claim_strict_tool_handler(agent: Any, tool_call_id: str) -> bool:
@@ -30,11 +47,11 @@ def claim_strict_tool_handler(agent: Any, tool_call_id: str) -> bool:
         return True
     if getattr(agent, "_interrupt_requested", False):
         return False
-    controller = getattr(agent, "_true_moa_cancel_controller", None)
+    controller = _strict_controller(agent)
     if controller is None:
         return True
     return controller.try_begin_dispatch(
-        f"final-tool-handler:{tool_call_id}"
+        _tool_fence_key(agent, "final-tool-handler", tool_call_id)
     )
 
 
@@ -45,11 +62,11 @@ def claim_strict_tool_execute(agent: Any, tool_call_id: str) -> bool:
         return True
     if getattr(agent, "_interrupt_requested", False):
         return False
-    controller = getattr(agent, "_true_moa_cancel_controller", None)
+    controller = _strict_controller(agent)
     if controller is None:
         return True
     return controller.try_begin_dispatch(
-        f"final-tool-execute:{tool_call_id}"
+        _tool_fence_key(agent, "final-tool-execute", tool_call_id)
     )
 
 
@@ -58,10 +75,12 @@ def claim_strict_tool_result(agent: Any, tool_call_id: str) -> bool:
 
     if not strict_tool_mode(agent):
         return True
-    controller = getattr(agent, "_true_moa_cancel_controller", None)
+    controller = _strict_controller(agent)
     if controller is None:
         return not getattr(agent, "_interrupt_requested", False)
-    return controller.try_begin_dispatch(f"final-tool-result:{tool_call_id}")
+    return controller.try_begin_dispatch(
+        _tool_fence_key(agent, "final-tool-result", tool_call_id)
+    )
 
 
 def strict_tool_terminal_stopped(agent: Any) -> bool:
@@ -69,7 +88,7 @@ def strict_tool_terminal_stopped(agent: Any) -> bool:
         return False
     if getattr(agent, "_interrupt_requested", False):
         return True
-    controller = getattr(agent, "_true_moa_cancel_controller", None)
+    controller = _strict_controller(agent)
     return bool(controller is not None and controller.is_set)
 
 

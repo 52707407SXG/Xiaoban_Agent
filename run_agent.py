@@ -192,6 +192,7 @@ from agent.tool_guardrails import (
 from agent.tool_result_classification import (
     CANONICAL_TOOL_RESULT_INTERNAL_KEY,
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
+    RUNTIME_CHECKPOINT_INTERNAL_KEY,
     file_mutation_result_landed,
 )
 from agent.trajectory import (
@@ -1499,6 +1500,29 @@ class AIAgent:
         if 0 <= idx < len(messages):
             msg = messages[idx]
             if isinstance(msg, dict) and msg.get("role") == "user":
+                applied_key = (
+                    str(getattr(self, "_current_turn_id", "") or ""),
+                    id(msg),
+                    idx,
+                    override,
+                    timestamp,
+                )
+                if (
+                    getattr(
+                        self,
+                        "_persist_user_message_override_applied_key",
+                        None,
+                    )
+                    == applied_key
+                ):
+                    return
+                current_turn_marker = msg.get(
+                    "_xiaoban_current_turn_user_marker"
+                )
+                current_turn_content = msg.pop(
+                    "_xiaoban_current_turn_user_content",
+                    None,
+                )
                 # Text-only call paths may pass a synthetic API-facing prompt
                 # and a cleaner transcript string separately. Multimodal
                 # turns, however, keep image/audio blocks in the live
@@ -1508,9 +1532,30 @@ class AIAgent:
                 # model call is built. The paired timestamp override still
                 # applies — it is metadata, not content.
                 if override is not None and not isinstance(msg.get("content"), list):
-                    msg["content"] = override
+                    if msg.get("_compressed_summary") and current_turn_marker:
+                        content = msg.get("content")
+                        if current_turn_content == override:
+                            pass
+                        elif (
+                            isinstance(content, str)
+                            and isinstance(current_turn_content, str)
+                            and current_turn_content
+                            and content.endswith(current_turn_content)
+                        ):
+                            msg["content"] = (
+                                content[:-len(current_turn_content)] + override
+                            )
+                        else:
+                            logger.warning(
+                                "Skipped unsafe current-user override on a "
+                                "merged compression summary"
+                            )
+                    else:
+                        msg["content"] = override
                 if timestamp is not None:
                     msg["timestamp"] = timestamp
+                msg.pop("_xiaoban_current_turn_user_marker", None)
+                self._persist_user_message_override_applied_key = applied_key
 
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Save session state to both JSON log and SQLite on any exit path.
@@ -1530,7 +1575,11 @@ class AIAgent:
         self._apply_persist_user_message_override(messages)
         self._session_messages = messages
         self._save_session_log(messages)
-        self._flush_messages_to_session_db(messages, conversation_history)
+        self._flush_messages_to_session_db(
+            messages,
+            conversation_history,
+            persist_override_applied=True,
+        )
 
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
         """Remove private empty-response retry/failure scaffolding from transcript tails.
@@ -1590,7 +1639,13 @@ class AIAgent:
         from agent.agent_runtime_helpers import repair_message_sequence
         return repair_message_sequence(self, messages)
 
-    def _flush_messages_to_session_db(self, messages: List[Dict], conversation_history: List[Dict] = None):
+    def _flush_messages_to_session_db(
+        self,
+        messages: List[Dict],
+        conversation_history: List[Dict] = None,
+        *,
+        persist_override_applied: bool = False,
+    ):
         """Persist any un-flushed messages to the SQLite session store.
 
         Uses per-session message identity tracking so repeated calls (from
@@ -1600,7 +1655,8 @@ class AIAgent:
         """
         if not self._session_db:
             return
-        self._apply_persist_user_message_override(messages)
+        if not persist_override_applied:
+            self._apply_persist_user_message_override(messages)
         try:
             # Retry row creation if the earlier attempt failed transiently.
             if not self._session_db_created:
@@ -1680,6 +1736,10 @@ class AIAgent:
                     timestamp=msg.get("timestamp"),
                     tool_result=msg.get(CANONICAL_TOOL_RESULT_INTERNAL_KEY)
                     if role == "tool" else None,
+                    compressed_summary=bool(msg.get("_compressed_summary")),
+                    runtime_checkpoint=msg.get(
+                        RUNTIME_CHECKPOINT_INTERNAL_KEY
+                    ),
                 )
                 flushed_ids.add(msg_id)
             self._last_flushed_db_idx = len(messages)

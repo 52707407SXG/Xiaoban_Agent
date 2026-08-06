@@ -35,7 +35,6 @@ from gateway.platforms.api_server import (
     _IdempotencyCache,
     _build_api_temporal_context,
     _derive_chat_session_id,
-    _fixed_tool_progress_summary,
     _mystand_tool_result_failed,
     _merge_temporal_context,
     _progress_sensitive_values,
@@ -179,7 +178,7 @@ class TestProgressSummaryDlp:
         assert _public_progress_summary(
             "正在核对 6350",
             numeric_values,
-        ) == ""
+        ) == "正在核对 相关资料"
         assert "松鹤居" not in _public_progress_summary(
             "我已经找到松鹤居，接着核对登记状态。",
             error_values,
@@ -218,6 +217,34 @@ class TestProgressSummaryDlp:
             protected,
         ) == "我先核对相关登记资料。"
 
+    def test_exact_argument_is_redacted_before_fragment_check(self):
+        protected, complete = _progress_sensitive_values(
+            {"query": "chain-1"},
+            protect_all_strings=True,
+            limit=512,
+        )
+        prior_values, prior_complete = _progress_sensitive_values(
+            {"evidence": "ev_8ab5abcd97c9d0717c6285b80979"},
+            protect_all_strings=True,
+            limit=512,
+        )
+
+        assert complete is True
+        assert prior_complete is True
+        assert _public_progress_summary(
+            "第一步完成，现在用 chain-1 继续核对。",
+            protected,
+        ) == "第一步完成，现在用 相关资料 继续核对。"
+        assert _public_progress_summary(
+            "第一步完成，ev_8ab5abcd97c9d0717c6285b80979。"
+            "现在用 chain-1 继续核对。",
+            [*protected, *prior_values],
+        ) == "第一步完成，相关资料。现在用 相关资料 继续核对。"
+        assert _public_progress_summary(
+            "第一步完成，现在核对 chain。",
+            protected,
+        ) == ""
+
     @pytest.mark.parametrize(
         "private_summary",
         [
@@ -245,7 +272,6 @@ class TestProgressSummaryDlp:
             ("核对佣金", "我先核对相关佣金规则。"),
             ("读取授权", "我先读取可用授权状态。"),
             ("查询状态", "我先查询当前处理状态。"),
-            ("市场资料", "我先整理公开市场资料。"),
             ("查询当前登记状态", "我先查询当前状态。"),
         ],
     )
@@ -262,9 +288,6 @@ class TestProgressSummaryDlp:
 
         assert complete is True
         assert _public_progress_summary(summary, protected) == ""
-        assert _fixed_tool_progress_summary(
-            "mystand_query"
-        ) == "我先核对相关资料。"
 
     @pytest.mark.parametrize(
         ("query", "derived_summary"),
@@ -2710,7 +2733,6 @@ class TestChatCompletionsEndpoint:
                 "progressSchema": "xiaoban.progress.v2",
                 "requestId": delivery_id,
                 "turnId": turn_id,
-                "summary": "我先核对相关资料。",
             },
             {
                 "tool": "mystand_query",
@@ -2923,22 +2945,28 @@ class TestChatCompletionsEndpoint:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("query", "commentary", "canary"),
+        ("query", "commentary", "canary", "expected_summary"),
         [
-            ("查找阿黎电话", "我先核对阿黎的电话。", "阿黎"),
-            ("查询世纪大道100号", "我先核对100号的登记。", "100号"),
+            ("查找阿黎电话", "我先核对阿黎的电话。", "阿黎", None),
+            ("查询世纪大道100号", "我先核对100号的登记。", "100号", None),
             (
                 "查找客户CUST-ABC12345",
                 "我先核对ABC12345。",
                 "ABC12345",
+                None,
             ),
-            ("核对佣金", "我先核对相关佣金规则。", "佣金"),
-            ("读取授权", "我先读取可用授权状态。", "授权"),
-            ("查询状态", "我先查询当前处理状态。", "状态"),
-            ("市场资料", "我先整理公开市场资料。", "市场资料"),
+            ("核对佣金", "我先核对相关佣金规则。", "佣金", None),
+            ("读取授权", "我先读取可用授权状态。", "授权", None),
+            ("查询状态", "我先查询当前处理状态。", "状态", None),
+            (
+                "市场资料",
+                "我先整理公开市场资料。",
+                "市场资料",
+                "我先整理公开相关资料。",
+            ),
         ],
     )
-    async def test_mystand_parameter_overlap_uses_fixed_tool_summary(
+    async def test_mystand_parameter_overlap_never_uses_fixed_tool_summary(
         self,
         auth_adapter,
         monkeypatch,
@@ -2946,6 +2974,7 @@ class TestChatCompletionsEndpoint:
         query,
         commentary,
         canary,
+        expected_summary,
     ):
         from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
 
@@ -3047,7 +3076,7 @@ class TestChatCompletionsEndpoint:
             and payload.get("status") == "running"
         ]
         assert len(running) == 1
-        assert running[0].get("summary") == "我先核对相关资料。"
+        assert running[0].get("summary") == expected_summary
         assert commentary not in body
         assert canary not in json.dumps(running, ensure_ascii=False)
 
@@ -3201,12 +3230,7 @@ class TestChatCompletionsEndpoint:
             and payload.get("status") == "running"
         ]
         assert len(running) == 1
-        if unsafe_case == "overlong-commentary":
-            assert running[0]["summary"] == _fixed_tool_progress_summary(
-                "mystand_query"
-            )
-        else:
-            assert running[0].get("summary") == "我先核对相关资料。"
+        assert running[0].get("summary") is None
         assert marker not in body
 
     @pytest.mark.asyncio
@@ -3361,7 +3385,12 @@ class TestChatCompletionsEndpoint:
             and payload.get("status") == "running"
         ]
         assert len(second_running) == 1
-        assert second_running[0].get("summary") == "我先核对相关资料。"
+        if history_case == "overflow":
+            assert second_running[0].get("summary") is None
+        else:
+            assert second_running[0].get("summary") == (
+                "我已经找到相关资料，接着核对登记状态。"
+            )
         assert prior_canary not in json.dumps(
             second_running,
             ensure_ascii=False,
@@ -4497,7 +4526,6 @@ class TestChatCompletionsEndpoint:
                 "progressSchema": "xiaoban.progress.v2",
                 "requestId": delivery_id,
                 "turnId": turn_id,
-                "summary": _fixed_tool_progress_summary("mystand_query"),
             },
             {
                 "tool": "mystand_query",

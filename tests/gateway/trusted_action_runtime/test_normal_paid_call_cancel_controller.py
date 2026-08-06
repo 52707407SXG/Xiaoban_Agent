@@ -6,7 +6,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.true_moa_conversation_policy import execute_llm_request
+from agent.true_moa_conversation_policy import (
+    claim_public_result,
+    claim_response_consumption,
+    execute_llm_request,
+)
+from agent.true_moa_tool_fence import (
+    claim_strict_tool_dispatch,
+    claim_strict_tool_execute,
+    claim_strict_tool_handler,
+    claim_strict_tool_result,
+)
 from gateway.platforms.agent_call_accounting import (
     bind_paid_call_ledger,
     finalize_normal_call_usage,
@@ -54,6 +64,7 @@ def _agent():
     return SimpleNamespace(
         _true_moa_usage_ledger=None,
         _true_moa_cancel_controller=None,
+        _strict_no_automatic_paid_retry=True,
         _interrupt_requested=False,
         provider="deepseek",
         model="deepseek-v4-pro",
@@ -146,6 +157,21 @@ def test_stop_before_reservation_dispatches_zero_provider_calls():
 
     assert provider_calls == 0
     assert workflow.agent_call_ledger.to_dict()["calls"] == []
+
+
+def test_normal_stop_fences_tool_result_response_and_public_commit():
+    workflow = _workflow()
+    assert initialize_normal_call_ledger(workflow) is None
+    agent = _agent()
+    bind_paid_call_ledger(workflow, agent)
+    assert workflow.agent_call_controller.cancel() is True
+
+    assert claim_strict_tool_dispatch(agent, "tool-1") is False
+    assert claim_strict_tool_handler(agent, "tool-1") is False
+    assert claim_strict_tool_execute(agent, "tool-1") is False
+    assert claim_strict_tool_result(agent, "tool-1") is False
+    assert claim_response_consumption(agent, "request-1") is False
+    assert claim_public_result(agent, "request-1", kind="final") is False
 
 
 def test_stop_after_durable_reservation_dispatches_zero_provider_calls():

@@ -202,6 +202,12 @@ async def test_branch_preserves_persisted_assistant_metadata():
             "reasoning_details": [{"type": "summary", "text": "step"}],
             "codex_reasoning_items": [{"id": "r1", "type": "reasoning"}],
             "codex_message_items": [{"id": "m1", "type": "message"}],
+            "_compressed_summary": True,
+            "_xiaoban_runtime_checkpoint": {
+                "schema": "xiaoban.runtime-compaction-checkpoint.v1",
+                "facts": [{"callId": "pending-call", "outcome": "unknown"}],
+                "trustedSteers": ["read only"],
+            },
         },
     ]
 
@@ -218,6 +224,10 @@ async def test_branch_preserves_persisted_assistant_metadata():
     assert assistant_kwargs["reasoning_details"] == [{"type": "summary", "text": "step"}]
     assert assistant_kwargs["codex_reasoning_items"] == [{"id": "r1", "type": "reasoning"}]
     assert assistant_kwargs["codex_message_items"] == [{"id": "m1", "type": "message"}]
+    assert assistant_kwargs["compressed_summary"] is True
+    assert assistant_kwargs["runtime_checkpoint"]["facts"] == [
+        {"callId": "pending-call", "outcome": "unknown"}
+    ]
 
 
 def test_clear_session_boundary_security_state_is_scoped():

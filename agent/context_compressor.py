@@ -21,7 +21,7 @@ import json
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from agent.auxiliary_client import call_llm, _is_connection_error, aux_interrupt_protection
 from agent.context_engine import ContextEngine
@@ -1322,6 +1322,21 @@ class ContextCompressor(ContextEngine):
             elif role == "tool":
                 call_id = str(msg.get("tool_call_id") or "")
                 tool_name, tool_args = call_id_to_tool.get(call_id, ("unknown", ""))
+                raw_tool_content = msg.get("content")
+                try:
+                    projected_result = (
+                        json.loads(raw_tool_content)
+                        if isinstance(raw_tool_content, str)
+                        else raw_tool_content
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    projected_result = None
+                if isinstance(projected_result, dict) and isinstance(
+                    projected_result.get("toolName"),
+                    str,
+                ):
+                    tool_name = projected_result["toolName"]
+                    tool_args = ""
                 tool_actions.append(
                     _summarize_tool_result(tool_name, tool_args, text or "")
                 )
@@ -2351,7 +2366,17 @@ This compaction should PRIORITISE preserving all information related to the focu
     # Main compression entry point
     # ------------------------------------------------------------------
 
-    def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None, focus_topic: str = None, force: bool = False) -> List[Dict[str, Any]]:
+    def compress(
+        self,
+        messages: List[Dict[str, Any]],
+        current_tokens: int = None,
+        focus_topic: str = None,
+        force: bool = False,
+        summary_generator: Optional[
+            Callable[[List[Dict[str, Any]], Optional[str]], Optional[str]]
+        ] = None,
+        abort_on_summary_failure: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
         """Compress conversation messages by summarizing middle turns.
 
         Algorithm:
@@ -2484,7 +2509,16 @@ This compaction should PRIORITISE preserving all information related to the focu
 
         # Phase 3: Generate structured summary
         summary_focus_topic = focus_topic or self._derive_auto_focus_topic(messages)
-        summary = self._generate_summary(turns_to_summarize, focus_topic=summary_focus_topic)
+        if summary_generator is None:
+            summary = self._generate_summary(
+                turns_to_summarize,
+                focus_topic=summary_focus_topic,
+            )
+        else:
+            summary = summary_generator(
+                turns_to_summarize,
+                summary_focus_topic,
+            )
 
         # If summary generation failed, behavior splits on
         # ``abort_on_summary_failure`` (config: compression.abort_on_summary_failure):
@@ -2506,7 +2540,15 @@ This compaction should PRIORITISE preserving all information related to the focu
         # subsequent call fails the same way. So when the failure was an auth
         # error we abort regardless of abort_on_summary_failure, preserving
         # the conversation unchanged until the credential is fixed.
-        if not summary and (self.abort_on_summary_failure or self._last_summary_auth_failure):
+        should_abort_on_summary_failure = (
+            self.abort_on_summary_failure
+            if abort_on_summary_failure is None
+            else bool(abort_on_summary_failure)
+        )
+        if not summary and (
+            should_abort_on_summary_failure
+            or self._last_summary_auth_failure
+        ):
             n_skipped = compress_end - compress_start
             self._last_summary_dropped_count = 0  # nothing actually dropped
             self._last_summary_fallback_used = False

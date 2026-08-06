@@ -188,6 +188,7 @@ def build_turn_context(
     agent._current_request_id = request_id
     agent._current_turn_id = turn_id
     agent._current_api_request_id = ""
+    agent._persist_user_message_override_applied_key = None
 
     # Reset retry counters and iteration budget at the start of each turn.
     agent._invalid_tool_retries = 0
@@ -223,6 +224,10 @@ def build_turn_context(
 
     # NOTE: _turns_since_memory and _iters_since_skill are NOT reset here.
     agent.iteration_budget = IterationBudget(agent.max_iterations)
+    agent._api_call_count = 0
+    agent._strict_compaction_call_count = 0
+    agent._strict_preflight_compaction_error = None
+    agent._paid_call_budget_exhausted_final_slot = False
 
     # Log conversation turn start for debugging/observability.
     from gateway.session_context import get_session_env
@@ -366,10 +371,36 @@ def build_turn_context(
             for _pass in range(3):
                 _orig_len = len(messages)
                 _orig_tokens = _preflight_tokens
-                messages, active_system_prompt = agent._compress_context(
-                    messages, system_message, approx_tokens=_preflight_tokens,
-                    task_id=effective_task_id,
-                )
+                try:
+                    messages, active_system_prompt = agent._compress_context(
+                        messages,
+                        system_message,
+                        approx_tokens=_preflight_tokens,
+                        task_id=effective_task_id,
+                    )
+                except RuntimeError as exc:
+                    if (
+                        getattr(
+                            agent,
+                            "_strict_no_automatic_paid_retry",
+                            False,
+                        )
+                        and getattr(
+                            agent,
+                            "_paid_call_usage_ledger",
+                            None,
+                        )
+                        is not None
+                        and getattr(
+                            agent,
+                            "_true_moa_usage_ledger",
+                            None,
+                        )
+                        is None
+                    ):
+                        agent._strict_preflight_compaction_error = exc
+                        break
+                    raise
                 # Re-estimate now so size-only compression (same row count,
                 # lower token count — e.g. summarising tool outputs) is
                 # recognised as progress instead of being misread as
@@ -391,6 +422,15 @@ def build_turn_context(
                 agent._mute_post_response = False
                 if not _compressor.should_compress(_preflight_tokens):
                     break
+
+    persisted_user_idx = getattr(agent, "_persist_user_message_idx", None)
+    if (
+        isinstance(persisted_user_idx, int)
+        and 0 <= persisted_user_idx < len(messages)
+        and isinstance(messages[persisted_user_idx], dict)
+        and messages[persisted_user_idx].get("role") == "user"
+    ):
+        current_turn_user_idx = persisted_user_idx
 
     # Plugin hook: pre_llm_call (context injected into user message, not system prompt).
     plugin_user_context = ""

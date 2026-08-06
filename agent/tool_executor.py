@@ -277,6 +277,43 @@ def _append_canonical_tool_result(
 ) -> dict[str, Any]:
     """Commit one canonical result, then notify its terminal observers."""
     message = make_tool_result_message(name, content, tool_call_id)
+    effective_trusted_fields = dict(trusted_fields or {})
+    if (
+        name == "mystand_authorization_write"
+        and dispatch_state == "dispatched"
+        and isinstance(function_args, dict)
+        and function_args.get("operation") == "commit_write"
+    ):
+        receipt_source = (
+            callback_result
+            if callback_result is not _CANONICAL_RESULT_UNSET
+            else (
+                classification_result
+                if classification_result is not _CANONICAL_RESULT_UNSET
+                else content
+            )
+        )
+        try:
+            parsed_receipt = (
+                json.loads(receipt_source)
+                if isinstance(receipt_source, str)
+                else receipt_source
+            )
+        except (TypeError, ValueError):
+            parsed_receipt = None
+        from tools.mystand_authorization_tool import _current_session
+        from tools.mystand_authorization_write_tool import (
+            _verified_commit_receipt,
+        )
+
+        if _verified_commit_receipt(
+            parsed_receipt,
+            commit_args=function_args,
+            session=_current_session(),
+        ):
+            effective_trusted_fields["verifiedWriteReceipt"] = (
+                parsed_receipt
+            )
     canonical = normalize_tool_result(
         request_id=str(getattr(agent, "_current_request_id", "") or ""),
         turn_id=str(getattr(agent, "_current_turn_id", "") or ""),
@@ -285,7 +322,7 @@ def _append_canonical_tool_result(
         dispatch_state=dispatch_state,
         result=content if classification_result is _CANONICAL_RESULT_UNSET else classification_result,
         outcome_hint=outcome_hint,
-        trusted_fields=trusted_fields,
+        trusted_fields=effective_trusted_fields,
     )
     message[CANONICAL_TOOL_RESULT_INTERNAL_KEY] = canonical
     messages.append(message)

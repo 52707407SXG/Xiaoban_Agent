@@ -85,6 +85,30 @@ class TestBranchCommandCLI:
         messages = session_db.get_messages_as_conversation(cli_instance.session_id)
         assert len(messages) == 4  # All 4 messages copied
 
+    def test_branch_preserves_runtime_checkpoint(self, cli_instance, session_db):
+        from cli import XiaobanCLI
+
+        checkpoint = {
+            "schema": "xiaoban.runtime-compaction-checkpoint.v1",
+            "facts": [{"callId": "pending-call", "outcome": "unknown"}],
+            "trustedSteers": ["read only"],
+        }
+        cli_instance.conversation_history = [{
+            "role": "assistant",
+            "content": "safe compacted summary",
+            "_compressed_summary": True,
+            "_xiaoban_runtime_checkpoint": checkpoint,
+        }]
+
+        XiaobanCLI._handle_branch_command(cli_instance, "/branch")
+
+        messages = session_db.get_messages_as_conversation(
+            cli_instance.session_id
+        )
+        assert messages[0]["content"] == "safe compacted summary"
+        assert messages[0]["_compressed_summary"] is True
+        assert messages[0]["_xiaoban_runtime_checkpoint"] == checkpoint
+
     def test_branch_preserves_parent_link(self, cli_instance, session_db):
         """The new session should reference the original as parent."""
         from cli import XiaobanCLI

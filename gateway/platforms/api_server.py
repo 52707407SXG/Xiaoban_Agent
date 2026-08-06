@@ -1349,6 +1349,20 @@ def _public_progress_summary(
         if not source_complete:
             return ""
         all_protected_items.extend(protected_items)
+    # Remove complete protected values from a scan-only copy before testing
+    # their proper fragments. This preserves a sentence that repeats an exact
+    # argument while a shortened/derived identifier elsewhere still suppresses
+    # it. Scan before inserting generic replacement text, which can itself
+    # contain common fragments such as "资料".
+    fragment_scan_text = text
+    for protected, replacement in sorted(
+        all_protected_items,
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        if replacement == _PROGRESS_DERIVED_FRAGMENT_SENTINEL:
+            continue
+        fragment_scan_text = fragment_scan_text.replace(protected, "")
     for protected, replacement in sorted(
         all_protected_items,
         key=lambda item: len(item[0]),
@@ -1356,7 +1370,7 @@ def _public_progress_summary(
     ):
         if (
             replacement == _PROGRESS_DERIVED_FRAGMENT_SENTINEL
-            and protected in text
+            and protected in fragment_scan_text
         ):
             return ""
     for protected, replacement in sorted(
@@ -1376,25 +1390,6 @@ def _public_progress_summary(
     if not text or _PROGRESS_UNSAFE_MARKUP_RE.search(text):
         return ""
     return text[:_PROGRESS_SUMMARY_MAX_CHARS].rstrip()
-
-
-def _fixed_tool_progress_summary(function_name: Any) -> str:
-    """Return parameter-free progress copy based only on a validated tool name."""
-
-    name = str(function_name or "")
-    if name in {"web_search", "web_extract"}:
-        return "我先查找公开资料。"
-    if name in {"mystand_authorization", "mystand_authorization_write"}:
-        return "我先核对授权状态。"
-    if name in {
-        "mystand_query",
-        "mystand_resource_index",
-        "mystand_parse",
-        "read_file",
-        "search_files",
-    }:
-        return "我先核对相关资料。"
-    return "我先处理相关资料。"
 
 
 def _mystand_stream_result_succeeded(result: Any) -> bool:
@@ -4437,10 +4432,6 @@ class APIServerAdapter(
                                 _active_progress_batch_values,
                                 current_values,
                                 _progress_protected_values,
-                            )
-                        if not summary:
-                            summary = _fixed_tool_progress_summary(
-                                function_name
                             )
                         if summary:
                             payload["summary"] = summary

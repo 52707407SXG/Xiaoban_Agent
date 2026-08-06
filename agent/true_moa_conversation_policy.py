@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import copy
+import json
+import uuid
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from agent.paid_call_accounting import (
@@ -12,6 +16,25 @@ from agent.paid_call_accounting import (
 
 def strict_mode(agent: Any) -> bool:
     return bool(getattr(agent, "_strict_no_automatic_paid_retry", False))
+
+
+def signed_normal_mode(agent: Any) -> bool:
+    """Return whether this is the normal, fully-accounted My Stand loop."""
+
+    return bool(
+        strict_mode(agent)
+        and getattr(agent, "_paid_call_usage_ledger", None) is not None
+        and getattr(agent, "_true_moa_usage_ledger", None) is None
+    )
+
+
+def strict_cancel_controller(agent: Any) -> Any:
+    """Return the request-local stop fence for either strict execution mode."""
+
+    return (
+        getattr(agent, "_true_moa_cancel_controller", None)
+        or getattr(agent, "_paid_call_cancel_controller", None)
+    )
 
 
 def initialize_session_side_effects(agent: Any, logger: Any) -> None:
@@ -101,9 +124,7 @@ def execute_llm_request(
         normal_policy = resolve_signed_mystand_agent_policy(
             getattr(agent, "_paid_call_policy_revision", "")
         )
-    controller = getattr(agent, "_true_moa_cancel_controller", None)
-    if controller is None:
-        controller = getattr(agent, "_paid_call_cancel_controller", None)
+    controller = strict_cancel_controller(agent)
 
     def accounted_provider_call(next_api_kwargs: dict[str, Any]) -> Any:
         enforce_strict_paid_request(agent, next_api_kwargs)
@@ -250,9 +271,11 @@ def execute_llm_request(
             )
         ):
             record_strict_terminal_usage(agent, response)
-            raise InterruptedError(
+            interrupted = InterruptedError(
                 "True MoA cancelled before response consumption"
             )
+            interrupted._strict_session_usage_recorded = True
+            raise interrupted
         return response
 
     if strict:
@@ -292,6 +315,9 @@ def strict_failure_result(
     cleanup_task_id: str | None = None,
     drop_scaffolding: bool = False,
 ) -> dict[str, Any]:
+    api_call_count += int(
+        getattr(agent, "_strict_compaction_call_count", 0) or 0
+    )
     if cleanup_task_id is not None:
         agent._cleanup_task_resources(cleanup_task_id)
     if drop_scaffolding:
@@ -400,18 +426,12 @@ def enforce_strict_paid_request(
     )
 
 
-def compact_strict_paid_history(
+def compact_true_moa_paid_history(
     agent: Any,
     messages: list[Any],
     current_turn_user_idx: int,
 ) -> tuple[list[Any], int, bool]:
-    """Deterministically compact only history before the active user turn.
-
-    This reuses the built-in compressor's local, redacting fallback summary and
-    never calls an auxiliary model.  The current user request and its complete
-    assistant/tool-result tail (including trusted ToolResult/steer sidecars)
-    remain byte-for-byte intact.
-    """
+    """Locally compact only history before a true-MoA active turn."""
 
     if (
         not isinstance(current_turn_user_idx, int)
@@ -425,12 +445,6 @@ def compact_strict_paid_history(
 
     historical = list(messages[:current_turn_user_idx])
     active_tail = list(messages[current_turn_user_idx:])
-    if not historical:
-        return messages, current_turn_user_idx, False
-
-    # System/developer instructions are not conversational history and must
-    # survive compaction verbatim.  Only earlier user/assistant/tool turns are
-    # eligible for the local redacting summary.
     prefix_end = 0
     while prefix_end < len(historical):
         item = historical[prefix_end]
@@ -445,30 +459,392 @@ def compact_strict_paid_history(
     if not compressible_history:
         return messages, current_turn_user_idx, False
 
-    compressor = getattr(agent, "context_compressor", None)
     summary_builder = getattr(
-        compressor,
+        getattr(agent, "context_compressor", None),
         "_build_static_fallback_summary",
         None,
     )
     if not callable(summary_builder):
         return messages, current_turn_user_idx, False
+    projected_history = agent._sanitize_api_messages(
+        copy.deepcopy(compressible_history)
+    )
     summary = summary_builder(
-        compressible_history,
-        reason="strict paid request exceeded its exact input byte cap",
+        projected_history,
+        reason="true MoA request exceeded its exact input byte cap",
     )
     if not isinstance(summary, str) or not summary.strip():
         return messages, current_turn_user_idx, False
-
     compacted = [
         *preserved_prefix,
-        {
-            "role": "assistant",
-            "content": summary.strip(),
-        },
+        {"role": "assistant", "content": summary.strip()},
         *active_tail,
     ]
     return compacted, len(preserved_prefix) + 1, compacted != messages
+
+
+def summarize_signed_normal_context(
+    agent: Any,
+    turns_to_summarize: list[dict[str, Any]],
+    focus_topic: str | None = None,
+) -> str | None:
+    """Create one paid, same-model checkpoint from the model-visible transcript."""
+
+    if not signed_normal_mode(agent) or not turns_to_summarize:
+        return None
+    compressor = getattr(agent, "context_compressor", None)
+    serialize = getattr(compressor, "_serialize_for_summary", None)
+    if not callable(serialize):
+        compressor._last_summary_error = (
+            "same-model compaction serializer unavailable"
+        )
+        return None
+
+    # Project canonical ToolResults exactly as a normal sampling request does;
+    # private tool content must never enter the compaction prompt.
+    projected_turns = agent._sanitize_api_messages(
+        copy.deepcopy(turns_to_summarize)
+    )
+    source = serialize(projected_turns)
+    previous_summary = str(
+        getattr(compressor, "_previous_summary", "") or ""
+    ).strip()
+    focus = str(focus_topic or "").strip()
+    prompt = (
+        "Create a compact same-turn context checkpoint for the agent that will "
+        "continue the task immediately after compaction. Do not answer the user "
+        "and do not call tools. Preserve concrete completed actions, actual tool "
+        "results, IDs, counts, blockers, decisions, and remaining work. Clearly "
+        "separate completed work from work still required. Never include API "
+        "keys, tokens, passwords, credentials, or connection strings. The latest "
+        "user request remains outside this checkpoint and remains authoritative."
+        "\n\n"
+        + (
+            f"PREVIOUS CHECKPOINT:\n{previous_summary}\n\n"
+            if previous_summary
+            else ""
+        )
+        + (f"FOCUS:\n{focus}\n\n" if focus else "")
+        + f"CONTEXT TO COMPACT:\n{source}"
+    )
+    compact_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You compact agent context. Return only the checkpoint text in "
+                "the user's language; do not solve the task."
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+    api_kwargs = agent._build_api_kwargs(compact_messages)
+    api_kwargs.pop("tools", None)
+    api_kwargs.pop("tool_choice", None)
+    api_kwargs.pop("parallel_tool_calls", None)
+    turn_id = str(getattr(agent, "_current_turn_id", "") or "compact")
+    api_request_id = f"{turn_id}:compact:{uuid.uuid4().hex}"
+    physical_calls_used = int(
+        getattr(agent, "_api_call_count", 0) or 0
+    ) + int(getattr(agent, "_strict_compaction_call_count", 0) or 0)
+    if physical_calls_used + 2 > int(getattr(agent, "max_iterations", 0) or 0):
+        compressor._last_summary_error = (
+            "same-model context compaction has no iteration continuation slot"
+        )
+        return None
+    ledger = getattr(agent, "_paid_call_usage_ledger", None)
+    ledger_before = ledger.to_dict() if ledger is not None else {"calls": []}
+    calls_before = list(ledger_before.get("calls") or [])
+    max_calls = int(getattr(ledger, "max_calls", 0) or 0)
+    if max_calls and len(calls_before) + 2 > max_calls:
+        compressor._last_summary_error = (
+            "same-model context compaction has no paid continuation slot"
+        )
+        return None
+    call_ids_before = {
+        str(item.get("callId") or "")
+        for item in calls_before
+        if isinstance(item, dict)
+    }
+    terminal_usage_recorded = False
+
+    try:
+        response = execute_llm_request(
+            agent,
+            api_kwargs,
+            agent._interruptible_api_call,
+            strict=True,
+            original_request=dict(api_kwargs),
+            middleware_trace=[],
+            task_id="context-compaction",
+            turn_id=turn_id,
+            api_request_id=api_request_id,
+            api_call_count=int(getattr(agent, "_api_call_count", 0) or 0) + 1,
+        )
+        if not claim_response_consumption(agent, api_request_id):
+            record_strict_terminal_usage(agent, response)
+            terminal_usage_recorded = getattr(response, "usage", None) is not None
+            raise InterruptedError(
+                "same-model context compaction cancelled before consumption"
+            )
+        record_strict_terminal_usage(agent, response)
+        terminal_usage_recorded = getattr(response, "usage", None) is not None
+        transport = agent._get_transport()
+        normalize_kwargs = {}
+        if getattr(agent, "api_mode", "") == "anthropic_messages":
+            normalize_kwargs["strip_tool_prefix"] = bool(
+                getattr(agent, "_is_anthropic_oauth", False)
+            )
+        normalized = transport.normalize_response(response, **normalize_kwargs)
+        raw_finish_reason: Any = ...
+        choices = getattr(response, "choices", None)
+        if isinstance(choices, (list, tuple)) and choices:
+            raw_finish_reason = getattr(choices[0], "finish_reason", None)
+        elif hasattr(response, "stop_reason"):
+            raw_finish_reason = getattr(response, "stop_reason", None)
+        finish_reason = str(
+            (
+                getattr(normalized, "finish_reason", "")
+                if raw_finish_reason is ...
+                else raw_finish_reason
+            )
+            or ""
+        ).lower()
+        if (
+            getattr(normalized, "tool_calls", None)
+            or finish_reason not in {"stop", "end_turn"}
+        ):
+            raise RuntimeError("compaction response was incomplete")
+        summary = agent._strip_think_blocks(
+            str(getattr(normalized, "content", "") or "")
+        ).strip()
+        summary = "\n".join(
+            line
+            for line in summary.splitlines()
+            if not line.lstrip().startswith(
+                (
+                    "XIAOBAN_RUNTIME_CHECKPOINT_JSON:",
+                    "[RUNTIME-OWNED COMPACTION CHECKPOINT",
+                )
+            )
+        ).strip()
+        if not summary:
+            raise RuntimeError("compaction response was empty")
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        if getattr(exc, "_strict_session_usage_recorded", False):
+            terminal_usage_recorded = True
+        if not terminal_usage_recorded:
+            usage_source = exc if getattr(exc, "usage", None) is not None else None
+            if usage_source is None and ledger is not None:
+                calls_after_error = ledger.to_dict().get("calls") or []
+                usage_call = next(
+                    (
+                        item
+                        for item in reversed(calls_after_error)
+                        if isinstance(item, dict)
+                        and str(item.get("callId") or "")
+                        not in call_ids_before
+                        and item.get("usageStatus") in {"partial", "reported"}
+                    ),
+                    None,
+                )
+                if usage_call is not None:
+                    usage = {
+                        "prompt_tokens": usage_call.get("inputTokens"),
+                        "completion_tokens": usage_call.get("outputTokens"),
+                        "total_tokens": usage_call.get("totalTokens"),
+                    }
+                    cached_tokens = usage_call.get("cachedInputTokens")
+                    if isinstance(cached_tokens, int):
+                        usage["prompt_tokens_details"] = {
+                            "cached_tokens": cached_tokens,
+                        }
+                    usage_source = SimpleNamespace(usage=usage)
+            if usage_source is not None:
+                record_strict_terminal_usage(agent, usage_source)
+        compressor._last_summary_error = (
+            "same-model context compaction cancelled"
+            if isinstance(exc, InterruptedError)
+            else "same-model context compaction failed"
+        )
+        return None
+    finally:
+        if ledger is not None:
+            calls_after = ledger.to_dict().get("calls") or []
+            dispatched_compactions = sum(
+                1
+                for item in calls_after
+                if (
+                    isinstance(item, dict)
+                    and str(item.get("callId") or "") not in call_ids_before
+                    and item.get("status") not in {
+                        "reserved",
+                        "not_dispatched",
+                    }
+                )
+            )
+            agent._strict_compaction_call_count = int(
+                getattr(agent, "_strict_compaction_call_count", 0) or 0
+            ) + dispatched_compactions
+
+    from agent.context_compressor import redact_sensitive_text
+
+    summary = redact_sensitive_text(summary)
+    with_prefix = getattr(compressor, "_with_summary_prefix", None)
+    if callable(with_prefix):
+        summary = with_prefix(summary)
+    compressor._previous_summary = compressor._strip_summary_prefix(summary)
+    compressor._last_summary_error = None
+    compressor._last_summary_fallback_used = False
+    compressor._last_summary_dropped_count = 0
+    compressor._last_compress_aborted = False
+    return summary
+
+
+def signed_normal_runtime_checkpoint(
+    agent: Any,
+    messages: list[Any],
+) -> str:
+    """Preserve unresolved side effects and verified writes outside LLM prose."""
+
+    if not signed_normal_mode(agent):
+        return ""
+    from agent.context_compressor import redact_sensitive_text
+    from agent.tool_result_classification import (
+        RUNTIME_CHECKPOINT_INTERNAL_KEY,
+        _verified_write_receipt,
+        _verified_write_receipt_digest,
+        project_runtime_checkpoint_for_model,
+        project_tool_result_for_model,
+    )
+
+    existing_facts: list[Any] = []
+    trusted_steers: list[str] = []
+
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        prior = item.get(RUNTIME_CHECKPOINT_INTERNAL_KEY)
+        if (
+            item.get("role") in {"assistant", "user"}
+            and item.get("_compressed_summary") is True
+            and isinstance(prior, dict)
+            and prior.get("schema")
+            == "xiaoban.runtime-compaction-checkpoint.v1"
+        ):
+            if isinstance(prior.get("facts"), list):
+                existing_facts.extend(prior["facts"][:64])
+            if isinstance(prior.get("trustedSteers"), list):
+                trusted_steers.extend(
+                    str(value)
+                    for value in prior["trustedSteers"][:32]
+                    if isinstance(value, str)
+                )
+        steer = item.get("_xiaoban_trusted_steer")
+        if isinstance(steer, (list, tuple)):
+            trusted_steers.extend(
+                str(value)
+                for value in steer
+                if isinstance(value, str) and value
+            )
+        sidecar = item.get("_xiaoban_tool_result")
+        if isinstance(sidecar, dict):
+            sidecar_steers = sidecar.get("trustedSteers")
+            if isinstance(sidecar_steers, list):
+                trusted_steers.extend(
+                    str(value)
+                    for value in sidecar_steers[:32]
+                    if isinstance(value, str) and value
+                )
+
+    fresh_protected: list[Any] = []
+    for item in messages:
+        if not isinstance(item, dict) or item.get("role") != "tool":
+            continue
+        sidecar = item.get("_xiaoban_tool_result")
+        if not isinstance(sidecar, dict):
+            continue
+        call_id = str(item.get("tool_call_id") or "")
+        verified_receipt = _verified_write_receipt(
+            sidecar.get("verifiedWriteReceipt")
+        )
+        verified_write = bool(
+            sidecar.get("toolName") == "mystand_authorization_write"
+            and sidecar.get("dispatchState") == "dispatched"
+            and sidecar.get("outcome") == "success"
+            and isinstance(verified_receipt, dict)
+            and sidecar.get("verifiedWriteReceiptDigest")
+            == _verified_write_receipt_digest(verified_receipt)
+        )
+        unresolved = bool(
+            sidecar.get("dispatchState") == "dispatched"
+            and sidecar.get("outcome") == "unknown"
+        )
+        if not (verified_write or unresolved):
+            continue
+        if verified_write:
+            model_projection = {
+                key: sidecar[key]
+                for key in (
+                    "schema",
+                    "requestId",
+                    "turnId",
+                    "callId",
+                    "toolName",
+                    "dispatchState",
+                    "outcome",
+                    "retrySafe",
+                )
+                if key in sidecar
+            }
+            model_projection["modelResult"] = verified_receipt
+        else:
+            model_projection = project_tool_result_for_model(
+                item.get("content"),
+                sidecar,
+            )
+            if isinstance(model_projection, str):
+                try:
+                    model_projection = json.loads(model_projection)
+                except (TypeError, ValueError):
+                    pass
+        if model_projection is not None:
+            fresh_protected.append(model_projection)
+    protected = [*fresh_protected, *existing_facts]
+    deduped_facts: list[Any] = []
+    seen_facts: set[str] = set()
+    for fact in protected:
+        key = json.dumps(
+            fact,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        if key in seen_facts:
+            continue
+        seen_facts.add(key)
+        deduped_facts.append(fact)
+        if len(deduped_facts) >= 64:
+            break
+    deduped_steers: list[str] = []
+    seen_steers: set[str] = set()
+    for steer in trusted_steers:
+        safe_steer = redact_sensitive_text(steer)[:8_192]
+        if not safe_steer or safe_steer in seen_steers:
+            continue
+        seen_steers.add(safe_steer)
+        deduped_steers.append(safe_steer)
+        if len(deduped_steers) >= 32:
+            break
+    if not deduped_facts and not deduped_steers:
+        return ""
+    checkpoint = {
+        "schema": "xiaoban.runtime-compaction-checkpoint.v1",
+        "facts": deduped_facts,
+        "trustedSteers": deduped_steers,
+    }
+    return project_runtime_checkpoint_for_model(checkpoint) or ""
 
 
 def strict_exception_failure_result(
@@ -518,6 +894,19 @@ def strict_exception_failure_result(
         code = "paid_call_policy_rejected"
         phase = "request_preflight"
         reason = "The provider request failed its signed pre-dispatch policy check"
+    elif failure_source == "context_compaction":
+        code = "context_compaction_failed"
+        phase = "context_compaction"
+        reason = (
+            "The model context could not be compacted safely for continuation"
+        )
+    elif failure_source == "context_overflow_usage_unavailable":
+        code = "provider_usage_unavailable"
+        phase = "provider_call"
+        reason = (
+            "The model request failed with a context overflow and no trusted "
+            "usage receipt was available for a paid continuation"
+        )
     elif failure_source == "response_processing":
         code = "provider_response_processing_failed"
         phase = "response_processing"
@@ -544,7 +933,7 @@ def strict_exception_failure_result(
 def claim_response_consumption(agent: Any, api_request_id: str) -> bool:
     if not strict_mode(agent):
         return True
-    controller = getattr(agent, "_true_moa_cancel_controller", None)
+    controller = strict_cancel_controller(agent)
     allowed = not agent._interrupt_requested
     if allowed and controller is not None:
         allowed = controller.try_begin_dispatch(
@@ -563,7 +952,7 @@ def claim_public_result(
 ) -> bool:
     if not strict_mode(agent):
         return True
-    controller = getattr(agent, "_true_moa_cancel_controller", None)
+    controller = strict_cancel_controller(agent)
     allowed = not agent._interrupt_requested
     if allowed and controller is not None:
         deferred = getattr(agent, "_defer_true_moa_final_commit", False)

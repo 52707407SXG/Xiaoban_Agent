@@ -129,6 +129,44 @@ class TestFlushAfterCompression:
             assert len(rows) == 2
             assert [row["content"] for row in rows] == ["summary", "continuing..."]
 
+    def test_persist_override_does_not_erase_merged_summary(self):
+        from xiaoban_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            agent = self._make_agent(db)
+            checkpoint = {
+                "schema": "xiaoban.runtime-compaction-checkpoint.v1",
+                "facts": [],
+                "trustedSteers": [],
+            }
+            messages = [{
+                "role": "user",
+                "content": "summary\n\nAPI-only current request",
+                "_compressed_summary": True,
+                "_xiaoban_runtime_checkpoint": checkpoint,
+                "_xiaoban_current_turn_user_marker": "current-user-marker",
+                "_xiaoban_current_turn_user_content": (
+                    "API-only current request"
+                ),
+            }]
+            agent._persist_user_message_idx = 0
+            agent._persist_user_message_override = "clean current request"
+
+            with patch.object(agent, "_save_session_log"):
+                agent._persist_session(messages)
+                agent._persist_session(messages)
+
+            replayed = db.get_messages_as_conversation("original-session")
+            assert messages[0]["content"] == (
+                "summary\n\nclean current request"
+            )
+            assert replayed[0]["content"] == (
+                "summary\n\nclean current request"
+            )
+            assert replayed[0]["_compressed_summary"] is True
+            assert replayed[0]["_xiaoban_runtime_checkpoint"] == checkpoint
+
 
 # ---------------------------------------------------------------------------
 # Part 2: Gateway-side — history_offset after session split

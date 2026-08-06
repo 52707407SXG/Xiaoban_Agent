@@ -10,7 +10,7 @@ def _agent_with_stubbed_persistence():
     agent._session_db = None
     agent._session_messages = []
     agent.flushed_session_db_messages = []
-    agent._flush_messages_to_session_db = lambda messages, conversation_history=None: (
+    agent._flush_messages_to_session_db = lambda messages, conversation_history=None, persist_override_applied=False: (
         agent.flushed_session_db_messages.append([m.copy() for m in messages])
     )
     return agent
