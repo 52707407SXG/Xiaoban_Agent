@@ -160,6 +160,10 @@ class TestProgressSummaryDlp:
                 "核对2026年7月结算卡点击情况",
                 "我先查清7月结算卡没点的人员。我会核对完整覆盖后汇总。",
             ),
+            (
+                "查询2026年7月未确认结算卡名单",
+                "我会查询7月结算卡还有哪些人没确认。我会拉取完整数据后汇总。",
+            ),
         ],
     )
     def test_todo_generic_settlement_wording_keeps_real_commentary(
