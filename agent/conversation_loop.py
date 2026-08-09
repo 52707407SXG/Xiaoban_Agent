@@ -455,7 +455,10 @@ _SIGNED_NORMAL_LOOP_INSTRUCTION = (
     "Wait for the TodoResult before calling a non-todo tool. If TodoResult "
     "fails, treat that failure as evidence and continue making the best legal "
     "decision; do not retry merely to satisfy this instruction. Update todo as "
-    "the real task state changes. For chat, advice, or questions that need no "
+    "the real task state changes. Never answer a request for current My Stand "
+    "records from memory or general knowledge: after TodoResult, call the "
+    "appropriate non-todo My Stand tool and use its result. For chat, advice, "
+    "or questions that need no "
     "My Stand tool, answer directly without todo even when careful reasoning "
     "is needed. Do not use fixed headings, markers, or templates. "
     "When you call tools, include one or two concise, concrete sentences in "
@@ -497,6 +500,14 @@ def _with_mystand_tool_ordering_contract(tools: Any) -> Any:
                 "response, write exactly two short natural sentences in "
                 "visible assistant content: summarize the requested outcome, "
                 "then say what you will check."
+            )
+        elif name == "mystand_query":
+            ordering = (
+                f"{_MYSTAND_TOOL_ORDERING_MARKER} Current My Stand facts must "
+                "come from this tool, never from memory or general knowledge. "
+                "For a settlement-card unconfirmed-list request, wait for "
+                "TodoResult, then call mystand_query exactly once and answer "
+                "from its result."
             )
         else:
             ordering = (
