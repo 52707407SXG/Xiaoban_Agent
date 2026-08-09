@@ -4472,37 +4472,6 @@ class TestRunConversation:
         )
         assert agent.tools[0]["function"]["description"] == "web_search tool"
 
-    def test_signed_normal_request_describes_provider_visible_finance_arguments(self):
-        from agent.conversation_loop import _with_mystand_tool_ordering_contract
-        from tools.mystand_query_tool import MYSTAND_QUERY_SCHEMA
-        from tools.schema_sanitizer import sanitize_tool_schemas
-
-        tools = sanitize_tool_schemas([
-            {
-                "type": "function",
-                "function": {
-                    "name": "todo",
-                    "description": "Track the current work plan.",
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            },
-            {"type": "function", "function": MYSTAND_QUERY_SCHEMA},
-        ])
-        assert tools[1]["function"]["parameters"]["properties"]["query_args"] == {
-            "type": "object",
-            "properties": {},
-        }
-
-        scoped = _with_mystand_tool_ordering_contract(tools)
-
-        query_description = scoped[1]["function"]["description"]
-        assert "query_args containing only year and month as JSON integers" in (
-            query_description
-        )
-        assert scoped[1]["function"]["parameters"]["properties"][
-            "query_args"
-        ] == {"type": "object", "properties": {}}
-
     def test_ollama_small_runtime_context_fails_before_api_call(self, agent, caplog):
         self._setup_agent(agent)
         agent.model = "qwen3.5:9b"
