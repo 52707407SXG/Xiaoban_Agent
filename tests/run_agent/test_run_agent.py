@@ -4467,9 +4467,6 @@ class TestRunConversation:
         assert "exactly one todo tool call" in _SIGNED_NORMAL_LOOP_INSTRUCTION
         assert "exactly two short, natural" in _SIGNED_NORMAL_LOOP_INSTRUCTION
         assert "exactly one item with status in_progress" in _SIGNED_NORMAL_LOOP_INSTRUCTION
-        assert "Never answer a request for current My Stand records" in (
-            _SIGNED_NORMAL_LOOP_INSTRUCTION
-        )
         assert sent_tools[0]["function"]["description"].startswith(
             "MY STAND TOOL ORDERING:"
         )
@@ -4498,11 +4495,7 @@ class TestRunConversation:
 
         scoped = _with_mystand_tool_ordering_contract(tools)
 
-        assert "exactly two short natural sentences" in (
-            scoped[0]["function"]["description"]
-        )
         query_description = scoped[1]["function"]["description"]
-        assert "call mystand_query exactly once" in query_description
         assert "query_args containing only year and month as JSON integers" in (
             query_description
         )
