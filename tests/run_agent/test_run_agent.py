@@ -4496,6 +4496,7 @@ class TestRunConversation:
         todo_description = scoped[0]["function"]["description"]
         assert "two short visible sentences" in todo_description
         assert "sentence-end punctuation" in todo_description
+        assert "不要用逗号连接两句" in todo_description
         description = scoped[1]["function"]["description"]
         assert "call once" in description
         assert "query_kind=list" in description

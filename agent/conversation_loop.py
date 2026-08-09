@@ -496,7 +496,8 @@ def _with_mystand_tool_ordering_contract(tools: Any) -> Any:
                 "TodoResult before choosing another tool. In that response, "
                 "write two short visible sentences separated by sentence-end "
                 "punctuation: first summarize the requested outcome, then say "
-                "what you will check."
+                "what you will check. 中文回复必须写成两句，每句用句号结束，"
+                "不要用逗号连接两句。"
             )
         else:
             ordering = (
