@@ -507,7 +507,11 @@ def _with_mystand_tool_ordering_contract(tools: Any) -> Any:
                 "come from this tool, never from memory or general knowledge. "
                 "For a settlement-card unconfirmed-list request, wait for "
                 "TodoResult, then call mystand_query exactly once and answer "
-                "from its result."
+                "from its result. Use operation=read, query_kind=list, "
+                "module_id=finance-ledger, fact_paths exactly "
+                "[finance.settlement_confirmation.unconfirmed], "
+                "coverage_required=true, and query_args containing only year "
+                "and month as JSON integers."
             )
         else:
             ordering = (
@@ -517,41 +521,6 @@ def _with_mystand_tool_ordering_contract(tools: Any) -> Any:
                 "If TodoResult is absent, call only todo now."
             )
         function["description"] = f"{ordering}\n\n{description}".strip()
-        if name == "mystand_query":
-            parameters = function.get("parameters")
-            properties = (
-                parameters.get("properties")
-                if isinstance(parameters, dict)
-                else None
-            )
-            query_args = (
-                properties.get("query_args")
-                if isinstance(properties, dict)
-                else None
-            )
-            if isinstance(query_args, dict):
-                query_args.update({
-                    "description": (
-                        "Finance aggregate arguments. Always pass year as a "
-                        "JSON integer. For "
-                        "finance.settlement_confirmation.unconfirmed, also "
-                        "pass month as a JSON integer from 1 through 12."
-                    ),
-                    "type": "object",
-                    "properties": {
-                        "year": {
-                            "type": "integer",
-                            "minimum": 2000,
-                            "maximum": 2100,
-                        },
-                        "month": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 12,
-                        },
-                    },
-                    "required": ["year"],
-                })
     return scoped_tools
 
 
