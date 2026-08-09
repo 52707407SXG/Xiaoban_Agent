@@ -5516,10 +5516,13 @@ class TestRunConversation:
         assert tool_call.call_count == 7
         assert result["completed"] is False
         assert result["failed"] is True
-        # Budget exhaustion reserves a final summary slot instead of failing
-        # the turn outright.  A model that still asks for a tool inside that
-        # reserved slot is a contract violation (K4), so it fails closed.
-        assert result["failure"]["code"] == "final_slot_requested_tool"
+        assert result["failure"]["code"] == "paid_call_budget_requested_tool"
+        last_payload = api_call.call_args_list[-1].args[0]
+        assert "tools" in last_payload
+        assert "final model call allowed" not in json.dumps(
+            last_payload["messages"],
+            ensure_ascii=False,
+        )
 
     def test_signed_normal_runs_past_eight_calls_until_natural_final(
         self,

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "contract": "mystand.xiaoban-trusted-runtime-contract.v1",
-  "revision": "2026-08-06.2",
+  "revision": "2026-08-09.1",
   "compatibility": {
     "mode": "exact-match",
     "silentFallbackAllowed": false,
@@ -90,7 +90,7 @@
     },
     "query": {
       "contract": "mystand.query-tool.v1",
-      "sha256": "cca9a8cfdc9190bb3ff8da7a9f0cf43ba7305f92b8118971105fb81c6c71660a"
+      "sha256": "f16c7abb93bf3bebdd826d44c77ab89cd1c169f205d3d1cd448da25a1e66992d"
     }
   },
   "parityFixtures": {

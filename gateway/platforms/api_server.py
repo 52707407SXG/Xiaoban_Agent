@@ -50,6 +50,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Mapping, Optional
@@ -486,6 +487,29 @@ _PROGRESS_TOOL_CALL_ID_RE = re.compile(
 )
 _PROGRESS_TOOL_NAME_RE = re.compile(
     r"[A-Za-z][A-Za-z0-9_.:-]{0,127}\Z"
+)
+_PROGRESS_TODO_GENERIC_TEXT_RE = re.compile(
+    "|".join(re.escape(item) for item in sorted({
+        "制定执行计划", "逐个拉取", "经纪人确认", "店长确认",
+        "未确认人数", "未确认名单", "确认状态", "财务档案",
+        "授权列表", "授权资料", "授权范围", "执行计划",
+        "继续查", "已查", "查找", "查看", "查询", "读取", "核对",
+        "检查", "联系", "跟进", "处理", "拉取", "获取", "筛选",
+        "统计", "汇总", "整理", "定位", "找到", "逐个", "全部",
+        "是否结单", "结算卡", "财务", "档案", "资料", "结算",
+        "佣金", "授权", "账户", "余额", "确认", "状态", "结单",
+        "人数", "名单", "结果", "相关", "本月", "当月", "当前",
+    }, key=len, reverse=True))
+)
+_PROGRESS_TODO_DATE_RE = re.compile(
+    r"(?:\d{4}\s*年\s*)?(?:1[0-2]|0?[1-9])\s*月"
+)
+_PROGRESS_TODO_RESIDUAL_RE = re.compile(
+    r"[\w·.:@#-]+",
+    re.UNICODE,
+)
+_PROGRESS_TODO_ITEM_ID_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}\Z"
 )
 _CHAT_CONTROL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}\Z")
 _CHAT_APPROVAL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}\Z")
@@ -1027,6 +1051,8 @@ _MYSTAND_STREAM_REPLAY_PROGRESS_KEYS = frozenset({
     "providerEventAt",
     "relatedCallIds",
     "relatedTools",
+    "todoItemId",
+    "todoItems",
 })
 
 
@@ -1301,13 +1327,25 @@ def _progress_tool_batch_context(
             if remaining <= 0:
                 protection_complete = False
             else:
-                argument_values, arguments_complete = (
-                    _progress_sensitive_values(
+                if function_name == "todo":
+                    (
                         argument_source,
-                        protect_all_strings=True,
-                        limit=remaining,
+                        todo_source_complete,
+                    ) = _todo_progress_protection_source(
+                        argument_source
                     )
-                )
+                    if not todo_source_complete:
+                        protection_complete = False
+                if protection_complete:
+                    argument_values, arguments_complete = (
+                        _progress_sensitive_values(
+                            argument_source,
+                            protect_all_strings=function_name != "todo",
+                            limit=remaining,
+                        )
+                    )
+                else:
+                    argument_values, arguments_complete = [], False
                 if not arguments_complete:
                     protection_complete = False
                 else:
@@ -1407,6 +1445,104 @@ def _public_progress_summary(
     return text[:_PROGRESS_SUMMARY_MAX_CHARS].rstrip()
 
 
+def _todo_progress_protection_source(value: Any) -> tuple[Any, bool]:
+    """Validate Todo shape, then protect every non-generic content fragment."""
+
+    payload = value
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}, False
+    if not isinstance(payload, Mapping):
+        return {}, False
+    payload_keys = set(payload)
+    if "summary" in payload_keys:
+        if not payload_keys.issubset({"todos", "summary"}):
+            return {}, False
+        summary = payload.get("summary")
+        summary_keys = {
+            "total", "pending", "in_progress", "completed", "cancelled",
+        }
+        if (
+            not isinstance(summary, Mapping)
+            or set(summary) != summary_keys
+            or any(
+                isinstance(summary.get(key), bool)
+                or not isinstance(summary.get(key), int)
+                or summary.get(key) < 0
+                for key in summary_keys
+            )
+        ):
+            return {}, False
+    else:
+        if not payload_keys.issubset({"todos", "merge"}):
+            return {}, False
+        if "merge" in payload and not isinstance(payload.get("merge"), bool):
+            return {}, False
+    if "todos" not in payload:
+        return {}, True
+    todos = payload.get("todos")
+    if not isinstance(todos, list) or len(todos) > 128:
+        return {}, False
+    projected_todos = []
+    generic_residuals = {
+        "一月", "二月", "三月", "四月", "五月", "六月",
+        "七月", "八月", "九月", "十月", "十一月", "十二月",
+        "所有", "先", "再", "并", "和", "与", "及", "等", "的",
+        "中", "已", "待", "查",
+    }
+    for item in todos:
+        if not isinstance(item, Mapping) or not set(item).issubset({
+            "id", "content", "status",
+        }):
+            return {}, False
+        item_id = item.get("id")
+        if (
+            "id" in item
+            and (
+                not isinstance(item_id, str)
+                or _PROGRESS_TODO_ITEM_ID_RE.fullmatch(item_id.strip()) is None
+            )
+        ):
+            return {}, False
+        content = item.get("content")
+        if "content" in item and not isinstance(content, str):
+            return {}, False
+        status = item.get("status")
+        if (
+            "status" in item
+            and (
+                not isinstance(status, str)
+                or status not in {
+                    "pending", "in_progress", "completed", "cancelled",
+                }
+            )
+        ):
+            return {}, False
+        projected_item = {}
+        if isinstance(content, str):
+            projected_item["content"] = content
+            residual = _PROGRESS_TODO_DATE_RE.sub(" ", content)
+            residual = _PROGRESS_TODO_GENERIC_TEXT_RE.sub(" ", residual)
+            entities = []
+            for match in _PROGRESS_TODO_RESIDUAL_RE.finditer(residual):
+                candidate = match.group(0).strip("-_.:@#")
+                if candidate and candidate not in generic_residuals:
+                    entities.append(candidate)
+            unparsed = _PROGRESS_TODO_RESIDUAL_RE.sub("", residual)
+            if any(
+                not character.isspace()
+                and not unicodedata.category(character).startswith("P")
+                for character in unparsed
+            ):
+                return {}, False
+            if entities:
+                projected_item["name"] = entities
+        projected_todos.append(projected_item)
+    return {"todos": projected_todos}, True
+
+
 def _mystand_stream_result_succeeded(result: Any) -> bool:
     return bool(
         isinstance(result, dict)
@@ -1418,35 +1554,75 @@ def _mystand_stream_result_succeeded(result: Any) -> bool:
     )
 
 
-def _todo_result_progress_summary(result: Any) -> str:
-    """Project only a successful TodoResult into bounded public plan text."""
+def _todo_result_progress_projection(
+    result: Any,
+) -> tuple[list[dict[str, str]], Optional[str]]:
+    """Project a successful TodoResult and its unique active item."""
 
     payload = result
     if isinstance(result, str):
         try:
             payload = json.loads(result)
         except (TypeError, ValueError, json.JSONDecodeError):
-            return ""
+            return [], None
     if not isinstance(payload, Mapping) or payload.get("error"):
-        return ""
+        return [], None
     todos = payload.get("todos")
     if not isinstance(todos, list):
-        return ""
-    status_labels = {
-        "pending": "待处理",
-        "in_progress": "进行中",
-        "completed": "已完成",
-        "cancelled": "已取消",
-    }
-    lines: list[str] = []
-    for index, item in enumerate(todos[:12], start=1):
+        return [], None
+    items: list[dict[str, str]] = []
+    active_ids: list[str] = []
+    for item in todos[:12]:
         if not isinstance(item, Mapping):
             continue
-        content = str(item.get("content") or "").strip()
-        status = status_labels.get(str(item.get("status") or "").strip())
-        if content and status:
-            lines.append(f"{index}. [{status}] {content}")
-    return _public_progress_summary("\n".join(lines)) if lines else ""
+        item_id = str(item.get("id") or "").strip()
+        status = str(item.get("status") or "").strip()
+        content = _public_progress_summary(item.get("content"))
+        if (
+            not item_id
+            or not _PROGRESS_TODO_ITEM_ID_RE.fullmatch(item_id)
+            or status not in {"pending", "in_progress", "completed", "cancelled"}
+            or not content
+        ):
+            continue
+        items.append({"id": item_id, "content": content, "status": status})
+        if status == "in_progress":
+            active_ids.append(item_id)
+    return items, active_ids[0] if len(active_ids) == 1 else None
+
+
+def _validated_mystand_replay_progress_payload(
+    value: Any,
+) -> Optional[Dict[str, Any]]:
+    if (
+        not isinstance(value, Mapping)
+        or not set(value).issubset(_MYSTAND_STREAM_REPLAY_PROGRESS_KEYS)
+    ):
+        return None
+    payload = dict(value)
+    if "todoItems" in payload:
+        replay_todo_items = payload["todoItems"]
+        if not isinstance(replay_todo_items, list):
+            return None
+        projected_todo_items, _ = _todo_result_progress_projection({
+            "todos": replay_todo_items,
+        })
+        if projected_todo_items != replay_todo_items:
+            return None
+    if any(
+        key != "todoItems"
+        and not isinstance(item, (str, int, bool, type(None)))
+        for key, item in payload.items()
+    ):
+        return None
+    try:
+        return json.loads(json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+        ))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
 
 
 def _build_mystand_stream_replay_envelope(
@@ -1482,26 +1658,13 @@ def _build_mystand_stream_replay_envelope(
             not isinstance(item, tuple)
             or len(item) != 2
             or item[0] != "__tool_progress__"
-            or not isinstance(item[1], Mapping)
-            or not set(item[1]).issubset(
-                _MYSTAND_STREAM_REPLAY_PROGRESS_KEYS
-            )
         ):
             return None
         else:
-            payload = dict(item[1])
-            if any(
-                not isinstance(value, (str, int, bool, type(None)))
-                for value in payload.values()
-            ):
-                return None
-            try:
-                public_payload = json.loads(json.dumps(
-                    payload,
-                    ensure_ascii=False,
-                    allow_nan=False,
-                ))
-            except (TypeError, ValueError, json.JSONDecodeError):
+            public_payload = _validated_mystand_replay_progress_payload(
+                item[1]
+            )
+            if public_payload is None:
                 return None
             encoded_items.append({
                 "kind": "progress",
@@ -1625,13 +1788,14 @@ def _decode_mystand_stream_replay_envelope(
         elif encoded.get("kind") == "progress" and isinstance(
             encoded.get("payload"), dict
         ):
-            if not set(encoded["payload"]).issubset(
-                _MYSTAND_STREAM_REPLAY_PROGRESS_KEYS
-            ):
+            public_payload = _validated_mystand_replay_progress_payload(
+                encoded["payload"]
+            )
+            if public_payload is None:
                 return None
             decoded_items.append((
                 "__tool_progress__",
-                dict(encoded["payload"]),
+                public_payload,
             ))
         else:
             return None
@@ -4200,6 +4364,7 @@ class APIServerAdapter(
             _progress_protected_values: list[tuple[str, str]] = []
             _progress_protected_values_complete = True
             _seen_todo_tool_call = False
+            _active_todo_item_id: Optional[str] = None
 
             def _on_delta(delta):
                 # Filter out None — the agent fires stream_delta_callback(None)
@@ -4343,14 +4508,13 @@ class APIServerAdapter(
                 "_xiaoban_accepts_provider_metadata",
                 True,
             )
-
             # Tool callbacks run in the agent executor thread while task
             # cancellation and final cleanup run in the event-loop thread.
             # Keep one locked lifecycle ledger so every visible call id gets
             # exactly one terminal event, including interrupted tool batches.
             _open_tool_calls: dict[
                 str,
-                tuple[str, Optional[tuple[str, str]]],
+                tuple[str, Optional[tuple[str, str]], Optional[str]],
             ] = {}
             _seen_tool_call_ids: set[str] = set()
             _tool_lifecycle_closed = False
@@ -4450,6 +4614,7 @@ class APIServerAdapter(
                 nonlocal _tool_lifecycle_closed
                 nonlocal _tool_lifecycle_integrity_failed
                 nonlocal _visible_tool_count, _seen_todo_tool_call
+                nonlocal _active_todo_item_id
                 with _tool_lifecycle_lock:
                     if _tool_lifecycle_closed:
                         return
@@ -4507,9 +4672,16 @@ class APIServerAdapter(
                             started["turnId"],
                         )
                     _seen_tool_call_ids.add(tool_call_id)
+                    if function_name == "todo":
+                        _active_todo_item_id = None
                     _open_tool_calls[tool_call_id] = (
                         function_name,
                         binding,
+                        (
+                            _active_todo_item_id
+                            if function_name != "todo"
+                            else None
+                        ),
                     )
                     payload = {
                         "tool": function_name,
@@ -4526,6 +4698,9 @@ class APIServerAdapter(
                         })
                         if function_name == "todo":
                             _seen_todo_tool_call = True
+                    todo_item_id = _open_tool_calls[tool_call_id][2]
+                    if todo_item_id is not None:
+                        payload["todoItemId"] = todo_item_id
                     _visible_tool_count += 1
                     _put_public_stream_item(("__tool_progress__", payload))
 
@@ -4544,6 +4719,7 @@ class APIServerAdapter(
                 """
                 nonlocal _progress_protected_values_complete
                 nonlocal _tool_lifecycle_integrity_failed
+                nonlocal _active_todo_item_id
                 with _tool_lifecycle_lock:
                     if _tool_lifecycle_closed:
                         return
@@ -4580,7 +4756,7 @@ class APIServerAdapter(
                         if mystand_request:
                             _tool_lifecycle_integrity_failed = True
                         return
-                    open_function_name, binding = open_call
+                    open_function_name, binding, todo_item_id = open_call
                     function_name_mismatch = bool(
                         binding is not None
                         and function_name != open_function_name
@@ -4637,6 +4813,8 @@ class APIServerAdapter(
                         "status": status,
                     }
                     payload.update(public_metadata)
+                    if todo_item_id is not None:
+                        payload["todoItemId"] = todo_item_id
                     if binding is not None:
                         payload["progressSchema"] = (
                             _XIAOBAN_PROGRESS_SCHEMA_V2
@@ -4647,11 +4825,14 @@ class APIServerAdapter(
                                 and public_metadata.get("outcome")
                                 in {"success", "empty"}
                             ):
-                                todo_summary = _todo_result_progress_summary(
+                                todo_items, active_todo_item_id = (
+                                    _todo_result_progress_projection(
                                     function_result
+                                    )
                                 )
-                                if todo_summary:
-                                    payload["summary"] = todo_summary
+                                _active_todo_item_id = active_todo_item_id
+                                if todo_items:
+                                    payload["todoItems"] = todo_items
                     _put_public_stream_item(("__tool_progress__", payload))
                     if binding is not None and _progress_protected_values_complete:
                         for source in (function_args, function_result):
@@ -4659,10 +4840,24 @@ class APIServerAdapter(
                                 _PROGRESS_PRIOR_MAX_PROTECTED_VALUES
                                 - len(_progress_protected_values)
                             )
+                            protection_source = source
+                            protect_all_strings = True
+                            source_shape_complete = True
+                            if open_function_name == "todo":
+                                (
+                                    protection_source,
+                                    source_shape_complete,
+                                ) = (
+                                    _todo_progress_protection_source(source)
+                                )
+                                protect_all_strings = False
+                            if not source_shape_complete:
+                                _progress_protected_values_complete = False
+                                break
                             source_values, source_complete = (
                                 _progress_sensitive_values(
-                                    source,
-                                    protect_all_strings=True,
+                                    protection_source,
+                                    protect_all_strings=protect_all_strings,
                                     limit=remaining,
                                 )
                             )
@@ -4688,7 +4883,7 @@ class APIServerAdapter(
                 with _tool_lifecycle_lock:
                     _tool_lifecycle_closed = True
                     for tool_call_id, open_call in _open_tool_calls.items():
-                        function_name, binding = open_call
+                        function_name, binding, todo_item_id = open_call
                         payload = {
                             "tool": function_name,
                             "toolCallId": tool_call_id,
@@ -4704,6 +4899,8 @@ class APIServerAdapter(
                                 "outcome": "unknown",
                                 "retrySafe": False,
                             })
+                        if todo_item_id is not None:
+                            payload["todoItemId"] = todo_item_id
                         _put_public_stream_item((
                             "__tool_progress__",
                             payload,

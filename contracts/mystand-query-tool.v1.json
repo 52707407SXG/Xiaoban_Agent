@@ -3,7 +3,7 @@
   "contract": "mystand.query-tool.v1",
   "tool": {
     "name": "mystand_query",
-    "description": "Read facts from the current user's authorized My Stand data. Use the semantic resource/entity shape for an identified material. For finance-ledger questions that require rank, list, predicate, or count over one year, use the matching strict finance aggregate shape shown in this schema. Call once and answer only from its result. Identity, ownership, authorization IDs, resource IDs, source IDs, lookup steps, query text, and fields outside the selected shape must never be supplied or narrated.",
+    "description": "Read facts from the current user's authorized My Stand data. Use the semantic resource/entity shape for an identified material. For finance-ledger questions that require rank, list, predicate, count, or a year/month settlement-card unconfirmed list, use the matching strict finance aggregate shape shown in this schema. Call once and answer only from its result. Identity, ownership, authorization IDs, resource IDs, source IDs, lookup steps, query text, and fields outside the selected shape must never be supplied or narrated.",
     "parameters": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -30,7 +30,8 @@
               "finance.performance.rank",
               "finance.performance.list",
               "finance.performance.predicate",
-              "finance.performance.count"
+              "finance.performance.count",
+              "finance.settlement_confirmation.unconfirmed"
             ],
             "type": "string"
           }
@@ -179,6 +180,40 @@
                 }
               },
               "required": ["year"],
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "required": [
+            "query_kind",
+            "module_id",
+            "fact_paths",
+            "query_args",
+            "coverage_required"
+          ],
+          "properties": {
+            "query_kind": {
+              "const": "list"
+            },
+            "fact_paths": {
+              "const": ["finance.settlement_confirmation.unconfirmed"]
+            },
+            "query_args": {
+              "type": "object",
+              "properties": {
+                "year": {
+                  "type": "integer",
+                  "minimum": 2000,
+                  "maximum": 2100
+                },
+                "month": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 12
+                }
+              },
+              "required": ["year", "month"],
               "additionalProperties": false
             }
           }

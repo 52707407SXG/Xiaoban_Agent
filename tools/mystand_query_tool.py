@@ -427,8 +427,17 @@ def _validate_finance_aggregate_plan(args: dict) -> dict:
         raise ValueError("query_kind 不在允许范围内")
     if args.get("module_id") != "finance-ledger":
         raise ValueError("module_id 不在允许范围内")
-    expected_fact_path = f"finance.performance.{query_kind}"
-    if args.get("fact_paths") != [expected_fact_path]:
+    fact_paths = args.get("fact_paths")
+    settlement_confirmation = (
+        query_kind == "list"
+        and fact_paths == ["finance.settlement_confirmation.unconfirmed"]
+    )
+    expected_fact_path = (
+        "finance.settlement_confirmation.unconfirmed"
+        if settlement_confirmation
+        else f"finance.performance.{query_kind}"
+    )
+    if fact_paths != [expected_fact_path]:
         raise ValueError("fact_paths 不在允许范围内")
     if args.get("coverage_required") is not True:
         raise ValueError("coverage_required 必须为 true")
@@ -451,9 +460,24 @@ def _validate_finance_aggregate_plan(args: dict) -> dict:
         raise ValueError(f"{query_kind} 的 year 必须是 2000-2100 之间的整数")
 
     if query_kind == "list":
-        if set(query_args) != {"year"}:
-            raise ValueError("list 的 query_args 只允许 year 一个字段（额外字段请移除）")
-        normalized_args = {"year": year}
+        if settlement_confirmation:
+            month = query_args.get("month")
+            if isinstance(month, str) and month.strip().isdigit():
+                month = int(month.strip())
+            elif isinstance(month, float) and month.is_integer():
+                month = int(month)
+            if (
+                set(query_args) != {"year", "month"}
+                or isinstance(month, bool)
+                or not isinstance(month, int)
+                or not 1 <= month <= 12
+            ):
+                raise ValueError("结算确认 list 的 query_args 只允许 year 和 month")
+            normalized_args = {"year": year, "month": month}
+        else:
+            if set(query_args) != {"year"}:
+                raise ValueError("list 的 query_args 只允许 year 一个字段（额外字段请移除）")
+            normalized_args = {"year": year}
     elif query_kind == "rank":
         rank = query_args.get("rank")
         if (

@@ -227,8 +227,6 @@ def build_turn_context(
     agent._api_call_count = 0
     agent._strict_compaction_call_count = 0
     agent._strict_preflight_compaction_error = None
-    agent._paid_call_budget_exhausted_final_slot = False
-
     # Log conversation turn start for debugging/observability.
     from gateway.session_context import get_session_env
 

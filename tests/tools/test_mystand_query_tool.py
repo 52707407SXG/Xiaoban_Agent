@@ -84,6 +84,17 @@ def _finance_plan(kind):
     }
 
 
+def _settlement_confirmation_plan(month=7):
+    return {
+        "operation": "read",
+        "query_kind": "list",
+        "module_id": "finance-ledger",
+        "fact_paths": ["finance.settlement_confirmation.unconfirmed"],
+        "query_args": {"year": 2026, "month": month},
+        "coverage_required": True,
+    }
+
+
 def _call(
     args,
     *,
@@ -121,7 +132,7 @@ def test_contract_exposes_semantic_and_strict_finance_aggregate_shapes():
         "mode",
     }
     assert parameters["required"] == ["operation"]
-    assert len(parameters["anyOf"]) == 6
+    assert len(parameters["anyOf"]) == 7
     assert parameters["additionalProperties"] is False
     assert properties["operation"]["const"] == "read"
     assert set(properties["query_kind"]["enum"]) == {
@@ -133,12 +144,18 @@ def test_contract_exposes_semantic_and_strict_finance_aggregate_shapes():
     assert properties["module_id"]["const"] == "finance-ledger"
     assert properties["coverage_required"]["const"] is True
     finance_branches = {
-        branch["properties"]["query_kind"]["const"]: branch
+        tuple(branch["properties"]["fact_paths"]["const"]): branch
         for branch in parameters["anyOf"]
         if "query_kind" in branch.get("properties", {})
     }
-    assert set(finance_branches) == {"rank", "list", "predicate", "count"}
-    for kind, branch in finance_branches.items():
+    assert set(finance_branches) == {
+        ("finance.performance.rank",),
+        ("finance.performance.list",),
+        ("finance.performance.predicate",),
+        ("finance.performance.count",),
+        ("finance.settlement_confirmation.unconfirmed",),
+    }
+    for fact_paths, branch in finance_branches.items():
         assert set(branch["required"]) == {
             "query_kind",
             "module_id",
@@ -146,9 +163,7 @@ def test_contract_exposes_semantic_and_strict_finance_aggregate_shapes():
             "query_args",
             "coverage_required",
         }
-        assert branch["properties"]["fact_paths"]["const"] == [
-            f"finance.performance.{kind}"
-        ]
+        assert branch["properties"]["fact_paths"]["const"] == list(fact_paths)
         assert branch["properties"]["query_args"]["additionalProperties"] is False
     assert set(properties["fact_needs"]["items"]["enum"]) == FACT_NEEDS
     assert set(
@@ -214,6 +229,43 @@ def test_handler_directly_dispatches_each_finance_aggregate_shape(
     ]
 
 
+def test_handler_dispatches_settlement_confirmation_once(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda payload, session: (
+            calls.append((payload, session))
+            or json.dumps({"ok": True, "coverage": {"complete": True}})
+        ),
+    )
+    plan = _settlement_confirmation_plan()
+
+    result = _call(plan, user_message="查7月结算卡还有谁没点")
+
+    assert result["ok"] is True
+    assert calls[0][0] == plan
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("month", [0, 13, True, 7.5])
+def test_handler_rejects_invalid_settlement_month_before_dispatch(
+    monkeypatch,
+    month,
+):
+    calls = []
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda *args: calls.append(args) or json.dumps({"ok": True}),
+    )
+
+    result = _call(_settlement_confirmation_plan(month))
+
+    assert result["code"] == "invalid_mystand_query_arguments"
+    assert calls == []
+
+
 def test_handler_rejects_finance_aggregate_shape_drift_before_dispatch(
     monkeypatch,
 ):
@@ -269,7 +321,6 @@ def test_handler_rejects_finance_aggregate_shape_drift_before_dispatch(
 
     mixed_shape = _finance_plan("rank")
     mixed_shape["resource"] = {"name": "财务档案"}
-    invalid_plans.append(mixed_shape)
 
     extra_control = _finance_plan("rank")
     extra_control["unexpected_control"] = "forged"
@@ -280,6 +331,10 @@ def test_handler_rejects_finance_aggregate_shape_drift_before_dispatch(
         assert result["code"] == "invalid_mystand_query_arguments"
 
     assert calls == []
+
+    result = _call(mixed_shape)
+    assert result["ok"] is True
+    assert calls[0][0] == _finance_plan("rank")
 
 
 def test_handler_injects_trusted_query_text_and_session_identity_stays_out_of_body(

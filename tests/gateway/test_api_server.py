@@ -33,13 +33,16 @@ from gateway.platforms.api_server import (
     IdempotencyConflictError,
     ResponseStore,
     _IdempotencyCache,
+    _build_mystand_stream_replay_envelope,
     _build_api_temporal_context,
+    _decode_mystand_stream_replay_envelope,
     _derive_chat_session_id,
     _mystand_tool_result_failed,
     _merge_temporal_context,
     _progress_sensitive_values,
     _progress_tool_batch_context,
     _public_progress_summary,
+    _todo_result_progress_projection,
     _trim_chat_history_for_context,
     check_api_server_requirements,
     cors_middleware,
@@ -107,6 +110,213 @@ class TestMystandToolResultFailure:
 
 
 class TestProgressSummaryDlp:
+    def test_todo_numeric_ids_do_not_suppress_natural_commentary(self):
+        tool_calls = [{
+            "id": "call-todo-plan",
+            "type": "function",
+            "function": {
+                "name": "todo",
+                "arguments": json.dumps({
+                    "todos": [
+                        {
+                            "id": "1",
+                            "content": "查授权列表，找到2026年7月结算相关的财务档案",
+                            "status": "in_progress",
+                        },
+                        {
+                            "id": "2",
+                            "content": "逐个拉取档案确认状态（经纪人确认、店长确认、是否结单）",
+                            "status": "pending",
+                        },
+                        {
+                            "id": "3",
+                            "content": "统计未确认人数和名单",
+                            "status": "pending",
+                        },
+                    ],
+                }, ensure_ascii=False),
+            },
+        }]
+
+        bindings, protected, complete = _progress_tool_batch_context(tool_calls)
+
+        assert bindings == {"call-todo-plan": "todo"}
+        assert complete is True
+        summary = _public_progress_summary(
+            "我会先定位2026年7月结算档案。随后逐项核对确认状态，并汇总未确认名单。",
+            protected,
+        )
+        assert summary
+        assert "汇总未确认名单" in summary
+
+    def test_todo_single_character_content_remains_fail_closed(self):
+        _, _, complete = _progress_tool_batch_context([{
+            "id": "call-todo-plan",
+            "type": "function",
+            "function": {
+                "name": "todo",
+                "arguments": json.dumps({
+                    "todos": [
+                        {"id": "1", "content": "王", "status": "in_progress"},
+                    ],
+                }, ensure_ascii=False),
+            },
+        }])
+
+        assert complete is False
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {"todos": ["甲某"]},
+            {"todos": [{
+                "id": "1",
+                "content": "核对结算卡",
+                "status": "in_progress",
+                "x": "甲某",
+            }]},
+            {"todos": "甲某"},
+            {"todos": [{
+                "id": "1",
+                "content": "核对😀结算卡",
+                "status": "in_progress",
+            }]},
+        ],
+    )
+    def test_invalid_or_unparsed_todo_shape_remains_fail_closed(
+        self,
+        arguments,
+    ):
+        _, _, complete = _progress_tool_batch_context([{
+            "id": "call-todo-plan",
+            "type": "function",
+            "function": {
+                "name": "todo",
+                "arguments": json.dumps(arguments, ensure_ascii=False),
+            },
+        }])
+
+        assert complete is False
+
+    @pytest.mark.parametrize(
+        ("content", "commentary", "private_fragment"),
+        [
+            ("核对𠀀野结算卡", "正在核对𠀀野", "𠀀野"),
+            ("核对やまだ结算卡", "正在核对やまだ", "やまだ"),
+            ("核对김민수结算卡", "正在核对김민수", "김민수"),
+        ],
+    )
+    def test_unicode_todo_entities_remain_protected(
+        self,
+        content,
+        commentary,
+        private_fragment,
+    ):
+        _, protected, complete = _progress_tool_batch_context([{
+            "id": "call-todo-plan",
+            "type": "function",
+            "function": {
+                "name": "todo",
+                "arguments": json.dumps({
+                    "todos": [{
+                        "id": "1",
+                        "content": content,
+                        "status": "in_progress",
+                    }],
+                }, ensure_ascii=False),
+            },
+        }])
+
+        assert complete is True
+        summary = _public_progress_summary(commentary, protected)
+        assert private_fragment not in summary
+
+    @pytest.mark.parametrize(
+        ("content", "commentary", "private_fragments"),
+        [
+            ("核对甲某结算卡", "我先核对甲某", ("甲某",)),
+            (
+                "逐个拉取档案确认状态——已查甲某，继续查乙某/丙某",
+                "已查甲某，继续查乙某和丙某",
+                ("甲某", "乙某", "丙某"),
+            ),
+            (
+                "处理东方花园3栋2单元结算卡",
+                "正在处理东方花园3栋",
+                ("东方花园", "3栋"),
+            ),
+            (
+                "核对Broker-X7结算卡",
+                "正在核对Broker-X7",
+                ("Broker-X7",),
+            ),
+            (
+                "核对东方结算花园档案",
+                "正在核对东方结算花园",
+                ("东方", "花园"),
+            ),
+        ],
+    )
+    def test_todo_content_fragments_remain_protected(
+        self,
+        content,
+        commentary,
+        private_fragments,
+    ):
+        _, protected, complete = _progress_tool_batch_context([{
+            "id": "call-todo-plan",
+            "type": "function",
+            "function": {
+                "name": "todo",
+                "arguments": json.dumps({
+                    "todos": [{
+                        "id": "1",
+                        "content": content,
+                        "status": "in_progress",
+                    }],
+                }, ensure_ascii=False),
+            },
+        }])
+
+        assert complete is True
+        summary = _public_progress_summary(commentary, protected)
+        assert all(fragment not in summary for fragment in private_fragments)
+
+    def test_todo_items_survive_strict_stream_replay(self):
+        todo_items = [
+            {"id": "1", "content": "核对确认状态", "status": "in_progress"},
+            {"id": "2", "content": "汇总名单", "status": "pending"},
+        ]
+        envelope = _build_mystand_stream_replay_envelope(
+            [("__tool_progress__", {
+                "tool": "todo",
+                "status": "completed",
+                "todoItems": todo_items,
+            })],
+            {"final_response": "已完成", "completed": True, "failed": False},
+            {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        )
+
+        assert envelope is not None
+        decoded = _decode_mystand_stream_replay_envelope(envelope)
+        assert decoded is not None
+        assert decoded[0][0][1]["todoItems"] == todo_items
+
+    def test_todo_projection_keeps_items_and_unique_active_id(self):
+        items, active_id = _todo_result_progress_projection({
+            "todos": [
+                {"id": "1", "content": "读取授权", "status": "completed"},
+                {"id": "2", "content": "核对确认状态", "status": "in_progress"},
+                {"id": "3", "content": "汇总名单", "status": "pending"},
+            ],
+        })
+
+        assert [item["id"] for item in items] == ["1", "2", "3"]
+        assert [item["status"] for item in items] == [
+            "completed", "in_progress", "pending",
+        ]
+        assert active_id == "2"
+
     @pytest.mark.parametrize(
         "unsafe_case",
         [
@@ -2906,12 +3116,14 @@ class TestChatCompletionsEndpoint:
             for payload in _xiaoban_progress_payloads(body)
             if payload.get("type") == "assistant.commentary"
         ]
-        assert len(commentary_events) == 1
-        assert commentary_events[0]["source"] == "provider"
-        assert commentary_events[0]["providerSequence"] == 1
-        assert commentary_events[0]["relatedCallIds"] == ",".join(call_ids)
-        assert commentary_events[0].get("toolCallId") is None
-        assert commentary_events[0].get("callId") is None
+        assert [event["status"] for event in commentary_events] == [
+            "completed",
+        ]
+        assert commentary_events[-1]["source"] == "provider"
+        assert commentary_events[-1]["providerSequence"] == 1
+        assert commentary_events[-1]["relatedCallIds"] == ",".join(call_ids)
+        assert commentary_events[-1].get("toolCallId") is None
+        assert commentary_events[-1].get("callId") is None
         terminals = [
             payload
             for payload in _xiaoban_progress_payloads(body)

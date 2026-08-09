@@ -445,14 +445,18 @@ _TRUE_MOA_FINAL_SLOT_INSTRUCTION = (
 
 _SIGNED_NORMAL_LOOP_INSTRUCTION = (
     "# My Stand execution feedback\n"
-    "For any turn that will use a non-todo tool or needs two or more steps, "
-    "your first provider response MUST contain natural visible commentary and "
-    "exactly one todo tool call, with no non-todo tool call in that response. "
+    "For any turn that will use a non-todo tool or perform two or more concrete "
+    "My Stand actions, "
+    "your first provider response MUST contain two or three short, natural "
+    "visible commentary sentences that summarize the user's requested outcome "
+    "and what you will check, plus exactly one todo tool call, with no non-todo "
+    "tool call in that response. "
     "Wait for the TodoResult before calling a non-todo tool. If TodoResult "
     "fails, treat that failure as evidence and continue making the best legal "
     "decision; do not retry merely to satisfy this instruction. Update todo as "
-    "the real task state changes. For simple chat that needs no tools, answer "
-    "directly without todo. Do not use fixed headings, markers, or templates. "
+    "the real task state changes. For chat, advice, or questions that need no "
+    "My Stand tool, answer directly without todo even when careful reasoning "
+    "is needed. Do not use fixed headings, markers, or templates. "
     "When you call tools, include one or two concise, concrete sentences in "
     "the same assistant message. Say what you are doing now and, when prior "
     "tool results exist, what you just learned from them. Write in the user's "
@@ -698,20 +702,11 @@ def run_conversation(
             _normal_calls_used = len(
                 _normal_ledger.to_dict().get("calls") or []
             )
-            _physical_calls_used = api_call_count + int(
-                getattr(agent, "_strict_compaction_call_count", 0) or 0
-            )
             if _normal_calls_used >= int(_normal_ledger.max_calls):
                 # Ledger is physically full: no further provider call can be
                 # reserved.  Stop the loop here; finalize_turn owns the last
                 # summary/terminal outcome.
                 break
-            if _physical_calls_used >= agent.max_iterations - 1:
-                # Only one paid physical call remains: reserve it for the
-                # model's own natural summary (contract K4) instead of
-                # failing the turn — tool schemas are stripped below, so the
-                # model still gets a final chance to produce an agent reply.
-                agent._paid_call_budget_exhausted_final_slot = True
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()
 
@@ -729,12 +724,6 @@ def run_conversation(
         _true_moa_final_slot = bool(
             getattr(agent, "_true_moa_usage_ledger", None) is not None
             and api_call_count >= agent.max_iterations
-        ) or bool(
-            getattr(
-                agent,
-                "_paid_call_budget_exhausted_final_slot",
-                False,
-            )
         )
 
         # Grace call: the budget is exhausted but we gave the model one
