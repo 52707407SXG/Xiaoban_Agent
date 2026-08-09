@@ -248,6 +248,26 @@ def test_handler_dispatches_settlement_confirmation_once(monkeypatch):
     assert len(calls) == 1
 
 
+def test_handler_normalizes_year_month_suffixes_before_one_dispatch(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda payload, session: (
+            calls.append((payload, session))
+            or json.dumps({"ok": True, "coverage": {"complete": True}})
+        ),
+    )
+    plan = _settlement_confirmation_plan("7月")
+    plan["query_args"]["year"] = "2026年"
+
+    result = _call(plan, user_message="查7月结算卡还有谁没点")
+
+    assert result["ok"] is True
+    assert calls[0][0]["query_args"] == {"year": 2026, "month": 7}
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("month", [0, 13, True, 7.5])
 def test_handler_rejects_invalid_settlement_month_before_dispatch(
     monkeypatch,

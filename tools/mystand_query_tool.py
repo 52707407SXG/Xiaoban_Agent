@@ -448,8 +448,10 @@ def _validate_finance_aggregate_plan(args: dict) -> dict:
     year = query_args.get("year")
     # 模型经常把年份传成数字字符串（如 "2026"）或整数值浮点（2026.0），
     # 这里归一化为整数。
-    if isinstance(year, str) and year.strip().isdigit():
-        year = int(year.strip())
+    if isinstance(year, str):
+        year_match = re.fullmatch(r"(\d{4})\s*年?", year.strip())
+        if year_match:
+            year = int(year_match.group(1))
     elif isinstance(year, float) and year.is_integer():
         year = int(year)
     if (
@@ -462,8 +464,10 @@ def _validate_finance_aggregate_plan(args: dict) -> dict:
     if query_kind == "list":
         if settlement_confirmation:
             month = query_args.get("month")
-            if isinstance(month, str) and month.strip().isdigit():
-                month = int(month.strip())
+            if isinstance(month, str):
+                month_match = re.fullmatch(r"(\d{1,2})\s*月?", month.strip())
+                if month_match:
+                    month = int(month_match.group(1))
             elif isinstance(month, float) and month.is_integer():
                 month = int(month)
             if (
