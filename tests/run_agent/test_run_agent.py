@@ -4472,6 +4472,48 @@ class TestRunConversation:
         )
         assert agent.tools[0]["function"]["description"] == "web_search tool"
 
+    def test_signed_normal_request_restores_provider_visible_finance_arguments(self):
+        from agent.conversation_loop import _with_mystand_tool_ordering_contract
+        from tools.mystand_query_tool import MYSTAND_QUERY_SCHEMA
+        from tools.schema_sanitizer import sanitize_tool_schemas
+
+        tools = sanitize_tool_schemas([
+            {
+                "type": "function",
+                "function": {
+                    "name": "todo",
+                    "description": "Track the current work plan.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {"type": "function", "function": MYSTAND_QUERY_SCHEMA},
+        ])
+        assert tools[1]["function"]["parameters"]["properties"]["query_args"] == {
+            "type": "object",
+            "properties": {},
+        }
+
+        scoped = _with_mystand_tool_ordering_contract(tools)
+
+        assert "exactly two short natural sentences" in (
+            scoped[0]["function"]["description"]
+        )
+        query_args = scoped[1]["function"]["parameters"]["properties"][
+            "query_args"
+        ]
+        assert query_args["required"] == ["year"]
+        assert "additionalProperties" not in query_args
+        assert query_args["properties"]["year"] == {
+            "type": "integer",
+            "minimum": 2000,
+            "maximum": 2100,
+        }
+        assert query_args["properties"]["month"] == {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 12,
+        }
+
     def test_ollama_small_runtime_context_fails_before_api_call(self, agent, caplog):
         self._setup_agent(agent)
         agent.model = "qwen3.5:9b"

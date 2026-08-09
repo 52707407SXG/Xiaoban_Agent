@@ -149,6 +149,42 @@ class TestProgressSummaryDlp:
         assert summary
         assert "汇总未确认名单" in summary
 
+    @pytest.mark.parametrize(
+        ("content", "commentary"),
+        [
+            (
+                "查2026年7月结算卡还有谁没点",
+                "我理解你要确认谁没点。我会核对完整名单和人数。",
+            ),
+            (
+                "核对2026年7月结算卡点击情况",
+                "我先查清7月结算卡没点的人员。我会核对完整覆盖后汇总。",
+            ),
+        ],
+    )
+    def test_todo_generic_settlement_wording_keeps_real_commentary(
+        self,
+        content,
+        commentary,
+    ):
+        _, protected, complete = _progress_tool_batch_context([{
+            "id": "call-todo-plan",
+            "type": "function",
+            "function": {
+                "name": "todo",
+                "arguments": json.dumps({
+                    "todos": [{
+                        "id": "1",
+                        "content": content,
+                        "status": "in_progress",
+                    }],
+                }, ensure_ascii=False),
+            },
+        }])
+
+        assert complete is True
+        assert _public_progress_summary(commentary, protected) == commentary
+
     def test_todo_single_character_content_remains_fail_closed(self):
         _, _, complete = _progress_tool_batch_context([{
             "id": "call-todo-plan",
