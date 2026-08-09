@@ -4465,6 +4465,7 @@ class TestRunConversation:
         assert result["completed"] is True
         assert sent_system.endswith(_SIGNED_NORMAL_LOOP_INSTRUCTION)
         assert "exactly one todo tool call" in _SIGNED_NORMAL_LOOP_INSTRUCTION
+        assert "exactly one item with status in_progress" in _SIGNED_NORMAL_LOOP_INSTRUCTION
         assert sent_tools[0]["function"]["description"].startswith(
             "MY STAND TOOL ORDERING:"
         )
