@@ -5089,10 +5089,61 @@ def run_conversation(
                             re.IGNORECASE,
                         )
                     )
+                    _has_structured = bool(
+                        getattr(assistant_message, "reasoning", None)
+                        or getattr(
+                            assistant_message,
+                            "reasoning_content",
+                            None,
+                        )
+                        or getattr(
+                            assistant_message,
+                            "reasoning_details",
+                            None,
+                        )
+                        or _has_inline_thinking
+                    )
+
+                    # A signed normal turn gets one bounded continuation. When
+                    # the provider returned real structured reasoning, route it
+                    # through the existing thinking continuation instead of
+                    # replacing it with a synthetic "(empty)" + user nudge.
+                    # This is especially important immediately after a tool
+                    # result: DeepSeek may return a thinking-only response
+                    # before emitting the next tool call.
+                    if _signed_normal_loop and _has_structured:
+                        if agent._thinking_prefill_retries >= 1:
+                            return _strict_failure_result(
+                                agent,
+                                messages,
+                                conversation_history,
+                                api_call_count=api_call_count,
+                                error=(
+                                    "Model returned no visible content after "
+                                    "one bounded reasoning continuation"
+                                ),
+                                failure_code="empty_model_response_repeated",
+                                failure_phase="response_generation",
+                                drop_scaffolding=True,
+                            )
+                        agent._thinking_prefill_retries += 1
+                        logger.info(
+                            "Signed normal thinking-only response — "
+                            "prefilling to continue (1/1)"
+                        )
+                        interim_msg = agent._build_assistant_message(
+                            assistant_message,
+                            "incomplete",
+                        )
+                        interim_msg["_thinking_prefill"] = True
+                        messages.append(interim_msg)
+                        agent._session_messages = messages
+                        continue
+
                     if (
                         _prior_was_tool
                         and not getattr(agent, "_post_tool_empty_retried", False)
-                        and not _has_inline_thinking  # thinking model still working — let prefill handle
+                        and not _has_structured
                     ):
                         agent._post_tool_empty_retried = True
                         # Clear stale narration so it doesn't resurface
@@ -5127,12 +5178,6 @@ def run_conversation(
                         })
                         continue
 
-                    _has_structured = bool(
-                        getattr(assistant_message, "reasoning", None)
-                        or getattr(assistant_message, "reasoning_content", None)
-                        or getattr(assistant_message, "reasoning_details", None)
-                        or _has_inline_thinking
-                    )
                     if _signed_normal_loop:
                         if (
                             agent._empty_content_retries >= 1

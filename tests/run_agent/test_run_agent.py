@@ -5372,6 +5372,70 @@ class TestRunConversation:
         assert result["failure"]["code"] == "empty_model_response_repeated"
         assert len(agent._paid_call_usage_ledger.to_dict()["calls"]) == 2
 
+    def test_signed_normal_reasoning_only_after_tool_continues_to_next_tool(
+        self,
+        agent,
+    ):
+        self._setup_signed_normal(agent)
+        first_tool = _mock_tool_call(
+            name="web_search",
+            arguments='{"step":1}',
+            call_id="reasoning-chain-1",
+        )
+        second_tool = _mock_tool_call(
+            name="web_search",
+            arguments='{"step":2}',
+            call_id="reasoning-chain-2",
+        )
+        responses = [
+            _mock_response(
+                content="我先核对第一项，再根据结果继续。",
+                finish_reason="tool_calls",
+                tool_calls=[first_tool],
+            ),
+            _mock_response(
+                content="",
+                finish_reason="stop",
+                reasoning_content="第一项已经返回，现在继续核对第二项。",
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[second_tool],
+            ),
+            _mock_response(
+                content="两项都已核对完成。",
+                finish_reason="stop",
+            ),
+        ]
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=responses,
+            ) as api_call,
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=["first result", "second result"],
+            ) as tool_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("依次核对两项后总结")
+
+        assert result["completed"] is True
+        assert result["final_response"] == "两项都已核对完成。"
+        assert api_call.call_count == 4
+        assert tool_call.call_count == 2
+        third_messages = api_call.call_args_list[2].args[0]["messages"]
+        assert not any(
+            message.get("content") == "(empty)"
+            or "returned an empty response" in str(message.get("content", ""))
+            for message in third_messages
+        )
+
     def test_signed_normal_invalid_tool_feedback_reaches_same_model(self, agent):
         self._setup_signed_normal(agent)
         responses = [
