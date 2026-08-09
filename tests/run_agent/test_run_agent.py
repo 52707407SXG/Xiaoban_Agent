@@ -4442,6 +4442,34 @@ class TestRunConversation:
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
 
+    def test_signed_normal_execution_contract_is_last_system_instruction(self, agent):
+        from agent.conversation_loop import _SIGNED_NORMAL_LOOP_INSTRUCTION
+
+        self._setup_signed_normal(agent)
+        agent.ephemeral_system_prompt = "current page context"
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="直接回答",
+            finish_reason="stop",
+        )
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("你好")
+
+        sent_system = (
+            agent.client.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+        )
+        sent_tools = agent.client.chat.completions.create.call_args.kwargs["tools"]
+        assert result["completed"] is True
+        assert sent_system.endswith(_SIGNED_NORMAL_LOOP_INSTRUCTION)
+        assert "exactly one todo tool call" in _SIGNED_NORMAL_LOOP_INSTRUCTION
+        assert sent_tools[0]["function"]["description"].startswith(
+            "MY STAND TOOL ORDERING:"
+        )
+        assert agent.tools[0]["function"]["description"] == "web_search tool"
+
     def test_ollama_small_runtime_context_fails_before_api_call(self, agent, caplog):
         self._setup_agent(agent)
         agent.model = "qwen3.5:9b"
@@ -5865,18 +5893,26 @@ class TestRunConversation:
             *,
             already_streamed=False,
             tool_calls=None,
+            source=None,
+            provider_sequence=None,
+            provider_event_at=None,
         ):
             observed.update({
                 "text": text,
                 "already_streamed": already_streamed,
                 "tool_calls": tool_calls,
+                "source": source,
+                "provider_sequence": provider_sequence,
+                "provider_event_at": provider_event_at,
             })
             raise RuntimeError(
                 tool_calls[0]["function"]["arguments"]
             )
 
         setattr(_trusted_callback, "_xiaoban_accepts_tool_calls", True)
+        setattr(_trusted_callback, "_xiaoban_accepts_provider_metadata", True)
         agent.interim_assistant_callback = _trusted_callback
+        agent._api_call_count = 3
         tool_calls = [{
             "id": "strict-interim-tool",
             "type": "function",
@@ -5896,7 +5932,11 @@ class TestRunConversation:
             "text": "我先核对。",
             "already_streamed": False,
             "tool_calls": tool_calls,
+            "source": "provider",
+            "provider_sequence": 3,
+            "provider_event_at": observed["provider_event_at"],
         }
+        assert observed["provider_event_at"] > 0
         assert canary not in caplog.text
         assert "category=callback_failure" in caplog.text
         assert "Traceback" not in caplog.text

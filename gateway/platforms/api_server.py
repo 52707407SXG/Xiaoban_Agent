@@ -460,6 +460,14 @@ _MYSTAND_REQUEST_TOOL_NAMES = {
 
 # Trusted My Stand stream delivery identity (wave 2).  A stream that carries
 # any delivery signal must present the full quartet below.
+# 站内取证断言：模型声称“看了/查了/核实了”站内模块、资料、页面等内容。
+# 用于取证闸（本轮零工具却断言看过 → 丢弃第一轮并重跑强制取证）。
+# 只匹配肯定式断言，“我先看看/我先查一下”这类行动式措辞不匹配，避免误拦。
+_MYSTAND_INSPECTION_CLAIM_RE = re.compile(
+    r"(?:我|已经|都|刚才)(?:已经|已)?(?:看|查|核实|检查)(?:了|过|完了|过一遍|了一圈)"
+    r"(?:[^。！？\n]{0,12}?(?:模块|资料|页面|记录|证据|实际情况|索引|授权|权限|配置))?"
+    r"|(?:看|查|核实|检查)(?:了|过)(?:模块|资料|页面|记录|证据|实际情况|索引|授权|权限|配置)"
+)
 _MYSTAND_STREAM_DELIVERY_ID_RE = re.compile(r"xbd_[0-9a-f]{40}")
 _MYSTAND_TURN_ID_RE = re.compile(r"[0-9a-f]{16}")
 _MYSTAND_STREAM_ATTEMPT_RE = re.compile(r"[0-9]{1,9}")
@@ -1012,6 +1020,13 @@ _MYSTAND_STREAM_REPLAY_PROGRESS_KEYS = frozenset({
     "type",
     "phase",
     "errorCategory",
+    "eventId",
+    "stage",
+    "source",
+    "providerSequence",
+    "providerEventAt",
+    "relatedCallIds",
+    "relatedTools",
 })
 
 
@@ -1401,6 +1416,37 @@ def _mystand_stream_result_succeeded(result: Any) -> bool:
         and not result.get("interrupted")
         and not result.get("stopped")
     )
+
+
+def _todo_result_progress_summary(result: Any) -> str:
+    """Project only a successful TodoResult into bounded public plan text."""
+
+    payload = result
+    if isinstance(result, str):
+        try:
+            payload = json.loads(result)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return ""
+    if not isinstance(payload, Mapping) or payload.get("error"):
+        return ""
+    todos = payload.get("todos")
+    if not isinstance(todos, list):
+        return ""
+    status_labels = {
+        "pending": "待处理",
+        "in_progress": "进行中",
+        "completed": "已完成",
+        "cancelled": "已取消",
+    }
+    lines: list[str] = []
+    for index, item in enumerate(todos[:12], start=1):
+        if not isinstance(item, Mapping):
+            continue
+        content = str(item.get("content") or "").strip()
+        status = status_labels.get(str(item.get("status") or "").strip())
+        if content and status:
+            lines.append(f"{index}. [{status}] {content}")
+    return _public_progress_summary("\n".join(lines)) if lines else ""
 
 
 def _build_mystand_stream_replay_envelope(
@@ -4141,6 +4187,8 @@ class APIServerAdapter(
             _tool_lifecycle_lock = threading.Lock()
             _pending_stream_chunks: list[str] = []
             _staged_final_stream_chunks: list[str] = []
+            _visible_tool_count = 0
+            _mystand_inspection_retried = False
             _pending_progress_summary = ""
             _active_progress_summary = ""
             _pending_progress_call_bindings: dict[str, str] = {}
@@ -4151,6 +4199,7 @@ class APIServerAdapter(
             _active_progress_batch_complete = False
             _progress_protected_values: list[tuple[str, str]] = []
             _progress_protected_values_complete = True
+            _seen_todo_tool_call = False
 
             def _on_delta(delta):
                 # Filter out None — the agent fires stream_delta_callback(None)
@@ -4200,8 +4249,11 @@ class APIServerAdapter(
                 *,
                 already_streamed=False,
                 tool_calls=None,
+                source=None,
+                provider_sequence=None,
+                provider_event_at=None,
             ):
-                """Hold only Agent-authored commentary until a real tool starts."""
+                """Emit provider-authored commentary bound to real tool calls."""
                 del already_streamed
                 nonlocal _pending_progress_summary
                 nonlocal _pending_progress_batch_complete
@@ -4222,10 +4274,73 @@ class APIServerAdapter(
                     _pending_progress_call_bindings.update(call_bindings)
                     _pending_progress_batch_values[:] = protected_values
                     _pending_progress_batch_complete = complete
+                    started = _started_turn or {}
+                    if (
+                        source != "provider"
+                        or not complete
+                        or not call_bindings
+                        or not _progress_protected_values_complete
+                        or not started.get("requestId")
+                        or not started.get("turnId")
+                    ):
+                        return
+                    summary = _public_progress_summary(
+                        raw_summary,
+                        protected_values,
+                        _progress_protected_values,
+                    )
+                    if not summary:
+                        return
+                    try:
+                        sequence = max(1, int(provider_sequence))
+                    except (TypeError, ValueError):
+                        return
+                    try:
+                        event_at = datetime.fromtimestamp(
+                            float(provider_event_at),
+                            tz=timezone.utc,
+                        ).isoformat(timespec="milliseconds").replace(
+                            "+00:00", "Z"
+                        )
+                    except (TypeError, ValueError, OSError, OverflowError):
+                        return
+                    related_names = list(call_bindings.values())
+                    stage = (
+                        "intent"
+                        if not _seen_todo_tool_call
+                        and related_names
+                        and all(name == "todo" for name in related_names)
+                        else "execute"
+                    )
+                    _put_public_stream_item((
+                        "__tool_progress__",
+                        {
+                            "progressSchema": _XIAOBAN_PROGRESS_SCHEMA_V2,
+                            "eventId": (
+                                f"commentary-{started['turnId']}-{sequence}"
+                            ),
+                            "type": "assistant.commentary",
+                            "status": "completed",
+                            "stage": stage,
+                            "summary": summary,
+                            "source": "provider",
+                            "providerSequence": sequence,
+                            "providerEventAt": event_at,
+                            "relatedCallIds": ",".join(call_bindings),
+                            "relatedTools": ",".join(related_names),
+                            "requestId": started["requestId"],
+                            "turnId": started["turnId"],
+                        },
+                    ))
 
             setattr(
                 _on_interim_summary,
                 "_xiaoban_accepts_tool_calls",
+                True,
+            )
+            setattr(
+                _on_interim_summary,
+                "_xiaoban_accepts_provider_metadata",
                 True,
             )
 
@@ -4334,6 +4449,7 @@ class APIServerAdapter(
                 """
                 nonlocal _tool_lifecycle_closed
                 nonlocal _tool_lifecycle_integrity_failed
+                nonlocal _visible_tool_count, _seen_todo_tool_call
                 with _tool_lifecycle_lock:
                     if _tool_lifecycle_closed:
                         return
@@ -4362,13 +4478,6 @@ class APIServerAdapter(
                     return
                 if not tool_call_id or not function_name:
                     return
-                current_values, current_values_complete = (
-                    _progress_sensitive_values(
-                        function_args,
-                        protect_all_strings=True,
-                        limit=_PROGRESS_BATCH_MAX_PROTECTED_VALUES,
-                    )
-                )
                 from agent.display import build_tool_preview, get_tool_emoji
                 label = (
                     function_name
@@ -4415,26 +4524,9 @@ class APIServerAdapter(
                             "requestId": binding[0],
                             "turnId": binding[1],
                         })
-                        commentary_bound = bool(
-                            str(_active_progress_summary or "").strip()
-                            and _active_progress_call_bindings.get(
-                                tool_call_id
-                            ) == function_name
-                        )
-                        summary = ""
-                        if commentary_bound and (
-                            _active_progress_batch_complete
-                            and current_values_complete
-                            and _progress_protected_values_complete
-                        ):
-                            summary = _public_progress_summary(
-                                _active_progress_summary,
-                                _active_progress_batch_values,
-                                current_values,
-                                _progress_protected_values,
-                            )
-                        if summary:
-                            payload["summary"] = summary
+                        if function_name == "todo":
+                            _seen_todo_tool_call = True
+                    _visible_tool_count += 1
                     _put_public_stream_item(("__tool_progress__", payload))
 
             def _on_tool_complete(
@@ -4549,6 +4641,17 @@ class APIServerAdapter(
                         payload["progressSchema"] = (
                             _XIAOBAN_PROGRESS_SCHEMA_V2
                         )
+                        if open_function_name == "todo":
+                            if (
+                                status == "completed"
+                                and public_metadata.get("outcome")
+                                in {"success", "empty"}
+                            ):
+                                todo_summary = _todo_result_progress_summary(
+                                    function_result
+                                )
+                                if todo_summary:
+                                    payload["summary"] = todo_summary
                     _put_public_stream_item(("__tool_progress__", payload))
                     if binding is not None and _progress_protected_values_complete:
                         for source in (function_args, function_result):
@@ -4749,6 +4852,7 @@ class APIServerAdapter(
 
             async def _stream_compute():
                 nonlocal _stream_compute_ran
+                nonlocal _mystand_inspection_retried
                 _stream_compute_ran = True
                 if (
                     stream_scoped_key
@@ -4828,6 +4932,73 @@ class APIServerAdapter(
                     else:
                         result = settled
                     _fail_stream_usage_ledger(usage, result)
+                # ── 站内取证闸（仅 My Stand 受控流）──────────────────
+                # 模型声称查看/核实过站内内容，但本轮零工具调用 → 丢弃第一轮
+                # 文本（staged 流尚未发出），追加强制取证指令重跑一轮（上限 1 次）。
+                if (
+                    mystand_request
+                    and not _mystand_inspection_retried
+                    and _visible_tool_count == 0
+                    and isinstance(result, dict)
+                    and result.get("completed", True)
+                    and not result.get("failed")
+                    and not result.get("partial")
+                    and not result.get("interrupted")
+                    and _MYSTAND_INSPECTION_CLAIM_RE.search(
+                        str(
+                            result.get("final_response")
+                            or result.get("message")
+                            or ""
+                        )
+                    )
+                ):
+                    _mystand_inspection_retried = True
+                    logger.info(
+                        "MYSTAND_INSPECTION_GATE tool_count=0 claim=1 retry=%s",
+                        completion_id,
+                    )
+                    with _tool_lifecycle_lock:
+                        _pending_stream_chunks.clear()
+                        _staged_final_stream_chunks.clear()
+                    _retry_prompt = (
+                        str(system_prompt or "")
+                        + "\n\n[System: 你上一轮声称查看/核实过站内内容，但实际"
+                        "没有调用任何站内取证工具。本轮必须先用 "
+                        "mystand_resource_index / mystand_query / "
+                        "mystand_authorization 等工具实际查证，再基于真实工具"
+                        "结果回答；未取证的“看过/查过”断言属于编造，禁止使用。]"
+                    )
+                    _retry_result, _retry_usage = await self._run_agent(
+                        user_message=user_message,
+                        conversation_history=history,
+                        ephemeral_system_prompt=_retry_prompt,
+                        session_id=session_id,
+                        stream_delta_callback=_on_delta,
+                        interim_assistant_callback=_on_interim_summary,
+                        tool_progress_callback=_on_agent_progress,
+                        tool_start_callback=_on_tool_start,
+                        tool_complete_callback=_on_tool_complete,
+                        agent_ref=agent_ref,
+                        gateway_session_key=gateway_session_key,
+                        request_headers=request.headers,
+                        async_delivery=self._session_events_requested(request),
+                        true_moa_snapshot=true_moa_snapshot,
+                        paid_call_usage_callback=(
+                            _persist_stream_paid_usage
+                            if durable_request
+                            else None
+                        ),
+                        final_commit_guard=(
+                            _seal_stream_lifecycle_for_final_commit
+                            if mystand_request
+                            and true_moa_snapshot is not None
+                            else None
+                        ),
+                    )
+                    result = _retry_result
+                    usage = dict(usage or {})
+                    for _u_key, _u_val in (_retry_usage or {}).items():
+                        usage[_u_key] = (usage.get(_u_key) or 0) + (_u_val or 0)
                 _flush_mystand_final_stream(result)
                 if (
                     true_moa_snapshot is not None
@@ -4862,16 +5033,25 @@ class APIServerAdapter(
                     staged_final = list(_staged_final_stream_chunks)
                     _staged_final_stream_chunks.clear()
                 if succeeded:
-                    for chunk in staged_final:
-                        _put_public_stream_item(chunk)
+                    # Final text has two mutually exclusive sources: staged
+                    # streaming or guarded egress. Deliver the model's natural
+                    # final exactly once; never split it into synthetic phases.
+                    combined_final = "".join(staged_final)
+                    guarded_final = ""
                     if guard_stream_deltas:
-                        guarded_final = _resolved_mystand_egress_text(
-                            result,
-                            user_message=user_message,
-                            conversation_history=history,
+                        guarded_final = (
+                            _resolved_mystand_egress_text(
+                                result,
+                                user_message=user_message,
+                                conversation_history=history,
+                            )
+                            or ""
                         )
-                        if guarded_final:
-                            _put_public_stream_item(guarded_final)
+                    if guarded_final:
+                        _put_public_stream_item(guarded_final)
+                    else:
+                        for chunk in staged_final:
+                            _put_public_stream_item(chunk)
                 chat_control_bridge.close()
                 _close_open_tool_calls()
                 _close_turn_lifecycle(result)

@@ -15506,7 +15506,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
 
-            def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
+            def _interim_assistant_cb(text: str, *, already_streamed: bool = False, stage: str = None) -> None:
                 if not _run_still_current():
                     return
                 if _stream_consumer is not None:
@@ -15517,11 +15517,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return
                 if already_streamed or not _status_adapter or not str(text or "").strip():
                     return
+                _interim_meta = dict(_status_thread_metadata or {})
+                if stage:
+                    _interim_meta["stage"] = stage
                 safe_schedule_threadsafe(
                     _status_adapter.send(
                         _status_chat_id,
                         text,
-                        metadata=_status_thread_metadata,
+                        metadata=_interim_meta,
                     ),
                     _loop_for_step,
                     logger=logger,

@@ -12,6 +12,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
+
 from gateway.session_context import (
     get_session_env,
     get_session_user_message,
@@ -436,16 +437,22 @@ def _validate_finance_aggregate_plan(args: dict) -> dict:
     if not isinstance(query_args, dict):
         raise ValueError("query_args 必须是对象")
     year = query_args.get("year")
+    # 模型经常把年份传成数字字符串（如 "2026"）或整数值浮点（2026.0），
+    # 这里归一化为整数。
+    if isinstance(year, str) and year.strip().isdigit():
+        year = int(year.strip())
+    elif isinstance(year, float) and year.is_integer():
+        year = int(year)
     if (
         isinstance(year, bool)
         or not isinstance(year, int)
         or not 2000 <= year <= 2100
     ):
-        raise ValueError(f"{query_kind} query_args 不在允许范围内")
+        raise ValueError(f"{query_kind} 的 year 必须是 2000-2100 之间的整数")
 
     if query_kind == "list":
         if set(query_args) != {"year"}:
-            raise ValueError("list query_args 不在允许范围内")
+            raise ValueError("list 的 query_args 只允许 year 一个字段（额外字段请移除）")
         normalized_args = {"year": year}
     elif query_kind == "rank":
         rank = query_args.get("rank")
@@ -455,7 +462,7 @@ def _validate_finance_aggregate_plan(args: dict) -> dict:
             or not isinstance(rank, int)
             or not 1 <= rank <= 10_000
         ):
-            raise ValueError("rank query_args 不在允许范围内")
+            raise ValueError("rank 的 query_args 只允许 year 和 rank 两个字段")
         normalized_args = {"year": year, "rank": rank}
     else:
         amount = query_args.get("amount")
@@ -468,7 +475,7 @@ def _validate_finance_aggregate_plan(args: dict) -> dict:
             or not math.isfinite(amount)
             or amount < 0
         ):
-            raise ValueError(f"{query_kind} query_args 不在允许范围内")
+            raise ValueError(f"{query_kind} 的 query_args 只允许 year/field/operator/amount 四个字段，field 必须是 yearlyAmount，operator 必须是 gt 或 gte")
         normalized_args = {
             "year": year,
             "field": "yearlyAmount",
@@ -494,9 +501,17 @@ def _validate_plan(args) -> dict:
     if args.get("operation") != "read":
         raise ValueError("operation 不在允许范围内")
     if _FINANCE_AGGREGATE_FIELDS.intersection(args):
-        expected_fields = {"operation", *_FINANCE_AGGREGATE_FIELDS}
-        if set(args) != expected_fields:
-            raise ValueError("finance aggregate 查询参数包含不允许的字段")
+        # finance 聚合查询：语义字段（resource/entities/fact_needs/mode）与
+        # finance 字段混用时，忽略语义字段——查询内容只由 finance 字段决定，
+        # 冗余字段不参与查询也不透传，避免模型混传导致的无效失败。
+        missing = _FINANCE_AGGREGATE_FIELDS - set(args)
+        if missing:
+            raise ValueError(
+                "finance 聚合查询缺少字段: "
+                + ", ".join(sorted(missing))
+                + "；允许的字段为 operation/query_kind/module_id/"
+                "fact_paths/query_args/coverage_required"
+            )
         return _validate_finance_aggregate_plan(args)
 
     resource = args.get("resource")

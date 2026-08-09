@@ -178,6 +178,8 @@ from agent.message_sanitization import (  # noqa: F401
     _strip_images_from_messages,
     _sanitize_structure_non_ascii,
 )
+
+
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
     _deterministic_call_id as _codex_deterministic_call_id,
@@ -4308,7 +4310,7 @@ class AIAgent:
         return bool(streamed) and streamed == visible_content
 
     def _emit_interim_assistant_message(self, assistant_msg: Dict[str, Any]) -> None:
-        """Surface a real mid-turn assistant commentary message to the UI layer."""
+        """Surface real provider commentary attached to a tool-call response."""
         cb = getattr(self, "interim_assistant_callback", None)
         if cb is None or not isinstance(assistant_msg, dict):
             return
@@ -4333,6 +4335,13 @@ class AIAgent:
                     if isinstance(tool_calls, list)
                     else []
                 )
+                if getattr(cb, "_xiaoban_accepts_provider_metadata", False):
+                    callback_kwargs["source"] = "provider"
+                    callback_kwargs["provider_sequence"] = max(
+                        1,
+                        int(getattr(self, "_api_call_count", 0) or 1),
+                    )
+                    callback_kwargs["provider_event_at"] = time.time()
             cb(visible, **callback_kwargs)
         except Exception:
             if getattr(self, "_strict_no_automatic_paid_retry", False):

@@ -16,6 +16,7 @@ resolved through :func:`_ra` so those patches keep working.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -444,6 +445,14 @@ _TRUE_MOA_FINAL_SLOT_INSTRUCTION = (
 
 _SIGNED_NORMAL_LOOP_INSTRUCTION = (
     "# My Stand execution feedback\n"
+    "For any turn that will use a non-todo tool or needs two or more steps, "
+    "your first provider response MUST contain natural visible commentary and "
+    "exactly one todo tool call, with no non-todo tool call in that response. "
+    "Wait for the TodoResult before calling a non-todo tool. If TodoResult "
+    "fails, treat that failure as evidence and continue making the best legal "
+    "decision; do not retry merely to satisfy this instruction. Update todo as "
+    "the real task state changes. For simple chat that needs no tools, answer "
+    "directly without todo. Do not use fixed headings, markers, or templates. "
     "When you call tools, include one or two concise, concrete sentences in "
     "the same assistant message. Say what you are doing now and, when prior "
     "tool results exist, what you just learned from them. Write in the user's "
@@ -456,6 +465,40 @@ _SIGNED_NORMAL_LOOP_INSTRUCTION = (
     "actual result, anything incomplete and why, and a useful next step when "
     "one exists."
 )
+
+_MYSTAND_TOOL_ORDERING_MARKER = "MY STAND TOOL ORDERING:"
+
+
+def _with_mystand_tool_ordering_contract(tools: Any) -> Any:
+    """Return request-local tool schemas that reinforce the real Todo order."""
+    if not isinstance(tools, list):
+        return tools
+    scoped_tools = copy.deepcopy(tools)
+    for tool in scoped_tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = str(function.get("name") or "").strip()
+        description = str(function.get("description") or "").strip()
+        if not name or _MYSTAND_TOOL_ORDERING_MARKER in description:
+            continue
+        if name == "todo":
+            ordering = (
+                f"{_MYSTAND_TOOL_ORDERING_MARKER} For a work task, call todo "
+                "first and as the only tool in the initial response. Wait for "
+                "TodoResult before choosing another tool."
+            )
+        else:
+            ordering = (
+                f"{_MYSTAND_TOOL_ORDERING_MARKER} Needing this tool makes the "
+                "turn a work task. Do not call it unless this turn's message "
+                "history already contains TodoResult from an earlier response. "
+                "If TodoResult is absent, call only todo now."
+            )
+        function["description"] = f"{ordering}\n\n{description}".strip()
+    return scoped_tools
 
 
 def _content_policy_blocked_result(
@@ -1122,6 +1165,10 @@ def run_conversation(
                 # isn't sent with stale, primary-shaped reasoning fields.
                 agent._reapply_reasoning_echo_for_provider(api_messages)
                 api_kwargs = agent._build_api_kwargs(api_messages)
+                if _signed_normal_loop and api_kwargs.get("tools"):
+                    api_kwargs["tools"] = _with_mystand_tool_ordering_contract(
+                        api_kwargs["tools"]
+                    )
                 if agent._force_ascii_payload:
                     _sanitize_structure_non_ascii(api_kwargs)
                 if agent.api_mode == "codex_responses":

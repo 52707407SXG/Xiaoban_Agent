@@ -2816,6 +2816,9 @@ class TestChatCompletionsEndpoint:
                 commentary,
                 already_streamed=True,
                 tool_calls=tool_calls,
+                source="provider",
+                provider_sequence=1,
+                provider_event_at=1786214400.0,
             )
             kwargs["stream_delta_callback"](None)
             for call_id in call_ids:
@@ -2896,9 +2899,19 @@ class TestChatCompletionsEndpoint:
             payload.get("progressSchema") == "xiaoban.progress.v2"
             and payload.get("requestId") == delivery_id
             and payload.get("turnId") == turn_id
-            and payload.get("summary", "").startswith("我先核对")
             for payload in running
         )
+        commentary_events = [
+            payload
+            for payload in _xiaoban_progress_payloads(body)
+            if payload.get("type") == "assistant.commentary"
+        ]
+        assert len(commentary_events) == 1
+        assert commentary_events[0]["source"] == "provider"
+        assert commentary_events[0]["providerSequence"] == 1
+        assert commentary_events[0]["relatedCallIds"] == ",".join(call_ids)
+        assert commentary_events[0].get("toolCallId") is None
+        assert commentary_events[0].get("callId") is None
         terminals = [
             payload
             for payload in _xiaoban_progress_payloads(body)
@@ -3009,6 +3022,9 @@ class TestChatCompletionsEndpoint:
             kwargs["interim_assistant_callback"](
                 commentary,
                 tool_calls=[tool_call],
+                source="provider",
+                provider_sequence=1,
+                provider_event_at=1786214400.0,
             )
             kwargs["stream_delta_callback"](None)
             kwargs["tool_start_callback"](
@@ -3076,9 +3092,23 @@ class TestChatCompletionsEndpoint:
             and payload.get("status") == "running"
         ]
         assert len(running) == 1
-        assert running[0].get("summary") == expected_summary
+        assert running[0].get("summary") is None
+        commentary_events = [
+            payload
+            for payload in _xiaoban_progress_payloads(body)
+            if payload.get("type") == "assistant.commentary"
+        ]
+        if expected_summary is None:
+            assert commentary_events == []
+        else:
+            assert len(commentary_events) == 1
+            assert commentary_events[0].get("summary") == expected_summary
+            assert commentary_events[0].get("callId") is None
         assert commentary not in body
-        assert canary not in json.dumps(running, ensure_ascii=False)
+        assert canary not in json.dumps(
+            commentary_events,
+            ensure_ascii=False,
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -3312,6 +3342,9 @@ class TestChatCompletionsEndpoint:
             kwargs["interim_assistant_callback"](
                 "我先核对基础资料。",
                 tool_calls=[_tool_call(first_call_id, first_args)],
+                source="provider",
+                provider_sequence=1,
+                provider_event_at=1786214400.0,
             )
             kwargs["stream_delta_callback"](None)
             kwargs["tool_start_callback"](
@@ -3329,6 +3362,9 @@ class TestChatCompletionsEndpoint:
             kwargs["interim_assistant_callback"](
                 second_commentary,
                 tool_calls=[_tool_call(second_call_id, second_args)],
+                source="provider",
+                provider_sequence=2,
+                provider_event_at=1786214401.0,
             )
             kwargs["stream_delta_callback"](None)
             kwargs["tool_start_callback"](
@@ -3385,14 +3421,22 @@ class TestChatCompletionsEndpoint:
             and payload.get("status") == "running"
         ]
         assert len(second_running) == 1
+        second_commentary_events = [
+            payload
+            for payload in _xiaoban_progress_payloads(body)
+            if payload.get("type") == "assistant.commentary"
+            and payload.get("providerSequence") == 2
+        ]
         if history_case == "overflow":
-            assert second_running[0].get("summary") is None
+            assert second_commentary_events == []
         else:
-            assert second_running[0].get("summary") == (
+            assert len(second_commentary_events) == 1
+            assert second_commentary_events[0].get("summary") == (
                 "我已经找到相关资料，接着核对登记状态。"
             )
+            assert second_commentary_events[0].get("callId") is None
         assert prior_canary not in json.dumps(
-            second_running,
+            second_commentary_events,
             ensure_ascii=False,
         )
 
