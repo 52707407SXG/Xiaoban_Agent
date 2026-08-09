@@ -448,10 +448,20 @@ def _validate_finance_aggregate_plan(args: dict) -> dict:
     year = query_args.get("year")
     # 模型经常把年份传成数字字符串（如 "2026"）或整数值浮点（2026.0），
     # 这里归一化为整数。
+    embedded_month = None
     if isinstance(year, str):
-        year_match = re.fullmatch(r"(\d{4})\s*年?", year.strip())
+        year_text = year.strip()
+        year_match = re.fullmatch(r"(\d{4})\s*年?", year_text)
+        settlement_period_match = (
+            re.fullmatch(r"(\d{4})\s*年\s*(\d{1,2})\s*月", year_text)
+            if settlement_confirmation
+            else None
+        )
         if year_match:
             year = int(year_match.group(1))
+        elif settlement_period_match:
+            year = int(settlement_period_match.group(1))
+            embedded_month = int(settlement_period_match.group(2))
     elif isinstance(year, float) and year.is_integer():
         year = int(year)
     if (
@@ -475,6 +485,7 @@ def _validate_finance_aggregate_plan(args: dict) -> dict:
                 or isinstance(month, bool)
                 or not isinstance(month, int)
                 or not 1 <= month <= 12
+                or (embedded_month is not None and embedded_month != month)
             ):
                 raise ValueError("结算确认 list 的 query_args 只允许 year 和 month")
             normalized_args = {"year": year, "month": month}

@@ -268,6 +268,46 @@ def test_handler_normalizes_year_month_suffixes_before_one_dispatch(monkeypatch)
     assert len(calls) == 1
 
 
+def test_handler_normalizes_consistent_settlement_period_before_one_dispatch(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda payload, session: (
+            calls.append((payload, session))
+            or json.dumps({"ok": True, "coverage": {"complete": True}})
+        ),
+    )
+    plan = _settlement_confirmation_plan("7月")
+    plan["query_args"]["year"] = "2026年7月"
+
+    result = _call(plan, user_message="查7月结算卡还有谁没点")
+
+    assert result["ok"] is True
+    assert calls[0][0]["query_args"] == {"year": 2026, "month": 7}
+    assert len(calls) == 1
+
+
+def test_handler_rejects_conflicting_settlement_period_before_dispatch(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda *args: calls.append(args) or json.dumps({"ok": True}),
+    )
+    plan = _settlement_confirmation_plan(8)
+    plan["query_args"]["year"] = "2026年7月"
+
+    result = _call(plan)
+
+    assert result["code"] == "invalid_mystand_query_arguments"
+    assert calls == []
+
+
 @pytest.mark.parametrize("month", [0, 13, True, 7.5])
 def test_handler_rejects_invalid_settlement_month_before_dispatch(
     monkeypatch,

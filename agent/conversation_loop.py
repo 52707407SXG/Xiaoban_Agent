@@ -447,7 +447,7 @@ _SIGNED_NORMAL_LOOP_INSTRUCTION = (
     "# My Stand execution feedback\n"
     "For any turn that will use a non-todo tool or perform two or more concrete "
     "My Stand actions, "
-    "your first provider response MUST contain two or three short, natural "
+    "your first provider response MUST contain exactly two short, natural "
     "visible commentary sentences that summarize the user's requested outcome "
     "and what you will check, plus exactly one todo tool call, with no non-todo "
     "tool call in that response. That Todo list must have exactly one item with "
