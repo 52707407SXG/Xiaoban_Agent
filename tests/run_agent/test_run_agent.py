@@ -4472,6 +4472,22 @@ class TestRunConversation:
         )
         assert agent.tools[0]["function"]["description"] == "web_search tool"
 
+    def test_signed_normal_query_description_includes_settlement_shape(self):
+        from agent.conversation_loop import _with_mystand_tool_ordering_contract
+
+        scoped = _with_mystand_tool_ordering_contract([{
+            "type": "function",
+            "function": {
+                "name": "mystand_query",
+                "description": "Read My Stand facts.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }])
+        description = scoped[0]["function"]["description"]
+        assert "call once" in description
+        assert "query_kind=list" in description
+        assert "query_args containing only year and month" in description
+
     def test_ollama_small_runtime_context_fails_before_api_call(self, agent, caplog):
         self._setup_agent(agent)
         agent.model = "qwen3.5:9b"

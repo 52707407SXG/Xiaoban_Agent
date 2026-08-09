@@ -502,7 +502,18 @@ def _with_mystand_tool_ordering_contract(tools: Any) -> Any:
                 "history already contains TodoResult from an earlier response. "
                 "If TodoResult is absent, call only todo now."
             )
-        function["description"] = f"{ordering}\n\n{description}".strip()
+        settlement_hint = (
+            "For finance.settlement_confirmation.unconfirmed, call once with "
+            "operation=read, query_kind=list, module_id=finance-ledger, "
+            "fact_paths=[finance.settlement_confirmation.unconfirmed], "
+            "coverage_required=true, and query_args containing only year and "
+            "month as JSON integers."
+            if name == "mystand_query"
+            else ""
+        )
+        function["description"] = "\n\n".join(
+            item for item in (ordering, settlement_hint, description) if item
+        ).strip()
     return scoped_tools
 
 
