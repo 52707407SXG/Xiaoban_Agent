@@ -493,7 +493,10 @@ def _with_mystand_tool_ordering_contract(tools: Any) -> Any:
             ordering = (
                 f"{_MYSTAND_TOOL_ORDERING_MARKER} For a work task, call todo "
                 "first and as the only tool in the initial response. Wait for "
-                "TodoResult before choosing another tool."
+                "TodoResult before choosing another tool. In that response, "
+                "write two short visible sentences separated by sentence-end "
+                "punctuation: first summarize the requested outcome, then say "
+                "what you will check."
             )
         else:
             ordering = (

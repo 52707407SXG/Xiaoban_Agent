@@ -4475,15 +4475,28 @@ class TestRunConversation:
     def test_signed_normal_query_description_includes_settlement_shape(self):
         from agent.conversation_loop import _with_mystand_tool_ordering_contract
 
-        scoped = _with_mystand_tool_ordering_contract([{
-            "type": "function",
-            "function": {
-                "name": "mystand_query",
-                "description": "Read My Stand facts.",
-                "parameters": {"type": "object", "properties": {}},
+        scoped = _with_mystand_tool_ordering_contract([
+            {
+                "type": "function",
+                "function": {
+                    "name": "todo",
+                    "description": "Track work.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
             },
-        }])
-        description = scoped[0]["function"]["description"]
+            {
+                "type": "function",
+                "function": {
+                    "name": "mystand_query",
+                    "description": "Read My Stand facts.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ])
+        todo_description = scoped[0]["function"]["description"]
+        assert "two short visible sentences" in todo_description
+        assert "sentence-end punctuation" in todo_description
+        description = scoped[1]["function"]["description"]
         assert "call once" in description
         assert "query_kind=list" in description
         assert "query_args containing only year and month" in description
