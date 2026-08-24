@@ -1788,6 +1788,22 @@ def update_version_files(semver: str, calver_date: str):
         )
         desktop_pkg.write_text(pkg_text, encoding="utf-8")
 
+    # npm workspaces also record the desktop package version in the root
+    # package-lock. A package.json-only bump leaves npm metadata stale even
+    # when dependency resolution itself is unchanged.
+    package_lock = REPO_ROOT / "package-lock.json"
+    if package_lock.exists():
+        package_lock_text = package_lock.read_text(encoding="utf-8")
+        package_lock_text, replacements = re.subn(
+            r'("apps/desktop": \{\n\s+"name": "xiaoban",\n\s+"version": ")[^"]+("[,\n])',
+            rf'\g<1>{semver}\g<2>',
+            package_lock_text,
+            count=1,
+        )
+        if replacements != 1:
+            raise RuntimeError("package-lock.json is missing the desktop workspace entry")
+        package_lock.write_text(package_lock_text, encoding="utf-8")
+
     # The editable root package is recorded in uv.lock with its own version.
     # Keep that entry synchronized without re-resolving third-party packages
     # during a release cut.
@@ -2210,6 +2226,7 @@ def main():
             for release_metadata_file in (
                 ACP_REGISTRY_MANIFEST,
                 REPO_ROOT / "apps" / "desktop" / "package.json",
+                REPO_ROOT / "package-lock.json",
                 REPO_ROOT / "uv.lock",
             ):
                 if release_metadata_file.exists():

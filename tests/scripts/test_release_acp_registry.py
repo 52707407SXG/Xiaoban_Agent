@@ -101,6 +101,10 @@ def test_update_version_files_bumps_manifest_alongside_pyproject(
     (desktop_dir / "package.json").write_text(
         '{"name":"xiaoban","version":"0.13.0"}\n', encoding="utf-8"
     )
+    (tmp_path / "package-lock.json").write_text(
+        '{\n  "packages": {\n    "apps/desktop": {\n      "name": "xiaoban",\n      "version": "0.13.0"\n    }\n  }\n}\n',
+        encoding="utf-8",
+    )
     (tmp_path / "uv.lock").write_text(
         'version = 1\n\n[[package]]\nname = "xiaoban-agent"\nversion = "0.13.0"\nsource = { editable = "." }\n',
         encoding="utf-8",
@@ -122,6 +126,24 @@ def test_update_version_files_bumps_manifest_alongside_pyproject(
     assert manifest["distribution"]["uvx"]["package"] == "xiaoban-agent[acp]==0.14.0"
     desktop = json.loads((desktop_dir / "package.json").read_text(encoding="utf-8"))
     assert desktop["version"] == "0.14.0"
+    package_lock = json.loads(
+        (tmp_path / "package-lock.json").read_text(encoding="utf-8")
+    )
+    assert package_lock["packages"]["apps/desktop"]["version"] == "0.14.0"
     assert 'name = "xiaoban-agent"\nversion = "0.14.0"' in (
         tmp_path / "uv.lock"
     ).read_text(encoding="utf-8")
+
+
+def test_committed_desktop_package_and_lock_versions_match():
+    repo_root = Path(__file__).resolve().parents[2]
+    desktop = json.loads(
+        (repo_root / "apps" / "desktop" / "package.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    package_lock = json.loads(
+        (repo_root / "package-lock.json").read_text(encoding="utf-8")
+    )
+
+    assert package_lock["packages"]["apps/desktop"]["version"] == desktop["version"]
