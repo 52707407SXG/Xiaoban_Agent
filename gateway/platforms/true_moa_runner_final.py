@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import logging
 import threading
 import time
 from typing import Any
@@ -19,6 +20,9 @@ from gateway.platforms.mystand_egress_seal import (
 from gateway.platforms.true_moa_stop_projection import (
     CompletionStoppedError,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class TrueMoARunnerFinalMixin:
@@ -58,6 +62,27 @@ class TrueMoARunnerFinalMixin:
             conversation_history=request.conversation_history,
             task_id=effective_task_id,
         )
+        if isinstance(stage_result, dict) and (
+            stage_result.get("failed")
+            or not stage_result.get("completed", False)
+        ):
+            logger.error(
+                "True MoA final agent returned incomplete "
+                "(failure_code=%s failure_phase=%s api_call_count=%s "
+                "max_iterations=%s budget_remaining=%s)",
+                str(stage_result.get("failure_code") or "unknown")[:80],
+                str(stage_result.get("failure_phase") or "unknown")[:80],
+                int(stage_result.get("api_call_count") or 0),
+                int(getattr(self.agent, "max_iterations", 0) or 0),
+                int(
+                    getattr(
+                        getattr(self.agent, "iteration_budget", None),
+                        "remaining",
+                        0,
+                    )
+                    or 0
+                ),
+            )
         if self.true_moa_ledger is None:
             return {"result": stage_result}
         result = (
@@ -174,6 +199,11 @@ class TrueMoARunnerFinalMixin:
                 try:
                     final_stage_box["payload"] = _execute_final_stage()
                 except BaseException as exc:
+                    logger.exception(
+                        "True MoA final stage raised before settlement "
+                        "(exception_type=%s)",
+                        type(exc).__name__,
+                    )
                     final_stage_box["error"] = exc
                 finally:
                     final_stage_done.set()

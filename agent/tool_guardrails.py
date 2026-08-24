@@ -47,6 +47,7 @@ MUTATING_TOOL_NAMES = frozenset(
         "todo",
         "memory",
         "skill_manage",
+        "mystand_skill_manage",
         "browser_click",
         "browser_type",
         "browser_press",
@@ -54,6 +55,7 @@ MUTATING_TOOL_NAMES = frozenset(
         "browser_navigate",
         "send_message",
         "cronjob",
+        "mystand_cron",
         "delegate_task",
         "process",
     }
@@ -64,17 +66,17 @@ MUTATING_TOOL_NAMES = frozenset(
 class ToolCallGuardrailConfig:
     """Thresholds for per-turn tool-call loop detection.
 
-    Warnings are enabled by default and never prevent tool execution. Hard stops
-    are explicit opt-in so interactive CLI/TUI sessions get a gentle nudge unless
-    the user enables circuit-breaker behavior in config.yaml.
+    Exact repeated failures and identical read-only results stop by default.
+    Varying calls of the same tool retain a high emergency threshold so normal
+    long-running work is not mistaken for a loop.
     """
 
     warnings_enabled: bool = True
-    hard_stop_enabled: bool = False
+    hard_stop_enabled: bool = True
     exact_failure_warn_after: int = 2
     exact_failure_block_after: int = 5
     same_tool_failure_warn_after: int = 3
-    same_tool_failure_halt_after: int = 8
+    same_tool_failure_halt_after: int = 90
     no_progress_warn_after: int = 2
     no_progress_block_after: int = 5
     idempotent_tools: frozenset[str] = field(default_factory=lambda: IDEMPOTENT_TOOL_NAMES)

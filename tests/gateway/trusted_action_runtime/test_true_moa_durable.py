@@ -16,9 +16,9 @@ from gateway.platforms.api_server import (
     _IdempotencyCache,
 )
 from xiaoban.trusted_runtime.true_moa import (
-    DEEPSEEK_ADVISOR_SLOT,
+    GPT55_ADVISOR_SLOT as DEEPSEEK_ADVISOR_SLOT,
     FINAL_EXECUTOR_SLOT,
-    KIMI_ADVISOR_SLOT,
+    DEEPSEEK_FLASH_ADVISOR_SLOT as KIMI_ADVISOR_SLOT,
     TRUE_MOA_MODE,
     TRUE_MOA_PRESET_ID,
     TRUE_MOA_PRESET_REVISION,
@@ -349,7 +349,7 @@ def test_terminal_true_moa_ledger_rejects_appended_provider_call(
     incoming = copy.deepcopy(current)
     appended = copy.deepcopy(incoming["calls"][-1])
     appended["callId"] = (
-        f"{wave_id}:final-deepseek-v4-pro:000002"
+        f"{wave_id}:final-openai-codex-gpt-5.6-luna:000002"
     )
     appended["startedAtMs"] += 1
     appended["endedAtMs"] += 1

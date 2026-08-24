@@ -384,12 +384,24 @@ def enforce_strict_paid_request(
         )
         from xiaoban.trusted_runtime.paid_call_policy import (
             enforce_openai_chat_paid_call_dispatch_budget,
+            enforce_openai_responses_paid_call_dispatch_budget,
         )
 
         enforce_true_moa_final_route(
             provider=getattr(agent, "provider", ""),
             model=payload.get("model"),
         )
+        if getattr(agent, "api_mode", "") == "codex_responses":
+            return enforce_openai_responses_paid_call_dispatch_budget(
+                TRUE_MOA_FINAL_PAID_CALL_POLICY,
+                payload=payload,
+                configured_output_max_tokens=getattr(
+                    agent,
+                    "max_tokens",
+                    None,
+                ),
+                error_prefix="true_moa",
+            )
         return enforce_openai_chat_paid_call_dispatch_budget(
             TRUE_MOA_FINAL_PAID_CALL_POLICY,
             payload=payload,
@@ -403,6 +415,7 @@ def enforce_strict_paid_request(
     from xiaoban.trusted_runtime.paid_call_policy import (
         enforce_fixed_paid_call_route,
         enforce_openai_chat_paid_call_dispatch_budget,
+        enforce_openai_responses_paid_call_dispatch_budget,
         enforce_signed_mystand_policy_revision,
         resolve_signed_mystand_agent_policy,
     )
@@ -419,6 +432,17 @@ def enforce_strict_paid_request(
         model=payload.get("model"),
         error_code="signed_mystand_fixed_route_mismatch",
     )
+    if getattr(agent, "api_mode", "") == "codex_responses":
+        return enforce_openai_responses_paid_call_dispatch_budget(
+            policy,
+            payload=payload,
+            configured_output_max_tokens=getattr(
+                agent,
+                "max_tokens",
+                None,
+            ),
+            error_prefix="signed_mystand_paid_call",
+        )
     return enforce_openai_chat_paid_call_dispatch_budget(
         policy,
         payload=payload,
@@ -873,7 +897,7 @@ def strict_exception_failure_result(
     if raw_code.endswith("_input_byte_cap_exceeded"):
         code = "input_payload_too_large"
         phase = "request_preflight"
-        reason = "The exact provider request exceeded the 131072-byte input limit"
+        reason = "The exact provider request exceeded the fixed input limit"
     elif raw_code.endswith("_output_token_cap_exceeded"):
         code = "output_token_limit_exceeded"
         phase = "request_preflight"

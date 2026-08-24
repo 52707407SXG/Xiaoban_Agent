@@ -20,10 +20,6 @@ from gateway.session_context import (
     get_session_env,
     get_session_user_message,
 )
-from tools.mystand_authorization_write_payload import (
-    AuthorizationWritePayloadError,
-    normalize_authorization_write_payload,
-)
 from tools.registry import registry
 
 _DEFAULT_API_URL = "http://127.0.0.1:18081"
@@ -36,28 +32,20 @@ _OPERATIONS = {
     "list": "/api/xiaoban/internal/authorization/list",
     "resolve": "/api/xiaoban/internal/authorization/resolve",
     "resolve_many": "/api/xiaoban/internal/authorization/resolve",
-    "preview_write": "/api/xiaoban/internal/authorization/write/preview",
-    "commit_write": "/api/xiaoban/internal/authorization/write/commit",
 }
 _READ_OPERATIONS = frozenset({"list", "resolve", "resolve_many"})
-_WRITE_OPERATIONS = frozenset({"preview_write", "commit_write"})
 _WRITE_ACTIONS = {
     "note.append-content",
     "property-note.append-text-block",
+    "property-note.edit-blocks",
     "profile-card.update-field",
     "knowledge-graph.add-node",
     "knowledge-graph.update-node",
     "knowledge-graph.add-edge",
+    "knowledge-graph.delete",
+    "business-archive.archive",
     "finance-archive.update-row-fields",
 }
-_EXPLICIT_CONFIRMATION = "确认写入"
-_EXPLICIT_CONFIRMATION_REPLY_RE = re.compile(
-    r"(?:"
-    r"(?:我\s*)?确认写入"
-    r"|"
-    r"预览(?:内容)?没问题[，,\s]*(?:我\s*)?确认写入"
-    r")[。！!]?"
-)
 
 
 MYSTAND_AUTHORIZATION_SCHEMA = {
@@ -212,7 +200,7 @@ def _post_internal(
     payload: dict,
     *,
     session: dict | None = None,
-    explicit_confirmation: bool = False,
+    gateway_approval_id: str = "",
 ) -> str:
     base_url = _api_base_url()
     token = _internal_token()
@@ -237,8 +225,9 @@ def _post_internal(
         safe_value = _safe_internal_header(value)
         if safe_value:
             headers[name] = safe_value
-    if explicit_confirmation:
-        headers["X-Xiaoban-Explicit-Confirmation"] = "1"
+    safe_approval_id = _safe_internal_header(gateway_approval_id)
+    if safe_approval_id:
+        headers["X-Xiaoban-Gateway-Approval-Id"] = safe_approval_id
     request = urllib.request.Request(
         f"{base_url}{path}",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -271,13 +260,6 @@ def _post_internal(
             code="mystand_authorization_transport_failed",
             status=502,
         )
-
-
-def _require_text(args: dict, key: str) -> str:
-    value = str(args.get(key) or "").strip()
-    if not value:
-        raise ValueError(f"缺少 {key}")
-    return value
 
 
 def _resource_uid_list(value) -> list[str]:
@@ -416,70 +398,17 @@ def _mystand_authorization_operation_handler(args, **_kwargs):
                     "query": query[:1200],
                 }
             )
-        elif operation == "preview_write":
-            if not session["message_id"] or not session["session_id"]:
-                return _error("当前请求缺少可信 messageId 或 sessionId，不能发起写入预览。", code="trusted_write_context_required", status=409)
-            action = _require_text(args, "action")
-            if action not in _WRITE_ACTIONS:
-                return _error("写入动作不在安全白名单中。", code="authorization_write_action_not_allowed")
-            payload = args.get("payload")
-            if not isinstance(payload, dict):
-                return _error("payload 必须是动作对应的对象。", code="invalid_write_payload")
-            payload = normalize_authorization_write_payload(action, payload)
-            body.update({
-                "authorizationId": _require_text(args, "authorization_id"),
-                "action": action,
-                "payload": payload,
-                "idempotencyKey": _require_text(args, "idempotency_key"),
-            })
         else:
-            if not session["message_id"] or not session["session_id"]:
-                return _error("当前请求缺少可信 messageId 或 sessionId，不能提交写入。", code="trusted_write_context_required", status=409)
-            current_user_message = get_session_user_message().strip()
-            if not _EXPLICIT_CONFIRMATION_REPLY_RE.fullmatch(current_user_message):
-                return _error(
-                    "只有用户在预览后的新消息里，用独立回复明确说“确认写入”，才能提交。",
-                    code="explicit_user_confirmation_required",
-                    status=409,
-                )
-            body.update({
-                "previewToken": _require_text(args, "preview_token"),
-                "idempotencyKey": _require_text(args, "idempotency_key"),
-                "confirmationPhrase": _EXPLICIT_CONFIRMATION,
-            })
-    except AuthorizationWritePayloadError as exc:
-        return _error(str(exc), code=exc.code, status=exc.status)
+            return _error("operation 不在允许范围内", code="invalid_authorization_operation")
     except ValueError as exc:
         return _error(str(exc), code="authorization_argument_missing")
 
-    return _post_internal(
-        _OPERATIONS[operation],
-        body,
-        session=session,
-        explicit_confirmation=operation == "commit_write",
-    )
-
-
-def _mystand_authorization_write_operation_handler(args, **kwargs):
-    """Execute a write operation only for the dedicated write-only tool."""
-    operation = str(args.get("operation") or "").strip()
-    if operation not in _WRITE_OPERATIONS:
-        return _error(
-            "该私有委托只允许写入预览与确认提交。",
-            code="invalid_authorization_write_operation",
-        )
-    return _mystand_authorization_operation_handler(args, **kwargs)
+    return _post_internal(_OPERATIONS[operation], body, session=session)
 
 
 def mystand_authorization_tool_handler(args, **kwargs):
-    """Expose only AUTH/OUT reads, even when hidden write args are supplied."""
+    """Expose only AUTH/OUT reads."""
     operation = str(args.get("operation") or "").strip()
-    if operation in _WRITE_OPERATIONS:
-        return _error(
-            "写入必须使用 mystand_authorization_write。",
-            code="authorization_write_tool_required",
-            status=403,
-        )
     if operation not in _READ_OPERATIONS:
         return _error(
             "operation 不在允许范围内",

@@ -94,14 +94,14 @@ _TRUE_MOA_SLOT_BY_ID = {
     )
     for slot in MYSTAND_TRUE_MOA_SLOTS
 }
-KIMI_ADVISOR_SLOT = _TRUE_MOA_SLOT_BY_ID["advisor-kimi-k3"]
-DEEPSEEK_ADVISOR_SLOT = _TRUE_MOA_SLOT_BY_ID[
-    "advisor-deepseek-v4-pro"
+DEEPSEEK_FLASH_ADVISOR_SLOT = _TRUE_MOA_SLOT_BY_ID[
+    "advisor-deepseek-v4-flash"
 ]
+GPT55_ADVISOR_SLOT = _TRUE_MOA_SLOT_BY_ID["advisor-openai-codex-gpt-5.5"]
 FINAL_EXECUTOR_SLOT = _TRUE_MOA_SLOT_BY_ID[
-    "final-deepseek-v4-pro"
+    "final-openai-codex-gpt-5.6-luna"
 ]
-TRUE_MOA_ADVISOR_SLOTS = (KIMI_ADVISOR_SLOT, DEEPSEEK_ADVISOR_SLOT)
+TRUE_MOA_ADVISOR_SLOTS = (DEEPSEEK_FLASH_ADVISOR_SLOT, GPT55_ADVISOR_SLOT)
 TRUE_MOA_ALL_SLOTS = (*TRUE_MOA_ADVISOR_SLOTS, FINAL_EXECUTOR_SLOT)
 _TRUE_MOA_ADVISOR_PAID_CALL_BUDGET = PaidCallBudget(
     policy_id="mystand.true-moa.advisor-paid-call.v1",

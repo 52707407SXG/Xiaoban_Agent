@@ -170,6 +170,12 @@ TOOLSETS = {
         "tools": ["skills_list", "skill_view", "skill_manage"],
         "includes": []
     },
+
+    "skills_readonly": {
+        "description": "Read-only discovery and loading of existing skills",
+        "tools": ["skills_list", "skill_view"],
+        "includes": []
+    },
     
     "browser": {
         "description": "Browser automation for web interaction (navigate, click, type, scroll, iframes, hold-click) with web search for finding URLs",
@@ -229,6 +235,24 @@ TOOLSETS = {
     "mystand_resource_index": {
         "description": "Read-only current-user My Stand resource index",
         "tools": ["mystand_resource_index"],
+        "includes": []
+    },
+
+    "mystand_unsettled_performance": {
+        "description": "Owner-only exact read of the current My Stand unpaid-performance cards",
+        "tools": ["mystand_unsettled_performance"],
+        "includes": []
+    },
+
+    "mystand_skill_manage": {
+        "description": "Approval-bound authoring of My Stand-only SKILL.md workflows",
+        "tools": ["mystand_skill_manage"],
+        "includes": []
+    },
+
+    "mystand_cron": {
+        "description": "Approval-bound, owner-scoped safe scheduled tasks for My Stand chat",
+        "tools": ["mystand_cron"],
         "includes": []
     },
     

@@ -173,6 +173,44 @@ class TestStreamingAccumulator:
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_strict_paid_turn_disables_configured_stream_retry(
+        self,
+        _mock_close,
+        mock_create,
+        monkeypatch,
+    ):
+        from run_agent import AIAgent
+
+        def _failed_stream():
+            if False:
+                yield None
+            raise RuntimeError("single physical provider failure")
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = (
+            lambda *args, **kwargs: _failed_stream()
+        )
+        mock_create.return_value = mock_client
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://example.com/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._strict_no_automatic_paid_retry = True
+        agent._disable_streaming = False
+        monkeypatch.setenv("XIAOBAN_STREAM_RETRIES", "2")
+
+        with pytest.raises(RuntimeError, match="single physical provider failure"):
+            agent._interruptible_streaming_api_call({})
+
+        assert mock_client.chat.completions.create.call_count == 1
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
     def test_text_only_response(self, mock_close, mock_create):
         """Text-only stream produces correct response shape."""
         from run_agent import AIAgent

@@ -218,6 +218,9 @@ class TrueMoARunnerPreflightMixin:
                         None,
                     )
                 ),
+                tool_gen_callback=(
+                    getattr(request, "tool_gen_callback", None)
+                ),
                 tool_progress_callback=request.tool_progress_callback,
                 tool_start_callback=(
                     request.traced_tool_start

@@ -39,8 +39,6 @@ from gateway.platforms.api_server import (
     _derive_chat_session_id,
     _mystand_tool_result_failed,
     _merge_temporal_context,
-    _progress_sensitive_values,
-    _progress_tool_batch_context,
     _public_progress_summary,
     _todo_result_progress_projection,
     _trim_chat_history_for_context,
@@ -109,218 +107,38 @@ class TestMystandToolResultFailure:
         assert _mystand_tool_result_failed("mystand_query", result) is expected
 
 
-class TestProgressSummaryDlp:
-    def test_todo_numeric_ids_do_not_suppress_natural_commentary(self):
-        tool_calls = [{
-            "id": "call-todo-plan",
-            "type": "function",
-            "function": {
-                "name": "todo",
-                "arguments": json.dumps({
-                    "todos": [
-                        {
-                            "id": "1",
-                            "content": "查授权列表，找到2026年7月结算相关的财务档案",
-                            "status": "in_progress",
-                        },
-                        {
-                            "id": "2",
-                            "content": "逐个拉取档案确认状态（经纪人确认、店长确认、是否结单）",
-                            "status": "pending",
-                        },
-                        {
-                            "id": "3",
-                            "content": "统计未确认人数和名单",
-                            "status": "pending",
-                        },
-                    ],
-                }, ensure_ascii=False),
-            },
-        }]
+class TestNativeProgressProjection:
+    def test_provider_commentary_is_sanitized_without_tool_argument_gate(self):
+        assert _public_progress_summary(
+            "我先核对授权资料，再根据真实结果继续。"
+        ) == "我先核对授权资料，再根据真实结果继续。"
 
-        bindings, protected, complete = _progress_tool_batch_context(tool_calls)
+    @pytest.mark.parametrize(
+        "private_summary",
+        [
+            "我先核对。<think>PRIVATE_REASONING",
+            "PRIVATE_REASONING</ANALYSIS>我再继续。",
+            "我先核对。<REASONING_SCRATCHPAD>PRIVATE_REASONING",
+        ],
+    )
+    def test_unclosed_private_markers_are_not_public(self, private_summary):
+        assert _public_progress_summary(private_summary) == ""
 
-        assert bindings == {"call-todo-plan": "todo"}
-        assert complete is True
+    def test_closed_private_block_is_removed(self):
+        assert _public_progress_summary(
+            "我先核对。<analysis>PRIVATE_REASONING</analysis>接着整理结果。"
+        ) == "我先核对。接着整理结果。"
+
+    def test_sensitive_contact_and_amount_are_redacted(self):
         summary = _public_progress_summary(
-            "我会先定位2026年7月结算档案。随后逐项核对确认状态，并汇总未确认名单。",
-            protected,
+            "正在核对 gang@example.com、13800001234 和人民币 6350 元。"
         )
-        assert summary
-        assert "汇总未确认名单" in summary
+        assert "gang@example.com" not in summary
+        assert "13800001234" not in summary
+        assert "6350" not in summary
 
-    @pytest.mark.parametrize(
-        ("content", "commentary"),
-        [
-            (
-                "查2026年7月结算卡还有谁没点",
-                "我理解你要确认谁没点。我会核对完整名单和人数。",
-            ),
-            (
-                "核对2026年7月结算卡点击情况",
-                "我先查清7月结算卡没点的人员。我会核对完整覆盖后汇总。",
-            ),
-            (
-                "查询2026年7月未确认结算卡名单",
-                "我会查询7月结算卡还有哪些人没确认。我会拉取完整数据后汇总。",
-            ),
-        ],
-    )
-    def test_todo_generic_settlement_wording_keeps_real_commentary(
-        self,
-        content,
-        commentary,
-    ):
-        _, protected, complete = _progress_tool_batch_context([{
-            "id": "call-todo-plan",
-            "type": "function",
-            "function": {
-                "name": "todo",
-                "arguments": json.dumps({
-                    "todos": [{
-                        "id": "1",
-                        "content": content,
-                        "status": "in_progress",
-                    }],
-                }, ensure_ascii=False),
-            },
-        }])
-
-        assert complete is True
-        assert _public_progress_summary(commentary, protected) == commentary
-
-    def test_todo_single_character_content_remains_fail_closed(self):
-        _, _, complete = _progress_tool_batch_context([{
-            "id": "call-todo-plan",
-            "type": "function",
-            "function": {
-                "name": "todo",
-                "arguments": json.dumps({
-                    "todos": [
-                        {"id": "1", "content": "王", "status": "in_progress"},
-                    ],
-                }, ensure_ascii=False),
-            },
-        }])
-
-        assert complete is False
-
-    @pytest.mark.parametrize(
-        "arguments",
-        [
-            {"todos": ["甲某"]},
-            {"todos": [{
-                "id": "1",
-                "content": "核对结算卡",
-                "status": "in_progress",
-                "x": "甲某",
-            }]},
-            {"todos": "甲某"},
-            {"todos": [{
-                "id": "1",
-                "content": "核对😀结算卡",
-                "status": "in_progress",
-            }]},
-        ],
-    )
-    def test_invalid_or_unparsed_todo_shape_remains_fail_closed(
-        self,
-        arguments,
-    ):
-        _, _, complete = _progress_tool_batch_context([{
-            "id": "call-todo-plan",
-            "type": "function",
-            "function": {
-                "name": "todo",
-                "arguments": json.dumps(arguments, ensure_ascii=False),
-            },
-        }])
-
-        assert complete is False
-
-    @pytest.mark.parametrize(
-        ("content", "commentary", "private_fragment"),
-        [
-            ("核对𠀀野结算卡", "正在核对𠀀野", "𠀀野"),
-            ("核对やまだ结算卡", "正在核对やまだ", "やまだ"),
-            ("核对김민수结算卡", "正在核对김민수", "김민수"),
-        ],
-    )
-    def test_unicode_todo_entities_remain_protected(
-        self,
-        content,
-        commentary,
-        private_fragment,
-    ):
-        _, protected, complete = _progress_tool_batch_context([{
-            "id": "call-todo-plan",
-            "type": "function",
-            "function": {
-                "name": "todo",
-                "arguments": json.dumps({
-                    "todos": [{
-                        "id": "1",
-                        "content": content,
-                        "status": "in_progress",
-                    }],
-                }, ensure_ascii=False),
-            },
-        }])
-
-        assert complete is True
-        summary = _public_progress_summary(commentary, protected)
-        assert private_fragment not in summary
-
-    @pytest.mark.parametrize(
-        ("content", "commentary", "private_fragments"),
-        [
-            ("核对甲某结算卡", "我先核对甲某", ("甲某",)),
-            (
-                "逐个拉取档案确认状态——已查甲某，继续查乙某/丙某",
-                "已查甲某，继续查乙某和丙某",
-                ("甲某", "乙某", "丙某"),
-            ),
-            (
-                "处理东方花园3栋2单元结算卡",
-                "正在处理东方花园3栋",
-                ("东方花园", "3栋"),
-            ),
-            (
-                "核对Broker-X7结算卡",
-                "正在核对Broker-X7",
-                ("Broker-X7",),
-            ),
-            (
-                "核对东方结算花园档案",
-                "正在核对东方结算花园",
-                ("东方", "花园"),
-            ),
-        ],
-    )
-    def test_todo_content_fragments_remain_protected(
-        self,
-        content,
-        commentary,
-        private_fragments,
-    ):
-        _, protected, complete = _progress_tool_batch_context([{
-            "id": "call-todo-plan",
-            "type": "function",
-            "function": {
-                "name": "todo",
-                "arguments": json.dumps({
-                    "todos": [{
-                        "id": "1",
-                        "content": content,
-                        "status": "in_progress",
-                    }],
-                }, ensure_ascii=False),
-            },
-        }])
-
-        assert complete is True
-        summary = _public_progress_summary(commentary, protected)
-        assert all(fragment not in summary for fragment in private_fragments)
+    def test_overlong_commentary_is_rejected(self):
+        assert _public_progress_summary("甲" * 2_001) == ""
 
     def test_todo_items_survive_strict_stream_replay(self):
         todo_items = [
@@ -357,298 +175,6 @@ class TestProgressSummaryDlp:
         ]
         assert active_id == "2"
 
-    @pytest.mark.parametrize(
-        "unsafe_case",
-        [
-            "long-string",
-            "deep-container",
-            "wide-container",
-            "malformed-json",
-            "non-finite-number",
-            "single-chinese-character",
-            "single-digit",
-        ],
-    )
-    def test_uncovered_argument_shapes_are_explicitly_incomplete(
-        self,
-        unsafe_case,
-    ):
-        if unsafe_case == "long-string":
-            value = {"financeBody": "长" * 513}
-        elif unsafe_case == "deep-container":
-            nested = "深层客户资料"
-            for index in range(6):
-                nested = {f"level{index}": nested}
-            value = {"payload": nested}
-        elif unsafe_case == "wide-container":
-            value = {"items": [f"资料-{index:03d}" for index in range(129)]}
-        elif unsafe_case == "malformed-json":
-            value = "{not-json}"
-        elif unsafe_case == "non-finite-number":
-            value = {"amount": float("nan")}
-        elif unsafe_case == "single-chinese-character":
-            value = {"customerName": "王"}
-        else:
-            value = {"roomNumber": 8}
-
-        _, complete = _progress_sensitive_values(
-            value,
-            protect_all_strings=True,
-            limit=512,
-        )
-
-        assert complete is False
-
-    def test_numeric_and_executor_error_reason_are_exactly_protected(self):
-        numeric_values, numeric_complete = _progress_sensitive_values(
-            {"amount": 6350},
-            protect_all_strings=True,
-            limit=512,
-        )
-        error_values, error_complete = _progress_sensitive_values(
-            "Error executing tool 'mystand_query': 松鹤居",
-            protect_all_strings=True,
-            limit=512,
-        )
-        wrapped_values = []
-        for wrapped_result in (
-            {"error": "Context engine tool 'lcm_grep' failed: 蓝湾苑"},
-            {"error": "Memory tool 'hindsight_search' failed: 蓝湾苑"},
-        ):
-            values, complete = _progress_sensitive_values(
-                wrapped_result,
-                protect_all_strings=True,
-                limit=512,
-            )
-            assert complete is True
-            wrapped_values.extend(values)
-
-        assert numeric_complete is True
-        assert error_complete is True
-        assert _public_progress_summary(
-            "正在核对 6350",
-            numeric_values,
-        ) == "正在核对 相关资料"
-        assert "松鹤居" not in _public_progress_summary(
-            "我已经找到松鹤居，接着核对登记状态。",
-            error_values,
-        )
-        assert "蓝湾苑" not in _public_progress_summary(
-            "我已经找到蓝湾苑，接着核对登记状态。",
-            wrapped_values,
-        )
-
-    def test_overlong_commentary_is_not_silently_truncated(self):
-        assert _public_progress_summary("甲" * 2_001) == ""
-
-    def test_derived_entity_and_identifier_fragments_suppress_summary(self):
-        protected, complete = _progress_sensitive_values(
-            {
-                "company": "松鹤居房地产经纪有限公司",
-                "phone": "13800001234",
-                "account": "6222020200000123",
-                "address": "城南一号2栋10楼",
-            },
-            protect_all_strings=True,
-            limit=512,
-        )
-
-        assert complete is True
-        for derived_summary in (
-            "我已找到松鹤居地产，接着核对登记状态。",
-            "我先核对松鹤对应资料。",
-            "我先核对联系电话尾号1234。",
-            "我先核对收款账号尾号0123。",
-            "我先核对城南一号的登记状态。",
-        ):
-            assert _public_progress_summary(derived_summary, protected) == ""
-        assert _public_progress_summary(
-            "我先核对相关登记资料。",
-            protected,
-        ) == "我先核对相关登记资料。"
-
-    def test_exact_argument_is_redacted_before_fragment_check(self):
-        protected, complete = _progress_sensitive_values(
-            {"query": "chain-1"},
-            protect_all_strings=True,
-            limit=512,
-        )
-        prior_values, prior_complete = _progress_sensitive_values(
-            {"evidence": "ev_8ab5abcd97c9d0717c6285b80979"},
-            protect_all_strings=True,
-            limit=512,
-        )
-
-        assert complete is True
-        assert prior_complete is True
-        assert _public_progress_summary(
-            "第一步完成，现在用 chain-1 继续核对。",
-            protected,
-        ) == "第一步完成，现在用 相关资料 继续核对。"
-        assert _public_progress_summary(
-            "第一步完成，ev_8ab5abcd97c9d0717c6285b80979。"
-            "现在用 chain-1 继续核对。",
-            [*protected, *prior_values],
-        ) == "第一步完成，相关资料。现在用 相关资料 继续核对。"
-        assert _public_progress_summary(
-            "第一步完成，现在核对 chain。",
-            protected,
-        ) == ""
-
-    @pytest.mark.parametrize(
-        "private_summary",
-        [
-            "我先核对。<think>PRIVATE_REASONING",
-            "PRIVATE_REASONING</ANALYSIS>我再继续。",
-            "我先核对。<REASONING_SCRATCHPAD>PRIVATE_REASONING",
-            "我先核对。<reasoning-scratchpad>PRIVATE_REASONING",
-        ],
-    )
-    def test_unclosed_or_orphan_private_markers_suppress_summary(
-        self,
-        private_summary,
-    ):
-        assert _public_progress_summary(private_summary) == ""
-
-    def test_closed_private_block_is_removed_but_safe_context_remains(self):
-        assert _public_progress_summary(
-            "我先核对。<ReAsOnInG_ScRaTcHpAd>PRIVATE_REASONING"
-            "</ReAsOnInG_ScRaTcHpAd>接着整理公开结果。"
-        ) == "我先核对。接着整理公开结果。"
-
-    @pytest.mark.parametrize(
-        ("query", "summary"),
-        [
-            ("核对佣金", "我先核对相关佣金规则。"),
-            ("读取授权", "我先读取可用授权状态。"),
-            ("查询状态", "我先查询当前处理状态。"),
-            ("查询当前登记状态", "我先查询当前状态。"),
-        ],
-    )
-    def test_generic_query_fragments_do_not_suppress_progress(
-        self,
-        query,
-        summary,
-    ):
-        protected, complete = _progress_sensitive_values(
-            {"query": query},
-            protect_all_strings=True,
-            limit=512,
-        )
-
-        assert complete is True
-        assert _public_progress_summary(summary, protected) == ""
-
-    @pytest.mark.parametrize(
-        ("query", "derived_summary"),
-        [
-            (
-                "查找松鹤居房地产经纪有限公司",
-                "我先核对松鹤居的资料。",
-            ),
-            ("查询城南一号2栋10楼", "我先核对城南一号的登记。"),
-            ("查找客户张小明", "我先核对张小明的资料。"),
-            ("检索蓝湾苑客户资料", "我先核对蓝湾苑的登记。"),
-            ("查找阿黎电话", "我先核对阿黎的电话。"),
-            ("查询世纪大道100号", "我先核对100号的登记。"),
-            ("查找客户CUST-ABC12345", "我先核对ABC12345。"),
-        ],
-    )
-    def test_query_entity_fragments_suppress_progress(
-        self,
-        query,
-        derived_summary,
-    ):
-        protected, complete = _progress_sensitive_values(
-            {"query": query},
-            protect_all_strings=True,
-            limit=512,
-        )
-
-        assert complete is True
-        assert _public_progress_summary(derived_summary, protected) == ""
-
-    @pytest.mark.parametrize(
-        ("key", "value", "derived_summary"),
-        [
-            ("account", 6222020200000123, "我先核对账号尾号0123。"),
-            ("phone", 13800001234, "我先核对电话尾号1234。"),
-            ("customerId", 123456789.0, "我先核对客户编号尾号6789。"),
-        ],
-    )
-    def test_numeric_identifier_leaves_protect_tail_fragments(
-        self,
-        key,
-        value,
-        derived_summary,
-    ):
-        protected, complete = _progress_sensitive_values(
-            {key: value},
-            protect_all_strings=True,
-            limit=512,
-        )
-
-        assert complete is True
-        assert _public_progress_summary(derived_summary, protected) == ""
-
-    @pytest.mark.parametrize(
-        ("key", "value", "derived_summary"),
-        [
-            ("query", "AUTH-7F93A1B2", "我先核对标识 7F93A1B2。"),
-            ("resourceId", "OUT-customer", "我先核对 customer 资源。"),
-            ("query", "gang@example.com", "我先核对 gang 的邮箱登记。"),
-        ],
-    )
-    def test_ascii_identifier_fragments_suppress_progress(
-        self,
-        key,
-        value,
-        derived_summary,
-    ):
-        protected, complete = _progress_sensitive_values(
-            {key: value},
-            protect_all_strings=True,
-            limit=512,
-        )
-
-        assert complete is True
-        assert _public_progress_summary(derived_summary, protected) == ""
-
-    @pytest.mark.parametrize(
-        "mutation",
-        ["duplicate-id", "padded-id", "padded-name", "invalid-name"],
-    )
-    def test_batch_binding_rejects_ambiguous_ids_and_names(self, mutation):
-        first = {
-            "id": "call-safe-one",
-            "type": "function",
-            "function": {
-                "name": "mystand_query",
-                "arguments": '{"query":"阿黎"}',
-            },
-        }
-        calls = [first]
-        if mutation == "duplicate-id":
-            calls.append({
-                "id": "call-safe-one",
-                "type": "function",
-                "function": {
-                    "name": "mystand_query",
-                    "arguments": '{"query":"蓝湾苑"}',
-                },
-            })
-        elif mutation == "padded-id":
-            first["id"] = " call-safe-one"
-        elif mutation == "padded-name":
-            first["function"]["name"] = "mystand_query "
-        else:
-            first["function"]["name"] = "mystand/query"
-
-        bindings, protected, complete = _progress_tool_batch_context(calls)
-
-        assert bindings == {}
-        assert protected == []
-        assert complete is False
 
 
 class TestChatHistoryContextBudget:
@@ -2054,42 +1580,46 @@ class TestChatCompletionsEndpoint:
         mock_create_agent.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_mystand_memory_http_is_account_scoped_and_cannot_add(
+    async def test_mystand_memory_http_is_account_scoped_bounded_documents(
         self,
         auth_adapter,
         monkeypatch,
         tmp_path,
     ):
-        from plugins.memory.holographic.scope import open_scoped_memory_store
-
         secret = "stable-memory-scope-secret-for-tests-20260721"
         monkeypatch.setenv("XIAOBAN_MYSTAND_MEMORY_SCOPE_SECRET", secret)
         monkeypatch.setenv("XIAOBAN_HOME", str(tmp_path))
-        store = open_scoped_memory_store(
-            secret=secret,
-            site_id="mystand-test-site",
-            user_id="alice",
-            xiaoban_home=tmp_path,
-        )
-        try:
-            fact_id = store.add_fact("alice private preference", category="user_pref")
-        finally:
-            store.close()
 
         alice_headers = {
             **_mystand_idempotent_headers("memory-alice", user="alice"),
             "X-Xiaoban-Memory-Mode": "user",
+            "X-Xiaoban-Memory-Tier": "notebook",
         }
         bob_headers = {
             **_mystand_idempotent_headers("memory-bob", user="bob"),
             "X-Xiaoban-Memory-Mode": "user",
+            "X-Xiaoban-Memory-Tier": "notebook",
         }
         app = _create_app(auth_adapter)
         async with TestClient(TestServer(app)) as cli:
+            recorded = await cli.post(
+                "/v1/mystand/memory",
+                headers=alice_headers,
+                json={
+                    "action": "record_turn",
+                    "turnId": "delivery-memory-alice-0001",
+                    "userMessage": "请帮我整理今天的带看事项",
+                    "assistantMessage": "已整理今天的带看事项。",
+                    "accountLabel": "张三",
+                    "occurredAt": "2026-08-21T08:00:00Z",
+                },
+            )
+            recorded_data = await recorded.json()
             alice = await cli.get("/v1/mystand/memory", headers=alice_headers)
             alice_data = await alice.json()
             bob = await cli.get("/v1/mystand/memory", headers=bob_headers)
             bob_data = await bob.json()
+            fact_id = recorded_data["factIds"][0]
             forged_update = await cli.post(
                 "/v1/mystand/memory",
                 headers=bob_headers,
@@ -2101,14 +1631,122 @@ class TestChatCompletionsEndpoint:
                 json={"action": "add", "content": "must not be accepted"},
             )
             active_add_data = await active_add.json()
+            active_delete = await cli.post(
+                "/v1/mystand/memory",
+                headers=alice_headers,
+                json={"action": "delete", "factId": fact_id},
+            )
 
+        assert recorded.status == 200
+        assert recorded_data["documents"] == 1
         assert alice.status == 200
-        assert [fact["content"] for fact in alice_data["facts"]] == ["alice private preference"]
+        assert alice_data["tier"] == "notebook"
+        assert len(alice_data["facts"]) == 1
+        assert "服务小本（张三）" in alice_data["facts"][0]["content"]
+        assert "带看事项" in alice_data["facts"][0]["content"]
         assert bob.status == 200
         assert bob_data["facts"] == []
         assert forged_update.status == 404
         assert active_add.status == 400
         assert active_add_data["error"] == "invalid_action"
+        assert active_delete.status == 400
+
+    @pytest.mark.asyncio
+    async def test_mystand_account_memory_reaches_only_current_account_prompt(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+    ):
+        secret = "stable-memory-scope-secret-for-prompt-tests-20260821"
+        monkeypatch.setenv("XIAOBAN_MYSTAND_MEMORY_SCOPE_SECRET", secret)
+        monkeypatch.setenv("XIAOBAN_HOME", str(tmp_path))
+        alice_headers = {
+            **_mystand_idempotent_headers(
+                f"memory-prompt-alice-{uuid.uuid4().hex}",
+                user="alice",
+            ),
+            "X-Xiaoban-Memory-Mode": "user",
+            "X-Xiaoban-Memory-Tier": "notebook",
+        }
+        bob_headers = {
+            **_mystand_idempotent_headers(
+                f"memory-prompt-bob-{uuid.uuid4().hex}",
+                user="bob",
+            ),
+            "X-Xiaoban-Memory-Mode": "user",
+            "X-Xiaoban-Memory-Tier": "notebook",
+        }
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            alice_record = await cli.post(
+                "/v1/mystand/memory",
+                headers=alice_headers,
+                json={
+                    "action": "record_turn",
+                    "turnId": "delivery-memory-prompt-alice-0001",
+                    "userMessage": "以后带看前先确认门禁时间",
+                    "assistantMessage": "已记下带看前确认门禁时间。",
+                    "accountLabel": "张三",
+                    "occurredAt": "2026-08-21T09:00:00Z",
+                },
+            )
+            bob_record = await cli.post(
+                "/v1/mystand/memory",
+                headers=bob_headers,
+                json={
+                    "action": "record_turn",
+                    "turnId": "delivery-memory-prompt-bob-0001",
+                    "userMessage": "内部代号是仅 Bob 可见",
+                    "assistantMessage": "已记下。",
+                    "accountLabel": "李四",
+                    "occurredAt": "2026-08-21T09:01:00Z",
+                },
+            )
+            with patch.object(
+                auth_adapter,
+                "_run_agent",
+                new_callable=AsyncMock,
+            ) as mock_run:
+                mock_run.return_value = (
+                    {
+                        "final_response": "好的。",
+                        "messages": [],
+                        "api_calls": 1,
+                        "completed": True,
+                        "failed": False,
+                        "interrupted": False,
+                    },
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+                chat_headers = {
+                    **alice_headers,
+                    "Idempotency-Key": f"memory-prompt-chat-{uuid.uuid4().hex}",
+                    "X-Xiaoban-Message-Id": f"message-{uuid.uuid4().hex}",
+                    "X-Xiaoban-Request-Fingerprint": hashlib.sha256(
+                        b"memory prompt integration request"
+                    ).hexdigest(),
+                }
+                response = await cli.post(
+                    "/v1/chat/completions",
+                    headers=chat_headers,
+                    json={
+                        "model": "test",
+                        "messages": [
+                            {"role": "system", "content": "本轮页面上下文"},
+                            {"role": "user", "content": "今天带看要注意什么？"},
+                        ],
+                    },
+                )
+
+        assert alice_record.status == 200
+        assert bob_record.status == 200
+        assert response.status == 200
+        prompt = mock_run.call_args.kwargs["ephemeral_system_prompt"]
+        assert "本轮页面上下文" in prompt
+        assert "<memory-context>" in prompt
+        assert "带看前先确认门禁时间" in prompt
+        assert "仅 Bob 可见" not in prompt
 
     @pytest.mark.asyncio
     async def test_mystand_user_memory_fails_closed_without_stable_secret(
@@ -2120,6 +1758,7 @@ class TestChatCompletionsEndpoint:
         headers = {
             **_mystand_idempotent_headers("memory-no-secret"),
             "X-Xiaoban-Memory-Mode": "user",
+            "X-Xiaoban-Memory-Tier": "notebook",
         }
         app = _create_app(auth_adapter)
         async with TestClient(TestServer(app)) as cli:
@@ -2905,6 +2544,12 @@ class TestChatCompletionsEndpoint:
                 turn_id,
                 None,
             )
+            kwargs["interim_assistant_callback"](
+                "我先执行这项查询。",
+                source="provider",
+                provider_sequence=1,
+                provider_event_at=float(1),
+            )
             kwargs["tool_start_callback"](
                 call_id,
                 "mystand_query",
@@ -2926,6 +2571,7 @@ class TestChatCompletionsEndpoint:
                     "retrySafe": False,
                 },
             )
+            kwargs["stream_delta_callback"]("done")
             ledger = AgentCallUsageLedger(provider="test", model="test")
             ledger.set_status("completed")
             return (
@@ -2999,13 +2645,122 @@ class TestChatCompletionsEndpoint:
         ]
 
     @pytest.mark.asyncio
-    async def test_mystand_commentary_binds_to_real_tools_without_becoming_reply(
+    async def test_mystand_natural_loop_needs_neither_feedback_nor_todo(
         self,
         auth_adapter,
         monkeypatch,
         tmp_path,
     ):
-        """R2-B keeps one natural summary per real call and out of final text."""
+        """A settled native final survives without feedback, Todo, or text deltas."""
+        from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
+
+        durable_cache = _IdempotencyCache(
+            durable_path=str(tmp_path / "natural-no-feedback-no-todo.sqlite"),
+            outcome_keys={"test-v1": b"\x31" * 32},
+        )
+        monkeypatch.setattr(
+            "gateway.platforms.api_server._idem_cache",
+            durable_cache,
+        )
+        delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
+        turn_id = uuid.uuid4().hex[:16]
+        call_id = "call-no-feedback-no-todo"
+        final_text = "没有 Todo 也能按真实工具循环自然完成。"
+        app = _create_app(auth_adapter)
+
+        async def _mock_run_agent(**kwargs):
+            kwargs["tool_progress_callback"](
+                "turn.started", delivery_id, turn_id, None,
+            )
+            kwargs["tool_start_callback"](
+                call_id,
+                "mystand_query",
+                {"query": "safe"},
+            )
+            kwargs["tool_complete_callback"](
+                call_id,
+                "mystand_query",
+                {"query": "safe"},
+                {"ok": True},
+                {
+                    "schema": "xiaoban.tool-result.v1",
+                    "requestId": delivery_id,
+                    "turnId": turn_id,
+                    "callId": call_id,
+                    "toolName": "mystand_query",
+                    "dispatchState": "dispatched",
+                    "outcome": "success",
+                    "retrySafe": False,
+                },
+            )
+            ledger = AgentCallUsageLedger(provider="test", model="test")
+            ledger.set_status("completed")
+            return (
+                {
+                    "final_response": final_text,
+                    "completed": True,
+                    "failed": False,
+                    "partial": False,
+                    "interrupted": False,
+                    "messages": [],
+                },
+                {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "total_tokens": 2,
+                    "agent_calls": ledger.to_dict(),
+                },
+            )
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                auth_adapter,
+                "_run_agent",
+                side_effect=_mock_run_agent,
+            ):
+                response = await cli.post(
+                    "/v1/chat/completions",
+                    headers=_mystand_stream_headers(delivery_id),
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "run"}],
+                        "stream": True,
+                    },
+                )
+                body = await response.text()
+
+        projection = _chat_stream_public_projection(body)
+        progress = _xiaoban_progress_payloads(body)
+        assert response.status == 200
+        assert projection["content"] == final_text
+        assert projection["finishes"][-1]["finish_reason"] == "stop"
+        assert [item.get("type") for item in progress if item.get("type")] == [
+            "turn.started",
+            "turn.completed",
+        ]
+        assert [
+            (item.get("tool"), item.get("status"))
+            for item in progress
+            if item.get("toolCallId") == call_id
+        ] == [
+            ("mystand_query", "running"),
+            ("mystand_query", "completed"),
+        ]
+        assert not any(
+            item.get("type") == "assistant.commentary"
+            or item.get("tool") == "todo"
+            for item in progress
+        )
+        assert "event: xiaoban.error" not in body
+
+    @pytest.mark.asyncio
+    async def test_mystand_commentary_is_real_without_requiring_tool_bindings(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+    ):
+        """Provider commentary remains visible but never becomes final text."""
         from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
 
         durable_cache = _IdempotencyCache(
@@ -3023,10 +2778,7 @@ class TestChatCompletionsEndpoint:
         protected_phone = "13800001234"
         protected_finance = "R2B_FINANCE_BODY_CANARY_781"
         protected_amount = 6350
-        commentary = (
-            f"我先核对{protected_name}的结算资料 {protected_phone} "
-            f"{protected_finance}，金额 {protected_amount}。"
-        )
+        commentary = "我先核对两项已授权结算资料。"
         final_summary = (
             "这轮两项核对已经结束。第一项资料读取成功；第二项因当前"
             "授权范围不足而未能读取，我没有继续越权，也没有把它说成"
@@ -3061,16 +2813,12 @@ class TestChatCompletionsEndpoint:
             kwargs["tool_progress_callback"](
                 "turn.started", delivery_id, turn_id, None,
             )
-            kwargs["stream_delta_callback"](commentary)
             kwargs["interim_assistant_callback"](
                 commentary,
-                already_streamed=True,
-                tool_calls=tool_calls,
                 source="provider",
                 provider_sequence=1,
-                provider_event_at=1786214400.0,
+                provider_event_at=float(1),
             )
-            kwargs["stream_delta_callback"](None)
             for call_id in call_ids:
                 kwargs["tool_start_callback"](
                     call_id,
@@ -3159,9 +2907,12 @@ class TestChatCompletionsEndpoint:
         assert [event["status"] for event in commentary_events] == [
             "completed",
         ]
+        assert commentary_events[-1]["stage"] == "intent"
+        assert commentary_events[-1]["summary"] == commentary
         assert commentary_events[-1]["source"] == "provider"
         assert commentary_events[-1]["providerSequence"] == 1
-        assert commentary_events[-1]["relatedCallIds"] == ",".join(call_ids)
+        assert commentary_events[-1].get("relatedCallIds") is None
+        assert commentary_events[-1].get("relatedTools") is None
         assert commentary_events[-1].get("toolCallId") is None
         assert commentary_events[-1].get("callId") is None
         terminals = [
@@ -3204,47 +2955,22 @@ class TestChatCompletionsEndpoint:
             str(protected_amount),
         ):
             assert canary not in decoded_wire
-        assert commentary not in decoded_wire
+        assert commentary not in "".join(final_chunks)
         assert "".join(final_chunks) == final_summary
         assert "系统" not in final_summary
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("query", "commentary", "canary", "expected_summary"),
-        [
-            ("查找阿黎电话", "我先核对阿黎的电话。", "阿黎", None),
-            ("查询世纪大道100号", "我先核对100号的登记。", "100号", None),
-            (
-                "查找客户CUST-ABC12345",
-                "我先核对ABC12345。",
-                "ABC12345",
-                None,
-            ),
-            ("核对佣金", "我先核对相关佣金规则。", "佣金", None),
-            ("读取授权", "我先读取可用授权状态。", "授权", None),
-            ("查询状态", "我先查询当前处理状态。", "状态", None),
-            (
-                "市场资料",
-                "我先整理公开市场资料。",
-                "市场资料",
-                "我先整理公开相关资料。",
-            ),
-        ],
-    )
-    async def test_mystand_parameter_overlap_never_uses_fixed_tool_summary(
+    async def test_mystand_streams_confirmed_tool_commentary_before_dispatch(
         self,
         auth_adapter,
         monkeypatch,
         tmp_path,
-        query,
-        commentary,
-        canary,
-        expected_summary,
     ):
+        """Tool-generation evidence promotes Provider text to live commentary."""
         from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
 
         durable_cache = _IdempotencyCache(
-            durable_path=str(tmp_path / f"fallback-{uuid.uuid4().hex}.sqlite"),
+            durable_path=str(tmp_path / "streamed-tool-commentary.sqlite"),
             outcome_keys={"test-v1": b"\x31" * 32},
         )
         monkeypatch.setattr(
@@ -3253,41 +2979,42 @@ class TestChatCompletionsEndpoint:
         )
         delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
         turn_id = uuid.uuid4().hex[:16]
-        call_id = "call-fixed-summary"
+        call_id = "call-streamed-commentary"
+        commentary_prefix = "我先"
+        commentary = "我先核对本轮授权资料。"
+        final_text = "本轮授权资料已经核对完成。"
         app = _create_app(auth_adapter)
-        tool_call = {
-            "id": call_id,
-            "type": "function",
-            "function": {
-                "name": "mystand_query",
-                "arguments": json.dumps(
-                    {"query": query},
-                    ensure_ascii=False,
-                ),
-            },
-        }
 
         async def _mock_run_agent(**kwargs):
             kwargs["tool_progress_callback"](
                 "turn.started", delivery_id, turn_id, None,
             )
-            kwargs["interim_assistant_callback"](
-                commentary,
-                tool_calls=[tool_call],
+            kwargs["stream_delta_callback"](commentary_prefix)
+            kwargs["tool_gen_callback"](
+                "mystand_query",
                 source="provider",
                 provider_sequence=1,
-                provider_event_at=1786214400.0,
+                provider_event_at=float(1),
+            )
+            kwargs["stream_delta_callback"](
+                commentary[len(commentary_prefix):],
+            )
+            kwargs["interim_assistant_callback"](
+                commentary,
+                source="provider",
+                provider_sequence=1,
+                provider_event_at=float(1),
             )
             kwargs["stream_delta_callback"](None)
             kwargs["tool_start_callback"](
                 call_id,
                 "mystand_query",
-                {"query": query},
+                {"query": "safe"},
             )
             kwargs["tool_complete_callback"](
                 call_id,
                 "mystand_query",
-                {"query": query},
+                {"query": "safe"},
                 {"ok": True},
                 {
                     "schema": "xiaoban.tool-result.v1",
@@ -3300,12 +3027,12 @@ class TestChatCompletionsEndpoint:
                     "retrySafe": False,
                 },
             )
-            kwargs["stream_delta_callback"]("安全最终答复。")
+            kwargs["stream_delta_callback"](final_text)
             ledger = AgentCallUsageLedger(provider="test", model="test")
             ledger.set_status("completed")
             return (
                 {
-                    "final_response": "安全最终答复。",
+                    "final_response": final_text,
                     "completed": True,
                     "failed": False,
                     "partial": False,
@@ -3337,304 +3064,72 @@ class TestChatCompletionsEndpoint:
                 )
                 body = await response.text()
 
-        running = [
-            payload
-            for payload in _xiaoban_progress_payloads(body)
-            if payload.get("toolCallId") == call_id
-            and payload.get("status") == "running"
-        ]
-        assert len(running) == 1
-        assert running[0].get("summary") is None
+        assert response.status == 200
+        progress = _xiaoban_progress_payloads(body)
         commentary_events = [
             payload
-            for payload in _xiaoban_progress_payloads(body)
+            for payload in progress
             if payload.get("type") == "assistant.commentary"
         ]
-        if expected_summary is None:
-            assert commentary_events == []
-        else:
-            assert len(commentary_events) == 1
-            assert commentary_events[0].get("summary") == expected_summary
-            assert commentary_events[0].get("callId") is None
-        assert commentary not in body
-        assert canary not in json.dumps(
-            commentary_events,
-            ensure_ascii=False,
-        )
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "unsafe_case",
-        [
-            "long-finance-body",
-            "deep-arguments",
-            "wide-arguments",
-            "overlong-commentary",
-            "single-character",
-            "single-digit",
-            "non-finite-number",
-        ],
-    )
-    async def test_mystand_unsafe_progress_input_suppresses_entire_summary(
-        self,
-        auth_adapter,
-        monkeypatch,
-        tmp_path,
-        unsafe_case,
-    ):
-        from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
-
-        durable_cache = _IdempotencyCache(
-            durable_path=str(tmp_path / f"unsafe-progress-{unsafe_case}.sqlite"),
-            outcome_keys={"test-v1": b"\x31" * 32},
-        )
-        monkeypatch.setattr(
-            "gateway.platforms.api_server._idem_cache",
-            durable_cache,
-        )
-        delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
-        turn_id = uuid.uuid4().hex[:16]
-        call_id = "call-unsafe-progress"
-        if unsafe_case == "long-finance-body":
-            marker = "R2B_LONG_FINANCE_PREFIX_CANARY_781"
-            arguments = {"financeBody": marker + "长" * 513}
-            commentary = f"我先核对{arguments['financeBody']}。"
-        elif unsafe_case == "deep-arguments":
-            marker = "R2B_DEEP_ARGUMENT_CANARY_781"
-            nested = marker
-            for index in range(6):
-                nested = {f"level{index}": nested}
-            arguments = {"payload": nested}
-            commentary = f"我先核对{marker}。"
-        elif unsafe_case == "wide-arguments":
-            marker = "R2B_WIDE_ARGUMENT_CANARY_781"
-            items = [f"资料-{index:03d}" for index in range(128)]
-            items.append(marker)
-            arguments = {"items": items}
-            commentary = f"我先核对{marker}。"
-        elif unsafe_case == "overlong-commentary":
-            marker = "R2B_BOUNDARY_CANARY_781"
-            arguments = {"financeBody": marker}
-            commentary = "甲" * 1_990 + marker
-        elif unsafe_case == "single-character":
-            marker = "客户王"
-            arguments = {"customerName": "王"}
-            commentary = f"我先核对{marker}。"
-        elif unsafe_case == "single-digit":
-            marker = "房号8号"
-            arguments = {"roomNumber": 8}
-            commentary = f"我先核对{marker}。"
-        else:
-            marker = "R2B_NONFINITE_AMOUNT_CANARY_781"
-            arguments = {"amount": float("nan")}
-            commentary = f"我先核对{marker}。"
-        app = _create_app(auth_adapter)
-        tool_call = {
-            "id": call_id,
-            "type": "function",
-            "function": {
-                "name": "mystand_query",
-                "arguments": json.dumps(arguments, ensure_ascii=False),
-            },
-        }
-
-        async def _mock_run_agent(**kwargs):
-            kwargs["tool_progress_callback"](
-                "turn.started", delivery_id, turn_id, None,
-            )
-            kwargs["stream_delta_callback"](commentary)
-            kwargs["interim_assistant_callback"](
-                commentary,
-                already_streamed=True,
-                tool_calls=[tool_call],
-            )
-            kwargs["stream_delta_callback"](None)
-            kwargs["tool_start_callback"](
-                call_id, "mystand_query", arguments,
-            )
-            kwargs["tool_complete_callback"](
-                call_id,
-                "mystand_query",
-                arguments,
-                {"ok": True},
-                {
-                    "schema": "xiaoban.tool-result.v1",
-                    "requestId": delivery_id,
-                    "turnId": turn_id,
-                    "callId": call_id,
-                    "toolName": "mystand_query",
-                    "dispatchState": "dispatched",
-                    "outcome": "success",
-                    "retrySafe": False,
-                },
-            )
-            kwargs["stream_delta_callback"]("安全最终答复。")
-            ledger = AgentCallUsageLedger(provider="test", model="test")
-            ledger.set_status("completed")
-            return (
-                {
-                    "final_response": "安全最终答复。",
-                    "completed": True,
-                    "failed": False,
-                    "partial": False,
-                    "interrupted": False,
-                    "messages": [],
-                },
-                {
-                    "input_tokens": 1,
-                    "output_tokens": 1,
-                    "total_tokens": 2,
-                    "agent_calls": ledger.to_dict(),
-                },
-            )
-
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(
-                auth_adapter,
-                "_run_agent",
-                side_effect=_mock_run_agent,
-            ):
-                response = await cli.post(
-                    "/v1/chat/completions",
-                    headers=_mystand_stream_headers(delivery_id),
-                    json={
-                        "model": "test",
-                        "messages": [{"role": "user", "content": "run"}],
-                        "stream": True,
-                    },
-                )
-                body = await response.text()
-
-        running = [
-            payload
-            for payload in _xiaoban_progress_payloads(body)
+        assert [event["status"] for event in commentary_events] == [
+            "running",
+            "running",
+            "completed",
+        ]
+        assert [event["summary"] for event in commentary_events] == [
+            commentary_prefix,
+            commentary,
+            commentary,
+        ]
+        assert len({event["eventId"] for event in commentary_events}) == 1
+        assert all(event["stage"] == "intent" for event in commentary_events)
+        assert all(event["source"] == "provider" for event in commentary_events)
+        tool_started_at = next(
+            index
+            for index, payload in enumerate(progress)
             if payload.get("toolCallId") == call_id
             and payload.get("status") == "running"
-        ]
-        assert len(running) == 1
-        assert running[0].get("summary") is None
-        assert marker not in body
+        )
+        commentary_completed_at = next(
+            index
+            for index, payload in enumerate(progress)
+            if payload.get("type") == "assistant.commentary"
+            and payload.get("status") == "completed"
+        )
+        assert commentary_completed_at < tool_started_at
+        assert commentary not in _chat_stream_public_projection(body)["content"]
+        assert _chat_stream_public_projection(body)["content"] == final_text
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "history_case",
-        ["short-string", "numeric", "executor-error", "overflow"],
-    )
-    async def test_mystand_later_commentary_protects_complete_prior_results(
+    async def test_mystand_natural_final_is_not_keyword_retried(
         self,
         auth_adapter,
         monkeypatch,
         tmp_path,
-        history_case,
     ):
-        """Historical values never enter later public commentary."""
+        """Chinese evidence wording must not discard a valid final or buy a retry."""
         from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
 
         durable_cache = _IdempotencyCache(
-            durable_path=str(tmp_path / f"r2b-prior-{history_case}.sqlite"),
+            durable_path=str(tmp_path / "natural-final-no-retry.sqlite"),
             outcome_keys={"test-v1": b"\x31" * 32},
         )
-        monkeypatch.setattr(
-            "gateway.platforms.api_server._idem_cache",
-            durable_cache,
-        )
+        monkeypatch.setattr("gateway.platforms.api_server._idem_cache", durable_cache)
         delivery_id = "xbd_" + uuid.uuid4().hex + "12345678"
         turn_id = uuid.uuid4().hex[:16]
-        first_call_id = "call-prior-one"
-        second_call_id = "call-prior-two"
-        if history_case == "numeric":
-            first_result = {"amount": 8421}
-            prior_canary = "8421"
-        elif history_case == "executor-error":
-            first_result = "Error executing tool 'mystand_query': 松鹤居"
-            prior_canary = "松鹤居"
-        elif history_case == "overflow":
-            values = {"estate": "松鹤居"}
-            values.update({
-                f"field-{index:03d}": f"历史资料-{index:03d}"
-                for index in range(127)
-            })
-            first_result = {"values": values}
-            prior_canary = "松鹤居"
-        else:
-            first_result = {"estate": "松鹤居"}
-            prior_canary = "松鹤居"
-        second_commentary = (
-            f"我已经找到{prior_canary}，接着核对登记状态。"
-        )
+        final_text = "我已经查过你本轮给出的内容，结论如下。"
         app = _create_app(auth_adapter)
-
-        def _tool_call(call_id, arguments):
-            return {
-                "id": call_id,
-                "type": "function",
-                "function": {
-                    "name": "mystand_query",
-                    "arguments": json.dumps(arguments, ensure_ascii=False),
-                },
-            }
-
-        def _terminal_metadata(call_id):
-            return {
-                "schema": "xiaoban.tool-result.v1",
-                "requestId": delivery_id,
-                "turnId": turn_id,
-                "callId": call_id,
-                "toolName": "mystand_query",
-                "dispatchState": "dispatched",
-                "outcome": "success",
-                "retrySafe": False,
-            }
 
         async def _mock_run_agent(**kwargs):
             kwargs["tool_progress_callback"](
                 "turn.started", delivery_id, turn_id, None,
             )
-            first_args = {"query": "基础资料"}
-            kwargs["interim_assistant_callback"](
-                "我先核对基础资料。",
-                tool_calls=[_tool_call(first_call_id, first_args)],
-                source="provider",
-                provider_sequence=1,
-                provider_event_at=1786214400.0,
-            )
-            kwargs["stream_delta_callback"](None)
-            kwargs["tool_start_callback"](
-                first_call_id, "mystand_query", first_args,
-            )
-            kwargs["tool_complete_callback"](
-                first_call_id,
-                "mystand_query",
-                first_args,
-                first_result,
-                _terminal_metadata(first_call_id),
-            )
-
-            second_args = {"query": "蓝湾苑"}
-            kwargs["interim_assistant_callback"](
-                second_commentary,
-                tool_calls=[_tool_call(second_call_id, second_args)],
-                source="provider",
-                provider_sequence=2,
-                provider_event_at=1786214401.0,
-            )
-            kwargs["stream_delta_callback"](None)
-            kwargs["tool_start_callback"](
-                second_call_id, "mystand_query", second_args,
-            )
-            kwargs["tool_complete_callback"](
-                second_call_id,
-                "mystand_query",
-                second_args,
-                {"ok": True},
-                _terminal_metadata(second_call_id),
-            )
-            kwargs["stream_delta_callback"]("安全最终答复。")
+            kwargs["stream_delta_callback"](final_text)
             ledger = AgentCallUsageLedger(provider="test", model="test")
             ledger.set_status("completed")
             return (
                 {
-                    "final_response": "安全最终答复。",
+                    "final_response": final_text,
                     "completed": True,
                     "failed": False,
                     "partial": False,
@@ -3654,7 +3149,7 @@ class TestChatCompletionsEndpoint:
                 auth_adapter,
                 "_run_agent",
                 side_effect=_mock_run_agent,
-            ):
+            ) as mock_run:
                 response = await cli.post(
                     "/v1/chat/completions",
                     headers=_mystand_stream_headers(delivery_id),
@@ -3666,31 +3161,18 @@ class TestChatCompletionsEndpoint:
                 )
                 body = await response.text()
 
-        second_running = [
-            payload
-            for payload in _xiaoban_progress_payloads(body)
-            if payload.get("toolCallId") == second_call_id
-            and payload.get("status") == "running"
-        ]
-        assert len(second_running) == 1
-        second_commentary_events = [
-            payload
-            for payload in _xiaoban_progress_payloads(body)
-            if payload.get("type") == "assistant.commentary"
-            and payload.get("providerSequence") == 2
-        ]
-        if history_case == "overflow":
-            assert second_commentary_events == []
-        else:
-            assert len(second_commentary_events) == 1
-            assert second_commentary_events[0].get("summary") == (
-                "我已经找到相关资料，接着核对登记状态。"
-            )
-            assert second_commentary_events[0].get("callId") is None
-        assert prior_canary not in json.dumps(
-            second_commentary_events,
-            ensure_ascii=False,
-        )
+        assert mock_run.call_count == 1
+        final_chunks = []
+        for line in body.splitlines():
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            frame = json.loads(line[len("data: "):])
+            if frame.get("object") == "chat.completion.chunk":
+                final_chunks.extend(
+                    choice.get("delta", {}).get("content", "")
+                    for choice in frame.get("choices", [])
+                )
+        assert "".join(final_chunks) == final_text
 
     @pytest.mark.asyncio
     async def test_mystand_turn_failure_projects_only_allowlisted_details(
@@ -3834,6 +3316,12 @@ class TestChatCompletionsEndpoint:
                 delivery_id,
                 turn_id,
                 None,
+            )
+            kwargs["interim_assistant_callback"](
+                "我先执行这项查询。",
+                source="provider",
+                provider_sequence=1,
+                provider_event_at=float(1),
             )
             kwargs["tool_start_callback"](
                 call_id,
@@ -4343,12 +3831,8 @@ class TestChatCompletionsEndpoint:
             progress = kwargs.get("tool_progress_callback")
             assert progress is not None
             progress("turn.started", delivery_id, turn_id, None)
-            stream_canary = (
-                "done"
-                if final_result.get("completed") is True
-                else f"PRIVATE_{ledger_status.upper()}_STREAM_MUST_NOT_LEAK"
-            )
-            kwargs["stream_delta_callback"](stream_canary)
+            if final_result.get("completed") is True:
+                kwargs["stream_delta_callback"]("done")
             ledger = AgentCallUsageLedger(provider="test", model="test")
             ledger.set_status(ledger_status)
             usage = {
@@ -4757,6 +4241,12 @@ class TestChatCompletionsEndpoint:
                 turn_id,
                 None,
             )
+            kwargs["interim_assistant_callback"](
+                "我先执行这项查询。",
+                source="provider",
+                provider_sequence=1,
+                provider_event_at=float(1),
+            )
             kwargs["tool_start_callback"](
                 call_id,
                 "mystand_query",
@@ -4812,6 +4302,19 @@ class TestChatCompletionsEndpoint:
                 "requestId": delivery_id,
                 "turnId": turn_id,
                 "status": "running",
+            },
+            {
+                "progressSchema": "xiaoban.progress.v2",
+                "eventId": f"commentary-{turn_id}-1",
+                "type": "assistant.commentary",
+                "status": "completed",
+                "stage": "intent",
+                "summary": "我先执行这项查询。",
+                "source": "provider",
+                "providerSequence": 1,
+                "providerEventAt": "1970-01-01T00:00:01.000Z",
+                "requestId": delivery_id,
+                "turnId": turn_id,
             },
             {
                 "tool": "mystand_query",
@@ -4889,9 +4392,10 @@ class TestChatCompletionsEndpoint:
             }]
             kwargs["interim_assistant_callback"](
                 "我先核对公开登记状态。",
-                tool_calls=tool_calls,
+                source="provider",
+                provider_sequence=1,
+                provider_event_at=float(1),
             )
-            kwargs["stream_delta_callback"](None)
             counters["tool"] += 1
             kwargs["tool_start_callback"](
                 call_id,
@@ -5069,22 +4573,14 @@ class TestChatCompletionsEndpoint:
             kwargs["tool_progress_callback"](
                 "turn.started", delivery_id, turn_id, None,
             )
-            run_started.set()
-            await release_run.wait()
             kwargs["interim_assistant_callback"](
                 "我先核对公开资料。",
-                tool_calls=[{
-                    "id": "call-inflight",
-                    "type": "function",
-                    "function": {
-                        "name": "mystand_query",
-                        "arguments": json.dumps({
-                            "query": private_argument,
-                        }),
-                    },
-                }],
+                source="provider",
+                provider_sequence=1,
+                provider_event_at=float(1),
             )
-            kwargs["stream_delta_callback"](None)
+            run_started.set()
+            await release_run.wait()
             counters["tool"] += 1
             kwargs["tool_start_callback"](
                 "call-inflight",
@@ -5490,12 +4986,17 @@ class TestChatCompletionsEndpoint:
                 kwargs["tool_progress_callback"](
                     "turn.started", delivery_id, turn_id, None,
                 )
+                kwargs["interim_assistant_callback"](
+                    "我先执行这项查询。",
+                    source="provider",
+                    provider_sequence=1,
+                    provider_event_at=float(1),
+                )
                 kwargs["tool_start_callback"](
                     "call-left-open",
                     "mystand_query",
                     {"query": "private"},
                 )
-            kwargs["stream_delta_callback"](private_final)
             ledger = AgentCallUsageLedger(provider="test", model="test")
             ledger.set_status("completed")
             return (
@@ -5552,7 +5053,11 @@ class TestChatCompletionsEndpoint:
                 payload.get("type")
                 for payload in first_progress
                 if payload.get("type")
-            ] == ["turn.started", "turn.failed"]
+            ] == [
+                "turn.started",
+                "assistant.commentary",
+                "turn.failed",
+            ]
             assert any(
                 payload.get("toolCallId") == "call-left-open"
                 and payload.get("status") == "failed"

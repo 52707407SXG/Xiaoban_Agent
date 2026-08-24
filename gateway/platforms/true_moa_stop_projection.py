@@ -139,7 +139,7 @@ def _stopped_chat_completion_response(response: Any) -> Any:
                     continue
                 if (
                     slot.get("role") == "final_executor"
-                    or slot.get("slotId") == "final-deepseek-v4-pro"
+                    or slot.get("slotId") == "final-openai-codex-gpt-5.6-luna"
                 ):
                     slot["status"] = "cancelled"
                     slot["errorCategory"] = "terminal_fence_after_stop"
@@ -154,7 +154,7 @@ def _stopped_chat_completion_response(response: Any) -> Any:
                     not isinstance(call, dict)
                     or (
                         call.get("role") != "final_executor"
-                        and call.get("slotId") != "final-deepseek-v4-pro"
+                        and call.get("slotId") != "final-openai-codex-gpt-5.6-luna"
                     )
                 ):
                     continue

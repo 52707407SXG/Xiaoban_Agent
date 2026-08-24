@@ -3,7 +3,7 @@
   "contract": "mystand.resource-index-tool.v1",
   "tool": {
     "name": "mystand_resource_index",
-    "description": "Read the current My Stand user's server-filtered resource index. Use it only when the current request names a material or business goal but does not provide an exact AUTH, OUT, or resourceUid. If the request provides an exact identifier, skip this index and call mystand_authorization resolve directly. Do not pass the natural business question as query; query is only for an actual resource title named by the user. After locating one or more candidates, use mystand_authorization resolve or resolve_many so My Stand re-checks every ID and returns the authorized content for model analysis. This index never returns business content or raw AUTH values. Paginate with next_cursor. Resource discovery, index-map traversal, AUTH IDs, retries, and tool output are private backend details: never narrate them to the user. All writes require mystand_authorization_write; never bypass the authorization wall or database boundary.",
+    "description": "Read the current My Stand user's server-filtered resource index. Use it only when the current request names a material or business goal but does not provide an exact AUTH, OUT, or resourceUid. If the request provides an exact identifier, skip this index and call mystand_authorization resolve directly. Do not pass the natural business question as query; query is only for an actual resource title named by the user. Each item includes pathLabels: the server-verified safe hierarchy from module to resource. Use pathLabels to distinguish repeated short labels such as 房源笔记, but do not expose this backend lookup process. After locating one or more candidates, use mystand_authorization resolve or resolve_many so My Stand re-checks every ID and returns the authorized content for model analysis. This index never returns business content or raw AUTH values. Paginate with next_cursor. Resource discovery, index-map traversal, AUTH IDs, retries, and tool output are private backend details: never narrate them to the user. All writes require mystand_authorization_write; never bypass the authorization wall or database boundary.",
     "parameters": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -60,6 +60,12 @@
             "resourceType": { "maxLength": 80, "type": "string" },
             "parentResourceUid": { "maxLength": 120, "type": "string" },
             "safeLabel": { "maxLength": 240, "type": "string" },
+            "pathLabels": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "items": { "minLength": 1, "maxLength": 240, "type": "string" }
+            },
             "encrypted": { "type": "boolean" },
             "status": { "enum": ["active", "archived", "locked"], "type": "string" },
             "locked": { "type": "boolean" },
@@ -67,7 +73,7 @@
             "canWrite": { "type": "boolean" },
             "sourceId": { "maxLength": 240, "type": "string" }
           },
-          "required": ["resourceUid", "moduleId", "resourceType", "parentResourceUid", "safeLabel", "encrypted", "status", "locked", "canRead", "canWrite"],
+          "required": ["resourceUid", "moduleId", "resourceType", "parentResourceUid", "safeLabel", "pathLabels", "encrypted", "status", "locked", "canRead", "canWrite"],
           "additionalProperties": false
         }
       },

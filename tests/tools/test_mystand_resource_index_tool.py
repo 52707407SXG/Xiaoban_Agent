@@ -25,6 +25,11 @@ def test_schema_is_read_only_and_cannot_accept_owner():
     assert "does not provide an exact AUTH, OUT, or resourceUid" in description
     assert "skip this index" in description
     assert "never bypass the index" not in description
+    assert "pathLabels" in description
+    result_item = bridge.RESOURCE_INDEX_CONTRACT["result"]["properties"]["items"]["items"]
+    assert "pathLabels" in result_item["properties"]
+    assert "pathLabels" in result_item["required"]
+    assert result_item["properties"]["pathLabels"]["maxItems"] == 32
 
 
 def test_current_session_identity_is_the_only_owner_source(monkeypatch):

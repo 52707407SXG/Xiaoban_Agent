@@ -1478,7 +1478,10 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     # slices so we can fire activity heartbeats every ~10s to the agent's
     # inactivity tracker — otherwise the gateway watchdog kills the agent
     # while the user is still responding. Mirrors _wait_for_process() cadence.
-    timeout = _get_approval_config().get("gateway_timeout", 300)
+    timeout = approval_data.get(
+        "approval_timeout_seconds",
+        _get_approval_config().get("gateway_timeout", 300),
+    )
     try:
         timeout = int(timeout)
     except (ValueError, TypeError):
@@ -1537,7 +1540,117 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
         surface=surface,
         choice=_outcome,
     )
-    return {"resolved": resolved, "choice": choice}
+    return {
+        "resolved": resolved,
+        "choice": choice,
+        "approval_id": str(approval_data.get("approvalId") or ""),
+    }
+
+
+def request_gateway_action_approval(
+    *,
+    pattern_key: str,
+    description: str,
+    command: str = "",
+    surface: str = "gateway-action",
+    choices: tuple[str, ...] = ("once", "session", "deny"),
+    metadata: Optional[dict] = None,
+    timeout_seconds: Optional[int] = None,
+) -> dict:
+    """Require one correlated gateway approval for a non-terminal mutation.
+
+    This is the narrow public entry point used by first-class UI tools such as
+    My Stand Skill and Cron management. It never exposes the permanent
+    allowlist and fails closed when no live approval bridge is registered.
+    """
+
+    session_key = get_current_session_key(default="")
+    clean_pattern = str(pattern_key or "").strip()
+    clean_description = str(description or "").strip()
+    if (
+        not session_key
+        or not clean_pattern
+        or not clean_description
+        or not _is_gateway_approval_context()
+    ):
+        return {
+            "approved": False,
+            "choice": None,
+            "message": "当前操作缺少可交互的确认会话。",
+        }
+    with _lock:
+        notify_cb = _gateway_notify_cbs.get(session_key)
+    if notify_cb is None:
+        return {
+            "approved": False,
+            "choice": None,
+            "message": "当前页面确认通道未连接，操作没有执行。",
+        }
+    allowed_choices = tuple(dict.fromkeys(
+        choice
+        for choice in (str(item or "").strip().lower() for item in choices)
+        if choice in {"once", "session", "deny"}
+    ))
+    if "deny" not in allowed_choices or not any(
+        choice in {"once", "session"} for choice in allowed_choices
+    ):
+        return {
+            "approved": False,
+            "choice": None,
+            "message": "当前操作的确认选项无效。",
+        }
+    approval_data = {
+        "command": str(command or clean_description)[:500],
+        "description": clean_description[:300],
+        "pattern_key": clean_pattern,
+        "pattern_keys": [clean_pattern],
+        "choices": list(allowed_choices),
+    }
+    if isinstance(metadata, dict):
+        approval_kind = str(metadata.get("approval_kind") or "").strip()
+        write_preview = metadata.get("write_preview")
+        if approval_kind:
+            approval_data["approval_kind"] = approval_kind[:80]
+        if isinstance(write_preview, dict):
+            approval_data["write_preview"] = dict(write_preview)
+    if timeout_seconds is not None:
+        try:
+            approval_data["approval_timeout_seconds"] = max(
+                1,
+                min(int(timeout_seconds), 7 * 24 * 60 * 60),
+            )
+        except (TypeError, ValueError):
+            return {
+                "approved": False,
+                "choice": None,
+                "message": "当前操作的确认等待时间无效。",
+            }
+    decision = _await_gateway_decision(
+        session_key,
+        notify_cb,
+        approval_data,
+        surface=surface,
+    )
+    choice = str(decision.get("choice") or "").strip().lower()
+    if not decision.get("resolved"):
+        return {
+            "approved": False,
+            "choice": None,
+            "message": "等待确认超时，操作没有执行。",
+        }
+    if choice not in allowed_choices or choice == "deny":
+        return {
+            "approved": False,
+            "choice": choice or "deny",
+            "approval_id": str(decision.get("approval_id") or ""),
+            "message": "用户拒绝了当前操作，操作没有执行。",
+        }
+    return {
+        "approved": True,
+        "choice": choice,
+        "approval_id": str(decision.get("approval_id") or ""),
+        "message": None,
+    }
 
 
 def check_all_command_guards(command: str, env_type: str,

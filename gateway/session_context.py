@@ -71,10 +71,9 @@ _SESSION_MESSAGE_ID: ContextVar = ContextVar("XIAOBAN_SESSION_MESSAGE_ID", defau
 # _VAR_MAP or subprocess environments; only trusted in-process gates (such as
 # the My Stand write-confirmation tool) may inspect it.
 _SESSION_USER_MESSAGE: ContextVar = ContextVar("XIAOBAN_SESSION_USER_MESSAGE", default=_UNSET)
-# Set for the remainder of the active user turn once a high-level My Stand
-# private-data query is planned or invoked. Web tools consult this task-local
-# flag as a hard egress boundary. It is deliberately not exported through
-# _VAR_MAP or process environments.
+# Records that the active turn used a private My Stand tool.  It is task-local
+# diagnostic state only: outbound tools inspect their own payloads and do not
+# use this flag to disable unrelated public research.
 _SESSION_MYSTAND_PRIVATE_QUERY: ContextVar = ContextVar(
     "XIAOBAN_SESSION_MYSTAND_PRIVATE_QUERY",
     default=False,
@@ -88,6 +87,7 @@ _MYSTAND_PRIVATE_SESSION_TAINT_PERSISTENCE_FAILED = False
 _MYSTAND_PRIVATE_HISTORY_TOOL_NAMES = frozenset(
     {
         "mystand_query",
+        "mystand_unsettled_performance",
         "mystand_authorization_write",
         # Legacy model-visible tools are no longer exposed, but their trusted
         # structured history can still be replayed after a gateway restart.
@@ -257,46 +257,18 @@ def get_session_user_message() -> str:
 
 
 def mark_mystand_private_query_turn() -> None:
-    """Block web egress for this turn and later turns in the same session."""
+    """Record private My Stand tool use for the active turn only."""
     _SESSION_MYSTAND_PRIVATE_QUERY.set(True)
-    taint_keys = _mystand_private_session_taint_keys()
-    if not taint_keys:
-        return
-    with _MYSTAND_PRIVATE_SESSION_TAINT_LOCK:
-        path = _mystand_private_session_taint_path()
-        _load_mystand_private_session_taints_locked(path)
-        new_keys = set(taint_keys) - _MYSTAND_PRIVATE_SESSION_TAINTS
-        if not new_keys:
-            return
-        _MYSTAND_PRIVATE_SESSION_TAINTS.update(new_keys)
-        if not _MYSTAND_PRIVATE_SESSION_TAINT_PERSISTENCE_FAILED:
-            _persist_mystand_private_session_taints_locked(path)
 
 
 def mystand_private_query_turn_active() -> bool:
-    """Return whether this turn or its stable session has touched private data."""
-    if _SESSION_MYSTAND_PRIVATE_QUERY.get() is True:
-        return True
-    taint_keys = _mystand_private_session_taint_keys()
-    if not taint_keys:
-        return False
-    with _MYSTAND_PRIVATE_SESSION_TAINT_LOCK:
-        _load_mystand_private_session_taints_locked(
-            _mystand_private_session_taint_path(),
-        )
-        return any(
-            key in _MYSTAND_PRIVATE_SESSION_TAINTS
-            for key in taint_keys
-        )
+    """Return whether the active turn used a private My Stand tool."""
+    return _SESSION_MYSTAND_PRIVATE_QUERY.get() is True
 
 
 def mystand_private_taint_persistence_failed() -> bool:
-    """Return whether the durable private-session boundary is unavailable."""
-    with _MYSTAND_PRIVATE_SESSION_TAINT_LOCK:
-        _load_mystand_private_session_taints_locked(
-            _mystand_private_session_taint_path(),
-        )
-        return _MYSTAND_PRIVATE_SESSION_TAINT_PERSISTENCE_FAILED
+    """Compatibility shim: session-wide private taint is no longer persisted."""
+    return False
 
 
 def mark_mystand_private_query_from_history(conversation_history: Any) -> bool:

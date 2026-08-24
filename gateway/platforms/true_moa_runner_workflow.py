@@ -34,6 +34,7 @@ class TrueMoARunRequest:
     session_id: Optional[str]
     stream_delta_callback: Any
     interim_assistant_callback: Any
+    tool_gen_callback: Any
     tool_progress_callback: Any
     tool_start_callback: Any
     tool_complete_callback: Any
@@ -276,6 +277,9 @@ class TrueMoARunWorkflow(
                             "interim_assistant_callback",
                             None,
                         )
+                    ),
+                    tool_gen_callback=(
+                        getattr(request, "tool_gen_callback", None)
                     ),
                     tool_progress_callback=(
                         request.tool_progress_callback

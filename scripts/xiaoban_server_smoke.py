@@ -124,7 +124,7 @@ def _check_event_center_signature() -> None:
         "siteId": "site-1",
         "eventId": "evt-smoke",
         "eventType": "event.due",
-        "userId": "52707407",
+        "userId": "owner-user-001",
         "occurredAt": "2026-06-24T10:00:00+08:00",
     }
     body = canonical_json_bytes(payload)
@@ -148,7 +148,7 @@ def _check_dev_stores() -> None:
     identity = InMemoryIdentityDirectory()
     user = MyStandUserIdentity(
         site_id="site-1",
-        user_id="52707407",
+        user_id="owner-user-001",
         display_name="刚哥",
         role="owner",
         is_owner=True,
@@ -159,10 +159,10 @@ def _check_dev_stores() -> None:
         channel="web",
         channel_account_id="desktop-pet",
         external_chat_id="conversation-1",
-        external_user_id="52707407",
+        external_user_id="owner-user-001",
     )
     identity.add_user(user)
-    identity.bind_channel("site-1", "52707407", channel_identity)
+    identity.bind_channel("site-1", "owner-user-001", channel_identity)
     assert identity.resolve_channel(channel_identity) == user
 
     durable = InMemoryDurableReceiveStore()

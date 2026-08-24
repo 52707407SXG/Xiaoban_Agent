@@ -247,6 +247,123 @@ def serialize_openai_chat_request_body(payload: Any) -> bytes:
     return openapi_dumps(body)
 
 
+def serialize_openai_responses_request_body(payload: Any) -> bytes:
+    """Build the exact JSON body produced by the installed Responses SDK."""
+
+    if not isinstance(payload, Mapping):
+        raise TypeError("OpenAI Responses payload must be a mapping")
+
+    from openai._base_client import _merge_mappings, openapi_dumps
+    from openai.resources.responses.responses import Responses
+
+    class _CaptureClient:
+        def __init__(self) -> None:
+            self.request: tuple[tuple[Any, ...], dict[str, Any]] | None = None
+
+        def post(self, *args: Any, **kwargs: Any) -> None:
+            self.request = (args, kwargs)
+
+        get = post
+        patch = post
+        put = post
+        delete = post
+        get_api_list = post
+
+    capture = _CaptureClient()
+    request_payload = dict(payload)
+    request_payload["stream"] = True
+    Responses(capture).create(**request_payload)
+    if capture.request is None:
+        raise RuntimeError("OpenAI SDK did not build a Responses request")
+    _, request_kwargs = capture.request
+    body = request_kwargs.get("body")
+    options = request_kwargs.get("options") or {}
+    extra_body = options.get("extra_json")
+    if extra_body is not None:
+        if body is None:
+            body = extra_body
+        elif isinstance(body, Mapping) and isinstance(extra_body, Mapping):
+            body = _merge_mappings(body, extra_body)
+        else:
+            raise TypeError("OpenAI extra_body cannot be merged into request body")
+    return openapi_dumps(body)
+
+
+def enforce_openai_responses_paid_call_dispatch_budget(
+    policy: PaidCallBudget,
+    *,
+    payload: Any,
+    configured_output_max_tokens: Any,
+    error_prefix: str = "paid_call_cost_cap",
+) -> int:
+    """Validate a Responses request, including Codex's logical output cap."""
+
+    if not isinstance(payload, Mapping):
+        raise PaidCallPolicyError(f"{error_prefix}_input_payload_invalid")
+    if configured_output_max_tokens is not None and (
+        isinstance(configured_output_max_tokens, bool)
+        or not isinstance(configured_output_max_tokens, int)
+        or configured_output_max_tokens <= 0
+    ):
+        raise PaidCallPolicyError(f"{error_prefix}_output_token_cap_invalid")
+    if (
+        configured_output_max_tokens is not None
+        and configured_output_max_tokens > policy.output_max_tokens
+    ):
+        raise PaidCallPolicyError(f"{error_prefix}_output_token_cap_exceeded")
+    extra_body = payload.get("extra_body")
+    controlled_fields = frozenset(
+        {
+            "model",
+            "input",
+            "instructions",
+            "max_output_tokens",
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "stream",
+        }
+    )
+    if isinstance(extra_body, Mapping) and controlled_fields.intersection(
+        extra_body
+    ):
+        raise PaidCallPolicyError(
+            f"{error_prefix}_protected_field_override"
+        )
+    try:
+        encoded = serialize_openai_responses_request_body(payload)
+        effective_payload = json.loads(encoded)
+    except Exception as exc:
+        raise PaidCallPolicyError(
+            f"{error_prefix}_input_payload_invalid"
+        ) from exc
+    if not isinstance(effective_payload, Mapping):
+        raise PaidCallPolicyError(f"{error_prefix}_input_payload_invalid")
+    wire_output_limit = effective_payload.get("max_output_tokens")
+    if (
+        wire_output_limit is not None
+        and wire_output_limit != configured_output_max_tokens
+    ):
+        raise PaidCallPolicyError(f"{error_prefix}_output_token_cap_exceeded")
+    if isinstance(policy, FixedPaidCallPolicy):
+        effective_model = normalize_model_for_provider(
+            str(effective_payload.get("model") or ""),
+            policy.provider,
+        )
+        if effective_model != policy.model:
+            raise PaidCallPolicyError(
+                f"{error_prefix}_fixed_route_mismatch"
+            )
+    if (
+        policy.input_max_bytes is not None
+        and len(encoded) > policy.input_max_bytes
+    ):
+        raise PaidCallPolicyError(
+            f"{error_prefix}_input_byte_cap_exceeded"
+        )
+    return len(encoded)
+
+
 def enforce_openai_chat_paid_call_dispatch_budget(
     policy: PaidCallBudget,
     *,
@@ -344,9 +461,11 @@ __all__ = [
     "SIGNED_MYSTAND_AGENT_POLICY_REGISTRY",
     "enforce_fixed_paid_call_route",
     "enforce_openai_chat_paid_call_dispatch_budget",
+    "enforce_openai_responses_paid_call_dispatch_budget",
     "enforce_paid_call_dispatch_budget",
     "enforce_signed_mystand_policy_revision",
     "normalize_fixed_route",
     "resolve_signed_mystand_agent_policy",
     "serialize_openai_chat_request_body",
+    "serialize_openai_responses_request_body",
 ]

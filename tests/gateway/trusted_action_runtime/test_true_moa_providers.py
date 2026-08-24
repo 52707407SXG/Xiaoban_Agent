@@ -8,8 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from xiaoban.trusted_runtime.true_moa import (
-    DEEPSEEK_ADVISOR_SLOT,
-    KIMI_ADVISOR_SLOT,
+    DEEPSEEK_FLASH_ADVISOR_SLOT,
+    GPT55_ADVISOR_SLOT,
     TRUE_MOA_ADVISOR_INPUT_MAX_BYTES,
     TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS,
     TRUE_MOA_FINAL_INPUT_MAX_BYTES,
@@ -73,7 +73,7 @@ def test_deepseek_advisor_is_one_fixed_toolless_no_retry_call(monkeypatch):
     monkeypatch.setattr("openai.OpenAI", _Client)
 
     result = providers.strict_advisor_call(
-        slot=DEEPSEEK_ADVISOR_SLOT,
+        slot=DEEPSEEK_FLASH_ADVISOR_SLOT,
         messages=_messages(),
         tools=(),
         timeout_seconds=9,
@@ -87,7 +87,7 @@ def test_deepseek_advisor_is_one_fixed_toolless_no_retry_call(monkeypatch):
 
     assert captured["client"]["max_retries"] == 0
     assert captured["client"]["timeout"] == 9
-    assert captured["request"]["model"] == "deepseek-v4-pro"
+    assert captured["request"]["model"] == "deepseek-v4-flash"
     assert captured["request"]["tools"] == []
     assert captured["request"]["stream"] is False
     assert (
@@ -101,74 +101,47 @@ def test_deepseek_advisor_is_one_fixed_toolless_no_retry_call(monkeypatch):
     assert result.usage["prompt_cache_hit_tokens"] == 4
 
 
-def test_kimi_advisor_is_one_fixed_toolless_no_retry_call(monkeypatch):
-    captured = {
-        "create_calls": 0,
-        "stream_calls": 0,
-        "dispatches": 0,
-    }
+def test_gpt55_advisor_is_one_fixed_toolless_codex_call(monkeypatch):
+    captured = {"create_calls": 0, "dispatches": 0}
 
-    class _Stream:
-        def __enter__(self):
-            captured["stream_entered"] = True
-            return self
-
-        def get_final_message(self):
+    class _Completions:
+        def create(self, **kwargs):
+            captured["create_calls"] += 1
+            captured["request"] = kwargs
             return SimpleNamespace(
-                content=[SimpleNamespace(type="text", text="Kimi 独立建议")],
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="GPT-5.5 反方建议",
+                            tool_calls=None,
+                        )
+                    )
+                ],
                 usage=SimpleNamespace(
-                    input_tokens=0,
-                    output_tokens=1996,
-                    cache_read_input_tokens=212,
-                    cache_creation_input_tokens=0,
+                    prompt_tokens=17,
+                    completion_tokens=6,
+                    total_tokens=23,
                 ),
             )
 
-        def __exit__(self, *_args):
-            captured["stream_closed"] = True
-
-    class _Messages:
-        def create(self, **_kwargs):
-            captured["create_calls"] += 1
-            raise AssertionError("Kimi advisor must use the streaming helper")
-
-        def stream(self, **kwargs):
-            captured["stream_calls"] += 1
-            captured["request"] = kwargs
-            return _Stream()
-
     class _Client:
         def __init__(self):
-            self.messages = _Messages()
+            self.chat = SimpleNamespace(completions=_Completions())
 
         def close(self):
             captured["closed"] = True
 
     client = _Client()
     monkeypatch.setattr(
-        providers,
-        "_fixed_credentials",
-        lambda *_args, **_kwargs: {
-            "api_key": "fake-kimi-key",
-            "base_url": "https://api.kimi.com/coding",
-        },
-    )
-
-    def _build_client(api_key, base_url, **kwargs):
-        captured["client"] = {
-            "api_key": api_key,
-            "base_url": base_url,
-            **kwargs,
-        }
-        return client
-
-    monkeypatch.setattr(
-        "agent.anthropic_adapter.build_anthropic_client",
-        _build_client,
+        "agent.auxiliary_client.resolve_provider_client",
+        lambda provider, model: (
+            client,
+            model,
+        ) if provider == "openai-codex" else (None, None),
     )
 
     result = providers.strict_advisor_call(
-        slot=KIMI_ADVISOR_SLOT,
+        slot=GPT55_ADVISOR_SLOT,
         messages=_messages(),
         tools=(),
         timeout_seconds=8,
@@ -180,94 +153,72 @@ def test_kimi_advisor_is_one_fixed_toolless_no_retry_call(monkeypatch):
         ),
     )
 
-    assert captured["client"]["max_retries"] == 0
-    assert captured["client"]["timeout"] == 8
-    assert captured["request"]["model"] == "k3"
+    assert captured["request"]["model"] == "gpt-5.5"
     assert captured["request"]["tools"] == []
+    assert captured["request"]["timeout"] == 8
+    assert captured["request"]["extra_body"] == {
+        "reasoning": {"effort": "medium"}
+    }
     assert (
         captured["request"]["max_tokens"]
         == TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS
     )
-    assert captured["create_calls"] == 0
-    assert captured["stream_calls"] == 1
+    assert captured["create_calls"] == 1
     assert captured["dispatches"] == 1
-    assert result.content == "Kimi 独立建议"
-    assert result.usage == {
-        "input_tokens": 212,
-        "output_tokens": 1996,
-        "total_tokens": 2208,
-        "cache_read_input_tokens": 212,
-    }
-    assert captured["stream_entered"] is True
-    assert captured["stream_closed"] is True
+    assert result.content == "GPT-5.5 反方建议"
+    assert result.usage["total_tokens"] == 23
+    assert result.usage["cached_input_tokens"] == 0
     assert captured["closed"] is True
 
 
-def test_kimi_stop_drains_final_usage_without_reading_late_text(monkeypatch):
-    stream_started = threading.Event()
+def test_gpt55_stop_drains_final_usage_without_reading_late_text(monkeypatch):
+    request_started = threading.Event()
     release_response = threading.Event()
     controller = TrueMoACancelController()
     outcome = []
     captured = {
         "dispatches": 0,
         "content_reads": 0,
-        "stream_closed": 0,
         "client_closed": 0,
     }
 
     class _Response:
         usage = SimpleNamespace(
-            input_tokens=17,
-            output_tokens=6,
-            cache_read_input_tokens=2,
-            cache_creation_input_tokens=3,
+            prompt_tokens=17,
+            completion_tokens=6,
+            total_tokens=23,
         )
 
         @property
         def content(self):
             captured["content_reads"] += 1
-            raise AssertionError("late Kimi text must not be read after stop")
+            raise AssertionError("late GPT-5.5 text must not be read after stop")
 
-    class _Stream:
-        def __enter__(self):
-            return self
-
-        def get_final_message(self):
-            stream_started.set()
+    class _Completions:
+        def create(self, **_kwargs):
+            request_started.set()
             assert release_response.wait(1)
-            return _Response()
-
-        def __exit__(self, *_args):
-            captured["stream_closed"] += 1
-
-    class _Messages:
-        def stream(self, **_kwargs):
-            return _Stream()
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=_Response())],
+                usage=_Response.usage,
+            )
 
     class _Client:
         def __init__(self):
-            self.messages = _Messages()
+            self.chat = SimpleNamespace(completions=_Completions())
 
         def close(self):
             captured["client_closed"] += 1
 
     monkeypatch.setattr(
-        providers,
-        "_fixed_credentials",
-        lambda *_args, **_kwargs: {
-            "api_key": "fake-kimi-key",
-            "base_url": "https://api.kimi.com/coding",
-        },
-    )
-    monkeypatch.setattr(
-        "agent.anthropic_adapter.build_anthropic_client",
-        lambda *_args, **_kwargs: _Client(),
+        "agent.auxiliary_client.resolve_provider_client",
+        lambda provider, model: (_Client(), model),
     )
 
     def _call():
         try:
             providers.strict_advisor_call(
-                slot=KIMI_ADVISOR_SLOT,
+                slot=GPT55_ADVISOR_SLOT,
                 messages=_messages(),
                 tools=(),
                 timeout_seconds=1,
@@ -283,7 +234,7 @@ def test_kimi_stop_drains_final_usage_without_reading_late_text(monkeypatch):
 
     worker = threading.Thread(target=_call, daemon=True)
     worker.start()
-    assert stream_started.wait(1)
+    assert request_started.wait(1)
     controller.cancel()
     release_response.set()
     worker.join(1)
@@ -292,15 +243,14 @@ def test_kimi_stop_drains_final_usage_without_reading_late_text(monkeypatch):
     assert len(outcome) == 1
     assert isinstance(outcome[0], providers.StrictAdvisorCancelled)
     assert outcome[0].usage == {
-        "input_tokens": 22,
-        "output_tokens": 6,
-        "total_tokens": 28,
-        "cache_read_input_tokens": 2,
+        "prompt_tokens": 17,
+        "completion_tokens": 6,
+        "total_tokens": 23,
+        "cached_input_tokens": 0,
     }
     assert captured == {
         "dispatches": 1,
         "content_reads": 0,
-        "stream_closed": 1,
         "client_closed": 1,
     }
 
@@ -308,7 +258,6 @@ def test_kimi_stop_drains_final_usage_without_reading_late_text(monkeypatch):
 @pytest.mark.parametrize(
     ("provider", "base_url"),
     [
-        ("kimi-coding", "https://proxy.example/v1"),
         ("deepseek", "https://proxy.example/v1"),
     ],
 )
@@ -321,11 +270,7 @@ def test_fixed_preset_rejects_endpoint_drift(monkeypatch, provider, base_url):
             "base_url": base_url,
         },
     )
-    expected = (
-        ("https://api.kimi.com", "/coding")
-        if provider == "kimi-coding"
-        else ("https://api.deepseek.com", "/v1")
-    )
+    expected = ("https://api.deepseek.com", "/v1")
     with pytest.raises(
         providers.StrictAdvisorProviderError,
         match="fixed_endpoint_mismatch",
@@ -383,7 +328,7 @@ def test_running_cancel_fences_output_but_waits_for_usage_receipt(monkeypatch):
     def _call():
         try:
             providers.strict_advisor_call(
-                slot=DEEPSEEK_ADVISOR_SLOT,
+                slot=DEEPSEEK_FLASH_ADVISOR_SLOT,
                 messages=_messages(),
                 tools=(),
                 timeout_seconds=1,
@@ -464,7 +409,7 @@ def test_cancel_winning_atomic_dispatch_gate_means_zero_provider_calls(
         match="advisor_cancelled_before_dispatch",
     ):
         providers.strict_advisor_call(
-            slot=DEEPSEEK_ADVISOR_SLOT,
+            slot=DEEPSEEK_FLASH_ADVISOR_SLOT,
             messages=_messages(),
             tools=(),
             timeout_seconds=1,
@@ -515,7 +460,7 @@ def test_cancel_during_durable_reservation_never_reaches_provider(
     def _call():
         try:
             providers.strict_advisor_call(
-                slot=DEEPSEEK_ADVISOR_SLOT,
+                slot=DEEPSEEK_FLASH_ADVISOR_SLOT,
                 messages=_messages(),
                 tools=(),
                 timeout_seconds=1,
@@ -542,7 +487,7 @@ def test_cancel_during_durable_reservation_never_reaches_provider(
 
 @pytest.mark.parametrize(
     "slot",
-    [KIMI_ADVISOR_SLOT, DEEPSEEK_ADVISOR_SLOT],
+    [DEEPSEEK_FLASH_ADVISOR_SLOT, GPT55_ADVISOR_SLOT],
 )
 def test_advisor_input_cap_rejects_before_credentials_or_dispatch(
     monkeypatch,

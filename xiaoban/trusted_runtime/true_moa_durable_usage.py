@@ -269,7 +269,7 @@ def project_true_moa_usage(value: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise ValueError("invalid true MoA durable advisor calls")
     if any(
-        item["slotId"] != "final-deepseek-v4-pro"
+        item["slotId"] != "final-openai-codex-gpt-5.6-luna"
         for item in final_calls
     ):
         raise ValueError("invalid true MoA durable final calls")
@@ -301,7 +301,7 @@ def project_true_moa_usage(value: Mapping[str, Any]) -> dict[str, Any]:
         for slot_id in advisor_call_slots
     ):
         raise ValueError("advisor call disagrees with true MoA slot lifecycle")
-    final_prefix = f"{wave_id}:final-deepseek-v4-pro:"
+    final_prefix = f"{wave_id}:final-openai-codex-gpt-5.6-luna:"
     if any(
         not item["callId"].startswith(final_prefix)
         for item in final_calls

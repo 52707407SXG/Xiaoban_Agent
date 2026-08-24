@@ -16,7 +16,6 @@ resolved through :func:`_ra` so those patches keep working.
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import os
@@ -445,80 +444,31 @@ _TRUE_MOA_FINAL_SLOT_INSTRUCTION = (
 
 _SIGNED_NORMAL_LOOP_INSTRUCTION = (
     "# My Stand execution feedback\n"
-    "For any turn that will use a non-todo tool or perform two or more concrete "
-    "My Stand actions, "
-    "your first provider response MUST contain exactly two short, natural "
-    "visible commentary sentences that summarize the user's requested outcome "
-    "and what you will check, plus exactly one todo tool call, with no non-todo "
-    "tool call in that response. That Todo list must have exactly one item with "
-    "status in_progress; every other unfinished item must be pending. "
-    "Wait for the TodoResult before calling a non-todo tool. If TodoResult "
-    "fails, treat that failure as evidence and continue making the best legal "
-    "decision; do not retry merely to satisfy this instruction. Update todo as "
-    "the real task state changes. For chat, advice, or questions that need no "
-    "My Stand tool, answer directly without todo even when careful reasoning "
-    "is needed. Do not use fixed headings, markers, or templates. "
-    "When you call tools, include one or two concise, concrete sentences in "
-    "the same assistant message. Say what you are doing now and, when prior "
-    "tool results exist, what you just learned from them. Write in the user's "
-    "language and never use a generic progress template. Treat every tool "
-    "result, including failures and runtime feedback about an invalid tool or "
-    "invalid arguments, as evidence: decide whether to correct the call, use a "
-    "different safe action, or finish. Keep working until the original goal and "
-    "its completion criteria are met or genuinely blocked. When no more tool "
-    "call is needed, give one natural final answer covering what you did, the "
-    "actual result, anything incomplete and why, and a useful next step when "
-    "one exists."
+    "Understand the user's requested outcome, relevant context, boundaries, "
+    "and completion criteria before acting. Do not expose hidden chain-of-thought. "
+    "Use the todo tool only when a visible plan materially helps a complex, "
+    "unfamiliar, dependent, or multi-step task stay on course. A simple or "
+    "familiar task may call the appropriate business tool directly, and a task "
+    "may inspect necessary read-only evidence before deciding whether a todo "
+    "plan is useful. Never create an empty or ceremonial plan. When todo is "
+    "used, treat TodoResult as real task state and update it as that state "
+    "changes. For chat, advice, or questions that need no My Stand tool, answer "
+    "directly without todo even when careful reasoning is needed. Do not use "
+    "fixed headings, markers, or progress templates. Whenever an assistant "
+    "response contains tool calls, its visible content must be non-empty in the "
+    "same assistant response as the tool calls. On the first tool round, write "
+    "one concise, natural sentence saying what outcome you understood and what "
+    "you will verify now. On a later tool round, write one concise sentence "
+    "saying what the prior ToolResult established and why the next action "
+    "follows. Do not use XML, nonce markers, bracketed stages, or a fixed "
+    "template. Write in the user's language. Never claim a tool was called or a fact was found "
+    "unless the current turn contains the corresponding real tool call or "
+    "ToolResult. Treat every ToolResult, including failures and invalid input, "
+    "as evidence: correct the call, choose another safe action, or finish. Keep "
+    "working until the original goal is met or genuinely blocked. When no more "
+    "tool call is needed, give one natural final answer covering the actual "
+    "result, anything incomplete and why, and a useful next step when one exists."
 )
-
-_MYSTAND_TOOL_ORDERING_MARKER = "MY STAND TOOL ORDERING:"
-
-
-def _with_mystand_tool_ordering_contract(tools: Any) -> Any:
-    """Return request-local tool schemas that reinforce the real Todo order."""
-    if not isinstance(tools, list):
-        return tools
-    scoped_tools = copy.deepcopy(tools)
-    for tool in scoped_tools:
-        if not isinstance(tool, dict):
-            continue
-        function = tool.get("function")
-        if not isinstance(function, dict):
-            continue
-        name = str(function.get("name") or "").strip()
-        description = str(function.get("description") or "").strip()
-        if not name or _MYSTAND_TOOL_ORDERING_MARKER in description:
-            continue
-        if name == "todo":
-            ordering = (
-                f"{_MYSTAND_TOOL_ORDERING_MARKER} For a work task, call todo "
-                "first and as the only tool in the initial response. Wait for "
-                "TodoResult before choosing another tool. In that response, "
-                "write two short visible sentences separated by sentence-end "
-                "punctuation: first summarize the requested outcome, then say "
-                "what you will check. 中文回复必须写成两句，每句用句号结束，"
-                "不要用逗号连接两句。"
-            )
-        else:
-            ordering = (
-                f"{_MYSTAND_TOOL_ORDERING_MARKER} Needing this tool makes the "
-                "turn a work task. Do not call it unless this turn's message "
-                "history already contains TodoResult from an earlier response. "
-                "If TodoResult is absent, call only todo now."
-            )
-        settlement_hint = (
-            "For finance.settlement_confirmation.unconfirmed, call once with "
-            "operation=read, query_kind=list, module_id=finance-ledger, "
-            "fact_paths=[finance.settlement_confirmation.unconfirmed], "
-            "coverage_required=true, and query_args containing only year and "
-            "month as JSON integers."
-            if name == "mystand_query"
-            else ""
-        )
-        function["description"] = "\n\n".join(
-            item for item in (ordering, settlement_hint, description) if item
-        ).strip()
-    return scoped_tools
 
 
 def _content_policy_blocked_result(
@@ -1170,10 +1120,6 @@ def run_conversation(
                 # isn't sent with stale, primary-shaped reasoning fields.
                 agent._reapply_reasoning_echo_for_provider(api_messages)
                 api_kwargs = agent._build_api_kwargs(api_messages)
-                if _signed_normal_loop and api_kwargs.get("tools"):
-                    api_kwargs["tools"] = _with_mystand_tool_ordering_contract(
-                        api_kwargs["tools"]
-                    )
                 if agent._force_ascii_payload:
                     _sanitize_structure_non_ascii(api_kwargs)
                 if agent.api_mode == "codex_responses":

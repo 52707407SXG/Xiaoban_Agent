@@ -16,9 +16,9 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from xiaoban.trusted_runtime.true_moa import (
-    DEEPSEEK_ADVISOR_SLOT,
+    GPT55_ADVISOR_SLOT as DEEPSEEK_ADVISOR_SLOT,
     FINAL_EXECUTOR_SLOT,
-    KIMI_ADVISOR_SLOT,
+    DEEPSEEK_FLASH_ADVISOR_SLOT as KIMI_ADVISOR_SLOT,
     MODE_EPOCH_HEADER,
     MOA_PRESET_ID_HEADER,
     MOA_PRESET_REVISION_HEADER,
@@ -256,8 +256,8 @@ def test_fixed_two_advisors_run_once_in_parallel_without_tools_or_shared_input()
     first, second = (message_views[slot.slot_id] for slot in TRUE_MOA_ADVISOR_SLOTS)
     assert first is not second
     assert all(left is not right for left, right in zip(first, second))
-    assert "<advisor-kimi-k3>" not in bundle.guidance
-    assert "&lt;advisor-kimi-k3&gt;" in bundle.guidance
+    assert "<advisor-deepseek-v4-flash>" not in bundle.guidance
+    assert "&lt;advisor-deepseek-v4-flash&gt;" in bundle.guidance
 
     ledger = bundle.ledger.to_dict()
     receipts = _slot_receipts(bundle.ledger)

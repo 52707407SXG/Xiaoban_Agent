@@ -294,6 +294,7 @@ def _origin_from_env() -> Optional[Dict[str, str]]:
             "chat_id": origin_chat_id,
             "chat_name": get_session_env("XIAOBAN_SESSION_CHAT_NAME") or None,
             "thread_id": thread_id,
+            "user_id": get_session_env("XIAOBAN_SESSION_USER_ID") or None,
         }
     return None
 

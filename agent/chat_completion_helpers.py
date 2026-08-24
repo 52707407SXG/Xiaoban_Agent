@@ -958,6 +958,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
                 getattr(agent, "_codex_reasoning_replay_enabled", True)
             ),
         )
+        return api_kwargs
 
     # ── chat_completions (default) ─────────────────────────────────────
     _ct = agent._get_transport()
@@ -2016,7 +2017,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
 
                 def _on_text(text):
                     _fire_first()
-                    agent._fire_stream_delta(text)
+                    _route_content_delta(text)
                     deltas_were_sent["yes"] = True
 
                 def _on_tool(name):
@@ -2025,7 +2026,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
 
                 def _on_reasoning(text):
                     _fire_first()
-                    agent._fire_reasoning_delta(text)
+                    _route_reasoning_delta(text)
 
                 result["response"] = stream_converse_with_callbacks(
                     raw_response,
@@ -2579,7 +2580,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     def _call():
         import httpx as _httpx
 
-        _max_stream_retries = env_int("XIAOBAN_STREAM_RETRIES", 2)
+        _max_stream_retries = (
+            0
+            if getattr(agent, "_strict_no_automatic_paid_retry", False)
+            else env_int("XIAOBAN_STREAM_RETRIES", 2)
+        )
 
         try:
             for _stream_attempt in range(_max_stream_retries + 1):

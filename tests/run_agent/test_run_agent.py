@@ -34,6 +34,10 @@ from agent.memory_manager import MemoryManager
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY, STEER_MARKER_OPEN
 from agent.transports.types import NormalizedResponse
 from gateway.session_context import clear_session_vars, set_session_vars
+from xiaoban.trusted_runtime.protocol_contract import (
+    MYSTAND_TRUE_MOA_FINAL_INPUT_MAX_BYTES,
+    MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -4402,6 +4406,7 @@ class TestRunConversation:
             AgentCallUsageLedger,
         )
         from xiaoban.trusted_runtime.paid_call_policy import (
+            SIGNED_MYSTAND_AGENT_POLICY,
             SIGNED_MYSTAND_AGENT_POLICY_REVISION,
         )
         from xiaoban.trusted_runtime.true_moa_cancel import (
@@ -4409,9 +4414,9 @@ class TestRunConversation:
         )
 
         self._setup_agent(agent)
-        agent.provider = "deepseek"
-        agent.model = "deepseek-v4-pro"
-        agent.max_tokens = 4096
+        agent.provider = SIGNED_MYSTAND_AGENT_POLICY.provider
+        agent.model = SIGNED_MYSTAND_AGENT_POLICY.model
+        agent.max_tokens = SIGNED_MYSTAND_AGENT_POLICY.output_max_tokens
         agent.max_iterations = 8
         agent._strict_no_automatic_paid_retry = True
         agent._disable_streaming = True
@@ -4464,43 +4469,188 @@ class TestRunConversation:
         sent_tools = agent.client.chat.completions.create.call_args.kwargs["tools"]
         assert result["completed"] is True
         assert sent_system.endswith(_SIGNED_NORMAL_LOOP_INSTRUCTION)
-        assert "exactly one todo tool call" in _SIGNED_NORMAL_LOOP_INSTRUCTION
-        assert "exactly two short, natural" in _SIGNED_NORMAL_LOOP_INSTRUCTION
-        assert "exactly one item with status in_progress" in _SIGNED_NORMAL_LOOP_INSTRUCTION
-        assert sent_tools[0]["function"]["description"].startswith(
-            "MY STAND TOOL ORDERING:"
-        )
+        assert "Use the todo tool only when" in _SIGNED_NORMAL_LOOP_INSTRUCTION
+        assert "Never create an empty or ceremonial plan" in _SIGNED_NORMAL_LOOP_INSTRUCTION
+        assert "Never claim a tool was called" in _SIGNED_NORMAL_LOOP_INSTRUCTION
+        assert "visible content must be non-empty" in _SIGNED_NORMAL_LOOP_INSTRUCTION
+        assert "same assistant response as the tool calls" in _SIGNED_NORMAL_LOOP_INSTRUCTION
+        assert "Do not use XML, nonce markers" in _SIGNED_NORMAL_LOOP_INSTRUCTION
+        assert "exactly two short, natural" not in _SIGNED_NORMAL_LOOP_INSTRUCTION
+        assert "exactly one todo tool call" not in _SIGNED_NORMAL_LOOP_INSTRUCTION
+        assert sent_tools[0]["function"]["description"] == "web_search tool"
         assert agent.tools[0]["function"]["description"] == "web_search tool"
 
-    def test_signed_normal_query_description_includes_settlement_shape(self):
-        from agent.conversation_loop import _with_mystand_tool_ordering_contract
+    def test_signed_mystand_native_loop_emits_commentary_then_natural_final(
+        self,
+        agent,
+    ):
+        self._setup_signed_normal(agent)
+        agent._disable_streaming = False
+        agent.tool_progress_callback = lambda *_args: None
+        commentary = []
+        final_deltas = []
+        agent.interim_assistant_callback = (
+            lambda text, **_kwargs: commentary.append(text)
+        )
+        agent.stream_delta_callback = final_deltas.append
+        tool_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"核对授权资料"}',
+            call_id="native-loop-tool",
+        )
+        responses = [
+            _mock_response(
+                content="我先核对授权资料，再根据真实结果回答。",
+                finish_reason="tool_calls",
+                tool_calls=[tool_call],
+            ),
+            _mock_response(
+                content="授权资料已经核对完成。",
+                finish_reason="stop",
+            ),
+        ]
+        response_iter = iter(responses)
 
-        scoped = _with_mystand_tool_ordering_contract([
-            {
-                "type": "function",
-                "function": {
-                    "name": "todo",
-                    "description": "Track work.",
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "mystand_query",
-                    "description": "Read My Stand facts.",
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            },
-        ])
-        todo_description = scoped[0]["function"]["description"]
-        assert "two short visible sentences" in todo_description
-        assert "sentence-end punctuation" in todo_description
-        assert "不要用逗号连接两句" in todo_description
-        description = scoped[1]["function"]["description"]
-        assert "call once" in description
-        assert "query_kind=list" in description
-        assert "query_args containing only year and month" in description
+        def _streaming_response(*_args, **_kwargs):
+            response = next(response_iter)
+            choice = response.choices[0]
+            if choice.finish_reason == "stop" and choice.message.content:
+                agent._fire_stream_delta(choice.message.content)
+            return response
+
+        tool_dispatches = []
+
+        def _tool_result(*_args, **_kwargs):
+            tool_dispatches.append("web_search")
+            return json.dumps({"ok": True, "result": "已取得可核实结果"})
+
+        session_tokens = set_session_vars(
+            platform="api_server",
+            source="mystand",
+            user_id="ZYJ005",
+            user_message="核对授权资料",
+            message_id="native-loop-message",
+            session_id="native-loop-session",
+            session_key="native-loop-key",
+            async_delivery=False,
+        )
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_streaming_api_call",
+                    side_effect=_streaming_response,
+                ) as api_call,
+                patch(
+                    "xiaoban.trusted_runtime.turns.current_turn",
+                    return_value=SimpleNamespace(
+                        request_id="native-loop-request",
+                        turn_id="native-loop-turn",
+                    ),
+                ),
+                patch("run_agent.handle_function_call", side_effect=_tool_result),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation("核对授权资料")
+        finally:
+            clear_session_vars(session_tokens)
+
+        assert api_call.call_count == 2
+        assert tool_dispatches == ["web_search"]
+        assert commentary == ["我先核对授权资料，再根据真实结果回答。"]
+        assert result["completed"] is True
+        assert result["final_response"] == "授权资料已经核对完成。"
+        assert "".join(item for item in final_deltas if item).strip() == "授权资料已经核对完成。"
+        sent_system = api_call.call_args_list[0].args[0]["messages"][0]["content"]
+        assert "XB-FEEDBACK" not in sent_system
+        assert "XB-FINAL" not in sent_system
+
+    def test_signed_mystand_native_loop_allows_multiple_tools_without_todo(
+        self,
+        agent,
+    ):
+        self._setup_signed_normal(agent)
+        agent._disable_streaming = False
+        agent.tool_progress_callback = lambda *_args: None
+        commentary = []
+        agent.interim_assistant_callback = (
+            lambda text, **_kwargs: commentary.append(text)
+        )
+        agent.stream_delta_callback = lambda _delta: None
+        responses = [
+            _mock_response(
+                content="我先查目录。",
+                finish_reason="tool_calls",
+                tool_calls=[_mock_tool_call(
+                    name="web_search",
+                    arguments='{"query":"先查目录"}',
+                    call_id="native-first-tool",
+                )],
+            ),
+            _mock_response(
+                content="目录已找到，我继续核对正文。",
+                finish_reason="tool_calls",
+                tool_calls=[_mock_tool_call(
+                    name="web_search",
+                    arguments='{"query":"再查正文"}',
+                    call_id="native-second-tool",
+                )],
+            ),
+            _mock_response(
+                content="目录和正文都已核对完成。",
+                finish_reason="stop",
+            ),
+        ]
+        tool_dispatches = []
+
+        def _tool_result(*_args, **_kwargs):
+            tool_dispatches.append("web_search")
+            return json.dumps({"ok": True})
+
+        session_tokens = set_session_vars(
+            platform="api_server",
+            source="mystand",
+            user_id="ZYJ005",
+            user_message="查目录并核对正文",
+            message_id="native-multi-message",
+            session_id="native-multi-session",
+            session_key="native-multi-key",
+            async_delivery=False,
+        )
+        try:
+            with (
+                patch.object(
+                    agent,
+                    "_interruptible_streaming_api_call",
+                    side_effect=responses,
+                ) as api_call,
+                patch(
+                    "xiaoban.trusted_runtime.turns.current_turn",
+                    return_value=SimpleNamespace(
+                        request_id="native-multi-request",
+                        turn_id="native-multi-turn",
+                    ),
+                ),
+                patch("run_agent.handle_function_call", side_effect=_tool_result),
+                patch.object(agent, "_persist_session"),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation("查目录并核对正文")
+        finally:
+            clear_session_vars(session_tokens)
+
+        assert api_call.call_count == 3
+        assert tool_dispatches == ["web_search", "web_search"]
+        assert commentary == [
+            "我先查目录。",
+            "目录已找到，我继续核对正文。",
+        ]
+        assert result["completed"] is True
+        assert result["final_response"] == "目录和正文都已核对完成。"
+
 
     def test_ollama_small_runtime_context_fails_before_api_call(self, agent, caplog):
         self._setup_agent(agent)
@@ -4643,32 +4793,34 @@ class TestRunConversation:
         expected_projection_key,
         final_text,
     ):
-        """A fake Provider must see the commit ToolResult before its final."""
-        from tools import mystand_authorization_tool as authorization_bridge
+        """A fake Provider sees the verified preview/approve/commit result."""
         from tools import mystand_authorization_write_tool as write_bridge
 
         self._setup_agent(agent)
         agent.tools = _make_tool_defs("mystand_authorization_write")
         agent.valid_tool_names = {"mystand_authorization_write"}
-        commit_args = {
-            "operation": "commit_write",
-            "preview_token": "preview-token-e4",
+        preview_token = "preview-token-e4"
+        tool_args = {
+            "operation": "preview_and_apply",
+            "resource": {
+                "name": "测试图谱",
+                "type_hint": "knowledge-graph",
+            },
+            "action": "knowledge-graph.add-node",
+            "payload": {
+                "node": {"label": "节点", "type": "skill"},
+            },
             "idempotency_key": "same-key-from-preview-e4",
         }
         serialized_preview_token = json.dumps(
-            commit_args["preview_token"],
+            preview_token,
             ensure_ascii=False,
             separators=(",", ":"),
         )
         preview_token_hash = hashlib.sha256(
             serialized_preview_token.encode("utf-8")
         ).hexdigest()
-        confirmation_context = (
-            "ZYJ005\u001fsession-confirm-e4\u001fmsg-confirm-e4"
-        )
-        confirmation_id = "xiaoban-write-" + hashlib.sha256(
-            confirmation_context.encode("utf-8")
-        ).hexdigest()
+        confirmation_id = "approval_" + "b" * 32
         upstream_result = {
             "ok": True,
             "status": 200,
@@ -4678,7 +4830,13 @@ class TestRunConversation:
                 "recorded": True,
                 "auditId": "audit-e4-same-loop-0001",
             },
+            "recovery": {
+                "recoveryId": "auth-recovery-" + "d" * 32,
+                "retentionDays": 7,
+                "expiresAt": "2026-09-01T12:00:00.000Z",
+            },
             "confirmationId": confirmation_id,
+            "confirmationMode": "separate-user-confirmation",
             "action": "knowledge-graph.add-node",
             "target": {
                 "graphId": "graph-e4",
@@ -4686,7 +4844,7 @@ class TestRunConversation:
             },
             "expectedVersion": "graph-version-1",
             "nextVersion": "graph-version-2",
-            "idempotencyKey": commit_args["idempotency_key"],
+            "idempotencyKey": tool_args["idempotency_key"],
             "requestFingerprint": "a" * 64,
             "previewTokenHash": preview_token_hash,
             "changeDigest": "c" * 64,
@@ -4694,7 +4852,7 @@ class TestRunConversation:
         }
         tool_call = _mock_tool_call(
             name="mystand_authorization_write",
-            arguments=json.dumps(commit_args),
+            arguments=json.dumps(tool_args),
             call_id="authorization-write-e4",
         )
         agent.client.chat.completions.create.side_effect = [
@@ -4709,6 +4867,24 @@ class TestRunConversation:
 
         def fake_internal(path, payload, **kwargs):
             internal_calls.append((path, payload, kwargs))
+            if path.endswith("/preview"):
+                return json.dumps({
+                    "ok": True,
+                    "previewToken": preview_token,
+                    "action": tool_args["action"],
+                    "target": {"graphId": "graph-e4"},
+                    "expectedVersion": "graph-version-1",
+                    "displayPreview": {
+                        "title": "新增图谱节点",
+                        "action": tool_args["action"],
+                        "target": "测试图谱",
+                        "before": "（当前没有该节点）",
+                        "after": "节点",
+                        "changeType": "add",
+                        "summary": "新增节点",
+                        "recoveryDays": 7,
+                    },
+                }, ensure_ascii=False)
             return json.dumps(upstream_result, ensure_ascii=False)
 
         def execute_write(function_name, function_args, *_args, **_kwargs):
@@ -4723,9 +4899,18 @@ class TestRunConversation:
             lambda: None,
         )
         monkeypatch.setattr(
-            authorization_bridge,
+            write_bridge,
             "_post_internal",
             fake_internal,
+        )
+        monkeypatch.setattr(
+            write_bridge,
+            "request_gateway_action_approval",
+            lambda **_kwargs: {
+                "approved": True,
+                "choice": "once",
+                "approval_id": confirmation_id,
+            },
         )
         session_tokens = set_session_vars(
             platform="api_server",
@@ -4749,25 +4934,15 @@ class TestRunConversation:
 
         assert result["final_response"] == final_text
         assert result["api_calls"] == 2
-        assert internal_calls == [
-            (
-                "/api/xiaoban/internal/authorization/write/commit",
-                {
-                    "previewToken": "preview-token-e4",
-                    "idempotencyKey": "same-key-from-preview-e4",
-                    "confirmationPhrase": "确认写入",
-                },
-                {
-                    "session": {
-                        "platform": "api_server",
-                        "user_id": "ZYJ005",
-                        "message_id": "msg-confirm-e4",
-                        "session_id": "session-confirm-e4",
-                    },
-                    "explicit_confirmation": True,
-                },
-            )
+        assert [call[0].rsplit("/", 1)[-1] for call in internal_calls] == [
+            "preview",
+            "commit",
         ]
+        assert internal_calls[1][1] == {
+            "previewToken": preview_token,
+            "idempotencyKey": tool_args["idempotency_key"],
+        }
+        assert internal_calls[1][2]["gateway_approval_id"] == confirmation_id
         second_call_messages = (
             agent.client.chat.completions.create.call_args_list[1]
             .kwargs["messages"]
@@ -4803,7 +4978,7 @@ class TestRunConversation:
                 "recorded": True,
                 "auditId": "audit-e4-same-loop-0001",
             }
-            assert receipt["idempotencyKey"] == commit_args["idempotency_key"]
+            assert receipt["idempotencyKey"] == tool_args["idempotency_key"]
             assert receipt["previewTokenHash"] == preview_token_hash
             assert receipt["confirmationId"] == confirmation_id
             assert "完成写入" in result["final_response"]
@@ -4918,6 +5093,7 @@ class TestRunConversation:
         agent,
     ):
         from xiaoban.trusted_runtime.true_moa import (
+            FINAL_EXECUTOR_SLOT,
             TRUE_MOA_MODE,
             TRUE_MOA_PRESET_ID,
             TRUE_MOA_PRESET_REVISION,
@@ -4931,9 +5107,9 @@ class TestRunConversation:
         agent._api_max_retries = 1
         agent._fallback_chain = []
         agent._fallback_index = 0
-        agent.provider = "deepseek"
-        agent.model = "deepseek-v4-pro"
-        agent.max_tokens = 4096
+        agent.provider = FINAL_EXECUTOR_SLOT.provider
+        agent.model = FINAL_EXECUTOR_SLOT.model
+        agent.max_tokens = MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
         ledger = TrueMoAUsageLedger(
             TrueMoASnapshot(
                 mode=TRUE_MOA_MODE,
@@ -4943,6 +5119,7 @@ class TestRunConversation:
             ),
             wave_id="strict-two-call-wave",
         )
+        agent._paid_call_usage_ledger = ledger
         agent._true_moa_usage_ledger = ledger
         tc = _mock_tool_call(
             name="web_search",
@@ -6096,6 +6273,7 @@ class TestRunConversation:
         agent,
     ):
         from xiaoban.trusted_runtime.true_moa import (
+            FINAL_EXECUTOR_SLOT,
             TRUE_MOA_MODE,
             TRUE_MOA_PRESET_ID,
             TRUE_MOA_PRESET_REVISION,
@@ -6109,9 +6287,9 @@ class TestRunConversation:
         agent._api_max_retries = 1
         agent._fallback_chain = []
         agent._fallback_index = 0
-        agent.provider = "deepseek"
-        agent.model = "deepseek-v4-pro"
-        agent.max_tokens = 4096
+        agent.provider = FINAL_EXECUTOR_SLOT.provider
+        agent.model = FINAL_EXECUTOR_SLOT.model
+        agent.max_tokens = MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
         agent.max_iterations = 8
         ledger = TrueMoAUsageLedger(
             TrueMoASnapshot(
@@ -6122,6 +6300,7 @@ class TestRunConversation:
             ),
             wave_id="strict-eight-call-wave",
         )
+        agent._paid_call_usage_ledger = ledger
         agent._true_moa_usage_ledger = ledger
         responses = []
         for index in range(7):
@@ -6177,7 +6356,7 @@ class TestRunConversation:
         assert api_call.call_count == 8
         assert tool_call.call_count == 7
         final_payload = api_call.call_args_list[7].args[0]
-        assert final_payload["model"] == "deepseek-v4-pro"
+        assert final_payload["model"] == FINAL_EXECUTOR_SLOT.model
         assert "tools" not in final_payload
         assert len(
             [
@@ -6192,6 +6371,7 @@ class TestRunConversation:
         agent,
     ):
         from xiaoban.trusted_runtime.true_moa import (
+            FINAL_EXECUTOR_SLOT,
             TRUE_MOA_MODE,
             TRUE_MOA_PRESET_ID,
             TRUE_MOA_PRESET_REVISION,
@@ -6205,10 +6385,10 @@ class TestRunConversation:
         agent._api_max_retries = 1
         agent._fallback_chain = []
         agent._fallback_index = 0
-        agent.provider = "deepseek"
-        agent.model = "deepseek-v4-pro"
-        agent.max_tokens = 4096
-        agent._true_moa_usage_ledger = TrueMoAUsageLedger(
+        agent.provider = FINAL_EXECUTOR_SLOT.provider
+        agent.model = FINAL_EXECUTOR_SLOT.model
+        agent.max_tokens = MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
+        ledger = TrueMoAUsageLedger(
             TrueMoASnapshot(
                 mode=TRUE_MOA_MODE,
                 mode_epoch="strict-byte-compact",
@@ -6217,6 +6397,8 @@ class TestRunConversation:
             ),
             wave_id="strict-byte-compact-wave",
         )
+        agent._paid_call_usage_ledger = ledger
+        agent._true_moa_usage_ledger = ledger
         history = []
         for index in range(12):
             history.extend(
@@ -6266,8 +6448,8 @@ class TestRunConversation:
         assert result["api_calls"] == 1
         assert api_call.call_count == 1
         sent_messages = api_call.call_args.args[0]["messages"]
-        assert sent_messages[0]["role"] == "system"
-        assert sent_messages[0]["content"] == "You are helpful."
+        assert sent_messages[0]["role"] == "developer"
+        assert sent_messages[0]["content"].startswith("You are helpful.")
         assert any(
             item.get("role") == "assistant"
             and "CONTEXT COMPACTION" in item.get("content", "")
@@ -6283,8 +6465,16 @@ class TestRunConversation:
     @pytest.mark.parametrize(
         ("max_tokens", "user_message"),
         [
-            (4097, "output cap must fail before dispatch"),
-            (4096, "x" * 131_072),
+            pytest.param(
+                MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS + 1,
+                "output cap must fail before dispatch",
+                id="output-cap",
+            ),
+            pytest.param(
+                MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS,
+                "x" * (MYSTAND_TRUE_MOA_FINAL_INPUT_MAX_BYTES + 1),
+                id="input-cap",
+            ),
         ],
     )
     def test_true_moa_final_cost_cap_rejects_before_provider_dispatch(
@@ -6294,6 +6484,7 @@ class TestRunConversation:
         user_message,
     ):
         from xiaoban.trusted_runtime.true_moa import (
+            FINAL_EXECUTOR_SLOT,
             TRUE_MOA_MODE,
             TRUE_MOA_PRESET_ID,
             TRUE_MOA_PRESET_REVISION,
@@ -6307,8 +6498,8 @@ class TestRunConversation:
         agent._api_max_retries = 1
         agent._fallback_chain = []
         agent._fallback_index = 0
-        agent.provider = "deepseek"
-        agent.model = "deepseek-v4-pro"
+        agent.provider = FINAL_EXECUTOR_SLOT.provider
+        agent.model = FINAL_EXECUTOR_SLOT.model
         agent.max_tokens = max_tokens
         ledger = TrueMoAUsageLedger(
             TrueMoASnapshot(
@@ -6319,6 +6510,7 @@ class TestRunConversation:
             ),
             wave_id="9" * 32,
         )
+        agent._paid_call_usage_ledger = ledger
         agent._true_moa_usage_ledger = ledger
 
         with (
@@ -6337,7 +6529,7 @@ class TestRunConversation:
 
         assert result["completed"] is False
         assert result["failed"] is True
-        if max_tokens > 4096:
+        if max_tokens > MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS:
             assert result["failure"] == {
                 "schema": "xiaoban.agent-failure.v1",
                 "kind": "fatal",
@@ -6345,7 +6537,7 @@ class TestRunConversation:
                 "phase": "request_preflight",
                 "reason": (
                     "The requested model output exceeded the fixed "
-                    "4096-token limit"
+                    f"{MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS}-token limit"
                 ),
                 "retryable": False,
             }
@@ -6364,6 +6556,7 @@ class TestRunConversation:
         agent,
     ):
         from xiaoban.trusted_runtime.true_moa import (
+            FINAL_EXECUTOR_SLOT,
             TRUE_MOA_MODE,
             TRUE_MOA_PRESET_ID,
             TRUE_MOA_PRESET_REVISION,
@@ -6378,9 +6571,9 @@ class TestRunConversation:
         agent._api_max_retries = 1
         agent._fallback_chain = []
         agent._fallback_index = 0
-        agent.provider = "deepseek"
-        agent.model = "deepseek-v4-pro"
-        agent.max_tokens = 4096
+        agent.provider = FINAL_EXECUTOR_SLOT.provider
+        agent.model = FINAL_EXECUTOR_SLOT.model
+        agent.max_tokens = MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
         controller = TrueMoACancelController()
         callback_started = threading.Event()
         release_callback = threading.Event()
@@ -6403,6 +6596,7 @@ class TestRunConversation:
             wave_id="final-reservation-wave",
             on_change=_persist,
         )
+        agent._paid_call_usage_ledger = ledger
         agent._true_moa_usage_ledger = ledger
         agent._true_moa_cancel_controller = controller
         result_box = {}
@@ -9540,6 +9734,40 @@ class TestStreamingApiCall:
         callback.assert_any_call("Hel")
         callback.assert_any_call("lo ")
         callback.assert_any_call("World")
+
+    def test_tool_generation_callback_can_opt_into_provider_metadata(self, agent):
+        observed = []
+
+        def callback(tool_name, **metadata):
+            observed.append((tool_name, metadata))
+
+        callback._xiaoban_accepts_provider_metadata = True
+        agent.tool_gen_callback = callback
+        agent._api_call_count = 3
+
+        with patch("run_agent.time.time", return_value=1787191200.25):
+            agent._fire_tool_gen_started("mystand_query")
+
+        assert observed == [(
+            "mystand_query",
+            {
+                "source": "provider",
+                "provider_sequence": 3,
+                "provider_event_at": 1787191200.25,
+            },
+        )]
+
+    def test_tool_generation_callback_keeps_legacy_one_argument_contract(self, agent):
+        observed = []
+
+        def callback(tool_name):
+            observed.append(tool_name)
+
+        agent.tool_gen_callback = callback
+
+        agent._fire_tool_gen_started("mystand_query")
+
+        assert observed == ["mystand_query"]
 
     def test_tool_call_accumulation(self, agent):
         # Per OpenAI streaming spec, function names are delivered atomically

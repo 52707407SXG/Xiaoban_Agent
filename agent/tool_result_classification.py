@@ -41,10 +41,12 @@ _TRUSTED_CONTEXT_ID = re.compile(
 _VERIFIED_WRITE_ACTIONS = frozenset({
     "note.append-content",
     "property-note.append-text-block",
+    "property-note.edit-blocks",
     "profile-card.update-field",
     "knowledge-graph.add-node",
     "knowledge-graph.update-node",
     "knowledge-graph.add-edge",
+    "knowledge-graph.delete",
     "finance-archive.update-row-fields",
 })
 _MODEL_METADATA_FIELDS = (

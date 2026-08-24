@@ -133,11 +133,20 @@ ACTION_OUTPUT_CONTRACTS: Dict[str, ActionOutputContract] = {
         "v1",
         "read",
     ),
+    "mystand_unsettled_performance": ActionOutputContract(
+        "mystand_unsettled_performance",
+        "v1",
+        "read",
+    ),
 }
 
 # 写操作不属于第一阶段只读合同：由既有写确认 + 写回执硬闸接管，
 # 可信只读链对其完全旁路，不登记、不采证、不拦截。
-WRITE_TOOL_NAMES = frozenset({"mystand_authorization_write"})
+WRITE_TOOL_NAMES = frozenset({
+    "mystand_authorization_write",
+    "mystand_skill_manage",
+    "mystand_cron",
+})
 WRITE_OPERATIONS = frozenset({"preview_write", "commit_write"})
 
 

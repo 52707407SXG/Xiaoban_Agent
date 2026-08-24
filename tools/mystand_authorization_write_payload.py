@@ -162,8 +162,21 @@ def build_authorization_write_payload_schema() -> dict:
             "use exactly {nodeId,changes:{label?,type?,summary?,body?,x?,y?,color?}}; "
             "changes also accepts only name→label, nodeType→type, and content→body. "
             "Canonical fields and their same-meaning aliases cannot be mixed. "
-            "Never include graphId; My Stand resolves the graph from the "
-            "server-authorized resource."
+            "knowledge-graph.delete accepts an empty payload and requires the separate "
+            "preview/confirmation flow; My Stand retains its audit receipt and resource tombstone. "
+            "Other permanent destructive actions are not available to website Xiaoban. "
+            "business-archive.archive accepts an empty payload and moves the record "
+            "to the website's recoverable archive area. Never "
+            "include graphId; My Stand resolves the graph from the "
+            "server-authorized resource. note.append-content needs only {content}; "
+            "My Stand resolves the note id from the same authorized resource. "
+            "property-note.append-text-block also needs only {content}; My Stand "
+            "resolves the property-note archive and active document from the same "
+            "authorized resource. For structure-aware property-note work, use "
+            "property-note.edit-blocks with {operations:[...]}. Read the resource first "
+            "and use the exact document/block ids and beforeText from writeCapability.structure. "
+            "One approved call may insert text blocks, replace existing block text, and delete "
+            "existing blocks atomically; My Stand resolves archiveId itself."
         ),
         "properties": {
             "node": {
@@ -212,6 +225,42 @@ def build_authorization_write_payload_schema() -> dict:
             "content": {"type": "string"},
             "archiveId": {"type": "string"},
             "documentId": {"type": "string"},
+            "operations": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 40,
+                "description": (
+                    "property-note.edit-blocks operations. insert-text-block uses "
+                    "{op,documentId,afterBlockId?,blockType,text}; replace-block-text "
+                    "uses {op,documentId,blockId,beforeText,afterText}; delete-block uses "
+                    "{op,documentId,blockId,beforeText}. beforeText must exactly equal the "
+                    "latest structure snapshot so punctuation-level differences remain visible."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "op": {
+                            "type": "string",
+                            "enum": ["insert-text-block", "replace-block-text", "delete-block"],
+                        },
+                        "documentId": {"type": "string"},
+                        "blockId": {"type": "string"},
+                        "afterBlockId": {"type": "string"},
+                        "blockType": {
+                            "type": "string",
+                            "enum": [
+                                "h1", "h2", "h3", "h4", "h5", "paragraph", "bullet",
+                                "ordered", "check", "quote", "divider", "code", "callout",
+                            ],
+                        },
+                        "beforeText": {"type": "string"},
+                        "afterText": {"type": "string"},
+                        "text": {"type": "string"},
+                    },
+                    "required": ["op", "documentId"],
+                    "additionalProperties": False,
+                },
+            },
             "subjectType": {"type": "string"},
             "subjectId": {"type": "string"},
             "sectionKey": {"type": "string"},
@@ -269,6 +318,93 @@ def normalize_authorization_write_payload(action: str, payload: dict) -> dict:
 
     if not isinstance(payload, dict):
         raise AuthorizationWritePayloadError("payload 必须是动作对应的对象。")
+    if action in {"business-archive.archive", "knowledge-graph.delete"}:
+        label = "业务档案可恢复归档请求" if action == "business-archive.archive" else "知识图谱删除请求"
+        _reject_unknown_fields(payload, (), label)
+        return {}
+    if action == "note.append-content":
+        _reject_unknown_fields(
+            payload,
+            ("content", "noteId", "mode"),
+            "追加笔记请求",
+        )
+        _require_fields(payload, ("content",), "追加笔记请求")
+        if "mode" in payload and payload["mode"] != "append":
+            raise AuthorizationWritePayloadError(
+                "追加笔记请求的 mode 只能是 append。",
+                code="write_payload_fields_not_allowed",
+            )
+        return {"content": payload["content"]}
+    if action == "property-note.append-text-block":
+        _reject_unknown_fields(
+            payload,
+            ("content", "archiveId", "documentId", "mode"),
+            "追加房源笔记请求",
+        )
+        _require_fields(payload, ("content",), "追加房源笔记请求")
+        if "mode" in payload and payload["mode"] != "append":
+            raise AuthorizationWritePayloadError(
+                "追加房源笔记请求的 mode 只能是 append。",
+                code="write_payload_fields_not_allowed",
+            )
+        return {"content": payload["content"]}
+    if action == "property-note.edit-blocks":
+        _reject_unknown_fields(payload, ("operations", "archiveId"), "房源笔记编辑请求")
+        _require_fields(payload, ("operations",), "房源笔记编辑请求")
+        operations = payload["operations"]
+        if not isinstance(operations, list) or not operations or len(operations) > 40:
+            raise AuthorizationWritePayloadError("房源笔记编辑需要 1 到 40 个操作。")
+        normalized = []
+        for index, operation in enumerate(operations):
+            label = f"房源笔记操作 {index + 1}"
+            if not isinstance(operation, dict):
+                raise AuthorizationWritePayloadError(f"{label}必须是对象。")
+            _require_fields(operation, ("op", "documentId"), label)
+            op = operation["op"]
+            if op == "insert-text-block":
+                _reject_unknown_fields(
+                    operation,
+                    ("op", "documentId", "afterBlockId", "blockType", "text"),
+                    label,
+                )
+                _require_fields(operation, ("blockType", "text"), label)
+                normalized.append({
+                    "op": op,
+                    "documentId": operation["documentId"],
+                    **({"afterBlockId": operation["afterBlockId"]} if "afterBlockId" in operation else {}),
+                    "blockType": operation["blockType"],
+                    "text": operation["text"],
+                })
+            elif op == "replace-block-text":
+                _reject_unknown_fields(
+                    operation,
+                    ("op", "documentId", "blockId", "beforeText", "afterText"),
+                    label,
+                )
+                _require_fields(operation, ("blockId", "beforeText", "afterText"), label)
+                normalized.append({
+                    "op": op,
+                    "documentId": operation["documentId"],
+                    "blockId": operation["blockId"],
+                    "beforeText": operation["beforeText"],
+                    "afterText": operation["afterText"],
+                })
+            elif op == "delete-block":
+                _reject_unknown_fields(
+                    operation,
+                    ("op", "documentId", "blockId", "beforeText"),
+                    label,
+                )
+                _require_fields(operation, ("blockId", "beforeText"), label)
+                normalized.append({
+                    "op": op,
+                    "documentId": operation["documentId"],
+                    "blockId": operation["blockId"],
+                    "beforeText": operation["beforeText"],
+                })
+            else:
+                raise AuthorizationWritePayloadError("房源笔记编辑操作不受支持。")
+        return {"operations": normalized}
     if action == "knowledge-graph.add-node":
         if "node" in payload:
             _reject_unknown_fields(payload, ("node",), "新增图谱节点请求")

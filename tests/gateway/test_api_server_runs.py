@@ -109,7 +109,7 @@ class TestStartRun:
                     json={"input": "hello"},
                     headers={
                         "X-Xiaoban-Toolset-Policy": "mystand-owner",
-                        "X-Xiaoban-User-Id": "52707407",
+                        "X-Xiaoban-User-Id": "owner-user-001",
                         "X-Xiaoban-Message-Id": "msg-safe-owner",
                     },
                 )

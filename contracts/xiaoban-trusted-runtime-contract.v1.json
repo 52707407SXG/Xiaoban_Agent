@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "contract": "mystand.xiaoban-trusted-runtime-contract.v1",
-  "revision": "2026-08-09.1",
+  "revision": "2026-08-22.1",
   "compatibility": {
     "mode": "exact-match",
     "silentFallbackAllowed": false,
@@ -22,43 +22,44 @@
   },
   "billing": {
     "normal": {
-      "policyRevision": "deepseek-v4-pro-20260806-v3",
-      "provider": "deepseek",
-      "model": "deepseek-v4-pro",
+      "policyRevision": "openai-codex-gpt-5.6-luna-token-beans-20260822-v2",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
       "role": "agent",
+      "reasoningEffort": "max",
       "inputMaxBytes": null,
-      "reservationInputMaxTokens": 950000,
-      "outputMaxTokens": 4096,
+      "reservationInputMaxTokens": 272000,
+      "outputMaxTokens": 128000,
       "callLimit": 90
     },
     "trueMoa": {
       "presetId": "mystand-true-moa-v1",
-      "presetRevision": "2026-07-27.1",
+      "presetRevision": "2026-08-21.3",
       "mode": "moa",
       "authorizationSource": "ui-reasoning-toggle",
       "advisorInputMaxBytes": 65536,
       "advisorOutputMaxTokens": 4096,
-      "finalInputMaxBytes": 131072,
+      "finalInputMaxBytes": 262144,
       "finalOutputMaxTokens": 4096,
       "slots": [
         {
-          "slotId": "advisor-kimi-k3",
-          "provider": "kimi-coding",
-          "model": "k3",
+          "slotId": "advisor-deepseek-v4-flash",
+          "provider": "deepseek",
+          "model": "deepseek-v4-flash",
           "role": "advisor",
           "maxCalls": 1
         },
         {
-          "slotId": "advisor-deepseek-v4-pro",
-          "provider": "deepseek",
-          "model": "deepseek-v4-pro",
+          "slotId": "advisor-openai-codex-gpt-5.5",
+          "provider": "openai-codex",
+          "model": "gpt-5.5",
           "role": "advisor",
           "maxCalls": 1
         },
         {
-          "slotId": "final-deepseek-v4-pro",
-          "provider": "deepseek",
-          "model": "deepseek-v4-pro",
+          "slotId": "final-openai-codex-gpt-5.6-luna",
+          "provider": "openai-codex",
+          "model": "gpt-5.6-luna",
           "role": "final_executor",
           "maxCalls": 8
         }
@@ -86,15 +87,15 @@
   "tools": {
     "resourceIndex": {
       "contract": "mystand.resource-index-tool.v1",
-      "sha256": "b15dee824f2a27014f8bf2d353c9679abffa5352b18f3a4bfae706fd0ae64405"
+      "sha256": "7acf67a01b95708f6fb8e8e432181ba1e1f81b6abe8a89941a67d0282041ceab"
     },
     "query": {
       "contract": "mystand.query-tool.v1",
-      "sha256": "f16c7abb93bf3bebdd826d44c77ab89cd1c169f205d3d1cd448da25a1e66992d"
+      "sha256": "68f4999fe51daeeb0a9e6a012136260561c765ac20a1ccbddbee8791f38a0967"
     }
   },
   "parityFixtures": {
-    "trueMoaUsageSha256": "272eb4a700c6a5d5de58546d9e6989119980b8093894856b791ee8e735310462"
+    "trueMoaUsageSha256": "844e743bee508e589f91d388d6717390753a6387ff5dfa4126698c3d047712e2"
   },
   "protectedInvariants": [
     "server-identity-and-datascope-only",

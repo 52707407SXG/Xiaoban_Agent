@@ -428,13 +428,19 @@ def _validate_finance_aggregate_plan(args: dict) -> dict:
     if args.get("module_id") != "finance-ledger":
         raise ValueError("module_id 不在允许范围内")
     fact_paths = args.get("fact_paths")
-    settlement_confirmation = (
+    settlement_fact_paths = {
+        "finance.settlement_confirmation.unconfirmed",
+        "finance.settlement.proof_confirmed_unsettled",
+    }
+    settlement_query = (
         query_kind == "list"
-        and fact_paths == ["finance.settlement_confirmation.unconfirmed"]
+        and isinstance(fact_paths, list)
+        and len(fact_paths) == 1
+        and fact_paths[0] in settlement_fact_paths
     )
     expected_fact_path = (
-        "finance.settlement_confirmation.unconfirmed"
-        if settlement_confirmation
+        fact_paths[0]
+        if settlement_query
         else f"finance.performance.{query_kind}"
     )
     if fact_paths != [expected_fact_path]:
@@ -454,7 +460,7 @@ def _validate_finance_aggregate_plan(args: dict) -> dict:
         year_match = re.fullmatch(r"(\d{4})\s*年?", year_text)
         settlement_period_match = (
             re.fullmatch(r"(\d{4})\s*年\s*(\d{1,2})\s*月", year_text)
-            if settlement_confirmation
+            if settlement_query
             else None
         )
         if year_match:
@@ -472,7 +478,7 @@ def _validate_finance_aggregate_plan(args: dict) -> dict:
         raise ValueError(f"{query_kind} 的 year 必须是 2000-2100 之间的整数")
 
     if query_kind == "list":
-        if settlement_confirmation:
+        if settlement_query:
             month = query_args.get("month")
             if isinstance(month, str):
                 month_match = re.fullmatch(r"(\d{1,2})\s*月?", month.strip())
@@ -487,7 +493,7 @@ def _validate_finance_aggregate_plan(args: dict) -> dict:
                 or not 1 <= month <= 12
                 or (embedded_month is not None and embedded_month != month)
             ):
-                raise ValueError("结算确认 list 的 query_args 只允许 year 和 month")
+                raise ValueError("结算状态 list 的 query_args 只允许 year 和 month")
             normalized_args = {"year": year, "month": month}
         else:
             if set(query_args) != {"year"}:
@@ -681,7 +687,7 @@ registry.register(
     check_fn=check_mystand_query,
     requires_env=[],
     is_async=False,
-    description="Authorized My Stand semantic and finance aggregate query",
+    description=MYSTAND_QUERY_SCHEMA["description"],
     emoji="🔎",
     max_result_size_chars=_MAX_RESPONSE_BYTES,
 )

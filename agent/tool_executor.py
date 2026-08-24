@@ -282,7 +282,7 @@ def _append_canonical_tool_result(
         name == "mystand_authorization_write"
         and dispatch_state == "dispatched"
         and isinstance(function_args, dict)
-        and function_args.get("operation") == "commit_write"
+        and function_args.get("operation") == "preview_and_apply"
     ):
         receipt_source = (
             callback_result
@@ -301,18 +301,17 @@ def _append_canonical_tool_result(
             )
         except (TypeError, ValueError):
             parsed_receipt = None
-        from tools.mystand_authorization_tool import _current_session
         from tools.mystand_authorization_write_tool import (
-            _verified_commit_receipt,
+            _verified_tool_result_receipt,
         )
 
-        if _verified_commit_receipt(
+        verified_receipt = _verified_tool_result_receipt(
             parsed_receipt,
-            commit_args=function_args,
-            session=_current_session(),
-        ):
+            function_args=function_args,
+        )
+        if verified_receipt is not None:
             effective_trusted_fields["verifiedWriteReceipt"] = (
-                parsed_receipt
+                verified_receipt
             )
     canonical = normalize_tool_result(
         request_id=str(getattr(agent, "_current_request_id", "") or ""),

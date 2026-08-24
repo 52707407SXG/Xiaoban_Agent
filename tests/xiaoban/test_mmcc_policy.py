@@ -112,7 +112,7 @@ def test_owner_approved_write_can_pass():
     tool = manifest.tools[0]
     principal = XiaobanPrincipal(
         site_id="site-1",
-        user_id="52707407",
+        user_id="owner-user-001",
         role="owner",
         scopes=frozenset({"self"}),
         capabilities=frozenset({"works.write"}),
@@ -132,4 +132,3 @@ def test_owner_approved_write_can_pass():
     )
 
     assert decision.allowed
-

@@ -45,9 +45,9 @@ from xiaoban.trusted_runtime.protocol_contract import (
     TRUSTED_RUNTIME_CONTRACT_REVISION_HEADER,
 )
 from xiaoban.trusted_runtime.true_moa import (
-    DEEPSEEK_ADVISOR_SLOT,
+    GPT55_ADVISOR_SLOT as DEEPSEEK_ADVISOR_SLOT,
     FINAL_EXECUTOR_SLOT,
-    KIMI_ADVISOR_SLOT,
+    DEEPSEEK_FLASH_ADVISOR_SLOT as KIMI_ADVISOR_SLOT,
     MODE_EPOCH_HEADER,
     MOA_PRESET_ID_HEADER,
     MOA_PRESET_REVISION_HEADER,
@@ -221,8 +221,8 @@ async def test_mystand_contract_mismatch_stops_before_provider_dispatch():
 
 
 class _FakeFinalAgent:
-    provider = "deepseek"
-    model = "deepseek-v4-pro"
+    provider = "openai-codex"
+    model = "gpt-5.6-luna"
     valid_tool_names: set[str] = set()
     tools: list[object] = []
     session_prompt_tokens = 17
@@ -393,8 +393,8 @@ def test_normal_fresh_subprocess_does_not_import_true_moa_or_fan_out():
         assert TRUE_MOA_PROVIDERS not in sys.modules
 
         class FakeAgent:
-            provider = "deepseek"
-            model = "deepseek-v4-pro"
+            provider = "openai-codex"
+            model = "gpt-5.6-luna"
             valid_tool_names = set()
             session_prompt_tokens = 2
             session_completion_tokens = 1
@@ -1588,10 +1588,19 @@ async def test_true_moa_real_http_stream_is_accepted_by_node_bridge(
                 },
             }]
             self.callbacks["stream_delta_callback"](prelude)
+            self.callbacks["tool_gen_callback"](
+                tool_name,
+                source="provider",
+                provider_sequence=1,
+                provider_event_at=1.0,
+            )
             self.callbacks["interim_assistant_callback"](
                 prelude,
                 already_streamed=True,
                 tool_calls=tool_calls,
+                source="provider",
+                provider_sequence=1,
+                provider_event_at=1.0,
             )
             self.callbacks["stream_delta_callback"](None)
             self.callbacks["tool_start_callback"](
@@ -1652,10 +1661,25 @@ async def test_true_moa_real_http_stream_is_accepted_by_node_bridge(
         wire = await response.text()
 
     assert response.status == 200
-    assert prelude not in wire
+    commentary_payloads = []
+    wire_lines = wire.splitlines()
+    for index, line in enumerate(wire_lines):
+        if line.strip() != "event: xiaoban.tool.progress":
+            continue
+        for follow in wire_lines[index + 1:index + 4]:
+            if follow.startswith("data: "):
+                payload = json.loads(follow[len("data: "):])
+                if payload.get("type") == "assistant.commentary":
+                    commentary_payloads.append(payload)
+                break
+    assert commentary_payloads
+    assert commentary_payloads[-1]["stage"] == "intent"
+    assert commentary_payloads[-1]["status"] == "completed"
+    assert commentary_payloads[-1]["summary"] == prelude
     assert wire.count(final_text) == 1
     ordered_markers = [
         '"type": "turn.started"',
+        '"type": "assistant.commentary"',
         f'"toolCallId": "{tool_call_id}", "status": "running"',
         f'"toolCallId": "{tool_call_id}", "status": "completed"',
         final_text,
@@ -1845,6 +1869,21 @@ async def test_true_moa_real_http_stream_is_accepted_by_node_bridge(
               });
               return;
             }
+            if (value.type === 'assistant.commentary') {
+              store.appendProgress(input.requestId, {
+                id: value.eventId,
+                schema: value.progressSchema,
+                type: value.type,
+                status: value.status,
+                stage: value.stage,
+                summary: value.summary,
+                source: value.source,
+                providerSequence: value.providerSequence,
+                providerEventAt: value.providerEventAt,
+                turnId: value.turnId,
+              });
+              return;
+            }
             const type = value.status === 'running'
               ? 'tool.started'
               : value.status === 'completed'
@@ -1871,8 +1910,8 @@ async def test_true_moa_real_http_stream_is_accepted_by_node_bridge(
         store.mergeUsageLedger(input.requestId, result.moaUsage);
         store.markGenerated(input.requestId, {
           outputText: result.text,
-          provider: 'deepseek',
-          model: 'deepseek-v4-pro',
+          provider: 'openai-codex',
+          model: 'gpt-5.6-luna',
           usage: result.moaUsage,
         });
         store.markDelivering(input.requestId);
@@ -1995,6 +2034,21 @@ async def test_true_moa_real_http_stream_is_accepted_by_node_bridge(
                   });
                   return;
                 }
+                if (value.type === 'assistant.commentary') {
+                  caseStore.appendProgress(input.requestId, {
+                    id: value.eventId,
+                    schema: value.progressSchema,
+                    type: value.type,
+                    status: value.status,
+                    stage: value.stage,
+                    summary: value.summary,
+                    source: value.source,
+                    providerSequence: value.providerSequence,
+                    providerEventAt: value.providerEventAt,
+                    turnId: value.turnId,
+                  });
+                  return;
+                }
                 const type = value.status === 'running'
                   ? 'tool.started'
                   : value.status === 'completed'
@@ -2022,8 +2076,8 @@ async def test_true_moa_real_http_stream_is_accepted_by_node_bridge(
             calls.markGenerated += 1;
             caseStore.markGenerated(input.requestId, {
               outputText: caseResult.text,
-              provider: 'deepseek',
-              model: 'deepseek-v4-pro',
+              provider: 'openai-codex',
+              model: 'gpt-5.6-luna',
               usage: caseResult.moaUsage,
             });
             calls.markDelivering += 1;
@@ -2103,9 +2157,17 @@ async def test_true_moa_real_http_stream_is_accepted_by_node_bridge(
     assert projected["result"]["finishReason"] == "stop"
     assert projected["result"]["moaUsage"]["status"] == "completed"
     assert projected["snapshots"] == [final_text]
-    assert len(projected["progress"]) == 4
+    assert len(projected["progress"]) == 5
     assert projected["progress"][0]["type"] == "turn.started"
     assert projected["progress"][-1]["type"] == "turn.completed"
+    projected_commentary = [
+        item
+        for item in projected["progress"]
+        if item.get("type") == "assistant.commentary"
+    ]
+    assert len(projected_commentary) == 1
+    assert projected_commentary[0]["stage"] == "intent"
+    assert projected_commentary[0]["summary"]
     tool_progress = [
         item for item in projected["progress"] if item.get("toolCallId")
     ]
@@ -2133,6 +2195,7 @@ async def test_true_moa_real_http_stream_is_accepted_by_node_bridge(
     ] == [
         "request.completed",
         "turn.completed",
+        "assistant.commentary",
         "tool.completed",
     ]
     assert [item["name"] for item in projected["adversarial"]] == [
@@ -3100,8 +3163,8 @@ async def test_normal_nonstream_delivery_drift_cannot_replay_prior_outcome(
         "X-Xiaoban-Attempt"
     ]
     ledger = AgentCallUsageLedger(
-        provider="deepseek",
-        model="deepseek-v4-pro",
+        provider="openai-codex",
+        model="gpt-5.6-luna",
         execution_id="7" * 32,
     )
     call_id = ledger.start_call()
@@ -3239,6 +3302,9 @@ async def test_gateway_runs_two_fake_advisors_and_one_fake_final_with_one_ledger
     def interim_callback(*_args, **_kwargs):
         return None
 
+    def tool_gen_callback(*_args, **_kwargs):
+        return None
+
     def _fake_create_agent(**kwargs):
         create_kwargs.update(kwargs)
         final_agent.ephemeral_system_prompt = str(
@@ -3254,6 +3320,7 @@ async def test_gateway_runs_two_fake_advisors_and_one_fake_final_with_one_ledger
         ],
         session_id="gateway-test-session",
         interim_assistant_callback=interim_callback,
+        tool_gen_callback=tool_gen_callback,
         gateway_session_key="gateway-test-channel",
         request_headers=headers,
         agent_ref=[None, False, None],
@@ -3269,6 +3336,7 @@ async def test_gateway_runs_two_fake_advisors_and_one_fake_final_with_one_ledger
     assert len(final_agent.run_calls) == 1
     assert create_kwargs["strict_no_automatic_paid_retry"] is True
     assert create_kwargs["interim_assistant_callback"] is interim_callback
+    assert create_kwargs["tool_gen_callback"] is tool_gen_callback
     assert final_agent.max_iterations == TRUE_MOA_FINAL_CALL_LIMIT
     assert final_agent.max_tokens == TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
     assert "[MY STAND TRUE MOA - UNTRUSTED ADVISORY CONTEXT]" in str(
@@ -3406,6 +3474,9 @@ async def test_normal_signed_legacy_direct_uses_old_path_without_paid_ledger(
     final_agent = _FakeFinalAgent()
     create_kwargs: dict[str, object] = {}
 
+    def tool_gen_callback(*_args, **_kwargs):
+        return None
+
     def create_agent(**kwargs):
         create_kwargs.update(kwargs)
         return final_agent
@@ -3416,6 +3487,7 @@ async def test_normal_signed_legacy_direct_uses_old_path_without_paid_ledger(
         user_message="normal request",
         conversation_history=[],
         session_id="normal-direct-session",
+        tool_gen_callback=tool_gen_callback,
         request_headers=_normal_direct_headers(),
         true_moa_snapshot=None,
     )
@@ -3427,6 +3499,7 @@ async def test_normal_signed_legacy_direct_uses_old_path_without_paid_ledger(
     assert usage["output_tokens"] == 7
     assert usage["total_tokens"] == 24
     assert create_kwargs["strict_no_automatic_paid_retry"] is False
+    assert create_kwargs["tool_gen_callback"] is tool_gen_callback
     assert "_true_moa_usage" not in result
     assert "_agent_call_usage" not in result
     assert "agent_calls" not in usage
@@ -4335,8 +4408,8 @@ async def test_restart_usage_recovery_terminalizes_orphan_without_stop(
 
     if topology == "normal":
         ledger = AgentCallUsageLedger(
-            provider="deepseek",
-            model="deepseek-v4-pro",
+            provider="openai-codex",
+            model="gpt-5.6-luna",
             execution_id="6" * 32,
         )
         call_id = ledger.start_call()
@@ -4553,8 +4626,8 @@ async def test_restart_usage_recovery_fails_nonterminal_ledger_without_active_ca
 
     if topology == "normal":
         ledger = AgentCallUsageLedger(
-            provider="deepseek",
-            model="deepseek-v4-pro",
+            provider="openai-codex",
+            model="gpt-5.6-luna",
             execution_id="7" * 32,
         )
         if phase == "between_calls":

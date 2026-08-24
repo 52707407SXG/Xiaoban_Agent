@@ -94,7 +94,7 @@ class TestApiServerAdapterToolset:
 
         assert APIServerAdapter._header_value(headers, "X-Xiaoban-Toolset-Policy") == "mystand-broker-basic"
 
-    def test_mystand_policies_are_explicit_and_exclude_server_mutation_tools(self):
+    def test_mystand_policies_are_explicit_and_owner_gets_restricted_main_channel_tools(self):
         from gateway.platforms.api_server import APIServerAdapter
 
         basic = APIServerAdapter._toolsets_for_request_policy("mystand-broker-basic")
@@ -105,6 +105,7 @@ class TestApiServerAdapterToolset:
         assert basic == [
             "web",
             "todo",
+            "skills_readonly",
             "mystand_parser",
             "mystand_resource_index",
             "mystand_query",
@@ -112,7 +113,11 @@ class TestApiServerAdapterToolset:
             "mystand_authorization_write",
         ]
         assert research == basic
-        assert owner == [*basic, "file_readonly"]
+        assert owner == [
+            *basic,
+            "mystand_unsettled_performance",
+            "mystand_skill_manage",
+        ]
         assert owner_research == owner
         for toolsets in (basic, research):
             assert "terminal" not in toolsets
@@ -121,7 +126,7 @@ class TestApiServerAdapterToolset:
             assert "skills" not in toolsets
             assert "memory" not in toolsets
             assert "session_search" not in toolsets
-        assert "file_readonly" in owner
+        assert "file_readonly" not in owner
         assert "file" not in owner
         assert "terminal" not in owner
         assert "mystand_resource_index" in basic
@@ -132,6 +137,12 @@ class TestApiServerAdapterToolset:
         assert "web" in owner
         assert "todo" in basic
         assert "todo" in owner
+        assert "mystand_unsettled_performance" in owner
+        assert "skills_readonly" in basic
+        assert "skills_readonly" in owner
+        assert "mystand_skill_manage" not in basic
+        assert "mystand_skill_manage" in owner
+        assert "mystand_cron" not in owner
 
     def test_broker_contract_exposes_stable_discovery_and_read_tools_together(self):
         from gateway.platforms.api_server import APIServerAdapter
@@ -227,9 +238,22 @@ class TestApiServerAdapterToolset:
         }
         assert resolved.isdisjoint(forbidden)
         if policy in {"mystand-owner", "mystand-owner-research"}:
-            assert {"read_file", "search_files"} <= resolved
+            assert "mystand_unsettled_performance" in resolved
+            assert {"skills_list", "skill_view", "mystand_skill_manage"} <= resolved
+            assert resolved.isdisjoint({
+                "read_file",
+                "search_files",
+                "mystand_cron",
+            })
         else:
-            assert resolved.isdisjoint({"read_file", "search_files"})
+            assert {"skills_list", "skill_view"} <= resolved
+            assert resolved.isdisjoint({
+                "read_file",
+                "search_files",
+                "mystand_skill_manage",
+                "mystand_cron",
+                "mystand_unsettled_performance",
+            })
 
     def test_mystand_policy_requires_authenticated_user_identity(self):
         from gateway.platforms.api_server import APIServerAdapter, InvalidToolsetPolicy
@@ -238,6 +262,45 @@ class TestApiServerAdapterToolset:
             APIServerAdapter._toolsets_for_request_headers(
                 {"X-Xiaoban-Toolset-Policy": "mystand-owner"}
             )
+
+    def test_memory_tier_is_bound_to_trusted_owner_policy(self, monkeypatch):
+        from gateway.platforms.api_server import APIServerAdapter, InvalidToolsetPolicy
+
+        monkeypatch.setenv("MYSTAND_XIAOBAN_OWNER_USER_ID", "owner-user-001")
+        base = {
+            "X-Xiaoban-Site-Id": "mystand-preview",
+            "X-Xiaoban-Memory-Mode": "user",
+        }
+        owner = {
+            **base,
+            "X-Xiaoban-User-Id": "owner-user-001",
+            "X-Xiaoban-Toolset-Policy": "mystand-owner",
+            "X-Xiaoban-Memory-Tier": "owner",
+        }
+        broker = {
+            **base,
+            "X-Xiaoban-User-Id": "ZYJ001",
+            "X-Xiaoban-Toolset-Policy": "mystand-broker-basic",
+            "X-Xiaoban-Memory-Tier": "notebook",
+        }
+
+        assert APIServerAdapter._toolsets_for_request_headers(owner)
+        assert APIServerAdapter._toolsets_for_request_headers(broker)
+        with pytest.raises(InvalidToolsetPolicy):
+            APIServerAdapter._toolsets_for_request_headers({
+                **broker,
+                "X-Xiaoban-Memory-Tier": "owner",
+            })
+        with pytest.raises(InvalidToolsetPolicy):
+            APIServerAdapter._toolsets_for_request_headers({
+                **owner,
+                "X-Xiaoban-Memory-Tier": "notebook",
+            })
+        with pytest.raises(InvalidToolsetPolicy):
+            APIServerAdapter._toolsets_for_request_headers({
+                **owner,
+                "X-Xiaoban-User-Id": "another-account",
+            })
 
     @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
     def test_create_agent_reads_config_toolsets(self):

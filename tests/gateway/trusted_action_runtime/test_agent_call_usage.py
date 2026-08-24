@@ -39,8 +39,10 @@ from xiaoban.trusted_runtime.paid_call_policy import (
     SIGNED_MYSTAND_AGENT_POLICY_REVISION,
     SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
     enforce_openai_chat_paid_call_dispatch_budget,
+    enforce_openai_responses_paid_call_dispatch_budget,
     resolve_signed_mystand_agent_policy,
     serialize_openai_chat_request_body,
+    serialize_openai_responses_request_body,
 )
 from xiaoban.trusted_runtime.true_moa_durable import TrueMoADurableStore
 from xiaoban.trusted_runtime.true_moa import (
@@ -115,6 +117,65 @@ def test_signed_chat_byte_preflight_matches_openai_sdk_wire_body():
     assert b'"thinking":{"type":"enabled"}' in encoded
 
 
+def test_signed_responses_preflight_accepts_codex_logical_output_cap():
+    payload = {
+        "model": SIGNED_MYSTAND_AGENT_POLICY.model,
+        "instructions": "system",
+        "input": [{"role": "user", "content": "中文字节核对"}],
+        "store": False,
+        "reasoning": {"effort": "max", "summary": "auto"},
+        "include": ["reasoning.encrypted_content"],
+        "extra_headers": {"session_id": "header-not-body"},
+    }
+    encoded = serialize_openai_responses_request_body(payload)
+    assert b'"stream":true' in encoded
+    assert b'header-not-body' not in encoded
+    assert enforce_openai_responses_paid_call_dispatch_budget(
+        SIGNED_MYSTAND_AGENT_POLICY,
+        payload=payload,
+        configured_output_max_tokens=(
+            SIGNED_MYSTAND_AGENT_POLICY.output_max_tokens
+        ),
+        error_prefix="signed_test",
+    ) == len(encoded)
+
+
+def test_signed_responses_preflight_accepts_provider_native_output_window():
+    payload = {
+        "model": SIGNED_MYSTAND_AGENT_POLICY.model,
+        "instructions": "system",
+        "input": [{"role": "user", "content": "长任务不使用应用层 Token 硬上限"}],
+        "store": False,
+    }
+    encoded = serialize_openai_responses_request_body(payload)
+    assert enforce_openai_responses_paid_call_dispatch_budget(
+        SIGNED_MYSTAND_AGENT_POLICY,
+        payload=payload,
+        configured_output_max_tokens=None,
+        error_prefix="signed_test",
+    ) == len(encoded)
+
+
+def test_signed_responses_preflight_rejects_explicit_output_override():
+    with pytest.raises(
+        PaidCallPolicyError,
+        match="signed_test_output_token_cap_exceeded",
+    ):
+        enforce_openai_responses_paid_call_dispatch_budget(
+            SIGNED_MYSTAND_AGENT_POLICY,
+            payload={
+                "model": SIGNED_MYSTAND_AGENT_POLICY.model,
+                "instructions": "system",
+                "input": [{"role": "user", "content": "hello"}],
+                "store": False,
+            },
+            configured_output_max_tokens=(
+                SIGNED_MYSTAND_AGENT_POLICY.output_max_tokens + 1
+            ),
+            error_prefix="signed_test",
+        )
+
+
 @pytest.mark.parametrize(
     "extra_body",
     [
@@ -143,20 +204,27 @@ def test_signed_chat_rejects_extra_body_controlled_field_override(extra_body):
 
 def test_signed_normal_has_no_artificial_wire_byte_boundary():
     payload = {
-        "model": "deepseek-v4-pro",
-        "messages": [{"role": "user", "content": ""}],
-        "max_tokens": 4096,
+        "model": SIGNED_MYSTAND_AGENT_POLICY.model,
+        "instructions": "system",
+        "input": [{"role": "user", "content": ""}],
+        "store": False,
     }
-    base_size = enforce_openai_chat_paid_call_dispatch_budget(
+    base_size = enforce_openai_responses_paid_call_dispatch_budget(
         SIGNED_MYSTAND_AGENT_POLICY,
         payload=payload,
+        configured_output_max_tokens=(
+            SIGNED_MYSTAND_AGENT_POLICY.output_max_tokens
+        ),
         error_prefix="signed_test",
     )
     assert SIGNED_MYSTAND_AGENT_POLICY.input_max_bytes is None
-    payload["messages"][0]["content"] = "x" * 140_519
-    encoded_size = enforce_openai_chat_paid_call_dispatch_budget(
+    payload["input"][0]["content"] = "x" * 140_519
+    encoded_size = enforce_openai_responses_paid_call_dispatch_budget(
         SIGNED_MYSTAND_AGENT_POLICY,
         payload=payload,
+        configured_output_max_tokens=(
+            SIGNED_MYSTAND_AGENT_POLICY.output_max_tokens
+        ),
         error_prefix="signed_test",
     )
     assert encoded_size > base_size
@@ -169,7 +237,7 @@ def _agent(ledger: AgentCallUsageLedger):
         _true_moa_usage_ledger=None,
         _true_moa_cancel_controller=None,
         _paid_call_policy_revision=(
-            SIGNED_MYSTAND_AGENT_POLICY_REVISION
+            LEGACY_SIGNED_MYSTAND_AGENT_POLICY_REVISION
         ),
         _interrupt_requested=False,
         provider="deepseek",
@@ -1195,12 +1263,12 @@ def test_signed_normal_route_is_rechecked_at_physical_dispatch():
     assert ledger.to_dict()["calls"] == []
 
 
-def test_signed_normal_route_binds_shared_caps_before_dispatch():
+def test_signed_normal_route_binds_call_limit_without_token_cap():
     workflow = _normal_workflow()
     assert initialize_normal_call_ledger(workflow) is None
     agent = SimpleNamespace(
-        provider="deepseek",
-        model="deepseek-v4-pro",
+        provider=SIGNED_MYSTAND_AGENT_POLICY.provider,
+        model=SIGNED_MYSTAND_AGENT_POLICY.model,
         max_iterations=90,
         max_tokens=99_999,
     )
@@ -1208,10 +1276,8 @@ def test_signed_normal_route_binds_shared_caps_before_dispatch():
     bind_paid_call_ledger(workflow, agent)
 
     assert workflow.agent_call_ledger is agent._paid_call_usage_ledger
-    # v3 policy raises the physical-call safety ceiling to 90 (task-book
-    # scene 1: long chains must run past 8 calls without being cut off).
     assert agent.max_iterations == 90
-    assert agent.max_tokens == 4096
+    assert agent.max_tokens is None
 
 
 @pytest.mark.parametrize("revision", ["", "stale-policy"])
@@ -1326,11 +1392,16 @@ def test_execution_middleware_cannot_bypass_physical_budget(
 def test_signed_normal_input_is_not_rejected_by_the_retired_byte_gate():
     provider_calls = 0
     ledger = AgentCallUsageLedger(
-        provider="deepseek",
-        model="deepseek-v4-pro",
+        provider=SIGNED_MYSTAND_AGENT_POLICY.provider,
+        model=SIGNED_MYSTAND_AGENT_POLICY.model,
         execution_id="4" * 32,
     )
     agent = _agent(ledger)
+    agent._paid_call_policy_revision = SIGNED_MYSTAND_AGENT_POLICY_REVISION
+    agent.provider = SIGNED_MYSTAND_AGENT_POLICY.provider
+    agent.model = SIGNED_MYSTAND_AGENT_POLICY.model
+    agent.api_mode = "codex_responses"
+    agent.max_tokens = None
 
     def provider(_kwargs):
         nonlocal provider_calls
@@ -1343,9 +1414,12 @@ def test_signed_normal_input_is_not_rejected_by_the_retired_byte_gate():
         request_id="large-normal-input",
         count=1,
         payload={
-            "model": "deepseek-v4-pro",
-            "messages": [{"role": "user", "content": "x" * 140_519}],
-            "max_tokens": 4_096,
+            "model": SIGNED_MYSTAND_AGENT_POLICY.model,
+            "instructions": "system",
+            "input": [
+                {"role": "user", "content": "x" * 140_519}
+            ],
+            "store": False,
         },
     )
 
@@ -1412,8 +1486,10 @@ def test_true_moa_failed_call_reservation_closes_not_dispatched_before_provider(
         _true_moa_usage_ledger=ledger,
         _true_moa_cancel_controller=controller,
         _interrupt_requested=False,
-        provider="deepseek",
-        model="deepseek-v4-pro",
+        provider=FINAL_EXECUTOR_SLOT.provider,
+        model=FINAL_EXECUTOR_SLOT.model,
+        api_mode="codex_responses",
+        max_tokens=4_096,
     )
 
     def provider(_kwargs):
@@ -1425,9 +1501,10 @@ def test_true_moa_failed_call_reservation_closes_not_dispatched_before_provider(
         execute_llm_request(
             agent,
             {
-                "model": "deepseek-v4-pro",
-                "messages": [],
-                "max_tokens": 4_096,
+                "model": FINAL_EXECUTOR_SLOT.model,
+                "instructions": "system",
+                "input": [{"role": "user", "content": "hello"}],
+                "store": False,
             },
             provider,
             strict=True,

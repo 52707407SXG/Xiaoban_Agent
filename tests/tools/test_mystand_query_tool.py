@@ -95,6 +95,17 @@ def _settlement_confirmation_plan(month=7):
     }
 
 
+def _settlement_proof_confirmed_unsettled_plan(month=7):
+    return {
+        "operation": "read",
+        "query_kind": "list",
+        "module_id": "finance-ledger",
+        "fact_paths": ["finance.settlement.proof_confirmed_unsettled"],
+        "query_args": {"year": 2026, "month": month},
+        "coverage_required": True,
+    }
+
+
 def _call(
     args,
     *,
@@ -132,7 +143,7 @@ def test_contract_exposes_semantic_and_strict_finance_aggregate_shapes():
         "mode",
     }
     assert parameters["required"] == ["operation"]
-    assert len(parameters["anyOf"]) == 7
+    assert len(parameters["anyOf"]) == 8
     assert parameters["additionalProperties"] is False
     assert properties["operation"]["const"] == "read"
     assert set(properties["query_kind"]["enum"]) == {
@@ -154,6 +165,7 @@ def test_contract_exposes_semantic_and_strict_finance_aggregate_shapes():
         ("finance.performance.predicate",),
         ("finance.performance.count",),
         ("finance.settlement_confirmation.unconfirmed",),
+        ("finance.settlement.proof_confirmed_unsettled",),
     }
     for fact_paths, branch in finance_branches.items():
         assert set(branch["required"]) == {
@@ -191,6 +203,39 @@ def test_contract_exposes_semantic_and_strict_finance_aggregate_shapes():
         "resource_uid",
         "source_id",
     }.isdisjoint(properties)
+
+
+def test_settlement_contract_tells_the_model_the_complete_first_call_shape():
+    from tools.schema_sanitizer import sanitize_tool_schemas
+
+    description = bridge.MYSTAND_QUERY_SCHEMA["description"]
+    required_shape = 'query_args={"year": YYYY, "month": 1-12}'
+
+    assert required_shape in description
+    assert "Both integer year and integer month are required" in description
+    for required_predicate in (
+        "uploaded settlement proof",
+        "broker confirmation",
+        "manager confirmation",
+        "still unsettled",
+    ):
+        assert required_predicate in description
+    assert bridge.registry.get_entry("mystand_query").description == description
+    provider_schema = sanitize_tool_schemas(
+        [{"type": "function", "function": bridge.MYSTAND_QUERY_SCHEMA}]
+    )[0]["function"]
+    assert "anyOf" not in provider_schema["parameters"]
+    assert required_shape in provider_schema["description"]
+    assert "finance.settlement.proof_confirmed_unsettled" in provider_schema["description"]
+    for required_predicate in (
+        "uploaded settlement proof",
+        "broker confirmation",
+        "manager confirmation",
+        "still unsettled",
+    ):
+        assert required_predicate in provider_schema["description"]
+    assert "TodoResult" not in provider_schema["description"]
+    assert "TOOL ORDERING" not in provider_schema["description"]
 
 
 @pytest.mark.parametrize("kind", ["rank", "list", "predicate", "count"])
@@ -248,7 +293,50 @@ def test_handler_dispatches_settlement_confirmation_once(monkeypatch):
     assert len(calls) == 1
 
 
-def test_handler_normalizes_year_month_suffixes_before_one_dispatch(monkeypatch):
+def test_handler_dispatches_compound_settlement_predicate_once(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda payload, session: (
+            calls.append((payload, session))
+            or json.dumps(
+                {
+                    "ok": True,
+                    "facts": [
+                        {"path": "finance.settlement.proof_confirmed_unsettled"}
+                    ],
+                    "coverage": {"complete": True},
+                }
+            )
+        ),
+    )
+    plan = _settlement_proof_confirmed_unsettled_plan()
+
+    result = _call(
+        plan,
+        user_message="查7月已上传结算凭证、经纪人确认、店长确认，但仍未结算的人员",
+    )
+
+    assert result["ok"] is True
+    assert result["facts"] == [
+        {"path": "finance.settlement.proof_confirmed_unsettled"}
+    ]
+    assert calls[0][0] == plan
+    assert "finance.settlement_confirmation.unconfirmed" not in json.dumps(
+        calls[0][0]
+    )
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "plan_factory",
+    [_settlement_confirmation_plan, _settlement_proof_confirmed_unsettled_plan],
+)
+def test_handler_normalizes_year_month_suffixes_before_one_dispatch(
+    monkeypatch,
+    plan_factory,
+):
     calls = []
     monkeypatch.setattr(
         bridge,
@@ -258,7 +346,7 @@ def test_handler_normalizes_year_month_suffixes_before_one_dispatch(monkeypatch)
             or json.dumps({"ok": True, "coverage": {"complete": True}})
         ),
     )
-    plan = _settlement_confirmation_plan("7月")
+    plan = plan_factory("7月")
     plan["query_args"]["year"] = "2026年"
 
     result = _call(plan, user_message="查7月结算卡还有谁没点")
@@ -268,8 +356,13 @@ def test_handler_normalizes_year_month_suffixes_before_one_dispatch(monkeypatch)
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    "plan_factory",
+    [_settlement_confirmation_plan, _settlement_proof_confirmed_unsettled_plan],
+)
 def test_handler_normalizes_consistent_settlement_period_before_one_dispatch(
     monkeypatch,
+    plan_factory,
 ):
     calls = []
     monkeypatch.setattr(
@@ -280,7 +373,7 @@ def test_handler_normalizes_consistent_settlement_period_before_one_dispatch(
             or json.dumps({"ok": True, "coverage": {"complete": True}})
         ),
     )
-    plan = _settlement_confirmation_plan("7月")
+    plan = plan_factory("7月")
     plan["query_args"]["year"] = "2026年7月"
 
     result = _call(plan, user_message="查7月结算卡还有谁没点")
@@ -290,8 +383,13 @@ def test_handler_normalizes_consistent_settlement_period_before_one_dispatch(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    "plan_factory",
+    [_settlement_confirmation_plan, _settlement_proof_confirmed_unsettled_plan],
+)
 def test_handler_rejects_conflicting_settlement_period_before_dispatch(
     monkeypatch,
+    plan_factory,
 ):
     calls = []
     monkeypatch.setattr(
@@ -299,7 +397,7 @@ def test_handler_rejects_conflicting_settlement_period_before_dispatch(
         "_post_internal",
         lambda *args: calls.append(args) or json.dumps({"ok": True}),
     )
-    plan = _settlement_confirmation_plan(8)
+    plan = plan_factory(8)
     plan["query_args"]["year"] = "2026年7月"
 
     result = _call(plan)
@@ -308,10 +406,15 @@ def test_handler_rejects_conflicting_settlement_period_before_dispatch(
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    "plan_factory",
+    [_settlement_confirmation_plan, _settlement_proof_confirmed_unsettled_plan],
+)
 @pytest.mark.parametrize("month", [0, 13, True, 7.5])
 def test_handler_rejects_invalid_settlement_month_before_dispatch(
     monkeypatch,
     month,
+    plan_factory,
 ):
     calls = []
     monkeypatch.setattr(
@@ -320,7 +423,7 @@ def test_handler_rejects_invalid_settlement_month_before_dispatch(
         lambda *args: calls.append(args) or json.dumps({"ok": True}),
     )
 
-    result = _call(_settlement_confirmation_plan(month))
+    result = _call(plan_factory(month))
 
     assert result["code"] == "invalid_mystand_query_arguments"
     assert calls == []
@@ -385,6 +488,14 @@ def test_handler_rejects_finance_aggregate_shape_drift_before_dispatch(
     extra_control = _finance_plan("rank")
     extra_control["unexpected_control"] = "forged"
     invalid_plans.append(extra_control)
+
+    for plan_factory in (
+        _settlement_confirmation_plan,
+        _settlement_proof_confirmed_unsettled_plan,
+    ):
+        settlement_extra_arg = plan_factory()
+        settlement_extra_arg["query_args"]["rank"] = 1
+        invalid_plans.append(settlement_extra_arg)
 
     for plan in invalid_plans:
         result = _call(plan)

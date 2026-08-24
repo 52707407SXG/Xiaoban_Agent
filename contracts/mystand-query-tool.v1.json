@@ -3,7 +3,7 @@
   "contract": "mystand.query-tool.v1",
   "tool": {
     "name": "mystand_query",
-    "description": "Read facts from the current user's authorized My Stand data. Use the semantic resource/entity shape for an identified material. For finance-ledger questions that require rank, list, predicate, count, or a year/month settlement-card unconfirmed list, use the matching strict finance aggregate shape shown in this schema. Call once and answer only from its result. Identity, ownership, authorization IDs, resource IDs, source IDs, lookup steps, query text, and fields outside the selected shape must never be supplied or narrated.",
+    "description": "Read facts from the current user's authorized My Stand data. Use the semantic resource/entity shape for an identified material. For an unconfirmed settlement-card list, call exactly once with operation=\"read\", query_kind=\"list\", module_id=\"finance-ledger\", fact_paths=[\"finance.settlement_confirmation.unconfirmed\"], query_args={\"year\": YYYY, \"month\": 1-12}, and coverage_required=true. For the compound list of rows that have an uploaded settlement proof, broker confirmation, manager confirmation, and are still unsettled, use the same shape with fact_paths=[\"finance.settlement.proof_confirmed_unsettled\"]. Both integer year and integer month are required in query_args on the first call. For other finance-ledger rank, list, predicate, or count questions, use the matching strict finance aggregate shape shown in this schema. Answer only from the result. Identity, ownership, authorization IDs, resource IDs, source IDs, lookup steps, query text, and fields outside the selected shape must never be supplied or narrated.",
     "parameters": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
@@ -31,7 +31,8 @@
               "finance.performance.list",
               "finance.performance.predicate",
               "finance.performance.count",
-              "finance.settlement_confirmation.unconfirmed"
+              "finance.settlement_confirmation.unconfirmed",
+              "finance.settlement.proof_confirmed_unsettled"
             ],
             "type": "string"
           }
@@ -152,6 +153,40 @@
           "properties": {
             "entities": {
               "minItems": 1
+            }
+          }
+        },
+        {
+          "required": [
+            "query_kind",
+            "module_id",
+            "fact_paths",
+            "query_args",
+            "coverage_required"
+          ],
+          "properties": {
+            "query_kind": {
+              "const": "list"
+            },
+            "fact_paths": {
+              "const": ["finance.settlement.proof_confirmed_unsettled"]
+            },
+            "query_args": {
+              "type": "object",
+              "properties": {
+                "year": {
+                  "type": "integer",
+                  "minimum": 2000,
+                  "maximum": 2100
+                },
+                "month": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 12
+                }
+              },
+              "required": ["year", "month"],
+              "additionalProperties": false
             }
           }
         },

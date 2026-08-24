@@ -173,7 +173,13 @@ def bind_paid_call_ledger(workflow: Any, agent: Any) -> None:
     # Compression and natural stop own the loop shape; this cap remains only
     # the signed physical-call safety boundary and never forces a final slot.
     agent.compression_enabled = True
-    agent.max_tokens = policy.output_max_tokens
+    # The current Codex route uses the provider's native output/context window.
+    # The policy number remains a reservation estimate, not a task-stopping cap.
+    agent.max_tokens = (
+        policy.output_max_tokens
+        if policy is not SIGNED_MYSTAND_AGENT_POLICY
+        else None
+    )
     try:
         enforce_fixed_paid_call_route(
             policy,

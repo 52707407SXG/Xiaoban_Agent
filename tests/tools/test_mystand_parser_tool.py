@@ -1,7 +1,6 @@
 """Privacy tests for the My Stand parser gateway wrapper."""
 
 import json
-from types import SimpleNamespace
 
 import pytest
 
@@ -12,7 +11,6 @@ from gateway.session_context import (
 )
 from tools import mystand_parser_tool as parser_bridge
 from tools import web_tools
-from tools.web_egress_safety import mark_mystand_private_batch
 
 
 @pytest.fixture
@@ -188,11 +186,16 @@ def test_untrusted_or_unsupported_remote_input_stops_before_provider_and_subproc
     }
 
 
-def test_private_session_blocks_exact_remote_url_before_provider_and_subprocess(
+def test_prior_private_turn_does_not_block_exact_public_url(
     monkeypatch,
     api_session,
 ):
-    _forbid_remote_work(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        parser_bridge,
+        "_upstream_mystand_parse_tool_handler",
+        lambda args, **_kwargs: calls.append(args) or '{"ok":true}',
+    )
     mark_mystand_private_query_turn()
 
     result = json.loads(
@@ -201,28 +204,5 @@ def test_private_session_blocks_exact_remote_url_before_provider_and_subprocess(
         )
     )
 
-    assert result["success"] is False
-    assert result["code"] == "private_data_egress_blocked"
-
-
-def test_parser_first_write_later_batch_is_blocked_before_remote_work(
-    monkeypatch,
-    api_session,
-):
-    _forbid_remote_work(monkeypatch)
-    calls = [
-        SimpleNamespace(function=SimpleNamespace(name="mystand_parse")),
-        SimpleNamespace(
-            function=SimpleNamespace(name="mystand_authorization_write")
-        ),
-    ]
-
-    assert mark_mystand_private_batch(calls)
-    result = json.loads(
-        parser_bridge.mystand_parse_tool_handler(
-            {"input": "https://example.com/public/report.pdf"}
-        )
-    )
-
-    assert result["success"] is False
-    assert result["code"] == "private_data_egress_blocked"
+    assert result["ok"] is True
+    assert calls == [{"input": "https://example.com/public/report.pdf"}]

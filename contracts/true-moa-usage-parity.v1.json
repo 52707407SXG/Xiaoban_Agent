@@ -6,14 +6,14 @@
     "mode": "moa",
     "modeEpoch": "1",
     "presetId": "mystand-true-moa-v1",
-    "presetRevision": "2026-07-27.1",
+    "presetRevision": "2026-08-21.3",
     "status": "completed",
     "slots": [
       {
-        "slotId": "advisor-kimi-k3",
-        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-kimi-k3",
-        "provider": "kimi-coding",
-        "model": "k3",
+        "slotId": "advisor-deepseek-v4-flash",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-deepseek-v4-flash",
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
         "role": "advisor",
         "startedAtMs": 100,
         "endedAtMs": 110,
@@ -28,10 +28,10 @@
         "costSource": "fake-provider"
       },
       {
-        "slotId": "advisor-deepseek-v4-pro",
-        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-deepseek-v4-pro",
-        "provider": "deepseek",
-        "model": "deepseek-v4-pro",
+        "slotId": "advisor-openai-codex-gpt-5.5",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-openai-codex-gpt-5.5",
+        "provider": "openai-codex",
+        "model": "gpt-5.5",
         "role": "advisor",
         "startedAtMs": 120,
         "endedAtMs": 130,
@@ -46,10 +46,10 @@
         "costSource": "fake-provider"
       },
       {
-        "slotId": "final-deepseek-v4-pro",
-        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:final-deepseek-v4-pro",
-        "provider": "deepseek",
-        "model": "deepseek-v4-pro",
+        "slotId": "final-openai-codex-gpt-5.6-luna",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:final-openai-codex-gpt-5.6-luna",
+        "provider": "openai-codex",
+        "model": "gpt-5.6-luna",
         "role": "final_executor",
         "startedAtMs": 140,
         "endedAtMs": 150,
@@ -63,10 +63,10 @@
     ],
     "calls": [
       {
-        "slotId": "advisor-kimi-k3",
-        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-kimi-k3",
-        "provider": "kimi-coding",
-        "model": "k3",
+        "slotId": "advisor-deepseek-v4-flash",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-deepseek-v4-flash",
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
         "role": "advisor",
         "startedAtMs": 200,
         "endedAtMs": 210,
@@ -81,10 +81,10 @@
         "costSource": "fake-provider"
       },
       {
-        "slotId": "advisor-deepseek-v4-pro",
-        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-deepseek-v4-pro",
-        "provider": "deepseek",
-        "model": "deepseek-v4-pro",
+        "slotId": "advisor-openai-codex-gpt-5.5",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-openai-codex-gpt-5.5",
+        "provider": "openai-codex",
+        "model": "gpt-5.5",
         "role": "advisor",
         "startedAtMs": 220,
         "endedAtMs": 230,
@@ -99,10 +99,10 @@
         "costSource": "fake-provider"
       },
       {
-        "slotId": "final-deepseek-v4-pro",
-        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:final-deepseek-v4-pro:000001",
-        "provider": "deepseek",
-        "model": "deepseek-v4-pro",
+        "slotId": "final-openai-codex-gpt-5.6-luna",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:final-openai-codex-gpt-5.6-luna:000001",
+        "provider": "openai-codex",
+        "model": "gpt-5.6-luna",
         "role": "final_executor",
         "startedAtMs": 240,
         "endedAtMs": 250,
@@ -171,12 +171,12 @@
       "operation": "project",
       "mutations": [
         {"action": "set", "path": ["waveId"], "value": "LEGACY_WAVE"},
-        {"action": "set", "path": ["slots", 0, "callId"], "value": "LEGACY_WAVE:advisor-kimi-k3"},
-        {"action": "set", "path": ["slots", 1, "callId"], "value": "LEGACY_WAVE:advisor-deepseek-v4-pro"},
-        {"action": "set", "path": ["slots", 2, "callId"], "value": "LEGACY_WAVE:final-deepseek-v4-pro"},
-        {"action": "set", "path": ["calls", 0, "callId"], "value": "LEGACY_WAVE:advisor-kimi-k3"},
-        {"action": "set", "path": ["calls", 1, "callId"], "value": "LEGACY_WAVE:advisor-deepseek-v4-pro"},
-        {"action": "set", "path": ["calls", 2, "callId"], "value": "LEGACY_WAVE:final-deepseek-v4-pro:000001"}
+        {"action": "set", "path": ["slots", 0, "callId"], "value": "LEGACY_WAVE:advisor-deepseek-v4-flash"},
+        {"action": "set", "path": ["slots", 1, "callId"], "value": "LEGACY_WAVE:advisor-openai-codex-gpt-5.5"},
+        {"action": "set", "path": ["slots", 2, "callId"], "value": "LEGACY_WAVE:final-openai-codex-gpt-5.6-luna"},
+        {"action": "set", "path": ["calls", 0, "callId"], "value": "LEGACY_WAVE:advisor-deepseek-v4-flash"},
+        {"action": "set", "path": ["calls", 1, "callId"], "value": "LEGACY_WAVE:advisor-openai-codex-gpt-5.5"},
+        {"action": "set", "path": ["calls", 2, "callId"], "value": "LEGACY_WAVE:final-openai-codex-gpt-5.6-luna:000001"}
       ],
       "expected": "invalid"
     },

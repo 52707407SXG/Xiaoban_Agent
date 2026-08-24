@@ -4425,7 +4425,17 @@ class AIAgent:
         cb = self.tool_gen_callback
         if cb is not None:
             try:
-                cb(tool_name)
+                callback_kwargs: Dict[str, Any] = {}
+                if getattr(cb, "_xiaoban_accepts_provider_metadata", False):
+                    callback_kwargs = {
+                        "source": "provider",
+                        "provider_sequence": max(
+                            1,
+                            int(getattr(self, "_api_call_count", 0) or 1),
+                        ),
+                        "provider_event_at": time.time(),
+                    }
+                cb(tool_name, **callback_kwargs)
             except Exception:
                 pass
 
@@ -5322,13 +5332,6 @@ class AIAgent:
         file reads/writes may do so only when their target paths do not overlap.
         """
         tool_calls = assistant_message.tool_calls
-        # Mark the complete batch before dispatch. This closes the ordering gap
-        # where a model emits web/parser work before a private My Stand query or
-        # write in the same batch: every outbound handler sees the flag first.
-        from tools.web_egress_safety import mark_mystand_private_batch
-
-        mark_mystand_private_batch(tool_calls)
-
         # Allow _vprint during tool execution even with stream consumers
         self._executing_tools = True
         try:
