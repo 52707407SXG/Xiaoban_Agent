@@ -12,11 +12,41 @@ _PARSER_SRC = os.environ.get('MYSTAND_PARSER_PYTHONPATH', '/opt/mystand-parser-t
 if _PARSER_SRC and _PARSER_SRC not in sys.path:
     sys.path.insert(0, _PARSER_SRC)
 
-from mystand_parser_tools.xiaoban import (
-    MYSTAND_PARSE_SCHEMA,
-    check_mystand_parser,
-    mystand_parse_tool_handler as _upstream_mystand_parse_tool_handler,
-)
+try:
+    from mystand_parser_tools.xiaoban import (
+        MYSTAND_PARSE_SCHEMA,
+        check_mystand_parser,
+        mystand_parse_tool_handler as _upstream_mystand_parse_tool_handler,
+    )
+except ImportError:
+    # The parser is a server-side optional companion package, not a Python
+    # dependency of the standalone Xiaoban repository.  Keep discovery and
+    # tests import-safe on clean machines; check_fn then hides the unavailable
+    # tool instead of crashing registry discovery at module import time.
+    MYSTAND_PARSE_SCHEMA = {
+        "name": "mystand_parse",
+        "description": "Parse a file or trusted public URL when MyStand Parser Tools is installed.",
+        "parameters": {
+            "type": "object",
+            "properties": {"input": {"type": "string"}},
+            "required": ["input"],
+            "additionalProperties": False,
+        },
+    }
+
+    def check_mystand_parser() -> bool:
+        return False
+
+    def _upstream_mystand_parse_tool_handler(_args, **_kwargs):
+        return json.dumps(
+            {
+                "success": False,
+                "code": "mystand_parser_unavailable",
+                "error": "MyStand Parser Tools is not installed on this runtime.",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
 from gateway.session_context import get_session_env, get_session_user_message
 from tools.registry import registry
 from tools.web_egress_safety import web_egress_block_result
