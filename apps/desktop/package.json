@@ -2,7 +2,7 @@
   "name": "xiaoban",
   "productName": "Xiaoban",
   "private": true,
-  "version": "0.17.2",
+  "version": "0.17.3",
   "description": "Native desktop shell for Xiaoban-Agent.",
   "author": "Nous Research",
   "type": "module",
