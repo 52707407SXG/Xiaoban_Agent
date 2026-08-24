@@ -615,7 +615,13 @@ def interruptible_api_call(agent, api_kwargs: dict):
         """
 
         if not getattr(agent, "_strict_no_automatic_paid_retry", False):
-            t.join(timeout=2.0)
+            # A user interrupt is already terminal for a normal turn. Give the
+            # force-closed worker a brief chance to unwind, but do not make the
+            # visible stop path wait the full stale-transport grace period.
+            # Strict paid calls still use the complete barrier below so their
+            # usage receipt cannot settle while the provider worker is alive.
+            join_timeout = 0.05 if reason == "interrupt_abort" else 2.0
+            t.join(timeout=join_timeout)
             return
 
         grace_seconds = _strict_paid_shutdown_grace_seconds()
