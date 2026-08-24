@@ -96,6 +96,15 @@ def test_update_version_files_bumps_manifest_alongside_pyproject(
         '__version__ = "0.13.0"\n__release_date__ = "2026-05-14"\n',
         encoding="utf-8",
     )
+    desktop_dir = tmp_path / "apps" / "desktop"
+    desktop_dir.mkdir(parents=True)
+    (desktop_dir / "package.json").write_text(
+        '{"name":"xiaoban","version":"0.13.0"}\n', encoding="utf-8"
+    )
+    (tmp_path / "uv.lock").write_text(
+        'version = 1\n\n[[package]]\nname = "xiaoban-agent"\nversion = "0.13.0"\nsource = { editable = "." }\n',
+        encoding="utf-8",
+    )
 
     module = _load_release_module(monkeypatch, tmp_path)
     monkeypatch.setattr(module, "VERSION_FILE", version_dir / "__init__.py")
@@ -111,3 +120,8 @@ def test_update_version_files_bumps_manifest_alongside_pyproject(
     )
     assert manifest["version"] == "0.14.0"
     assert manifest["distribution"]["uvx"]["package"] == "xiaoban-agent[acp]==0.14.0"
+    desktop = json.loads((desktop_dir / "package.json").read_text(encoding="utf-8"))
+    assert desktop["version"] == "0.14.0"
+    assert 'name = "xiaoban-agent"\nversion = "0.14.0"' in (
+        tmp_path / "uv.lock"
+    ).read_text(encoding="utf-8")
