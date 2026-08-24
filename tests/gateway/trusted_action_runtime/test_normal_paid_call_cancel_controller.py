@@ -23,6 +23,7 @@ from gateway.platforms.agent_call_accounting import (
     initialize_normal_call_ledger,
 )
 from xiaoban.trusted_runtime.paid_call_policy import (
+    SIGNED_MYSTAND_AGENT_POLICY,
     SIGNED_MYSTAND_AGENT_POLICY_REVISION,
     SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
 )
@@ -66,9 +67,9 @@ def _agent():
         _true_moa_cancel_controller=None,
         _strict_no_automatic_paid_retry=True,
         _interrupt_requested=False,
-        provider="deepseek",
-        model="deepseek-v4-pro",
-        api_mode="chat_completions",
+        provider=SIGNED_MYSTAND_AGENT_POLICY.provider,
+        model=SIGNED_MYSTAND_AGENT_POLICY.model,
+        api_mode="codex_responses",
         base_url="",
         api_key="",
         max_iterations=90,
@@ -89,9 +90,10 @@ def _usage(input_tokens: int = 1, output_tokens: int = 1):
 
 def _execute(agent, provider_call, *, request_id: str):
     payload = {
-        "model": "deepseek-v4-pro",
-        "messages": [],
-        "max_tokens": 4096,
+        "model": SIGNED_MYSTAND_AGENT_POLICY.model,
+        "instructions": "system",
+        "input": [],
+        "store": False,
     }
     return execute_llm_request(
         agent,

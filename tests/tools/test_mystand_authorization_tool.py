@@ -61,14 +61,6 @@ def _call(args, **kwargs):
     )
 
 
-def _call_write(args, **kwargs):
-    return _call_with_handler(
-        bridge._mystand_authorization_write_operation_handler,
-        args,
-        **kwargs,
-    )
-
-
 def test_schema_exposes_only_read_operations():
     operation = bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]["operation"]
     properties = bridge.MYSTAND_AUTHORIZATION_SCHEMA["parameters"]["properties"]
@@ -116,8 +108,8 @@ def test_model_visible_handler_hard_rejects_write_operations(
     )
 
     assert result["ok"] is False
-    assert result["status"] == 403
-    assert result["code"] == "authorization_write_tool_required"
+    assert result["status"] == 400
+    assert result["code"] == "invalid_authorization_operation"
     assert internal_calls == []
 
 
@@ -366,252 +358,7 @@ def test_resolve_uses_trusted_user_message_instead_of_model_broadened_query(
     assert internal_calls[0]["payload"]["query"] == "只查17栋801有没有车位"
 
 
-@pytest.mark.parametrize(
-    ("message_id", "session_id"),
-    [
-        ("", "session-001"),
-        ("msg-001", ""),
-    ],
-)
-def test_preview_requires_trusted_write_context(
-    internal_calls, message_id, session_id
-):
-    result = _call_write(
-        {
-            "operation": "preview_write",
-            "authorization_id": "AUTH-ABC123",
-            "action": "knowledge-graph.add-node",
-            "payload": {"label": "客户需求"},
-            "idempotency_key": "write-001",
-        },
-        message_id=message_id,
-        session_id=session_id,
-    )
-
-    assert result["code"] == "trusted_write_context_required"
-    assert internal_calls == []
-
-
-def test_preview_normalizes_flat_add_node_and_ignores_model_version(
-    internal_calls,
-):
-    payload = {
-        "nodeId": "model-node-1",
-        "label": "客户需求",
-        "type": "skill",
-        "summary": "先核对需求",
-        "body": "以授权资料为准。",
-        "x": 640,
-        "y": 360,
-        "color": "#2563eb",
-    }
-    result = _call_write(
-        {
-            "operation": "preview_write",
-            "authorization_id": "AUTH-ABC123",
-            "action": "knowledge-graph.add-node",
-            "payload": payload,
-            "expected_version": "model-guessed-v999",
-            "idempotency_key": "write-001",
-        }
-    )
-    nested_result = _call_write(
-        {
-            "operation": "preview_write",
-            "authorization_id": "AUTH-ABC123",
-            "action": "knowledge-graph.add-node",
-            "payload": {
-                "node": {
-                    "nodeId": "model-node-2",
-                    "name": "复盘真实结果",
-                    "nodeType": "skill",
-                    "content": "写入后必须回读。",
-                }
-            },
-            "idempotency_key": "write-002",
-        }
-    )
-
-    assert result["ok"] is True
-    assert nested_result["ok"] is True
-    assert internal_calls[0] == (
-        {
-            "path": "/api/xiaoban/internal/authorization/write/preview",
-            "payload": {
-                "authorizationId": "AUTH-ABC123",
-                "action": "knowledge-graph.add-node",
-                "payload": {
-                    "node": {
-                        "id": "model-node-1",
-                        "label": "客户需求",
-                        "type": "skill",
-                        "summary": "先核对需求",
-                        "body": "以授权资料为准。",
-                        "x": 640,
-                        "y": 360,
-                        "color": "#2563eb",
-                    }
-                },
-                "idempotencyKey": "write-001",
-            },
-            "session": {
-                "platform": "api_server",
-                "user_id": "ZYJ005",
-                "message_id": "msg-001",
-                "session_id": "session-001",
-            },
-            "explicit_confirmation": False,
-        }
-    )
-    assert internal_calls[1]["payload"] == {
-        "authorizationId": "AUTH-ABC123",
-        "action": "knowledge-graph.add-node",
-        "payload": {
-            "node": {
-                "id": "model-node-2",
-                "label": "复盘真实结果",
-                "type": "skill",
-                "body": "写入后必须回读。",
-            }
-        },
-        "idempotencyKey": "write-002",
-    }
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {
-            "nodeId": "model-node-1",
-            "label": "节点",
-            "type": "skill",
-            "ownerUser": "forged-owner",
-        },
-        {
-            "node": {"label": "节点", "type": "skill"},
-            "label": "混用字段",
-        },
-        {
-            "graphId": "KGREF-FORGED",
-            "node": {"label": "节点", "type": "skill"},
-        },
-        {
-            "node": {
-                "label": "规范名",
-                "name": "别名冲突",
-                "type": "skill",
-            },
-        },
-    ],
-)
-def test_preview_rejects_add_node_unknown_mixed_or_graph_id_before_transport(
-    internal_calls,
-    payload,
-):
-    result = _call_write(
-        {
-            "operation": "preview_write",
-            "authorization_id": "AUTH-ABC123",
-            "action": "knowledge-graph.add-node",
-            "payload": payload,
-            "idempotency_key": "write-001",
-        }
-    )
-
-    assert result["ok"] is False
-    assert result["code"] == "write_payload_fields_not_allowed"
-    assert internal_calls == []
-
-
-def test_preview_rejects_unknown_write_action_before_transport(internal_calls):
-    result = _call_write(
-        {
-            "operation": "preview_write",
-            "authorization_id": "AUTH-ABC123",
-            "action": "knowledge-graph.delete-node",
-            "payload": {"nodeId": "node-1"},
-            "idempotency_key": "write-001",
-        }
-    )
-
-    assert result["code"] == "authorization_write_action_not_allowed"
-    assert internal_calls == []
-
-
-@pytest.mark.parametrize(
-    "user_message",
-    [
-        "",
-        "先别写",
-        "不要确认写入",
-        "我还没确认写入",
-        "我没有确认写入",
-        "我尚未确认写入",
-        "确认写入吗？",
-        "这不是确认写入",
-        "这不算确认写入",
-        "我说“确认写入”是什么意思？",
-        "确认写入是不是就会立即改资料？",
-        "请解释确认写入",
-        "按钮文案：确认写入，分析安全问题",
-        "如果我说确认写入，你就会修改吗？",
-        "引用原话“确认写入”",
-        "确认写入，然后把安全问题也分析一下",
-    ],
-)
-def test_commit_rejects_missing_negated_or_question_confirmation(
-    internal_calls, user_message
-):
-    result = _call_write(
-        {
-            "operation": "commit_write",
-            "preview_token": "preview-token",
-            "idempotency_key": "write-001",
-            # The model cannot smuggle confirmation through its tool arguments.
-            "confirmationPhrase": "确认写入",
-            "user_message": "确认写入",
-        },
-        user_message=user_message,
-    )
-
-    assert result["code"] == "explicit_user_confirmation_required"
-    assert internal_calls == []
-
-
-def test_commit_uses_actual_user_confirmation_and_trusted_session_ids(internal_calls):
-    result = _call_write(
-        {
-            "operation": "commit_write",
-            "preview_token": "preview-token",
-            "idempotency_key": "write-001",
-            "confirmationPhrase": "模型伪造的其他文字",
-        },
-        message_id="msg-confirm-002",
-        session_id="session-001",
-        user_message="预览没问题，确认写入",
-    )
-
-    assert result["ok"] is True
-    assert internal_calls == [
-        {
-            "path": "/api/xiaoban/internal/authorization/write/commit",
-            "payload": {
-                "previewToken": "preview-token",
-                "idempotencyKey": "write-001",
-                "confirmationPhrase": "确认写入",
-            },
-            "session": {
-                "platform": "api_server",
-                "user_id": "ZYJ005",
-                "message_id": "msg-confirm-002",
-                "session_id": "session-001",
-            },
-            "explicit_confirmation": True,
-        }
-    ]
-
-
-def test_post_internal_sends_only_valid_trusted_identity_and_confirmation_headers(monkeypatch):
+def test_post_internal_sends_only_valid_trusted_identity_headers(monkeypatch):
     captured = {}
 
     class FakeResponse:
@@ -638,11 +385,11 @@ def test_post_internal_sends_only_valid_trusted_identity_and_confirmation_header
             "/api/xiaoban/internal/authorization/write/commit",
             {"previewToken": "preview-token"},
             session={
-                "user_id": "ZYJ005\nInjected",
-                "message_id": "msg-002",
-                "session_id": "session-001",
+                "user_id": "owner-user-001\nInjected",
+                "message_id": "message-write-0002",
+                "session_id": "session-write-0002",
             },
-            explicit_confirmation=True,
+            gateway_approval_id="approval_" + "e" * 32,
         )
     )
 
@@ -654,6 +401,6 @@ def test_post_internal_sends_only_valid_trusted_identity_and_confirmation_header
     assert captured["timeout"] == 20
     assert headers["authorization"] == "Bearer service-token"
     assert "x-xiaoban-user-id" not in headers
-    assert headers["x-xiaoban-message-id"] == "msg-002"
-    assert headers["x-xiaoban-session-id"] == "session-001"
-    assert headers["x-xiaoban-explicit-confirmation"] == "1"
+    assert headers["x-xiaoban-message-id"] == "message-write-0002"
+    assert headers["x-xiaoban-session-id"] == "session-write-0002"
+    assert headers["x-xiaoban-gateway-approval-id"].startswith("approval_")

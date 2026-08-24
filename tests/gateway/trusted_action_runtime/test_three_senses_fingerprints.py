@@ -39,10 +39,15 @@ def test_ledger_records_file_symbol_consumers_and_tests():
     assert kinds == {"角色感", "时间感", "空间感"}
 
     blocks = {block["id"]: block for block in ledger["blocks"]}
+    updates_by_block = {}
     for update in ledger.get("approved_updates", []):
         assert update["block"] in blocks
         assert len(update["from_sha256"]) == 64
         assert len(update["to_sha256"]) == 64
         assert update["from_sha256"] != update["to_sha256"]
-        assert blocks[update["block"]]["sha256"] == update["to_sha256"]
+        updates_by_block.setdefault(update["block"], []).append(update)
+    for block_id, updates in updates_by_block.items():
+        for previous, current in zip(updates, updates[1:]):
+            assert previous["to_sha256"] == current["from_sha256"]
+        assert blocks[block_id]["sha256"] == updates[-1]["to_sha256"]
         assert update["reason"]

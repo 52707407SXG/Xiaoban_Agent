@@ -8,6 +8,41 @@
       "from_sha256": "728d84af15954ab869bcbb028466c7da415a77db29835740f3c11e9a5a7b12bb",
       "to_sha256": "df0ca49c634474dc12cf120843c075cb2f0cf38c486bdc71b2f76b6dd3f835a8",
       "reason": "August plan: exact AUTH, OUT, and resourceUid reads are direct; the resource index is discovery-only."
+    },
+    {
+      "date": "2026-08-25",
+      "block": "policy.operating-policy",
+      "from_sha256": "55e1ab0b076ec424cd766f6c20bc2b508702cb3c74d4e0592e8e5c0264dd77af",
+      "to_sha256": "e19f5039e6242779fc31209840889e8f7f400a2868d21ed1bfcbb0525578a5c0",
+      "reason": "Current formal runtime defines truthful website capability claims, attachment boundaries, and a required natural terminal result."
+    },
+    {
+      "date": "2026-08-25",
+      "block": "policy.mystand-feature-reasoning",
+      "from_sha256": "df0ca49c634474dc12cf120843c075cb2f0cf38c486bdc71b2f76b6dd3f835a8",
+      "to_sha256": "833de7371ed9080acc97e44ed9a9984f0c1ef83478973179797782e3959afe1f",
+      "reason": "Current formal runtime adds the dedicated unsettled-performance route and the server-approved same-account write workflow."
+    },
+    {
+      "date": "2026-08-25",
+      "block": "policy.mystand-security-boundary",
+      "from_sha256": "d3f0ab24b7f88d2945ed91958a7a492fd9ba2c0143109b7eb19fe1afc9937cc4",
+      "to_sha256": "ba52e6b365d317ca0b494a2dec34949a569fb0d637a3defa67dc78ad4fd60d20",
+      "reason": "Current formal runtime removes embedded owner identity and documents account-scoped memory, read-only source evidence, and recoverable write boundaries."
+    },
+    {
+      "date": "2026-08-25",
+      "block": "policy.agentic-workflow",
+      "from_sha256": "6fa095a2a951ed7f79c5908759ca499fb3a3125775807712db2b014dc8b9b1a7",
+      "to_sha256": "2d9f9532b283dd5fa22115d0efb668860ae3d9696013bcb27b12b560beb1885b",
+      "reason": "Current formal runtime makes visible intent and Todo optional projections while preserving real tool and final-answer execution."
+    },
+    {
+      "date": "2026-08-25",
+      "block": "policy.explicit-learn",
+      "from_sha256": "22cc5f76568af37ff340da1df469a535f0db146a6c03371f3764f2240e18a3f5",
+      "to_sha256": "4698eae46a327b97523386197194f20d7351ae6583a1caec3b5692aba731fef4",
+      "reason": "Current formal runtime limits shared Skill authoring to the configured owner and the authenticated approval tool."
     }
   ],
   "blocks": [
@@ -110,7 +145,7 @@
       "kind": "角色感",
       "file": "agent/xiaoban_operating_policy.py",
       "symbol": "XIAOBAN_OPERATING_POLICY",
-      "sha256": "55e1ab0b076ec424cd766f6c20bc2b508702cb3c74d4e0592e8e5c0264dd77af",
+      "sha256": "e19f5039e6242779fc31209840889e8f7f400a2868d21ed1bfcbb0525578a5c0",
       "consumers": [
         "agent/system_prompt.py::build_system_prompt_parts"
       ],
@@ -123,7 +158,7 @@
       "kind": "角色感",
       "file": "agent/xiaoban_operating_policy.py",
       "symbol": "XIAOBAN_MYSTAND_FEATURE_REASONING_POLICY",
-      "sha256": "df0ca49c634474dc12cf120843c075cb2f0cf38c486bdc71b2f76b6dd3f835a8",
+      "sha256": "833de7371ed9080acc97e44ed9a9984f0c1ef83478973179797782e3959afe1f",
       "consumers": [
         "agent/system_prompt.py::build_system_prompt_parts"
       ],
@@ -136,7 +171,7 @@
       "kind": "角色感",
       "file": "agent/xiaoban_operating_policy.py",
       "symbol": "XIAOBAN_MYSTAND_SECURITY_BOUNDARY_POLICY",
-      "sha256": "d3f0ab24b7f88d2945ed91958a7a492fd9ba2c0143109b7eb19fe1afc9937cc4",
+      "sha256": "ba52e6b365d317ca0b494a2dec34949a569fb0d637a3defa67dc78ad4fd60d20",
       "consumers": [
         "agent/system_prompt.py::build_system_prompt_parts"
       ],
@@ -149,7 +184,7 @@
       "kind": "角色感",
       "file": "agent/xiaoban_operating_policy.py",
       "symbol": "XIAOBAN_AGENTIC_WORKFLOW_POLICY",
-      "sha256": "6fa095a2a951ed7f79c5908759ca499fb3a3125775807712db2b014dc8b9b1a7",
+      "sha256": "2d9f9532b283dd5fa22115d0efb668860ae3d9696013bcb27b12b560beb1885b",
       "consumers": [
         "agent/system_prompt.py::build_system_prompt_parts"
       ],
@@ -175,7 +210,7 @@
       "kind": "角色感",
       "file": "agent/xiaoban_operating_policy.py",
       "symbol": "XIAOBAN_EXPLICIT_LEARN_POLICY",
-      "sha256": "22cc5f76568af37ff340da1df469a535f0db146a6c03371f3764f2240e18a3f5",
+      "sha256": "4698eae46a327b97523386197194f20d7351ae6583a1caec3b5692aba731fef4",
       "consumers": [
         "agent/system_prompt.py::build_system_prompt_parts"
       ],

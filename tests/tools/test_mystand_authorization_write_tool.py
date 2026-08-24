@@ -78,6 +78,45 @@ def test_schema_exposes_one_exact_approval_flow():
     assert "execute_safe_write" not in json.dumps(parameters)
 
 
+@pytest.mark.parametrize(
+    "session",
+    [
+        {**SESSION, "platform": "telegram"},
+        {**SESSION, "user_id": ""},
+    ],
+)
+def test_requires_authenticated_api_session(monkeypatch, session):
+    calls = []
+    monkeypatch.setattr(bridge, "_current_session", lambda: dict(session))
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    result = json.loads(bridge.mystand_authorization_write_tool_handler(_args()))
+
+    assert result["code"] == "mystand_session_required"
+    assert calls == []
+
+
+@pytest.mark.parametrize("missing_key", ["message_id", "session_id"])
+def test_requires_trusted_write_context(monkeypatch, missing_key):
+    calls = []
+    session = {**SESSION, missing_key: ""}
+    monkeypatch.setattr(bridge, "_current_session", lambda: session)
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    result = json.loads(bridge.mystand_authorization_write_tool_handler(_args()))
+
+    assert result["code"] == "trusted_write_context_required"
+    assert calls == []
+
+
 def test_approved_change_previews_then_commits_exact_plan(monkeypatch):
     calls = []
     token = "preview-token-write-0001"
@@ -208,7 +247,34 @@ def test_legacy_or_same_turn_operations_are_not_available(operation):
     assert result["code"] == "authorization_read_not_allowed"
 
 
-def test_invalid_payload_is_rejected_before_preview(monkeypatch):
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "graphId": "forged-internal-id",
+            "node": {"label": "节点", "type": "skill"},
+        },
+        {
+            "node": {"label": "节点", "type": "skill"},
+            "label": "mixed-flat-field",
+        },
+        {
+            "node": {
+                "label": "canonical-label",
+                "name": "conflicting-alias",
+                "type": "skill",
+            },
+        },
+        {
+            "node": {
+                "label": "节点",
+                "type": "skill",
+                "ownerUser": "forged-owner",
+            },
+        },
+    ],
+)
+def test_invalid_payload_is_rejected_before_preview(monkeypatch, payload):
     calls = []
     monkeypatch.setattr(
         bridge,
@@ -218,13 +284,91 @@ def test_invalid_payload_is_rejected_before_preview(monkeypatch):
     result = json.loads(bridge.mystand_authorization_write_tool_handler(_args(
         action="knowledge-graph.add-node",
         resource={"name": "测试图谱", "type_hint": "knowledge-graph"},
-        payload={
-            "graphId": "forged-internal-id",
-            "node": {"label": "节点", "type": "skill"},
-        },
+        payload=payload,
     )))
     assert result["ok"] is False
     assert result["code"] == "write_payload_fields_not_allowed"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (
+            {
+                "nodeId": "model-node-1",
+                "label": "客户需求",
+                "type": "skill",
+                "body": "以授权资料为准。",
+            },
+            {
+                "node": {
+                    "id": "model-node-1",
+                    "label": "客户需求",
+                    "type": "skill",
+                    "body": "以授权资料为准。",
+                },
+            },
+        ),
+        (
+            {
+                "node": {
+                    "nodeId": "model-node-2",
+                    "name": "复盘真实结果",
+                    "nodeType": "skill",
+                    "content": "写入后必须回读。",
+                },
+            },
+            {
+                "node": {
+                    "id": "model-node-2",
+                    "label": "复盘真实结果",
+                    "type": "skill",
+                    "body": "写入后必须回读。",
+                },
+            },
+        ),
+    ],
+)
+def test_graph_add_normalizes_supported_aliases(monkeypatch, payload, expected):
+    calls = []
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda path, body, **kwargs: calls.append((path, body, kwargs))
+        or json.dumps({
+            "ok": False,
+            "status": 404,
+            "code": "write_resource_not_available",
+            "error": "测试到达服务器",
+        }),
+    )
+
+    result = json.loads(bridge.mystand_authorization_write_tool_handler(_args(
+        action="knowledge-graph.add-node",
+        resource={"name": "测试图谱", "type_hint": "knowledge-graph"},
+        payload=payload,
+    )))
+
+    assert result["code"] == "write_resource_not_available"
+    assert calls[0][1]["payload"] == expected
+
+
+def test_unknown_write_action_is_rejected_before_preview(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        bridge,
+        "_post_internal",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    result = json.loads(bridge.mystand_authorization_write_tool_handler(_args(
+        action="knowledge-graph.delete-node",
+        resource={"name": "测试图谱", "type_hint": "knowledge-graph"},
+        payload={"nodeId": "node-1"},
+    )))
+
+    assert result["code"] == "authorization_write_action_not_allowed"
     assert calls == []
 
 
