@@ -308,18 +308,19 @@ def test_pending_approval_limit_is_bounded_but_exact_notify_replay_survives():
     assert len(emitted) == 8
 
 
-def test_late_steer_after_tool_terminal_is_rejected():
-    bridge, _emitted, open_tool_calls, agent = _make_bridge()
+def test_steer_without_open_tool_binds_to_running_turn():
+    bridge, emitted, open_tool_calls, agent = _make_bridge()
     open_tool_calls.clear()
 
-    with pytest.raises(_ChatControlConflict) as late:
-        bridge.steer(
-            control_id="control-late",
-            message="late body",
-        )
+    receipt = bridge.steer(
+        control_id="control-thinking",
+        message="use the corrected address",
+    )
 
-    assert late.value.code == "steer_not_active"
-    assert agent.messages == []
+    assert receipt["status"] == "accepted"
+    assert receipt["event"]["callId"] == "turn-steer:turn-current"
+    assert agent.messages == ["use the corrected address"]
+    assert [name for name, _payload in emitted] == ["steer.accepted"]
 
 
 def test_pending_approval_steer_rejects_missing_or_changed_slot():
@@ -347,7 +348,7 @@ def test_pending_approval_steer_rejects_missing_or_changed_slot():
     assert [name for name, _payload in emitted] == ["approval.request"]
 
 
-def test_steer_rejects_multiple_pending_approvals_or_unbound_open_tools():
+def test_steer_rejects_multiple_pending_approvals_but_not_parallel_tools():
     session_key = "chat-control-steer-ambiguous"
     bridge, _emitted, open_tool_calls, agent = _make_bridge(
         session_key=session_key
@@ -387,13 +388,12 @@ def test_steer_rejects_multiple_pending_approvals_or_unbound_open_tools():
         "mystand_query",
         ("delivery-current", "turn-current"),
     )
-    with pytest.raises(_ChatControlConflict) as tools:
-        plain_bridge.steer(
-            control_id="control-ambiguous-tool",
-            message="supplement",
-        )
-    assert tools.value.code == "steer_tool_ambiguous"
-    assert plain_agent.messages == []
+    receipt = plain_bridge.steer(
+        control_id="control-parallel-tools",
+        message="supplement",
+    )
+    assert receipt["event"]["callId"] == "turn-steer:turn-current"
+    assert plain_agent.messages == ["supplement"]
 
 
 def test_combined_steer_targets_exact_approval_call_and_preserves_other_call():
@@ -700,9 +700,9 @@ async def test_steer_http_exact_approval_id_closes_toctou_window(
             private_message.encode("utf-8")
         ).hexdigest()
         assert private_message not in json.dumps(accepted_body, ensure_ascii=False)
-        assert agent.messages == [private_message]
-        assert ambiguous.status == 409
-        assert ambiguous_body["error"]["code"] == "steer_tool_ambiguous"
+        assert agent.messages == [private_message, private_message]
+        assert ambiguous.status == 202
+        assert ambiguous_body["event"]["callId"] == f"turn-steer:{'7' * 16}"
     finally:
         release.set()
         await active

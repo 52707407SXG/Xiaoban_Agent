@@ -2591,11 +2591,40 @@ class AIAgent:
             self._pending_steer = (existing + "\n" + cleaned) if existing else cleaned
             return True
         with _lock:
+            if not getattr(self, "_steer_accepting", True):
+                return False
             if self._pending_steer:
                 self._pending_steer = self._pending_steer + "\n" + cleaned
             else:
                 self._pending_steer = cleaned
         return True
+
+    def _open_steer_window(self) -> None:
+        """Open the same-turn supplement window for a new Agent turn."""
+        _lock = getattr(self, "_pending_steer_lock", None)
+        if _lock is None:
+            self._pending_steer = None
+            self._steer_accepting = True
+            return
+        with _lock:
+            self._pending_steer = None
+            self._steer_accepting = True
+
+    def _close_steer_window_or_drain(self) -> Optional[str]:
+        """Atomically drain a late steer, or close the turn to new steers."""
+        _lock = getattr(self, "_pending_steer_lock", None)
+        if _lock is None:
+            text = getattr(self, "_pending_steer", None)
+            self._pending_steer = None
+            if not text:
+                self._steer_accepting = False
+            return text
+        with _lock:
+            text = self._pending_steer
+            self._pending_steer = None
+            if not text:
+                self._steer_accepting = False
+            return text
 
     def _drain_pending_steer(self) -> Optional[str]:
         """Return the pending steer text (if any) and clear the slot.

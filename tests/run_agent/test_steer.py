@@ -24,6 +24,7 @@ def _bare_agent() -> AIAgent:
     agent = object.__new__(AIAgent)
     agent._pending_steer = None
     agent._pending_steer_lock = threading.Lock()
+    agent._steer_accepting = True
     return agent
 
 
@@ -59,6 +60,20 @@ class TestSteerAcceptance:
         agent.steer("second note")
         agent.steer("third note")
         assert agent._pending_steer == "first note\nsecond note\nthird note"
+
+    def test_rejects_after_final_window_closed(self):
+        agent = _bare_agent()
+        agent._steer_accepting = False
+        assert agent.steer("too late") is False
+        assert agent._pending_steer is None
+
+    def test_final_boundary_drains_or_closes_atomically(self):
+        agent = _bare_agent()
+        agent.steer("use the corrected address")
+        assert agent._close_steer_window_or_drain() == "use the corrected address"
+        assert agent._steer_accepting is True
+        assert agent._close_steer_window_or_drain() is None
+        assert agent._steer_accepting is False
 
 
 class TestSteerDrain:

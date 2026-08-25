@@ -823,11 +823,10 @@ class _ChatControlBridge:
             if (
                 self._closed
                 or not current_turn
-                or not self._open_tool_calls
             ):
                 raise _ChatControlConflict(
                     "steer_not_active",
-                    "Steer is accepted only while a tool is running",
+                    "Steer is accepted only while the current turn is running",
                 )
             if (
                 not cleaned
@@ -849,12 +848,6 @@ class _ChatControlBridge:
                     "steer_approval_changed",
                     "The pending approval changed before steer was accepted",
                 )
-            if not self._pending_approvals and len(self._open_tool_calls) != 1:
-                raise _ChatControlConflict(
-                    "steer_tool_ambiguous",
-                    "Steer requires one unambiguous active tool",
-                )
-
             if expected_approval_id:
                 target_pending = self._pending_approvals[expected_approval_id]
                 target_call_id = target_pending["callId"]
@@ -884,7 +877,11 @@ class _ChatControlBridge:
                         "Steer cannot choose between approvals on the same tool call",
                     )
             else:
-                target_call_id = next(iter(self._open_tool_calls))
+                target_call_id = (
+                    next(iter(self._open_tool_calls))
+                    if len(self._open_tool_calls) == 1
+                    else f"turn-steer:{current_turn['turnId']}"
+                )
             from tools.approval import resolve_gateway_approval_exact
 
             pending_items = (
@@ -7206,9 +7203,8 @@ class APIServerAdapter(
 
     @staticmethod
     def _mystand_owner_user_id() -> str:
-        from xiaoban.mystand_owner import configured_mystand_owner_user_id
-
-        return configured_mystand_owner_user_id()
+        value = str(os.getenv("MYSTAND_XIAOBAN_OWNER_USER_ID", "") or "").strip()
+        return value if re.fullmatch(r"[A-Za-z0-9._:@-]{1,200}", value) else ""
 
     @classmethod
     def _toolsets_for_request_headers(cls, headers: Any) -> Optional[List[str]]:

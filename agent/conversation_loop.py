@@ -610,6 +610,10 @@ def run_conversation(
             failure_source="context_compaction",
         )
 
+    # From this point the gateway may deliver ordinary chat input into this
+    # running turn. The final-response branch closes this window atomically.
+    agent._open_steer_window()
+
     # A turn becomes observable only after the complete prologue has returned a
     # real TurnContext.  The gateway filters this generic progress callback to
     # trusted My Stand request/turn identifiers; other consumers ignore the
@@ -5387,6 +5391,23 @@ def run_conversation(
                     )
                 ):
                     messages.pop()
+
+                # A supplement can arrive while the provider is producing its
+                # final text. Keep that draft in model context and continue the
+                # same turn; otherwise close the window before committing.
+                late_steer = agent._close_steer_window_or_drain()
+                if late_steer:
+                    final_msg["content"] = final_response
+                    final_msg["_xiaoban_mid_turn_draft"] = True
+                    messages.append(final_msg)
+                    messages.append({
+                        "role": "user",
+                        "content": late_steer,
+                        "_xiaoban_mid_turn_supplement": True,
+                    })
+                    agent._trusted_steer_sensitive_turn = True
+                    agent._session_messages = messages
+                    continue
 
                 if not _claim_true_moa_public_result(
                     agent,
