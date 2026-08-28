@@ -332,7 +332,10 @@ def compress_context(
         RUNTIME_CHECKPOINT_INTERNAL_KEY,
     )
 
-    strict_normal = signed_normal_mode(agent)
+    strict_accounted = bool(
+        signed_normal_mode(agent)
+        or getattr(agent, "_true_moa_usage_ledger", None) is not None
+    )
 
     # Lazy feasibility check — run the auxiliary-provider probe + context
     # length lookup just-in-time on the first compression attempt instead of
@@ -342,7 +345,7 @@ def compress_context(
     # status-callback replay machinery still emits the warning to the user
     # the first time it would matter.
     if (
-        not strict_normal
+        not strict_accounted
         and not getattr(agent, "_compression_feasibility_checked", False)
     ):
         # Mark as checked only after the probe completes. If the check
@@ -477,7 +480,7 @@ def compress_context(
             _existing_sp = getattr(agent, "_cached_system_prompt", None)
             if not _existing_sp:
                 _existing_sp = agent._build_system_prompt(system_message)
-            if strict_normal:
+            if strict_accounted:
                 raise RuntimeError(
                     "same-model context compaction lock unavailable"
                 )
@@ -499,7 +502,7 @@ def compress_context(
             pass
 
     try:
-        if strict_normal:
+        if strict_accounted:
             compressed = agent.context_compressor.compress(
                 messages,
                 current_tokens=approx_tokens,
@@ -549,7 +552,7 @@ def compress_context(
         if not _existing_sp:
             _existing_sp = agent._build_system_prompt(system_message)
         _release_lock()  # compression aborted — no rotation will happen
-        if strict_normal:
+        if strict_accounted:
             raise RuntimeError(_err)
         return messages, _existing_sp
 
@@ -558,7 +561,7 @@ def compress_context(
         if not _existing_sp:
             _existing_sp = agent._build_system_prompt(system_message)
         _release_lock()
-        if strict_normal:
+        if strict_accounted:
             raise RuntimeError(
                 "same-model context compaction made no progress"
             )
@@ -566,7 +569,7 @@ def compress_context(
 
     runtime_checkpoint = (
         signed_normal_runtime_checkpoint(agent, messages)
-        if strict_normal
+        if strict_accounted
         else ""
     )
     runtime_checkpoint_payload = None

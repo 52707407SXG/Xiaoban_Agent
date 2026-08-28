@@ -16,9 +16,9 @@ from gateway.platforms.api_server import (
     _IdempotencyCache,
 )
 from xiaoban.trusted_runtime.true_moa import (
-    GPT55_ADVISOR_SLOT as DEEPSEEK_ADVISOR_SLOT,
+    GPT56_SOL_ADVISOR_SLOT,
     FINAL_EXECUTOR_SLOT,
-    DEEPSEEK_FLASH_ADVISOR_SLOT as KIMI_ADVISOR_SLOT,
+    DEEPSEEK_PRO_ADVISOR_SLOT,
     TRUE_MOA_MODE,
     TRUE_MOA_PRESET_ID,
     TRUE_MOA_PRESET_REVISION,
@@ -201,8 +201,8 @@ def test_stale_usage_drain_generation_cannot_persist_or_terminalize(
     fingerprint = _fingerprint("usage-drain-fence")
     assert store.claim(key, fingerprint, kind="execution") == "missing"
     ledger = _running_ledger(wave_id="d" * 32)
-    ledger.start_slot(KIMI_ADVISOR_SLOT)
-    call_id = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    ledger.start_slot(DEEPSEEK_PRO_ADVISOR_SLOT)
+    call_id = ledger.start_advisor_call(DEEPSEEK_PRO_ADVISOR_SLOT)
     ledger.mark_dispatched(call_id)
     usage = ledger.to_dict()
 
@@ -265,13 +265,13 @@ def _completed_ledger(
     ledger = _running_ledger(epoch=epoch, wave_id=wave_id)
     _finish_advisor(
         ledger,
-        KIMI_ADVISOR_SLOT,
+        DEEPSEEK_PRO_ADVISOR_SLOT,
         input_tokens=5,
         output_tokens=2,
     )
     _finish_advisor(
         ledger,
-        DEEPSEEK_ADVISOR_SLOT,
+        GPT56_SOL_ADVISOR_SLOT,
         input_tokens=7,
         output_tokens=3,
     )
@@ -379,8 +379,8 @@ def test_store_merges_late_snapshots_without_usage_or_state_regression(
     assert store.claim(key, fingerprint, kind="execution") == "missing"
 
     ledger = _running_ledger()
-    ledger.start_slot(KIMI_ADVISOR_SLOT)
-    kimi_call_id = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    ledger.start_slot(DEEPSEEK_PRO_ADVISOR_SLOT)
+    kimi_call_id = ledger.start_advisor_call(DEEPSEEK_PRO_ADVISOR_SLOT)
     ledger.mark_dispatched(kimi_call_id)
     old_snapshot = ledger.to_dict()
     ledger.finish_advisor_call(
@@ -394,7 +394,7 @@ def test_store_merges_late_snapshots_without_usage_or_state_regression(
         },
     )
     ledger.finish_slot(
-        KIMI_ADVISOR_SLOT,
+        DEEPSEEK_PRO_ADVISOR_SLOT,
         status="completed",
         usage={
             "input_tokens": 7,
@@ -405,7 +405,7 @@ def test_store_merges_late_snapshots_without_usage_or_state_regression(
     )
     _finish_advisor(
         ledger,
-        DEEPSEEK_ADVISOR_SLOT,
+        GPT56_SOL_ADVISOR_SLOT,
         input_tokens=11,
         output_tokens=4,
     )
@@ -423,10 +423,10 @@ def test_store_merges_late_snapshots_without_usage_or_state_regression(
         item["slotId"]: item
         for item in recovered["usage"]["calls"]
     }
-    assert calls[KIMI_ADVISOR_SLOT.slot_id]["totalTokens"] == 10
-    assert calls[KIMI_ADVISOR_SLOT.slot_id]["status"] == "completed"
-    assert calls[DEEPSEEK_ADVISOR_SLOT.slot_id]["totalTokens"] == 15
-    assert calls[DEEPSEEK_ADVISOR_SLOT.slot_id]["status"] == "completed"
+    assert calls[DEEPSEEK_PRO_ADVISOR_SLOT.slot_id]["totalTokens"] == 10
+    assert calls[DEEPSEEK_PRO_ADVISOR_SLOT.slot_id]["status"] == "completed"
+    assert calls[GPT56_SOL_ADVISOR_SLOT.slot_id]["totalTokens"] == 15
+    assert calls[GPT56_SOL_ADVISOR_SLOT.slot_id]["status"] == "completed"
     store.close()
 
 
@@ -439,8 +439,8 @@ def test_stopped_orphan_fence_accepts_late_failed_usage_without_reopening(
     assert store.claim(key, fingerprint, kind="execution") == "missing"
 
     ledger = _running_ledger(wave_id="b" * 32)
-    ledger.start_slot(KIMI_ADVISOR_SLOT)
-    call_id = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    ledger.start_slot(DEEPSEEK_PRO_ADVISOR_SLOT)
+    call_id = ledger.start_advisor_call(DEEPSEEK_PRO_ADVISOR_SLOT)
     ledger.mark_dispatched(call_id)
     store.save_usage(
         key,
@@ -471,7 +471,7 @@ def test_stopped_orphan_fence_accepts_late_failed_usage_without_reopening(
         error_category="late_malformed_result_after_terminal",
     )
     ledger.finish_slot(
-        KIMI_ADVISOR_SLOT,
+        DEEPSEEK_PRO_ADVISOR_SLOT,
         status="cancelled",
         usage=late_usage,
         error_category="late_malformed_result_after_terminal",
@@ -567,13 +567,13 @@ def test_store_accepts_dynamic_advisor_subset_and_keeps_fixed_call_order(
     assert store.claim(key, fingerprint, kind="execution") == "missing"
 
     ledger = _running_ledger(wave_id="f" * 32)
-    ledger.start_slot(DEEPSEEK_ADVISOR_SLOT)
-    ledger.start_advisor_call(DEEPSEEK_ADVISOR_SLOT)
+    ledger.start_slot(GPT56_SOL_ADVISOR_SLOT)
+    ledger.start_advisor_call(GPT56_SOL_ADVISOR_SLOT)
     deepseek_only = ledger.to_dict()
     store.save_usage(key, fingerprint, deepseek_only, state="running")
 
-    ledger.start_slot(KIMI_ADVISOR_SLOT)
-    ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    ledger.start_slot(DEEPSEEK_PRO_ADVISOR_SLOT)
+    ledger.start_advisor_call(DEEPSEEK_PRO_ADVISOR_SLOT)
     both_advisors = ledger.to_dict()
     store.save_usage(key, fingerprint, both_advisors, state="running")
     store.save_usage(key, fingerprint, deepseek_only, state="running")
@@ -583,8 +583,8 @@ def test_store_accepts_dynamic_advisor_subset_and_keeps_fixed_call_order(
     assert [
         call["slotId"] for call in recovered["usage"]["calls"]
     ] == [
-        KIMI_ADVISOR_SLOT.slot_id,
-        DEEPSEEK_ADVISOR_SLOT.slot_id,
+        DEEPSEEK_PRO_ADVISOR_SLOT.slot_id,
+        GPT56_SOL_ADVISOR_SLOT.slot_id,
     ]
     store.close()
 
@@ -598,8 +598,8 @@ def test_store_fill_once_upgrades_unknown_cache_split_without_regression(
     assert store.claim(key, fingerprint, kind="execution") == "missing"
 
     ledger = _running_ledger(wave_id="1" * 32)
-    ledger.start_slot(DEEPSEEK_ADVISOR_SLOT)
-    call_id = ledger.start_advisor_call(DEEPSEEK_ADVISOR_SLOT)
+    ledger.start_slot(GPT56_SOL_ADVISOR_SLOT)
+    call_id = ledger.start_advisor_call(GPT56_SOL_ADVISOR_SLOT)
     ledger.mark_dispatched(call_id)
     base_usage = {
         "prompt_tokens": 11,
@@ -684,8 +684,8 @@ def test_interrupted_delivery_accepts_late_terminal_usage_callback(
     cache._durable.set_state(key, state="running")
 
     ledger = _running_ledger(wave_id="2" * 32)
-    ledger.start_slot(DEEPSEEK_ADVISOR_SLOT)
-    call_id = ledger.start_advisor_call(DEEPSEEK_ADVISOR_SLOT)
+    ledger.start_slot(GPT56_SOL_ADVISOR_SLOT)
+    call_id = ledger.start_advisor_call(GPT56_SOL_ADVISOR_SLOT)
     ledger.mark_dispatched(call_id)
     cache.persist_usage(key, fingerprint, ledger.to_dict())
 
@@ -706,7 +706,7 @@ def test_interrupted_delivery_accepts_late_terminal_usage_callback(
         error_category="late_terminal_after_disconnect",
     )
     ledger.finish_slot(
-        DEEPSEEK_ADVISOR_SLOT,
+        GPT56_SOL_ADVISOR_SLOT,
         status=receipt_status,
         usage=usage,
         error_category="late_terminal_after_disconnect",
@@ -879,12 +879,12 @@ async def test_restart_replay_preserves_calls_and_never_recomputes(
     ledger = _running_ledger(epoch="2", wave_id="b" * 32)
     _finish_advisor(
         ledger,
-        KIMI_ADVISOR_SLOT,
+        DEEPSEEK_PRO_ADVISOR_SLOT,
         input_tokens=5,
         output_tokens=2,
     )
-    ledger.start_slot(DEEPSEEK_ADVISOR_SLOT)
-    ledger.start_advisor_call(DEEPSEEK_ADVISOR_SLOT)
+    ledger.start_slot(GPT56_SOL_ADVISOR_SLOT)
+    ledger.start_advisor_call(GPT56_SOL_ADVISOR_SLOT)
     first.save_usage(
         key,
         fingerprint,
@@ -1056,7 +1056,7 @@ def test_durable_files_never_contain_scope_or_prompt_plaintext(tmp_path: Path):
     ledger = _running_ledger(epoch="3", wave_id="c" * 32)
     _finish_advisor(
         ledger,
-        KIMI_ADVISOR_SLOT,
+        DEEPSEEK_PRO_ADVISOR_SLOT,
         input_tokens=2,
         output_tokens=1,
     )
@@ -1447,8 +1447,8 @@ def test_first_outcome_encryption_binds_transactionally_merged_usage(
     fingerprint = _fingerprint(key)
     binding = _outcome_binding()
     ledger = _running_ledger(wave_id="c" * 32)
-    ledger.start_slot(KIMI_ADVISOR_SLOT)
-    kimi_call = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    ledger.start_slot(DEEPSEEK_PRO_ADVISOR_SLOT)
+    kimi_call = ledger.start_advisor_call(DEEPSEEK_PRO_ADVISOR_SLOT)
     ledger.mark_dispatched(kimi_call)
     provisional = ledger.to_dict()
     kimi_usage = {
@@ -1463,13 +1463,13 @@ def test_first_outcome_encryption_binds_transactionally_merged_usage(
         usage=kimi_usage,
     )
     ledger.finish_slot(
-        KIMI_ADVISOR_SLOT,
+        DEEPSEEK_PRO_ADVISOR_SLOT,
         status="completed",
         usage=kimi_usage,
     )
     _finish_advisor(
         ledger,
-        DEEPSEEK_ADVISOR_SLOT,
+        GPT56_SOL_ADVISOR_SLOT,
         input_tokens=7,
         output_tokens=3,
     )
@@ -1565,13 +1565,13 @@ def test_durable_projection_accepts_ten_total_calls_and_rejects_ninth_final():
     ledger = _running_ledger(wave_id="d" * 32)
     _finish_advisor(
         ledger,
-        KIMI_ADVISOR_SLOT,
+        DEEPSEEK_PRO_ADVISOR_SLOT,
         input_tokens=1,
         output_tokens=1,
     )
     _finish_advisor(
         ledger,
-        DEEPSEEK_ADVISOR_SLOT,
+        GPT56_SOL_ADVISOR_SLOT,
         input_tokens=1,
         output_tokens=1,
     )

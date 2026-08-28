@@ -45,9 +45,9 @@ from xiaoban.trusted_runtime.protocol_contract import (
     TRUSTED_RUNTIME_CONTRACT_REVISION_HEADER,
 )
 from xiaoban.trusted_runtime.true_moa import (
-    GPT55_ADVISOR_SLOT as DEEPSEEK_ADVISOR_SLOT,
+    GPT56_SOL_ADVISOR_SLOT,
     FINAL_EXECUTOR_SLOT,
-    DEEPSEEK_FLASH_ADVISOR_SLOT as KIMI_ADVISOR_SLOT,
+    DEEPSEEK_PRO_ADVISOR_SLOT,
     MODE_EPOCH_HEADER,
     MOA_PRESET_ID_HEADER,
     MOA_PRESET_REVISION_HEADER,
@@ -295,8 +295,8 @@ def _completed_usage(
 ) -> dict:
     ledger = TrueMoAUsageLedger(snapshot, wave_id=wave_id)
     for slot, input_tokens, output_tokens in (
-        (KIMI_ADVISOR_SLOT, 2, 1),
-        (DEEPSEEK_ADVISOR_SLOT, 3, 1),
+        (DEEPSEEK_PRO_ADVISOR_SLOT, 2, 1),
+        (GPT56_SOL_ADVISOR_SLOT, 3, 1),
     ):
         ledger.start_slot(slot)
         advisor_call_id = ledger.start_advisor_call(slot)
@@ -347,11 +347,11 @@ def _failed_advisor_timeout_ledger(
 ) -> tuple[TrueMoAUsageLedger, str]:
     ledger = TrueMoAUsageLedger(snapshot, wave_id=wave_id)
     ledger.set_wave_status("running")
-    ledger.start_slot(KIMI_ADVISOR_SLOT)
-    call_id = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    ledger.start_slot(DEEPSEEK_PRO_ADVISOR_SLOT)
+    call_id = ledger.start_advisor_call(DEEPSEEK_PRO_ADVISOR_SLOT)
     ledger.mark_dispatched(call_id)
     ledger.finish_slot(
-        KIMI_ADVISOR_SLOT,
+        DEEPSEEK_PRO_ADVISOR_SLOT,
         status="timed_out",
         error_category="advisor_timeout",
     )
@@ -3264,7 +3264,7 @@ async def test_gateway_runs_two_fake_advisors_and_one_fake_final_with_one_ledger
         dispatch_callback()
         with calls_lock:
             advisor_calls[slot.slot_id] += 1
-        if slot == KIMI_ADVISOR_SLOT:
+        if slot == DEEPSEEK_PRO_ADVISOR_SLOT:
             return StrictAdvisorResult(
                 content="fake kimi advice",
                 usage={
@@ -3276,7 +3276,7 @@ async def test_gateway_runs_two_fake_advisors_and_one_fake_final_with_one_ledger
                 cost_status="reported",
                 cost_source="fake-kimi",
             )
-        assert slot == DEEPSEEK_ADVISOR_SLOT
+        assert slot == GPT56_SOL_ADVISOR_SLOT
         return StrictAdvisorResult(
             content="fake deepseek advice",
             usage={
@@ -3329,8 +3329,8 @@ async def test_gateway_runs_two_fake_advisors_and_one_fake_final_with_one_ledger
 
     assert advisor_calls == Counter(
         {
-            KIMI_ADVISOR_SLOT.slot_id: 1,
-            DEEPSEEK_ADVISOR_SLOT.slot_id: 1,
+            DEEPSEEK_PRO_ADVISOR_SLOT.slot_id: 1,
+            GPT56_SOL_ADVISOR_SLOT.slot_id: 1,
         },
     )
     assert len(final_agent.run_calls) == 1
@@ -3355,8 +3355,8 @@ async def test_gateway_runs_two_fake_advisors_and_one_fake_final_with_one_ledger
     assert ledger["presetRevision"] == TRUE_MOA_PRESET_REVISION
     assert ledger["status"] == "completed"
     assert [slot["slotId"] for slot in ledger["slots"]] == [
-        KIMI_ADVISOR_SLOT.slot_id,
-        DEEPSEEK_ADVISOR_SLOT.slot_id,
+        DEEPSEEK_PRO_ADVISOR_SLOT.slot_id,
+        GPT56_SOL_ADVISOR_SLOT.slot_id,
         FINAL_EXECUTOR_SLOT.slot_id,
     ]
     assert all(slot["status"] == "completed" for slot in ledger["slots"])
@@ -3395,7 +3395,7 @@ async def test_advisor_failure_closes_gateway_before_final_or_tools(
         with lock:
             advisor_calls[slot.slot_id] += 1
         rendezvous.wait()
-        if slot == KIMI_ADVISOR_SLOT:
+        if slot == DEEPSEEK_PRO_ADVISOR_SLOT:
             raise RuntimeError("sanitized fake provider failure")
         return StrictAdvisorResult(
             content="PRIVATE_LATE_ADVISOR",
@@ -3433,8 +3433,8 @@ async def test_advisor_failure_closes_gateway_before_final_or_tools(
 
     assert advisor_calls == Counter(
         {
-            KIMI_ADVISOR_SLOT.slot_id: 1,
-            DEEPSEEK_ADVISOR_SLOT.slot_id: 1,
+            DEEPSEEK_PRO_ADVISOR_SLOT.slot_id: 1,
+            GPT56_SOL_ADVISOR_SLOT.slot_id: 1,
         },
     )
     assert final_agent.run_calls == []
@@ -3571,7 +3571,7 @@ async def test_stop_tombstone_wins_completion_commit_without_text_leak():
         "calls": [
             {
                 "callId": "advisor-running",
-                "slotId": KIMI_ADVISOR_SLOT.slot_id,
+                "slotId": DEEPSEEK_PRO_ADVISOR_SLOT.slot_id,
                 "role": "advisor",
                 "status": "running",
                 "usageStatus": "unavailable",
@@ -3773,7 +3773,7 @@ async def test_same_process_stopped_usage_drain_is_not_terminalized_as_orphan(
     )
     ledger = TrueMoAUsageLedger(snapshot, wave_id="d" * 32)
     running_calls = {}
-    for slot in (KIMI_ADVISOR_SLOT, DEEPSEEK_ADVISOR_SLOT):
+    for slot in (DEEPSEEK_PRO_ADVISOR_SLOT, GPT56_SOL_ADVISOR_SLOT):
         ledger.start_slot(slot)
         running_calls[slot] = ledger.start_advisor_call(slot)
         ledger.mark_dispatched(running_calls[slot])
@@ -3869,7 +3869,7 @@ async def test_same_process_stopped_usage_drain_is_not_terminalized_as_orphan(
                 notify=False,
             )
 
-        _finish_receipt(KIMI_ADVISOR_SLOT, 1)
+        _finish_receipt(DEEPSEEK_PRO_ADVISOR_SLOT, 1)
         cache.persist_usage(scoped_key, fingerprint, ledger.to_dict())
         partial_response = await client.post(
             "/v1/chat/completions/usage",
@@ -3884,15 +3884,15 @@ async def test_same_process_stopped_usage_drain_is_not_terminalized_as_orphan(
             for call in partial_payload["usage"]["calls"]
         }
         assert (
-            partial_calls[KIMI_ADVISOR_SLOT.slot_id]["usageStatus"]
+            partial_calls[DEEPSEEK_PRO_ADVISOR_SLOT.slot_id]["usageStatus"]
             == "reported"
         )
         assert (
-            partial_calls[DEEPSEEK_ADVISOR_SLOT.slot_id]["status"]
+            partial_calls[GPT56_SOL_ADVISOR_SLOT.slot_id]["status"]
             == "running"
         )
 
-        _finish_receipt(DEEPSEEK_ADVISOR_SLOT, 2)
+        _finish_receipt(GPT56_SOL_ADVISOR_SLOT, 2)
         cache.persist_usage(scoped_key, fingerprint, ledger.to_dict())
 
         settled_response = await client.post(
@@ -3941,8 +3941,8 @@ async def test_same_process_interrupted_usage_drain_is_not_recovered_as_orphan(
     )
     ledger = TrueMoAUsageLedger(snapshot, wave_id="5" * 32)
     ledger.set_wave_status("running")
-    ledger.start_slot(KIMI_ADVISOR_SLOT)
-    call_id = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    ledger.start_slot(DEEPSEEK_PRO_ADVISOR_SLOT)
+    call_id = ledger.start_advisor_call(DEEPSEEK_PRO_ADVISOR_SLOT)
     ledger.mark_dispatched(call_id)
     cache.persist_usage(scoped_key, fingerprint, ledger.to_dict())
     cache._durable.set_state(scoped_key, state="interrupted")
@@ -4169,7 +4169,7 @@ async def test_restart_failed_advisor_timeout_terminalizes_orphaned_call(
         cost_source="fake-provider",
     )
     ledger.finish_slot(
-        KIMI_ADVISOR_SLOT,
+        DEEPSEEK_PRO_ADVISOR_SLOT,
         status="timed_out",
         usage=late_usage,
         error_category="advisor_timeout",
@@ -4229,8 +4229,8 @@ async def test_restart_retries_running_usage_after_old_lease_expires(
     )
     ledger = TrueMoAUsageLedger(snapshot, wave_id="b" * 32)
     ledger.set_wave_status("running")
-    ledger.start_slot(KIMI_ADVISOR_SLOT)
-    call_id = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+    ledger.start_slot(DEEPSEEK_PRO_ADVISOR_SLOT)
+    call_id = ledger.start_advisor_call(DEEPSEEK_PRO_ADVISOR_SLOT)
     ledger.mark_dispatched(call_id)
     original.persist_usage(scoped_key, fingerprint, ledger.to_dict())
     lease_before_restart = original._durable.usage_drain_lease(scoped_key)
@@ -4421,8 +4421,8 @@ async def test_restart_usage_recovery_terminalizes_orphan_without_stop(
         )
         ledger = TrueMoAUsageLedger(snapshot, wave_id="6" * 32)
         ledger.set_wave_status("running")
-        ledger.start_slot(KIMI_ADVISOR_SLOT)
-        call_id = ledger.start_advisor_call(KIMI_ADVISOR_SLOT)
+        ledger.start_slot(DEEPSEEK_PRO_ADVISOR_SLOT)
+        call_id = ledger.start_advisor_call(DEEPSEEK_PRO_ADVISOR_SLOT)
     if dispatched:
         ledger.mark_dispatched(call_id)
     original._durable.save_usage(
@@ -4535,7 +4535,7 @@ async def test_restart_usage_recovery_terminalizes_orphan_without_stop(
             cost_source="fake-provider",
         )
         ledger.finish_slot(
-            KIMI_ADVISOR_SLOT,
+            DEEPSEEK_PRO_ADVISOR_SLOT,
             status="completed",
             usage=late_usage,
             error_category="late_provider_result",
@@ -4656,7 +4656,7 @@ async def test_restart_usage_recovery_fails_nonterminal_ledger_without_active_ca
         ledger.set_wave_status("running")
         if phase == "between_calls":
             for index, slot in enumerate(
-                (KIMI_ADVISOR_SLOT, DEEPSEEK_ADVISOR_SLOT),
+                (DEEPSEEK_PRO_ADVISOR_SLOT, GPT56_SOL_ADVISOR_SLOT),
                 start=1,
             ):
                 usage = {
@@ -4788,8 +4788,8 @@ async def test_create_restart_stop_fences_late_completion_and_keeps_usage(
 
     ledger = TrueMoAUsageLedger(snapshot, wave_id="e" * 32)
     for slot, input_tokens, output_tokens in (
-        (KIMI_ADVISOR_SLOT, 4, 2),
-        (DEEPSEEK_ADVISOR_SLOT, 6, 3),
+        (DEEPSEEK_PRO_ADVISOR_SLOT, 4, 2),
+        (GPT56_SOL_ADVISOR_SLOT, 6, 3),
     ):
         ledger.start_slot(slot)
         call_id = ledger.start_advisor_call(slot)
@@ -5016,8 +5016,8 @@ async def test_stopped_completion_usage_endpoint_recovers_actual_receipt(
     )
     usage_ledger = TrueMoAUsageLedger(snapshot, wave_id="a" * 32)
     for slot, input_tokens, output_tokens in (
-        (KIMI_ADVISOR_SLOT, 2, 1),
-        (DEEPSEEK_ADVISOR_SLOT, 3, 1),
+        (DEEPSEEK_PRO_ADVISOR_SLOT, 2, 1),
+        (GPT56_SOL_ADVISOR_SLOT, 3, 1),
     ):
         usage_ledger.start_slot(slot)
         advisor_call_id = usage_ledger.start_advisor_call(slot)
@@ -5146,7 +5146,7 @@ async def test_usage_endpoint_blocks_unknown_cache_split(
     ledger = TrueMoAUsageLedger(snapshot, wave_id="b" * 32)
     for slot, usage in (
         (
-            KIMI_ADVISOR_SLOT,
+            DEEPSEEK_PRO_ADVISOR_SLOT,
             {
                 "input_tokens": 5,
                 "output_tokens": 2,
@@ -5155,7 +5155,7 @@ async def test_usage_endpoint_blocks_unknown_cache_split(
             },
         ),
         (
-            DEEPSEEK_ADVISOR_SLOT,
+            GPT56_SOL_ADVISOR_SLOT,
             {
                 "prompt_tokens": 8,
                 "completion_tokens": 3,
@@ -5422,8 +5422,8 @@ async def test_final_route_preflight_fails_before_any_advisor_call(monkeypatch):
         item["slotId"]: item
         for item in usage["true_moa"]["slots"]
     }
-    assert receipts[KIMI_ADVISOR_SLOT.slot_id]["status"] == "not_started"
-    assert receipts[DEEPSEEK_ADVISOR_SLOT.slot_id]["status"] == "not_started"
+    assert receipts[DEEPSEEK_PRO_ADVISOR_SLOT.slot_id]["status"] == "not_started"
+    assert receipts[GPT56_SOL_ADVISOR_SLOT.slot_id]["status"] == "not_started"
     assert receipts[FINAL_EXECUTOR_SLOT.slot_id]["status"] == "failed"
 
 
@@ -5482,7 +5482,7 @@ async def test_post_advisor_setup_failure_returns_complete_partial_ledger(
         item["slotId"]: item
         for item in usage["true_moa"]["slots"]
     }
-    for slot in (KIMI_ADVISOR_SLOT, DEEPSEEK_ADVISOR_SLOT):
+    for slot in (DEEPSEEK_PRO_ADVISOR_SLOT, GPT56_SOL_ADVISOR_SLOT):
         assert receipts[slot.slot_id]["status"] == "completed"
         assert receipts[slot.slot_id]["usageStatus"] == "reported"
         assert receipts[slot.slot_id]["totalTokens"] == 8

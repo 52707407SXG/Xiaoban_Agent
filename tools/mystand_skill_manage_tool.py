@@ -12,13 +12,13 @@ import yaml
 from gateway.session_context import get_session_env
 from tools.approval import request_gateway_action_approval
 from tools.registry import registry
-from xiaoban.mystand_owner import is_configured_mystand_owner
 
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _ALLOWED_ACTIONS = {"create", "edit", "patch"}
 _CATEGORY = "mystand"
+_MYSTAND_OWNER_USER_ID = "52707407"
 
 
 def _json(value: object) -> str:
@@ -152,12 +152,12 @@ def mystand_skill_manage_handler(args, **_kwargs) -> str:
         return _error("Skill 参数必须是对象。", "invalid_mystand_skill_arguments")
     if get_session_env("XIAOBAN_SESSION_PLATFORM", "").strip().lower() != "api_server":
         return _error("该工具只允许 My Stand 已登录网页会话使用。", "mystand_session_required", 403)
-    session_user_id = get_session_env("XIAOBAN_SESSION_USER_ID", "").strip()
+    session_user_id = get_session_env("XIAOBAN_SESSION_USER_ID", "").strip().upper()
     if not session_user_id:
         return _error("当前 My Stand 登录身份无效。", "mystand_session_required", 403)
-    if not is_configured_mystand_owner(session_user_id):
+    if session_user_id != _MYSTAND_OWNER_USER_ID:
         return _error(
-            "只有当前配置的 My Stand owner 账号可以创建、修改或安排共享 Skill。",
+            "只有刚哥主账号 52707407 可以创建、修改或安排共享 Skill。",
             "mystand_skill_owner_required",
             403,
         )
@@ -257,7 +257,7 @@ def mystand_skill_manage_handler(args, **_kwargs) -> str:
 MYSTAND_SKILL_MANAGE_SCHEMA = {
     "name": "mystand_skill_manage",
     "description": (
-        "仅当前 My Stand 登录账号与服务端配置的 owner 身份一致，且用户明确要求制作、学习或更新可复用工作流程时，创建或修订全站共享 Skill。"
+        "仅当前 My Stand 登录账号为 52707407，且用户明确要求制作、学习或更新可复用工作流程时，创建或修订全站共享 Skill。"
         "只能操作 mystand 分类下的 SKILL.md，不支持删除、脚本、附件或其他目录；每次持久化都需要用户在网页确认。"
         "SKILL.md 必须在 metadata.mystand.tools 中声明依赖的 Tool；写入前会自动核对 ToolRegistry 和管理员工具集。"
     ),

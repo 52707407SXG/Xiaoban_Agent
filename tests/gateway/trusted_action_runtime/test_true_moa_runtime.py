@@ -16,9 +16,9 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from xiaoban.trusted_runtime.true_moa import (
-    GPT55_ADVISOR_SLOT as DEEPSEEK_ADVISOR_SLOT,
+    GPT56_SOL_ADVISOR_SLOT,
     FINAL_EXECUTOR_SLOT,
-    DEEPSEEK_FLASH_ADVISOR_SLOT as KIMI_ADVISOR_SLOT,
+    DEEPSEEK_PRO_ADVISOR_SLOT,
     MODE_EPOCH_HEADER,
     MOA_PRESET_ID_HEADER,
     MOA_PRESET_REVISION_HEADER,
@@ -256,15 +256,15 @@ def test_fixed_two_advisors_run_once_in_parallel_without_tools_or_shared_input()
     first, second = (message_views[slot.slot_id] for slot in TRUE_MOA_ADVISOR_SLOTS)
     assert first is not second
     assert all(left is not right for left, right in zip(first, second))
-    assert "<advisor-deepseek-v4-flash>" not in bundle.guidance
-    assert "&lt;advisor-deepseek-v4-flash&gt;" in bundle.guidance
+    assert "<advisor-deepseek-v4-pro>" not in bundle.guidance
+    assert "&lt;advisor-deepseek-v4-pro&gt;" in bundle.guidance
 
     ledger = bundle.ledger.to_dict()
     receipts = _slot_receipts(bundle.ledger)
     assert ledger["status"] == "advisors_completed"
     assert [item["slotId"] for item in ledger["slots"]] == [
-        KIMI_ADVISOR_SLOT.slot_id,
-        DEEPSEEK_ADVISOR_SLOT.slot_id,
+        DEEPSEEK_PRO_ADVISOR_SLOT.slot_id,
+        GPT56_SOL_ADVISOR_SLOT.slot_id,
         FINAL_EXECUTOR_SLOT.slot_id,
     ]
     for slot in TRUE_MOA_ADVISOR_SLOTS:
@@ -276,8 +276,8 @@ def test_fixed_two_advisors_run_once_in_parallel_without_tools_or_shared_input()
         assert receipt["cachedInputTokens"] == 0
         assert receipt["costUsd"] == 0.01
     assert [call["slotId"] for call in ledger["calls"]] == [
-        KIMI_ADVISOR_SLOT.slot_id,
-        DEEPSEEK_ADVISOR_SLOT.slot_id,
+        DEEPSEEK_PRO_ADVISOR_SLOT.slot_id,
+        GPT56_SOL_ADVISOR_SLOT.slot_id,
     ]
     assert all(call["status"] == "completed" for call in ledger["calls"])
     assert receipts[FINAL_EXECUTOR_SLOT.slot_id]["status"] == "not_started"
@@ -301,10 +301,10 @@ def test_any_advisor_failure_closes_peer_and_waits_for_all_dispatched_calls():
         dispatch_callback()
         with lock:
             calls[slot.slot_id] += 1
-        if slot == DEEPSEEK_ADVISOR_SLOT:
+        if slot == GPT56_SOL_ADVISOR_SLOT:
             cancel_controller.register_cancel_callback(slot.slot_id, peer_closed.set)
         rendezvous.wait()
-        if slot == KIMI_ADVISOR_SLOT:
+        if slot == DEEPSEEK_PRO_ADVISOR_SLOT:
             with lock:
                 exited.add(slot.slot_id)
             raise RuntimeError("sensitive-provider-detail")
@@ -330,10 +330,10 @@ def test_any_advisor_failure_closes_peer_and_waits_for_all_dispatched_calls():
     assert caught.value.category == "provider_error"
     assert "sensitive-provider-detail" not in str(caught.value)
     receipts = _slot_receipts(caught.value.ledger)
-    assert receipts[KIMI_ADVISOR_SLOT.slot_id]["status"] == "failed"
-    assert receipts[DEEPSEEK_ADVISOR_SLOT.slot_id]["status"] == "cancelled"
+    assert receipts[DEEPSEEK_PRO_ADVISOR_SLOT.slot_id]["status"] == "failed"
+    assert receipts[GPT56_SOL_ADVISOR_SLOT.slot_id]["status"] == "cancelled"
     assert (
-        receipts[DEEPSEEK_ADVISOR_SLOT.slot_id]["errorCategory"]
+        receipts[GPT56_SOL_ADVISOR_SLOT.slot_id]["errorCategory"]
         == "cascade_after_provider_error"
     )
     assert "completed_after_stop" not in json.dumps(
@@ -544,7 +544,7 @@ def test_running_cancel_closes_both_calls_and_late_results_cannot_escape():
         assert close_event.wait(1)
         with lock:
             exited_ids.add(slot.slot_id)
-        if slot == KIMI_ADVISOR_SLOT:
+        if slot == DEEPSEEK_PRO_ADVISOR_SLOT:
             error = TimeoutError("transport closed after user stop")
             error.usage = {
                 "input_tokens": 9,
@@ -595,7 +595,7 @@ def test_running_cancel_closes_both_calls_and_late_results_cannot_escape():
     assert all(
         receipts[slot_id]["status"] == "cancelled" for slot_id in expected_ids
     )
-    kimi_receipt = receipts[KIMI_ADVISOR_SLOT.slot_id]
+    kimi_receipt = receipts[DEEPSEEK_PRO_ADVISOR_SLOT.slot_id]
     assert kimi_receipt["usageStatus"] == "reported"
     assert kimi_receipt["totalTokens"] == 11
     assert kimi_receipt["cachedInputTokens"] == 0
@@ -990,9 +990,9 @@ def test_actual_call_watchdog_wins_deadline_and_fences_advisor_bundle():
 
 def test_usage_and_cost_are_fill_once_after_terminal_status():
     ledger = TrueMoAUsageLedger(_snapshot())
-    ledger.start_slot(KIMI_ADVISOR_SLOT)
+    ledger.start_slot(DEEPSEEK_PRO_ADVISOR_SLOT)
     ledger.finish_slot(
-        KIMI_ADVISOR_SLOT,
+        DEEPSEEK_PRO_ADVISOR_SLOT,
         status="completed",
         usage={
             "input_tokens": 10,
@@ -1005,7 +1005,7 @@ def test_usage_and_cost_are_fill_once_after_terminal_status():
         cost_source="first-provider-receipt",
     )
     ledger.finish_slot(
-        KIMI_ADVISOR_SLOT,
+        DEEPSEEK_PRO_ADVISOR_SLOT,
         status="cancelled",
         usage={
             "input_tokens": 999,
@@ -1018,14 +1018,14 @@ def test_usage_and_cost_are_fill_once_after_terminal_status():
         cost_source="late-overwrite",
     )
 
-    ledger.start_slot(DEEPSEEK_ADVISOR_SLOT)
+    ledger.start_slot(GPT56_SOL_ADVISOR_SLOT)
     ledger.finish_slot(
-        DEEPSEEK_ADVISOR_SLOT,
+        GPT56_SOL_ADVISOR_SLOT,
         status="cancelled",
         error_category="terminal_fence",
     )
     ledger.finish_slot(
-        DEEPSEEK_ADVISOR_SLOT,
+        GPT56_SOL_ADVISOR_SLOT,
         status="completed",
         usage={
             "input_tokens": 7,
@@ -1039,14 +1039,14 @@ def test_usage_and_cost_are_fill_once_after_terminal_status():
     )
 
     receipts = _slot_receipts(ledger)
-    first = receipts[KIMI_ADVISOR_SLOT.slot_id]
+    first = receipts[DEEPSEEK_PRO_ADVISOR_SLOT.slot_id]
     assert first["status"] == "completed"
     assert first["inputTokens"] == 10
     assert first["outputTokens"] == 3
     assert first["totalTokens"] == 13
     assert first["costUsd"] == 0.01
     assert first["costSource"] == "first-provider-receipt"
-    late = receipts[DEEPSEEK_ADVISOR_SLOT.slot_id]
+    late = receipts[GPT56_SOL_ADVISOR_SLOT.slot_id]
     assert late["status"] == "cancelled"
     assert late["errorCategory"] == "terminal_fence"
     assert late["usageStatus"] == "reported"
@@ -1072,8 +1072,8 @@ def test_cache_split_requires_a_trusted_nonnegative_integer(
     expected_status,
 ):
     ledger = TrueMoAUsageLedger(_snapshot())
-    ledger.start_slot(DEEPSEEK_ADVISOR_SLOT)
-    call_id = ledger.start_advisor_call(DEEPSEEK_ADVISOR_SLOT)
+    ledger.start_slot(GPT56_SOL_ADVISOR_SLOT)
+    call_id = ledger.start_advisor_call(GPT56_SOL_ADVISOR_SLOT)
     ledger.mark_dispatched(call_id)
     usage = {
         "prompt_tokens": 11,
@@ -1087,7 +1087,7 @@ def test_cache_split_requires_a_trusted_nonnegative_integer(
         usage=usage,
     )
     ledger.finish_slot(
-        DEEPSEEK_ADVISOR_SLOT,
+        GPT56_SOL_ADVISOR_SLOT,
         status="completed",
         usage=usage,
     )
@@ -1248,6 +1248,8 @@ def test_final_synthesis_policy_is_trusted_outside_escaped_advisor_xml():
     advisor_index = bundle.guidance.index("<advisor ")
     assert policy_index < untrusted_index < advisor_index
     assert bundle.guidance.count(TRUE_MOA_FINAL_SYNTHESIS_POLICY) == 1
+    assert "Independently answer the user" not in bundle.guidance
+    assert "Apply the trusted selection-and-synthesis policy above" in bundle.guidance
     for required in (
         "real goal",
         "known facts",
@@ -1302,7 +1304,7 @@ def test_final_timeout_fence_preserves_late_usage_without_rewriting_status():
         for call in payload["calls"]
         if call["slotId"] == FINAL_EXECUTOR_SLOT.slot_id
     )
-    assert TRUE_MOA_FINAL_TIMEOUT_SECONDS == 120.0
+    assert TRUE_MOA_FINAL_TIMEOUT_SECONDS == 6 * 60 * 60.0
     assert TRUE_MOA_FINAL_SHUTDOWN_GRACE_SECONDS == 5.0
     assert payload["status"] == "failed"
     assert final_slot["status"] == "timed_out"
@@ -1643,7 +1645,7 @@ def test_advisor_terminal_callback_block_returns_boundedly():
 
     def _caller(*, slot, dispatch_callback, **_kwargs):
         dispatch_callback()
-        if slot == KIMI_ADVISOR_SLOT:
+        if slot == DEEPSEEK_PRO_ADVISOR_SLOT:
             assert release_provider.wait(1)
             return StrictAdvisorResult(content="PRIVATE_LATE_ADVISOR_TEXT")
         return StrictAdvisorResult(content="safe peer")
@@ -1671,10 +1673,10 @@ def test_advisor_terminal_callback_block_returns_boundedly():
     release_provider.set()
 
 
-def test_fixed_preset_has_two_advisors_and_at_most_eight_final_calls():
+def test_fixed_preset_has_two_advisors_and_normal_task_call_budget():
     assert len(TRUE_MOA_ADVISOR_SLOTS) == 2
-    assert TRUE_MOA_FINAL_CALL_LIMIT == 8
-    assert TRUE_MOA_TOTAL_CALL_LIMIT == 10
+    assert TRUE_MOA_FINAL_CALL_LIMIT == 90
+    assert TRUE_MOA_TOTAL_CALL_LIMIT == 92
     assert (
         len(TRUE_MOA_ADVISOR_SLOTS) + TRUE_MOA_FINAL_CALL_LIMIT
         == TRUE_MOA_TOTAL_CALL_LIMIT

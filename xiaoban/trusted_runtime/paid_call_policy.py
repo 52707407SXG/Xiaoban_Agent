@@ -73,6 +73,52 @@ SIGNED_MYSTAND_AGENT_POLICY_REVISION = (
 SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER = (
     "X-Xiaoban-Agent-Billing-Policy-Revision"
 )
+
+
+def _selectable_policy(*, policy_id: str, provider: str, model: str) -> FixedPaidCallPolicy:
+    return FixedPaidCallPolicy(
+        policy_id=policy_id,
+        provider=provider,
+        model=model,
+        role="agent",
+        input_max_bytes=None,
+        output_max_tokens=128000,
+        call_limit=MYSTAND_NORMAL_CALL_LIMIT,
+    )
+
+
+OPENAI_CODEX_GPT_5_6_SOL_POLICY_REVISION = (
+    "openai-codex-gpt-5.6-sol-token-beans-20260825-v1"
+)
+DEEPSEEK_V4_PRO_POLICY_REVISION = (
+    "deepseek-v4-pro-token-beans-20260825-v1"
+)
+DEEPSEEK_V4_FLASH_POLICY_REVISION = (
+    "deepseek-v4-flash-token-beans-20260825-v1"
+)
+GLM_5_3_FLASH_POLICY_REVISION = (
+    "glm-5.3-flash-token-beans-20260828-v1"
+)
+OPENAI_CODEX_GPT_5_6_SOL_POLICY = _selectable_policy(
+    policy_id="mystand.signed-normal-paid-call.gpt-5.6-sol.v1",
+    provider="openai-codex",
+    model="gpt-5.6-sol",
+)
+DEEPSEEK_V4_PRO_POLICY = _selectable_policy(
+    policy_id="mystand.signed-normal-paid-call.deepseek-v4-pro.v1",
+    provider="deepseek",
+    model="deepseek-v4-pro",
+)
+DEEPSEEK_V4_FLASH_POLICY = _selectable_policy(
+    policy_id="mystand.signed-normal-paid-call.deepseek-v4-flash.v1",
+    provider="deepseek",
+    model="deepseek-v4-flash",
+)
+GLM_5_3_FLASH_POLICY = _selectable_policy(
+    policy_id="mystand.signed-normal-paid-call.glm-5.3-flash.v1",
+    provider="zai",
+    model="glm-5.3-flash",
+)
 SIGNED_MYSTAND_AGENT_POLICY_REGISTRY = MappingProxyType(
     {
         LEGACY_SIGNED_MYSTAND_AGENT_POLICY_REVISION: (
@@ -81,6 +127,12 @@ SIGNED_MYSTAND_AGENT_POLICY_REGISTRY = MappingProxyType(
         SIGNED_MYSTAND_AGENT_POLICY_REVISION: (
             SIGNED_MYSTAND_AGENT_POLICY
         ),
+        OPENAI_CODEX_GPT_5_6_SOL_POLICY_REVISION: (
+            OPENAI_CODEX_GPT_5_6_SOL_POLICY
+        ),
+        DEEPSEEK_V4_PRO_POLICY_REVISION: DEEPSEEK_V4_PRO_POLICY,
+        DEEPSEEK_V4_FLASH_POLICY_REVISION: DEEPSEEK_V4_FLASH_POLICY,
+        GLM_5_3_FLASH_POLICY_REVISION: GLM_5_3_FLASH_POLICY,
     }
 )
 

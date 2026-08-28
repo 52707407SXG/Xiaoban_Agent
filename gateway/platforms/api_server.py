@@ -389,6 +389,7 @@ _MYSTAND_REQUEST_TOOLSETS = {
         "mystand_query",
         "mystand_authorization",
         "mystand_authorization_write",
+        "mystand_memory",
     ],
     "mystand-broker-research": [
         "web",
@@ -399,6 +400,7 @@ _MYSTAND_REQUEST_TOOLSETS = {
         "mystand_query",
         "mystand_authorization",
         "mystand_authorization_write",
+        "mystand_memory",
     ],
     "mystand-owner": [
         "web",
@@ -409,6 +411,7 @@ _MYSTAND_REQUEST_TOOLSETS = {
         "mystand_query",
         "mystand_authorization",
         "mystand_authorization_write",
+        "mystand_memory",
         "mystand_unsettled_performance",
         "mystand_skill_manage",
     ],
@@ -421,6 +424,7 @@ _MYSTAND_REQUEST_TOOLSETS = {
         "mystand_query",
         "mystand_authorization",
         "mystand_authorization_write",
+        "mystand_memory",
         "mystand_unsettled_performance",
         "mystand_skill_manage",
     ],
@@ -437,6 +441,7 @@ _MYSTAND_REQUEST_TOOL_NAMES = {
         "mystand_query",
         "mystand_authorization",
         "mystand_authorization_write",
+        "mystand_memory",
     },
     "mystand-broker-research": {
         "web_search",
@@ -449,6 +454,7 @@ _MYSTAND_REQUEST_TOOL_NAMES = {
         "mystand_query",
         "mystand_authorization",
         "mystand_authorization_write",
+        "mystand_memory",
     },
     "mystand-owner": {
         "web_search",
@@ -461,6 +467,7 @@ _MYSTAND_REQUEST_TOOL_NAMES = {
         "mystand_query",
         "mystand_authorization",
         "mystand_authorization_write",
+        "mystand_memory",
         "mystand_unsettled_performance",
         "mystand_skill_manage",
     },
@@ -475,6 +482,7 @@ _MYSTAND_REQUEST_TOOL_NAMES = {
         "mystand_query",
         "mystand_authorization",
         "mystand_authorization_write",
+        "mystand_memory",
         "mystand_unsettled_performance",
         "mystand_skill_manage",
     },
@@ -1382,6 +1390,25 @@ def _content_to_visible_text(content: Any) -> str:
     return str(content or "")
 
 
+def _natural_mystand_failure_text(result: Dict[str, Any]) -> str:
+    """Give a failed turn a brief user-facing result instead of a receipt."""
+
+    if bool(result.get("interrupted") or result.get("stopped")):
+        return "好的，当前任务已经停止。"
+    failure = _canonical_agent_failure_projection(result.get("failure"))
+    summary = (
+        str(failure.get("summary") or "").strip()
+        if isinstance(failure, dict)
+        else ""
+    )
+    if not summary:
+        summary = "执行链在形成最终答复前中断了。"
+    return (
+        f"抱歉，这次任务没有完成：{summary}"
+        "我没有拿到可靠结果，也不会把失败当成成功。你可以让我继续处理。"
+    )
+
+
 def _finalize_mystand_egress_result(
     result: Any,
     *,
@@ -1396,6 +1423,11 @@ def _finalize_mystand_egress_result(
         return result["final_response"]
     discard_untrusted_mystand_egress_projection(result)
     final_text = _sanitize_user_visible_text(result.get("final_response", ""))
+    if not final_text and (
+        bool(result.get("failed") or result.get("partial"))
+        or result.get("completed") is False
+    ):
+        final_text = _natural_mystand_failure_text(result)
     result["final_response"] = final_text
     result["_mystand_egress_output_digest"] = hashlib.sha256(
         final_text.encode("utf-8")
@@ -2921,6 +2953,8 @@ class APIServerAdapter(
         request_user_id: Optional[str] = None,
         skip_memory: bool = False,
         strict_no_automatic_paid_retry: bool = False,
+        fixed_paid_call_policy=None,
+        reasoning_effort: str = "",
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -2951,6 +2985,28 @@ class APIServerAdapter(
         runtime_kwargs = _resolve_runtime_agent_kwargs()
         reasoning_config = GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
+        if fixed_paid_call_policy is not None:
+            from xiaoban_cli.runtime_provider import resolve_runtime_provider
+
+            runtime = resolve_runtime_provider(
+                requested=fixed_paid_call_policy.provider,
+                target_model=fixed_paid_call_policy.model,
+            )
+            runtime_kwargs = {
+                "api_key": runtime.get("api_key"),
+                "base_url": runtime.get("base_url"),
+                "provider": runtime.get("provider"),
+                "api_mode": runtime.get("api_mode"),
+                "command": runtime.get("command"),
+                "args": list(runtime.get("args") or []),
+                "credential_pool": runtime.get("credential_pool"),
+                "max_tokens": None,
+            }
+            model = fixed_paid_call_policy.model
+            reasoning_config = {
+                "enabled": True,
+                "effort": str(reasoning_effort or "high").strip().lower(),
+            }
 
         user_config = _load_gateway_config()
         enabled_toolsets = (
@@ -4774,6 +4830,8 @@ class APIServerAdapter(
                             and true_moa_snapshot is not None
                             else None
                         ),
+                        requested_model=model_name,
+                        reasoning_effort=body.get("reasoning_effort", ""),
                     )
                 finally:
                     if approval_notify_registered:
@@ -5050,6 +5108,8 @@ class APIServerAdapter(
                     agent_ref=agent_ref,
                     true_moa_snapshot=true_moa_snapshot,
                     paid_call_usage_callback=paid_call_usage_callback,
+                    requested_model=model_name,
+                    reasoning_effort=body.get("reasoning_effort", ""),
                 )
                 if agent_ref[1]:
                     result = dict(result or {})
@@ -7111,6 +7171,11 @@ class APIServerAdapter(
         user_id: str = "",
         message_id: str = "",
         user_message: str = "",
+        access_mode: str = "",
+        work_mode: str = "",
+        memory_site_id: str = "",
+        memory_tier: str = "",
+        memory_resource_refs: Any = (),
         conversation_history: Any = None,
         async_delivery: bool = False,
     ) -> list:
@@ -7135,6 +7200,11 @@ class APIServerAdapter(
             user_id=user_id,
             message_id=message_id,
             user_message=user_message,
+            access_mode=access_mode,
+            work_mode=work_mode,
+            memory_site_id=memory_site_id,
+            memory_tier=memory_tier,
+            memory_resource_refs=memory_resource_refs,
             session_key=session_key,
             session_id=session_id,
             async_delivery=bool(async_delivery),
@@ -7182,24 +7252,9 @@ class APIServerAdapter(
     @staticmethod
     def _mystand_memory_scope_secret() -> str:
         """Return the dedicated stable HMAC key, never the rotatable API key."""
-        value = str(os.getenv("XIAOBAN_MYSTAND_MEMORY_SCOPE_SECRET", "") or "").strip()
-        secret_file = str(
-            os.getenv("XIAOBAN_MYSTAND_MEMORY_SCOPE_SECRET_FILE", "") or ""
-        ).strip()
-        if not value and secret_file:
-            try:
-                from xiaoban_constants import get_xiaoban_home
+        from xiaoban.mystand_account_memory import resolve_memory_scope_secret
 
-                home = Path(get_xiaoban_home()).resolve()
-                path = Path(secret_file).expanduser().resolve()
-                path.relative_to(home)
-                if path.is_file() and path.stat().st_mode & 0o077 == 0:
-                    value = path.read_text(encoding="utf-8").strip()
-            except (OSError, RuntimeError, ValueError):
-                value = ""
-        if len(value) < 32 or len(value) > 256 or re.search(r"[\r\n\x00]", value):
-            return ""
-        return value
+        return resolve_memory_scope_secret()
 
     @staticmethod
     def _mystand_owner_user_id() -> str:
@@ -7217,7 +7272,10 @@ class APIServerAdapter(
         """
         header_name = "X-Xiaoban-Toolset-Policy"
         if not cls._header_present(headers, header_name):
-            if cls._header_present(headers, "X-Xiaoban-User-Id"):
+            if (
+                cls._header_present(headers, "X-Xiaoban-User-Id")
+                or cls._header_present(headers, "X-Xiaoban-Memory-Resource-Refs")
+            ):
                 raise InvalidToolsetPolicy("My Stand user identity requires a toolset policy")
             return None
         normalized = cls._header_value(headers, header_name).strip().lower()
@@ -7242,6 +7300,12 @@ class APIServerAdapter(
             raise InvalidToolsetPolicy("User memory requires a My Stand memory tier")
         if memory_mode == "disabled" and memory_tier:
             raise InvalidToolsetPolicy("Disabled memory cannot carry a memory tier")
+        if (
+            memory_mode != "user"
+            and cls._header_present(headers, "X-Xiaoban-Memory-Resource-Refs")
+        ):
+            raise InvalidToolsetPolicy("Disabled memory cannot carry resource references")
+        cls._mystand_memory_resource_refs(headers)
         owner_user_id = cls._mystand_owner_user_id()
         if memory_tier == "owner" and (
             normalized not in {"mystand-owner", "mystand-owner-research"}
@@ -7260,6 +7324,35 @@ class APIServerAdapter(
         if resolved != _MYSTAND_REQUEST_TOOL_NAMES[normalized]:
             raise InvalidToolsetPolicy("Unsafe My Stand toolset configuration")
         return toolsets
+
+    @classmethod
+    def _mystand_memory_resource_refs(
+        cls,
+        headers: Any,
+    ) -> tuple[tuple[str, str], ...]:
+        """Parse only server-resolved resource identities from the internal header."""
+
+        header_name = "X-Xiaoban-Memory-Resource-Refs"
+        if not cls._header_present(headers, header_name):
+            return ()
+        raw = cls._header_value(headers, header_name)
+        if not raw or len(raw) > 2048:
+            raise InvalidToolsetPolicy("Invalid My Stand memory resource references")
+        try:
+            value = json.loads(raw)
+            from xiaoban.mystand_account_memory import normalize_memory_resource_refs
+
+            normalized = normalize_memory_resource_refs(value)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise InvalidToolsetPolicy(
+                "Invalid My Stand memory resource references"
+            ) from exc
+        if not normalized:
+            raise InvalidToolsetPolicy("Empty My Stand memory resource references")
+        return tuple(
+            (item["referenceId"], item["sourceType"])
+            for item in normalized
+        )
 
     @classmethod
     def _mystand_memory_identity(cls, headers: Any) -> Optional[tuple[str, str, str, str]]:
@@ -7327,8 +7420,11 @@ class APIServerAdapter(
             "X-Xiaoban-Site-Id",
             "X-Xiaoban-User-Id",
             "X-Xiaoban-Toolset-Policy",
+            "X-Xiaoban-Access-Mode",
+            "X-Xiaoban-Work-Mode",
             "X-Xiaoban-Memory-Mode",
             "X-Xiaoban-Memory-Tier",
+            "X-Xiaoban-Memory-Resource-Refs",
             "X-Xiaoban-Session-Key",
             "X-Xiaoban-Session-Id",
             "X-Xiaoban-Message-Id",
@@ -7619,6 +7715,12 @@ class APIServerAdapter(
             identity = self._mystand_memory_identity(request.headers)
         except (InvalidToolsetPolicy, ValueError):
             return web.json_response({"error": "invalid_memory_scope"}, status=400)
+        authorized_resource_refs = [
+            {"referenceId": reference_id, "sourceType": source_type}
+            for reference_id, source_type in self._mystand_memory_resource_refs(
+                request.headers
+            )
+        ]
         memory_secret = self._mystand_memory_scope_secret()
         if identity is None or identity[2] != "user" or not self._api_key or not memory_secret:
             return web.json_response({"error": "memory_disabled"}, status=403)
@@ -7636,8 +7738,9 @@ class APIServerAdapter(
             from plugins.memory.holographic.scope import open_scoped_memory_store
             from xiaoban.mystand_account_memory import (
                 list_account_documents,
-                record_account_turn,
+                manage_account_memory,
                 serialized_account_memory_write,
+                validate_authorized_memory_resource_refs,
             )
 
             store = open_scoped_memory_store(
@@ -7656,30 +7759,43 @@ class APIServerAdapter(
                     }
 
                 action = str(body.get("action", "")).strip().lower()
-                if action == "record_turn":
+                if action in {"skip", "upsert", "correct", "forget"}:
                     allowed = {
                         "action",
-                        "turnId",
-                        "userMessage",
-                        "assistantMessage",
+                        "target",
+                        "summary",
+                        "oldText",
                         "accountLabel",
-                        "occurredAt",
+                        "expiresAt",
+                        "resourceRefs",
                     }
                     if set(body) - allowed:
                         return 400, {"error": "invalid_memory_fields"}
-                    user_message = str(body.get("userMessage", ""))
-                    assistant_message = str(body.get("assistantMessage", ""))
-                    if len(user_message) > 6000 or len(assistant_message) > 6000:
-                        return 400, {"error": "memory_turn_too_large"}
-                    result = record_account_turn(
-                        store,
-                        tier=identity[3],
-                        turn_id=body.get("turnId"),
-                        user_message=user_message,
-                        assistant_message=assistant_message,
-                        account_label=str(body.get("accountLabel", ""))[:80],
-                        occurred_at=body.get("occurredAt"),
-                    )
+                    summary = str(body.get("summary", ""))
+                    old_text = str(body.get("oldText", ""))
+                    if len(summary) > 1200 or len(old_text) > 360:
+                        return 400, {"error": "memory_decision_too_large"}
+                    try:
+                        resource_refs = validate_authorized_memory_resource_refs(
+                            body.get("resourceRefs", []),
+                            authorized_refs=authorized_resource_refs,
+                        )
+                    except ValueError:
+                        return 400, {"error": "invalid_memory_resource_refs"}
+                    try:
+                        result = manage_account_memory(
+                            store,
+                            tier=identity[3],
+                            action=action,
+                            target=str(body.get("target", ""))[:40],
+                            content=summary,
+                            old_text=old_text,
+                            expires_at=str(body.get("expiresAt", ""))[:10],
+                            resource_refs=resource_refs,
+                            account_label=str(body.get("accountLabel", ""))[:80],
+                        )
+                    except ValueError:
+                        return 400, {"error": "invalid_memory_decision"}
                     return 200, result
                 if action == "update":
                     raw_fact_id = body.get("factId")

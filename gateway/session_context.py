@@ -71,6 +71,17 @@ _SESSION_MESSAGE_ID: ContextVar = ContextVar("XIAOBAN_SESSION_MESSAGE_ID", defau
 # _VAR_MAP or subprocess environments; only trusted in-process gates (such as
 # the My Stand write-confirmation tool) may inspect it.
 _SESSION_USER_MESSAGE: ContextVar = ContextVar("XIAOBAN_SESSION_USER_MESSAGE", default=_UNSET)
+_SESSION_ACCESS_MODE: ContextVar = ContextVar("XIAOBAN_SESSION_ACCESS_MODE", default=_UNSET)
+_SESSION_WORK_MODE: ContextVar = ContextVar("XIAOBAN_SESSION_WORK_MODE", default=_UNSET)
+_SESSION_MEMORY_SITE_ID: ContextVar = ContextVar("XIAOBAN_SESSION_MEMORY_SITE_ID", default=_UNSET)
+_SESSION_MEMORY_TIER: ContextVar = ContextVar("XIAOBAN_SESSION_MEMORY_TIER", default=_UNSET)
+# Server-resolved resource identities that the active My Stand turn may retain
+# as references. Kept private to the process: resource content is never stored
+# here and this value is intentionally absent from _VAR_MAP.
+_SESSION_MEMORY_RESOURCE_REFS: ContextVar = ContextVar(
+    "XIAOBAN_SESSION_MEMORY_RESOURCE_REFS",
+    default=_UNSET,
+)
 # Records that the active turn used a private My Stand tool.  It is task-local
 # diagnostic state only: outbound tools inspect their own payloads and do not
 # use this flag to disable unrelated public research.
@@ -134,6 +145,10 @@ _VAR_MAP = {
     "XIAOBAN_SESSION_KEY": _SESSION_KEY,
     "XIAOBAN_SESSION_ID": _SESSION_ID,
     "XIAOBAN_SESSION_MESSAGE_ID": _SESSION_MESSAGE_ID,
+    "XIAOBAN_SESSION_ACCESS_MODE": _SESSION_ACCESS_MODE,
+    "XIAOBAN_SESSION_WORK_MODE": _SESSION_WORK_MODE,
+    "XIAOBAN_SESSION_MEMORY_SITE_ID": _SESSION_MEMORY_SITE_ID,
+    "XIAOBAN_SESSION_MEMORY_TIER": _SESSION_MEMORY_TIER,
     "XIAOBAN_CRON_AUTO_DELIVER_PLATFORM": _CRON_AUTO_DELIVER_PLATFORM,
     "XIAOBAN_CRON_AUTO_DELIVER_CHAT_ID": _CRON_AUTO_DELIVER_CHAT_ID,
     "XIAOBAN_CRON_AUTO_DELIVER_THREAD_ID": _CRON_AUTO_DELIVER_THREAD_ID,
@@ -167,6 +182,11 @@ def set_session_vars(
     session_id: str = "",
     message_id: str = "",
     user_message: str = "",
+    access_mode: str = "",
+    work_mode: str = "",
+    memory_site_id: str = "",
+    memory_tier: str = "",
+    memory_resource_refs: Any = (),
     cwd: str = "",
     async_delivery: bool = True,
 ) -> list:
@@ -197,6 +217,11 @@ def set_session_vars(
         _SESSION_ID.set(session_id),
         _SESSION_MESSAGE_ID.set(message_id),
         _SESSION_USER_MESSAGE.set(user_message),
+        _SESSION_ACCESS_MODE.set(access_mode),
+        _SESSION_WORK_MODE.set(work_mode),
+        _SESSION_MEMORY_SITE_ID.set(memory_site_id),
+        _SESSION_MEMORY_TIER.set(memory_tier),
+        _SESSION_MEMORY_RESOURCE_REFS.set(tuple(memory_resource_refs or ())),
         _SESSION_MYSTAND_PRIVATE_QUERY.set(False),
         _SESSION_ASYNC_DELIVERY.set(bool(async_delivery)),
     ]
@@ -232,6 +257,9 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_ID,
         _SESSION_MESSAGE_ID,
         _SESSION_USER_MESSAGE,
+        _SESSION_MEMORY_SITE_ID,
+        _SESSION_MEMORY_TIER,
+        _SESSION_MEMORY_RESOURCE_REFS,
     ):
         var.set("")
     _SESSION_MYSTAND_PRIVATE_QUERY.set(False)
@@ -254,6 +282,20 @@ def get_session_user_message() -> str:
     if value is _UNSET:
         return ""
     return str(value or "")
+
+
+def get_session_memory_resource_refs() -> tuple[tuple[str, str], ...]:
+    """Return current-turn resource identities authorized by My Stand."""
+
+    value = _SESSION_MEMORY_RESOURCE_REFS.get()
+    if value is _UNSET or not isinstance(value, tuple):
+        return ()
+    references: list[tuple[str, str]] = []
+    for item in value:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            continue
+        references.append((str(item[0] or ""), str(item[1] or "")))
+    return tuple(references)
 
 
 def mark_mystand_private_query_turn() -> None:

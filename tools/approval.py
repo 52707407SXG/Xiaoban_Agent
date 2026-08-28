@@ -1412,8 +1412,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     the execute_code guard (``check_execute_code_guard``) so the fiddly
     heartbeat-polling wait loop lives in one place.
 
-    Returns ``{"resolved": bool, "choice": str|None, "approval_id": str}``
-    on completion, or
+    Returns ``{"resolved": bool, "choice": str|None}`` on completion, or
     ``{"resolved": False, "choice": None, "notify_failed": True}`` if the
     notify callback raised.  Persistence of an approved choice and building
     the final tool-facing result dict remain the caller's responsibility.

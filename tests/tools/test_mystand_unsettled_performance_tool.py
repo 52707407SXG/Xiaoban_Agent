@@ -21,7 +21,7 @@ class _Response:
 def _session_value(key, default=""):
     return {
         "XIAOBAN_SESSION_PLATFORM": "api_server",
-        "XIAOBAN_SESSION_USER_ID": "owner-user-001",
+        "XIAOBAN_SESSION_USER_ID": "52707407",
     }.get(key, default)
 
 
@@ -42,7 +42,7 @@ def test_exact_unsettled_tool_calls_only_dedicated_endpoint():
     assert json.loads(result["content"])["counts"] == payload["counts"]
     request = urlopen.call_args.args[0]
     assert request.full_url == "http://127.0.0.1:18083/api/xiaoban/internal/finance/unsettled-ready"
-    assert json.loads(request.data)["userId"] == "owner-user-001"
+    assert json.loads(request.data)["userId"] == "52707407"
     mark_private.assert_called_once_with()
 
 

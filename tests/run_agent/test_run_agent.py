@@ -34,10 +34,6 @@ from agent.memory_manager import MemoryManager
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY, STEER_MARKER_OPEN
 from agent.transports.types import NormalizedResponse
 from gateway.session_context import clear_session_vars, set_session_vars
-from xiaoban.trusted_runtime.protocol_contract import (
-    MYSTAND_TRUE_MOA_FINAL_INPUT_MAX_BYTES,
-    MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -4406,7 +4402,6 @@ class TestRunConversation:
             AgentCallUsageLedger,
         )
         from xiaoban.trusted_runtime.paid_call_policy import (
-            SIGNED_MYSTAND_AGENT_POLICY,
             SIGNED_MYSTAND_AGENT_POLICY_REVISION,
         )
         from xiaoban.trusted_runtime.true_moa_cancel import (
@@ -4414,9 +4409,9 @@ class TestRunConversation:
         )
 
         self._setup_agent(agent)
-        agent.provider = SIGNED_MYSTAND_AGENT_POLICY.provider
-        agent.model = SIGNED_MYSTAND_AGENT_POLICY.model
-        agent.max_tokens = SIGNED_MYSTAND_AGENT_POLICY.output_max_tokens
+        agent.provider = "deepseek"
+        agent.model = "deepseek-v4-pro"
+        agent.max_tokens = 4096
         agent.max_iterations = 8
         agent._strict_no_automatic_paid_retry = True
         agent._disable_streaming = True
@@ -4793,34 +4788,32 @@ class TestRunConversation:
         expected_projection_key,
         final_text,
     ):
-        """A fake Provider sees the verified preview/approve/commit result."""
+        """A fake Provider must see the commit ToolResult before its final."""
+        from tools import mystand_authorization_tool as authorization_bridge
         from tools import mystand_authorization_write_tool as write_bridge
 
         self._setup_agent(agent)
         agent.tools = _make_tool_defs("mystand_authorization_write")
         agent.valid_tool_names = {"mystand_authorization_write"}
-        preview_token = "preview-token-e4"
-        tool_args = {
-            "operation": "preview_and_apply",
-            "resource": {
-                "name": "测试图谱",
-                "type_hint": "knowledge-graph",
-            },
-            "action": "knowledge-graph.add-node",
-            "payload": {
-                "node": {"label": "节点", "type": "skill"},
-            },
+        commit_args = {
+            "operation": "commit_write",
+            "preview_token": "preview-token-e4",
             "idempotency_key": "same-key-from-preview-e4",
         }
         serialized_preview_token = json.dumps(
-            preview_token,
+            commit_args["preview_token"],
             ensure_ascii=False,
             separators=(",", ":"),
         )
         preview_token_hash = hashlib.sha256(
             serialized_preview_token.encode("utf-8")
         ).hexdigest()
-        confirmation_id = "approval_" + "b" * 32
+        confirmation_context = (
+            "ZYJ005\u001fsession-confirm-e4\u001fmsg-confirm-e4"
+        )
+        confirmation_id = "xiaoban-write-" + hashlib.sha256(
+            confirmation_context.encode("utf-8")
+        ).hexdigest()
         upstream_result = {
             "ok": True,
             "status": 200,
@@ -4830,13 +4823,7 @@ class TestRunConversation:
                 "recorded": True,
                 "auditId": "audit-e4-same-loop-0001",
             },
-            "recovery": {
-                "recoveryId": "auth-recovery-" + "d" * 32,
-                "retentionDays": 7,
-                "expiresAt": "2026-09-01T12:00:00.000Z",
-            },
             "confirmationId": confirmation_id,
-            "confirmationMode": "separate-user-confirmation",
             "action": "knowledge-graph.add-node",
             "target": {
                 "graphId": "graph-e4",
@@ -4844,7 +4831,7 @@ class TestRunConversation:
             },
             "expectedVersion": "graph-version-1",
             "nextVersion": "graph-version-2",
-            "idempotencyKey": tool_args["idempotency_key"],
+            "idempotencyKey": commit_args["idempotency_key"],
             "requestFingerprint": "a" * 64,
             "previewTokenHash": preview_token_hash,
             "changeDigest": "c" * 64,
@@ -4852,7 +4839,7 @@ class TestRunConversation:
         }
         tool_call = _mock_tool_call(
             name="mystand_authorization_write",
-            arguments=json.dumps(tool_args),
+            arguments=json.dumps(commit_args),
             call_id="authorization-write-e4",
         )
         agent.client.chat.completions.create.side_effect = [
@@ -4867,24 +4854,6 @@ class TestRunConversation:
 
         def fake_internal(path, payload, **kwargs):
             internal_calls.append((path, payload, kwargs))
-            if path.endswith("/preview"):
-                return json.dumps({
-                    "ok": True,
-                    "previewToken": preview_token,
-                    "action": tool_args["action"],
-                    "target": {"graphId": "graph-e4"},
-                    "expectedVersion": "graph-version-1",
-                    "displayPreview": {
-                        "title": "新增图谱节点",
-                        "action": tool_args["action"],
-                        "target": "测试图谱",
-                        "before": "（当前没有该节点）",
-                        "after": "节点",
-                        "changeType": "add",
-                        "summary": "新增节点",
-                        "recoveryDays": 7,
-                    },
-                }, ensure_ascii=False)
             return json.dumps(upstream_result, ensure_ascii=False)
 
         def execute_write(function_name, function_args, *_args, **_kwargs):
@@ -4899,18 +4868,9 @@ class TestRunConversation:
             lambda: None,
         )
         monkeypatch.setattr(
-            write_bridge,
+            authorization_bridge,
             "_post_internal",
             fake_internal,
-        )
-        monkeypatch.setattr(
-            write_bridge,
-            "request_gateway_action_approval",
-            lambda **_kwargs: {
-                "approved": True,
-                "choice": "once",
-                "approval_id": confirmation_id,
-            },
         )
         session_tokens = set_session_vars(
             platform="api_server",
@@ -4934,15 +4894,25 @@ class TestRunConversation:
 
         assert result["final_response"] == final_text
         assert result["api_calls"] == 2
-        assert [call[0].rsplit("/", 1)[-1] for call in internal_calls] == [
-            "preview",
-            "commit",
+        assert internal_calls == [
+            (
+                "/api/xiaoban/internal/authorization/write/commit",
+                {
+                    "previewToken": "preview-token-e4",
+                    "idempotencyKey": "same-key-from-preview-e4",
+                    "confirmationPhrase": "确认写入",
+                },
+                {
+                    "session": {
+                        "platform": "api_server",
+                        "user_id": "ZYJ005",
+                        "message_id": "msg-confirm-e4",
+                        "session_id": "session-confirm-e4",
+                    },
+                    "explicit_confirmation": True,
+                },
+            )
         ]
-        assert internal_calls[1][1] == {
-            "previewToken": preview_token,
-            "idempotencyKey": tool_args["idempotency_key"],
-        }
-        assert internal_calls[1][2]["gateway_approval_id"] == confirmation_id
         second_call_messages = (
             agent.client.chat.completions.create.call_args_list[1]
             .kwargs["messages"]
@@ -4978,7 +4948,7 @@ class TestRunConversation:
                 "recorded": True,
                 "auditId": "audit-e4-same-loop-0001",
             }
-            assert receipt["idempotencyKey"] == tool_args["idempotency_key"]
+            assert receipt["idempotencyKey"] == commit_args["idempotency_key"]
             assert receipt["previewTokenHash"] == preview_token_hash
             assert receipt["confirmationId"] == confirmation_id
             assert "完成写入" in result["final_response"]
@@ -5093,7 +5063,6 @@ class TestRunConversation:
         agent,
     ):
         from xiaoban.trusted_runtime.true_moa import (
-            FINAL_EXECUTOR_SLOT,
             TRUE_MOA_MODE,
             TRUE_MOA_PRESET_ID,
             TRUE_MOA_PRESET_REVISION,
@@ -5107,9 +5076,9 @@ class TestRunConversation:
         agent._api_max_retries = 1
         agent._fallback_chain = []
         agent._fallback_index = 0
-        agent.provider = FINAL_EXECUTOR_SLOT.provider
-        agent.model = FINAL_EXECUTOR_SLOT.model
-        agent.max_tokens = MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
+        agent.provider = "deepseek"
+        agent.model = "deepseek-v4-pro"
+        agent.max_tokens = 4096
         ledger = TrueMoAUsageLedger(
             TrueMoASnapshot(
                 mode=TRUE_MOA_MODE,
@@ -5119,7 +5088,6 @@ class TestRunConversation:
             ),
             wave_id="strict-two-call-wave",
         )
-        agent._paid_call_usage_ledger = ledger
         agent._true_moa_usage_ledger = ledger
         tc = _mock_tool_call(
             name="web_search",
@@ -6273,7 +6241,6 @@ class TestRunConversation:
         agent,
     ):
         from xiaoban.trusted_runtime.true_moa import (
-            FINAL_EXECUTOR_SLOT,
             TRUE_MOA_MODE,
             TRUE_MOA_PRESET_ID,
             TRUE_MOA_PRESET_REVISION,
@@ -6287,9 +6254,9 @@ class TestRunConversation:
         agent._api_max_retries = 1
         agent._fallback_chain = []
         agent._fallback_index = 0
-        agent.provider = FINAL_EXECUTOR_SLOT.provider
-        agent.model = FINAL_EXECUTOR_SLOT.model
-        agent.max_tokens = MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
+        agent.provider = "deepseek"
+        agent.model = "deepseek-v4-pro"
+        agent.max_tokens = 4096
         agent.max_iterations = 8
         ledger = TrueMoAUsageLedger(
             TrueMoASnapshot(
@@ -6300,7 +6267,6 @@ class TestRunConversation:
             ),
             wave_id="strict-eight-call-wave",
         )
-        agent._paid_call_usage_ledger = ledger
         agent._true_moa_usage_ledger = ledger
         responses = []
         for index in range(7):
@@ -6356,7 +6322,7 @@ class TestRunConversation:
         assert api_call.call_count == 8
         assert tool_call.call_count == 7
         final_payload = api_call.call_args_list[7].args[0]
-        assert final_payload["model"] == FINAL_EXECUTOR_SLOT.model
+        assert final_payload["model"] == "deepseek-v4-pro"
         assert "tools" not in final_payload
         assert len(
             [
@@ -6366,12 +6332,11 @@ class TestRunConversation:
             ]
         ) == 8
 
-    def test_strict_paid_exact_byte_preflight_compacts_only_prior_history(
+    def test_true_moa_large_input_is_not_rejected_by_a_byte_cap(
         self,
         agent,
     ):
         from xiaoban.trusted_runtime.true_moa import (
-            FINAL_EXECUTOR_SLOT,
             TRUE_MOA_MODE,
             TRUE_MOA_PRESET_ID,
             TRUE_MOA_PRESET_REVISION,
@@ -6385,10 +6350,11 @@ class TestRunConversation:
         agent._api_max_retries = 1
         agent._fallback_chain = []
         agent._fallback_index = 0
-        agent.provider = FINAL_EXECUTOR_SLOT.provider
-        agent.model = FINAL_EXECUTOR_SLOT.model
-        agent.max_tokens = MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
-        ledger = TrueMoAUsageLedger(
+        agent.provider = "openai-codex"
+        agent.model = "gpt-5.6-luna"
+        agent.api_mode = "chat_completions"
+        agent.max_tokens = 4096
+        agent._true_moa_usage_ledger = TrueMoAUsageLedger(
             TrueMoASnapshot(
                 mode=TRUE_MOA_MODE,
                 mode_epoch="strict-byte-compact",
@@ -6397,8 +6363,6 @@ class TestRunConversation:
             ),
             wave_id="strict-byte-compact-wave",
         )
-        agent._paid_call_usage_ledger = ledger
-        agent._true_moa_usage_ledger = ledger
         history = []
         for index in range(12):
             history.extend(
@@ -6443,38 +6407,24 @@ class TestRunConversation:
                 conversation_history=history,
             )
 
-        assert result["completed"] is True
+        assert result["completed"] is True, result
         assert result["final_response"] == "当前任务已完成。"
         assert result["api_calls"] == 1
         assert api_call.call_count == 1
         sent_messages = api_call.call_args.args[0]["messages"]
-        assert sent_messages[0]["role"] == "developer"
-        assert sent_messages[0]["content"].startswith("You are helpful.")
-        assert any(
-            item.get("role") == "assistant"
-            and "CONTEXT COMPACTION" in item.get("content", "")
-            for item in sent_messages
-        )
+        assert sent_messages[0]["role"] in {"developer", "system"}
+        assert sent_messages[0]["content"] == "You are helpful."
         assert any(
             item.get("role") == "user"
             and item.get("content") == "只处理当前任务"
             for item in sent_messages
         )
-        assert all("甲" * 7_000 not in item.get("content", "") for item in sent_messages)
+        assert any("甲" * 7_000 in item.get("content", "") for item in sent_messages)
 
     @pytest.mark.parametrize(
         ("max_tokens", "user_message"),
         [
-            pytest.param(
-                MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS + 1,
-                "output cap must fail before dispatch",
-                id="output-cap",
-            ),
-            pytest.param(
-                MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS,
-                "x" * (MYSTAND_TRUE_MOA_FINAL_INPUT_MAX_BYTES + 1),
-                id="input-cap",
-            ),
+            (128001, "output cap must fail before dispatch"),
         ],
     )
     def test_true_moa_final_cost_cap_rejects_before_provider_dispatch(
@@ -6484,7 +6434,6 @@ class TestRunConversation:
         user_message,
     ):
         from xiaoban.trusted_runtime.true_moa import (
-            FINAL_EXECUTOR_SLOT,
             TRUE_MOA_MODE,
             TRUE_MOA_PRESET_ID,
             TRUE_MOA_PRESET_REVISION,
@@ -6498,8 +6447,9 @@ class TestRunConversation:
         agent._api_max_retries = 1
         agent._fallback_chain = []
         agent._fallback_index = 0
-        agent.provider = FINAL_EXECUTOR_SLOT.provider
-        agent.model = FINAL_EXECUTOR_SLOT.model
+        agent.provider = "openai-codex"
+        agent.model = "gpt-5.6-luna"
+        agent.api_mode = "chat_completions"
         agent.max_tokens = max_tokens
         ledger = TrueMoAUsageLedger(
             TrueMoASnapshot(
@@ -6510,7 +6460,6 @@ class TestRunConversation:
             ),
             wave_id="9" * 32,
         )
-        agent._paid_call_usage_ledger = ledger
         agent._true_moa_usage_ledger = ledger
 
         with (
@@ -6529,21 +6478,8 @@ class TestRunConversation:
 
         assert result["completed"] is False
         assert result["failed"] is True
-        if max_tokens > MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS:
-            assert result["failure"] == {
-                "schema": "xiaoban.agent-failure.v1",
-                "kind": "fatal",
-                "code": "output_token_limit_exceeded",
-                "phase": "request_preflight",
-                "reason": (
-                    "The requested model output exceeded the fixed "
-                    f"{MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS}-token limit"
-                ),
-                "retryable": False,
-            }
-        else:
-            assert result["failure"]["code"] == "input_payload_too_large"
-            assert result["failure"]["phase"] == "request_preflight"
+        assert result["failure"]["code"] == "output_token_limit_exceeded", result
+        assert result["failure"]["phase"] == "request_preflight"
         api_call.assert_not_called()
         assert [
             item
@@ -6556,7 +6492,6 @@ class TestRunConversation:
         agent,
     ):
         from xiaoban.trusted_runtime.true_moa import (
-            FINAL_EXECUTOR_SLOT,
             TRUE_MOA_MODE,
             TRUE_MOA_PRESET_ID,
             TRUE_MOA_PRESET_REVISION,
@@ -6571,9 +6506,9 @@ class TestRunConversation:
         agent._api_max_retries = 1
         agent._fallback_chain = []
         agent._fallback_index = 0
-        agent.provider = FINAL_EXECUTOR_SLOT.provider
-        agent.model = FINAL_EXECUTOR_SLOT.model
-        agent.max_tokens = MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS
+        agent.provider = "deepseek"
+        agent.model = "deepseek-v4-pro"
+        agent.max_tokens = 4096
         controller = TrueMoACancelController()
         callback_started = threading.Event()
         release_callback = threading.Event()
@@ -6596,7 +6531,6 @@ class TestRunConversation:
             wave_id="final-reservation-wave",
             on_change=_persist,
         )
-        agent._paid_call_usage_ledger = ledger
         agent._true_moa_usage_ledger = ledger
         agent._true_moa_cancel_controller = controller
         result_box = {}

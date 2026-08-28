@@ -1424,7 +1424,7 @@ wheels = [
 
 [[package]]
 name = "xiaoban-agent"
-version = "0.17.3"
+version = "0.17.1"
 source = { editable = "." }
 dependencies = [
     { name = "certifi" },

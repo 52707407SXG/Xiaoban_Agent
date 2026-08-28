@@ -23,7 +23,6 @@ from gateway.platforms.api_server import (
     security_headers_middleware,
 )
 from xiaoban.trusted_runtime.paid_call_policy import (
-    SIGNED_MYSTAND_AGENT_POLICY,
     SIGNED_MYSTAND_AGENT_POLICY_REVISION,
     SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER,
 )
@@ -46,8 +45,8 @@ _USAGE = {
             {
                 "callId": f"{'b' * 32}:call:000001",
                 "ordinal": 1,
-                "provider": SIGNED_MYSTAND_AGENT_POLICY.provider,
-                "model": SIGNED_MYSTAND_AGENT_POLICY.model,
+                "provider": "deepseek",
+                "model": "deepseek-v4-pro",
                 "role": "agent",
                 "startedAtMs": 1,
                 "endedAtMs": 2,
@@ -129,9 +128,9 @@ def _stream_body(message: str) -> dict:
 
 def _mock_agent(final_response: str) -> MagicMock:
     agent = MagicMock()
-    agent.provider = SIGNED_MYSTAND_AGENT_POLICY.provider
-    agent.model = SIGNED_MYSTAND_AGENT_POLICY.model
-    agent.max_iterations = SIGNED_MYSTAND_AGENT_POLICY.call_limit
+    agent.provider = "deepseek"
+    agent.model = "deepseek-v4-pro"
+    agent.max_iterations = 8
     agent.run_conversation.return_value = {"final_response": final_response, "messages": []}
     agent.session_prompt_tokens = 1
     agent.session_completion_tokens = 1

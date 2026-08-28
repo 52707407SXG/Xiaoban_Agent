@@ -119,11 +119,6 @@ _FAILED_WRITE_INTEGRITY_NOTICE = (
     "本次写入没有成功；禁止向用户声称已经写入或已落库，"
     "必须如实说明失败。"
 )
-_VERIFIED_WRITE_INTEGRITY_NOTICE = (
-    "本次已取得完整且与本次确认绑定的 "
-    "authorization-write-receipt-v2 且 verified=true 回执，"
-    "可以准确说明写入成功。"
-)
 _TRUSTED_CONTEXT_ID_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._:@-]{7,199}$"
 )
@@ -263,47 +258,15 @@ def _with_integrity_notice(
             ),
         }
     if valid_commit_receipt:
-        notice = _VERIFIED_WRITE_INTEGRITY_NOTICE
+        notice = (
+            "本次已取得完整且与本次确认绑定的 "
+            "authorization-write-receipt-v2 且 verified=true 回执，"
+            "可以准确说明写入成功。"
+        )
     else:
         notice = _FAILED_WRITE_INTEGRITY_NOTICE
     parsed["integrity_notice"] = notice
     return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
-
-
-def _verified_tool_result_receipt(result, *, function_args):
-    """Recover the receipt already verified inside preview/approve/commit.
-
-    The tool handler owns the private preview token and approval id, so the
-    executor cannot reconstruct those values from the model-visible call.
-    Only the handler adds the exact verified integrity notice after binding
-    both values. Recheck the public call identity here before promoting the
-    receipt into the runtime-owned canonical sidecar.
-    """
-    try:
-        parsed = json.loads(result) if isinstance(result, str) else result
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-    args = function_args if isinstance(function_args, dict) else {}
-    if (
-        not isinstance(parsed, dict)
-        or args.get("operation") != "preview_and_apply"
-        or parsed.get("integrity_notice")
-        != _VERIFIED_WRITE_INTEGRITY_NOTICE
-        or parsed.get("action") != args.get("action")
-        or parsed.get("idempotencyKey") != args.get("idempotency_key")
-    ):
-        return None
-    if not _verified_commit_receipt(
-        parsed,
-        commit_args={
-            "gateway_approval_id": parsed.get("confirmationId"),
-            "idempotency_key": args.get("idempotency_key"),
-        },
-    ):
-        return None
-    receipt = dict(parsed)
-    receipt.pop("integrity_notice", None)
-    return receipt
 
 
 def _display_text(value, limit: int = 8_000) -> str:

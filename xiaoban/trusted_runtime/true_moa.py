@@ -7,14 +7,14 @@ and parallel execution in one module.
 
 from xiaoban.trusted_runtime.true_moa_cancel import TrueMoACancelController
 from xiaoban.trusted_runtime.true_moa_contracts import (
-    DEEPSEEK_FLASH_ADVISOR_SLOT,
+    DEEPSEEK_PRO_ADVISOR_SLOT,
     DEFAULT_ADJACENT_MESSAGE_COUNT,
     DEFAULT_ADJACENT_MESSAGE_MAX_CHARS,
     DEFAULT_ADVISOR_OUTPUT_MAX_CHARS,
     DEFAULT_ADVISOR_TIMEOUT_SECONDS,
     DEFAULT_CURRENT_QUESTION_MAX_CHARS,
     FINAL_EXECUTOR_SLOT,
-    GPT55_ADVISOR_SLOT,
+    GPT56_SOL_ADVISOR_SLOT,
     MODE_EPOCH_HEADER,
     MOA_PRESET_ID_HEADER,
     MOA_PRESET_REVISION_HEADER,
@@ -66,9 +66,9 @@ __all__ = [
     or name
     in {
         "AdvisorMessage",
-        "DEEPSEEK_FLASH_ADVISOR_SLOT",
+        "DEEPSEEK_PRO_ADVISOR_SLOT",
         "FINAL_EXECUTOR_SLOT",
-        "GPT55_ADVISOR_SLOT",
+        "GPT56_SOL_ADVISOR_SLOT",
         "StrictAdvisorCaller",
         "StrictAdvisorResult",
         "TrueMoAAdvisorBundle",

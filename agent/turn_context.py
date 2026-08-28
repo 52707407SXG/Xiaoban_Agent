@@ -383,18 +383,20 @@ def build_turn_context(
                             "_strict_no_automatic_paid_retry",
                             False,
                         )
-                        and getattr(
-                            agent,
-                            "_paid_call_usage_ledger",
-                            None,
+                        and (
+                            getattr(
+                                agent,
+                                "_paid_call_usage_ledger",
+                                None,
+                            )
+                            is not None
+                            or getattr(
+                                agent,
+                                "_true_moa_usage_ledger",
+                                None,
+                            )
+                            is not None
                         )
-                        is not None
-                        and getattr(
-                            agent,
-                            "_true_moa_usage_ledger",
-                            None,
-                        )
-                        is None
                     ):
                         agent._strict_preflight_compaction_error = exc
                         break

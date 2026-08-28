@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "contract": "mystand.xiaoban-trusted-runtime-contract.v1",
-  "revision": "2026-08-22.1",
+  "revision": "2026-08-27.1",
   "compatibility": {
     "mode": "exact-match",
     "silentFallbackAllowed": false,
@@ -17,8 +17,8 @@
     "trueMoaSchema": "mystand.true-moa.usage.v1",
     "maxBytes": 65536,
     "normalCallLimit": 90,
-    "trueMoaTotalCallLimit": 10,
-    "trueMoaFinalCallLimit": 8
+    "trueMoaTotalCallLimit": 92,
+    "trueMoaFinalCallLimit": 90
   },
   "billing": {
     "normal": {
@@ -34,25 +34,27 @@
     },
     "trueMoa": {
       "presetId": "mystand-true-moa-v1",
-      "presetRevision": "2026-08-21.3",
+      "presetRevision": "2026-08-27.1",
       "mode": "moa",
       "authorizationSource": "ui-reasoning-toggle",
-      "advisorInputMaxBytes": 65536,
+      "advisorInputMaxBytes": null,
+      "advisorReservationInputMaxTokens": 32768,
       "advisorOutputMaxTokens": 4096,
-      "finalInputMaxBytes": 262144,
-      "finalOutputMaxTokens": 4096,
+      "finalInputMaxBytes": null,
+      "finalReservationInputMaxTokens": 272000,
+      "finalOutputMaxTokens": 128000,
       "slots": [
         {
-          "slotId": "advisor-deepseek-v4-flash",
+          "slotId": "advisor-deepseek-v4-pro",
           "provider": "deepseek",
-          "model": "deepseek-v4-flash",
+          "model": "deepseek-v4-pro",
           "role": "advisor",
           "maxCalls": 1
         },
         {
-          "slotId": "advisor-openai-codex-gpt-5.5",
+          "slotId": "advisor-openai-codex-gpt-5.6-sol",
           "provider": "openai-codex",
-          "model": "gpt-5.5",
+          "model": "gpt-5.6-sol",
           "role": "advisor",
           "maxCalls": 1
         },
@@ -61,7 +63,7 @@
           "provider": "openai-codex",
           "model": "gpt-5.6-luna",
           "role": "final_executor",
-          "maxCalls": 8
+          "maxCalls": 90
         }
       ]
     }
@@ -95,7 +97,7 @@
     }
   },
   "parityFixtures": {
-    "trueMoaUsageSha256": "844e743bee508e589f91d388d6717390753a6387ff5dfa4126698c3d047712e2"
+    "trueMoaUsageSha256": "b182be3dbb245f3f4d98980c6824f5b2fcd1244ed3a125db7abd06d85226b984"
   },
   "protectedInvariants": [
     "server-identity-and-datascope-only",

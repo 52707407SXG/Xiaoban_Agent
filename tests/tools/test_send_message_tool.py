@@ -116,10 +116,8 @@ class _patch_discord_sender:
         return False
 
 
-def test_api_server_email_delivery_is_limited_to_configured_owner(monkeypatch):
+def test_api_server_email_delivery_is_limited_to_gangge():
     from gateway.session_context import clear_session_vars, set_session_vars
-
-    monkeypatch.setenv("MYSTAND_XIAOBAN_OWNER_USER_ID", "owner-user-001")
 
     tokens = set_session_vars(platform="api_server", user_id="ZYJ005")
     try:
@@ -128,16 +126,13 @@ def test_api_server_email_delivery_is_limited_to_configured_owner(monkeypatch):
         clear_session_vars(tokens)
 
     assert denied is not None
-    assert "owner" in denied["error"]
-    assert "owner-user-001" not in denied["error"]
+    assert "52707407" in denied["error"]
 
 
-def test_api_server_email_delivery_allows_configured_owner(monkeypatch):
+def test_api_server_email_delivery_allows_gangge():
     from gateway.session_context import clear_session_vars, set_session_vars
 
-    monkeypatch.setenv("MYSTAND_XIAOBAN_OWNER_USER_ID", "owner-user-001")
-
-    tokens = set_session_vars(platform="api_server", user_id="owner-user-001")
+    tokens = set_session_vars(platform="api_server", user_id="52707407")
     try:
         denied = _email_send_denied_for_current_session()
     finally:

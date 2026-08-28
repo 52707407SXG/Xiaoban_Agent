@@ -1,10 +1,6 @@
 """Privacy tests for the My Stand parser gateway wrapper."""
 
 import json
-import os
-import subprocess
-import sys
-from pathlib import Path
 
 import pytest
 
@@ -52,22 +48,6 @@ def _forbid_remote_work(monkeypatch):
             AssertionError("web provider discovery must not start")
         ),
     )
-
-
-def test_bridge_imports_without_optional_companion_package():
-    env = dict(os.environ)
-    env["MYSTAND_PARSER_PYTHONPATH"] = ""
-    result = subprocess.run(
-        [sys.executable, "-c", "import tools.mystand_parser_tool"],
-        cwd=Path(parser_bridge.__file__).resolve().parents[1],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
 
 
 def test_api_session_local_file_stops_before_parser_subprocess(

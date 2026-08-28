@@ -450,63 +450,6 @@ def enforce_strict_paid_request(
     )
 
 
-def compact_true_moa_paid_history(
-    agent: Any,
-    messages: list[Any],
-    current_turn_user_idx: int,
-) -> tuple[list[Any], int, bool]:
-    """Locally compact only history before a true-MoA active turn."""
-
-    if (
-        not isinstance(current_turn_user_idx, int)
-        or current_turn_user_idx <= 0
-        or current_turn_user_idx >= len(messages)
-    ):
-        return messages, current_turn_user_idx, False
-    current_user = messages[current_turn_user_idx]
-    if not isinstance(current_user, dict) or current_user.get("role") != "user":
-        return messages, current_turn_user_idx, False
-
-    historical = list(messages[:current_turn_user_idx])
-    active_tail = list(messages[current_turn_user_idx:])
-    prefix_end = 0
-    while prefix_end < len(historical):
-        item = historical[prefix_end]
-        if not isinstance(item, dict) or item.get("role") not in {
-            "system",
-            "developer",
-        }:
-            break
-        prefix_end += 1
-    preserved_prefix = historical[:prefix_end]
-    compressible_history = historical[prefix_end:]
-    if not compressible_history:
-        return messages, current_turn_user_idx, False
-
-    summary_builder = getattr(
-        getattr(agent, "context_compressor", None),
-        "_build_static_fallback_summary",
-        None,
-    )
-    if not callable(summary_builder):
-        return messages, current_turn_user_idx, False
-    projected_history = agent._sanitize_api_messages(
-        copy.deepcopy(compressible_history)
-    )
-    summary = summary_builder(
-        projected_history,
-        reason="true MoA request exceeded its exact input byte cap",
-    )
-    if not isinstance(summary, str) or not summary.strip():
-        return messages, current_turn_user_idx, False
-    compacted = [
-        *preserved_prefix,
-        {"role": "assistant", "content": summary.strip()},
-        *active_tail,
-    ]
-    return compacted, len(preserved_prefix) + 1, compacted != messages
-
-
 def summarize_signed_normal_context(
     agent: Any,
     turns_to_summarize: list[dict[str, Any]],
@@ -514,7 +457,10 @@ def summarize_signed_normal_context(
 ) -> str | None:
     """Create one paid, same-model checkpoint from the model-visible transcript."""
 
-    if not signed_normal_mode(agent) or not turns_to_summarize:
+    if not (
+        signed_normal_mode(agent)
+        or getattr(agent, "_true_moa_usage_ledger", None) is not None
+    ) or not turns_to_summarize:
         return None
     compressor = getattr(agent, "context_compressor", None)
     serialize = getattr(compressor, "_serialize_for_summary", None)
@@ -575,7 +521,10 @@ def summarize_signed_normal_context(
             "same-model context compaction has no iteration continuation slot"
         )
         return None
-    ledger = getattr(agent, "_paid_call_usage_ledger", None)
+    ledger = (
+        getattr(agent, "_paid_call_usage_ledger", None)
+        or getattr(agent, "_true_moa_usage_ledger", None)
+    )
     ledger_before = ledger.to_dict() if ledger is not None else {"calls": []}
     calls_before = list(ledger_before.get("calls") or [])
     max_calls = int(getattr(ledger, "max_calls", 0) or 0)
@@ -732,7 +681,10 @@ def signed_normal_runtime_checkpoint(
 ) -> str:
     """Preserve unresolved side effects and verified writes outside LLM prose."""
 
-    if not signed_normal_mode(agent):
+    if not (
+        signed_normal_mode(agent)
+        or getattr(agent, "_true_moa_usage_ledger", None) is not None
+    ):
         return ""
     from agent.context_compressor import redact_sensitive_text
     from agent.tool_result_classification import (
@@ -901,7 +853,7 @@ def strict_exception_failure_result(
     elif raw_code.endswith("_output_token_cap_exceeded"):
         code = "output_token_limit_exceeded"
         phase = "request_preflight"
-        reason = "The requested model output exceeded the fixed 4096-token limit"
+        reason = "The requested model output exceeded the configured per-call limit"
     elif raw_code.endswith("_output_token_cap_invalid"):
         code = "output_token_limit_invalid"
         phase = "request_preflight"

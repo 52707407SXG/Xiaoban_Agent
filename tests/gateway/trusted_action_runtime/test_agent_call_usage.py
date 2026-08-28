@@ -31,8 +31,12 @@ from xiaoban.trusted_runtime.agent_call_usage import (
     project_agent_call_usage,
 )
 from xiaoban.trusted_runtime.paid_call_policy import (
+    DEEPSEEK_V4_FLASH_POLICY_REVISION,
+    DEEPSEEK_V4_PRO_POLICY_REVISION,
+    GLM_5_3_FLASH_POLICY_REVISION,
     LEGACY_SIGNED_MYSTAND_AGENT_POLICY,
     LEGACY_SIGNED_MYSTAND_AGENT_POLICY_REVISION,
+    OPENAI_CODEX_GPT_5_6_SOL_POLICY_REVISION,
     PaidCallPolicyError,
     SIGNED_MYSTAND_AGENT_POLICY,
     SIGNED_MYSTAND_AGENT_POLICY_REGISTRY,
@@ -261,6 +265,8 @@ def _normal_workflow(
     *,
     callback=None,
     revision: str = SIGNED_MYSTAND_AGENT_POLICY_REVISION,
+    requested_model: str = "",
+    reasoning_effort: str = "",
 ):
     headers = {
         SIGNED_MYSTAND_AGENT_POLICY_REVISION_HEADER: revision,
@@ -280,6 +286,8 @@ def _normal_workflow(
             paid_call_usage_callback=callback,
             agent_ref=[None, False, None],
             request_delivery_id="xbd_" + ("7" * 40),
+            requested_model=requested_model,
+            reasoning_effort=reasoning_effort,
         ),
     )
 
@@ -1280,6 +1288,25 @@ def test_signed_normal_route_binds_call_limit_without_token_cap():
     assert agent.max_tokens is None
 
 
+@pytest.mark.parametrize(
+    ("revision", "model"),
+    [
+        (DEEPSEEK_V4_PRO_POLICY_REVISION, "deepseek-v4-pro"),
+        (DEEPSEEK_V4_FLASH_POLICY_REVISION, "deepseek-v4-flash"),
+        (GLM_5_3_FLASH_POLICY_REVISION, "glm-5.3-flash"),
+    ],
+)
+def test_non_reasoning_model_selection_accepts_none(revision, model):
+    workflow = _normal_workflow(
+        revision=revision,
+        requested_model=model,
+        reasoning_effort="none",
+    )
+
+    assert initialize_normal_call_ledger(workflow) is None
+    assert workflow.agent_call_policy.model == model
+
+
 @pytest.mark.parametrize("revision", ["", "stale-policy"])
 def test_signed_normal_policy_revision_is_durable_and_fail_closed(
     revision,
@@ -1560,14 +1587,17 @@ def test_billing_policy_registry_keeps_revision_specific_policy():
         )
         is SIGNED_MYSTAND_AGENT_POLICY
     )
-    assert SIGNED_MYSTAND_AGENT_POLICY_REGISTRY == {
-        LEGACY_SIGNED_MYSTAND_AGENT_POLICY_REVISION: (
-            LEGACY_SIGNED_MYSTAND_AGENT_POLICY
-        ),
-        SIGNED_MYSTAND_AGENT_POLICY_REVISION: (
-            SIGNED_MYSTAND_AGENT_POLICY
-        ),
-    }
+    assert SIGNED_MYSTAND_AGENT_POLICY_REGISTRY[
+        LEGACY_SIGNED_MYSTAND_AGENT_POLICY_REVISION
+    ] is LEGACY_SIGNED_MYSTAND_AGENT_POLICY
+    assert SIGNED_MYSTAND_AGENT_POLICY_REGISTRY[
+        SIGNED_MYSTAND_AGENT_POLICY_REVISION
+    ] is SIGNED_MYSTAND_AGENT_POLICY
+    assert {
+        OPENAI_CODEX_GPT_5_6_SOL_POLICY_REVISION,
+        DEEPSEEK_V4_PRO_POLICY_REVISION,
+        DEEPSEEK_V4_FLASH_POLICY_REVISION,
+    }.issubset(SIGNED_MYSTAND_AGENT_POLICY_REGISTRY)
     with pytest.raises(TypeError):
         SIGNED_MYSTAND_AGENT_POLICY_REGISTRY["future"] = (
             SIGNED_MYSTAND_AGENT_POLICY

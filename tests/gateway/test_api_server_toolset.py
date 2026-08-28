@@ -111,6 +111,7 @@ class TestApiServerAdapterToolset:
             "mystand_query",
             "mystand_authorization",
             "mystand_authorization_write",
+            "mystand_memory",
         ]
         assert research == basic
         assert owner == [
@@ -125,6 +126,7 @@ class TestApiServerAdapterToolset:
             assert "file_readonly" not in toolsets
             assert "skills" not in toolsets
             assert "memory" not in toolsets
+            assert "mystand_memory" in toolsets
             assert "session_search" not in toolsets
         assert "file_readonly" not in owner
         assert "file" not in owner
@@ -142,6 +144,7 @@ class TestApiServerAdapterToolset:
         assert "skills_readonly" in owner
         assert "mystand_skill_manage" not in basic
         assert "mystand_skill_manage" in owner
+        assert "mystand_memory" in owner
         assert "mystand_cron" not in owner
 
     def test_broker_contract_exposes_stable_discovery_and_read_tools_together(self):
@@ -266,14 +269,14 @@ class TestApiServerAdapterToolset:
     def test_memory_tier_is_bound_to_trusted_owner_policy(self, monkeypatch):
         from gateway.platforms.api_server import APIServerAdapter, InvalidToolsetPolicy
 
-        monkeypatch.setenv("MYSTAND_XIAOBAN_OWNER_USER_ID", "owner-user-001")
+        monkeypatch.setenv("MYSTAND_XIAOBAN_OWNER_USER_ID", "52707407")
         base = {
             "X-Xiaoban-Site-Id": "mystand-preview",
             "X-Xiaoban-Memory-Mode": "user",
         }
         owner = {
             **base,
-            "X-Xiaoban-User-Id": "owner-user-001",
+            "X-Xiaoban-User-Id": "52707407",
             "X-Xiaoban-Toolset-Policy": "mystand-owner",
             "X-Xiaoban-Memory-Tier": "owner",
         }

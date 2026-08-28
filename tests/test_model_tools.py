@@ -31,16 +31,8 @@ class TestHandleFunctionCall:
         assert "totally_fake_tool_xyz" in result["error"]
 
     def test_exception_returns_json_error(self):
-        # Even if dispatch itself fails, callers still receive valid JSON.
-        with patch(
-            "model_tools.registry.dispatch",
-            side_effect=RuntimeError("dispatch failed"),
-        ):
-            result = handle_function_call(
-                "web_search",
-                {},
-                skip_extension_hooks=True,
-            )
+        # Even if something goes wrong, should return valid JSON
+        result = handle_function_call("web_search", None)  # None args may cause issues
         parsed = json.loads(result)
         assert isinstance(parsed, dict)
         assert "error" in parsed

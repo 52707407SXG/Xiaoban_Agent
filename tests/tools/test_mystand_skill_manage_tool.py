@@ -2,8 +2,6 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from tools import mystand_skill_manage_tool as bridge
 from tools import skill_manager_tool
 
@@ -25,7 +23,7 @@ Run the bounded workflow.
 def _session_value(key, default=""):
     return {
         "XIAOBAN_SESSION_PLATFORM": "api_server",
-        "XIAOBAN_SESSION_USER_ID": "owner-user-001",
+        "XIAOBAN_SESSION_USER_ID": "52707407",
     }.get(key, default)
 
 
@@ -34,11 +32,6 @@ def _broker_session_value(key, default=""):
         "XIAOBAN_SESSION_PLATFORM": "api_server",
         "XIAOBAN_SESSION_USER_ID": "ZYJ099",
     }.get(key, default)
-
-
-@pytest.fixture(autouse=True)
-def configured_owner(monkeypatch):
-    monkeypatch.setenv("MYSTAND_XIAOBAN_OWNER_USER_ID", "owner-user-001")
 
 
 def test_non_owner_cannot_manage_shared_skill(tmp_path):

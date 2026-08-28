@@ -15,7 +15,6 @@ import time
 from email.utils import formatdate
 
 from agent.redact import redact_sensitive_text
-from xiaoban.mystand_owner import is_configured_mystand_owner
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +69,7 @@ _URL_SECRET_QUERY_RE = re.compile(
     r"([?&](?:access_token|api[_-]?key|auth[_-]?token|token|signature|sig)=)([^&#\s]+)",
     re.IGNORECASE,
 )
+_MYSTAND_EMAIL_OWNER_USER_ID = "52707407"
 _GENERIC_SECRET_ASSIGN_RE = re.compile(
     r"\b(access_token|api[_-]?key|auth[_-]?token|signature|sig)\s*=\s*([^\s,;]+)",
     re.IGNORECASE,
@@ -94,15 +94,15 @@ def _email_send_denied_for_current_session() -> dict | None:
     try:
         from gateway.session_context import get_session_env
         session_platform = get_session_env("XIAOBAN_SESSION_PLATFORM", "").strip().lower()
-        session_user_id = get_session_env("XIAOBAN_SESSION_USER_ID", "").strip()
+        session_user_id = get_session_env("XIAOBAN_SESSION_USER_ID", "").strip().upper()
     except Exception:
         return None
 
     if session_platform != "api_server":
         return None
-    if is_configured_mystand_owner(session_user_id):
+    if session_user_id == _MYSTAND_EMAIL_OWNER_USER_ID:
         return None
-    return _error("邮件功能只对当前配置的 My Stand owner 账号开放，当前账号不能发送、查询或处理邮件。")
+    return _error("邮件功能只对刚哥主账号 52707407 开放，当前账号不能发送、查询或处理邮件。")
 
 
 def _display_chat_id(platform_name: str, chat_id: str) -> str:

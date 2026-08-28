@@ -56,6 +56,8 @@ class TrueMoARunRequest:
     memory_identity: Any
     metadata_trace: Any
     trace_state: TrueMoARunnerTraceState
+    requested_model: str
+    reasoning_effort: str
 
 
 class TrueMoARunWorkflow(
@@ -152,6 +154,34 @@ class TrueMoARunWorkflow(
                 message_id=request.request_message_id,
                 user_message=_content_to_visible_text(
                     request.user_message
+                ),
+                access_mode=request.adapter._header_value(
+                    request.request_headers,
+                    "X-Xiaoban-Access-Mode",
+                ).lower(),
+                work_mode=request.adapter._header_value(
+                    request.request_headers,
+                    "X-Xiaoban-Work-Mode",
+                ).lower(),
+                memory_site_id=(
+                    str(request.memory_identity[0])
+                    if request.memory_identity
+                    and request.memory_identity[2] == "user"
+                    else ""
+                ),
+                memory_tier=(
+                    str(request.memory_identity[3])
+                    if request.memory_identity
+                    and request.memory_identity[2] == "user"
+                    else ""
+                ),
+                memory_resource_refs=(
+                    request.adapter._mystand_memory_resource_refs(
+                        request.request_headers
+                    )
+                    if request.memory_identity
+                    and request.memory_identity[2] == "user"
+                    else ()
                 ),
                 conversation_history=request.conversation_history,
                 async_delivery=request.async_delivery,
@@ -308,6 +338,12 @@ class TrueMoARunWorkflow(
                     strict_no_automatic_paid_retry=(
                         request.durable_paid_call
                     ),
+                    fixed_paid_call_policy=self.agent_call_policy,
+                    reasoning_effort=getattr(
+                        request,
+                        "reasoning_effort",
+                        "",
+                    ),
                 )
             elif self.true_moa_ledger is not None:
                 self.agent.ephemeral_system_prompt = "\n\n".join(
@@ -369,7 +405,7 @@ class TrueMoARunWorkflow(
                 self.agent._disable_streaming = True
                 self.agent._strict_no_automatic_paid_retry = True
                 self.agent._defer_true_moa_final_commit = True
-                self.agent.compression_enabled = False
+                self.agent.compression_enabled = True
             from gateway.platforms.agent_call_accounting import (
                 bind_paid_call_ledger,
             )

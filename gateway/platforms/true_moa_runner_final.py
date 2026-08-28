@@ -66,12 +66,15 @@ class TrueMoARunnerFinalMixin:
             stage_result.get("failed")
             or not stage_result.get("completed", False)
         ):
+            failure = stage_result.get("failure")
+            if not isinstance(failure, dict):
+                failure = {}
             logger.error(
                 "True MoA final agent returned incomplete "
                 "(failure_code=%s failure_phase=%s api_call_count=%s "
                 "max_iterations=%s budget_remaining=%s)",
-                str(stage_result.get("failure_code") or "unknown")[:80],
-                str(stage_result.get("failure_phase") or "unknown")[:80],
+                str(failure.get("code") or "unknown")[:80],
+                str(failure.get("phase") or "unknown")[:80],
                 int(stage_result.get("api_call_count") or 0),
                 int(getattr(self.agent, "max_iterations", 0) or 0),
                 int(

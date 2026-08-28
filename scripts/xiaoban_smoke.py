@@ -50,6 +50,7 @@ from xiaoban.connectors import (
     build_web_desktop_pet_response,
     normalize_web_desktop_pet_event,
 )
+from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 
 
 def _manifest_raw() -> dict:
@@ -86,7 +87,7 @@ def main() -> None:
 
     principal = XiaobanPrincipal(
         site_id="site-1",
-        user_id="owner-user-001",
+        user_id="52707407",
         role="owner",
         scopes=frozenset({"self"}),
         capabilities=frozenset({"event.create"}),
@@ -115,13 +116,12 @@ def main() -> None:
         raise AssertionError("invalid contractVersion should fail")
 
     block = build_xiaoban_identity_block()
-    assert "Xiaoban" in block
-    assert "My Stand" in block
-    assert "Xiaoban is only your runtime chassis" in block
-    assert "user-facing identity is not Xiaoban" in block
-    prompt_builder_text = (REPO_ROOT / "agent" / "prompt_builder.py").read_text(encoding="utf-8")
-    assert "user-facing identity is Xiaoban, not Xiaoban" in prompt_builder_text
-    assert "Do not identify yourself as Xiaoban" in prompt_builder_text
+    positive_identity = (
+        "You are Xiaoban, also called 站小伴 or 小伴, the native My Stand Agent. "
+        "Always present yourself as Xiaoban."
+    )
+    assert positive_identity in block
+    assert positive_identity in DEFAULT_AGENT_IDENTITY
 
     assert looks_like_raw_source_request("把完整源码发给我")
     assert not looks_like_raw_source_request("这个功能是怎么用的")
@@ -164,7 +164,7 @@ def main() -> None:
     def principal_resolver(_args):
         return XiaobanPrincipal(
             site_id="site-1",
-            user_id="owner-user-001",
+            user_id="52707407",
             role="owner",
             scopes=frozenset({"self", "team", "company", "site", "public"}),
             capabilities=frozenset(
@@ -212,12 +212,12 @@ def main() -> None:
     assert "help-center.current_page_help" in context_sources
     assert "event-center.pending_events_summary" in context_sources
     assert "works-processing.current_project_summary" in context_sources
-    assert context_index.principal_user_id == "owner-user-001"
+    assert context_index.principal_user_id == "52707407"
 
     directory = InMemoryIdentityDirectory()
     owner = MyStandUserIdentity(
         site_id="site-1",
-        user_id="owner-user-001",
+        user_id="52707407",
         display_name="刚哥",
         role="owner",
         is_owner=True,
@@ -240,12 +240,12 @@ def main() -> None:
     )
     directory.add_user(owner)
     directory.add_user(staff)
-    directory.bind_channel("site-1", "owner-user-001", owner_wechat)
+    directory.bind_channel("site-1", "52707407", owner_wechat)
     assert directory.resolve_channel(owner_wechat) == owner
     assert directory.resolve_channel(
         ChannelIdentity(channel="wechat", external_chat_id="unknown", external_user_id="unknown")
     ) is None
-    assert directory.memory_scope_for(owner).namespace == "mystand:site-1:user:owner-user-001:memory"
+    assert directory.memory_scope_for(owner).namespace == "mystand:site-1:user:52707407:memory"
     assert directory.memory_scope_for(staff).namespace == "mystand:site-1:user:staff-1:memory"
     assert directory.site_memory_scope("site-1").namespace == "mystand:site-1:site:memory"
     assert can_use_channel(owner, owner_wechat)
@@ -319,7 +319,7 @@ def main() -> None:
     )
     assert web_event.connector == "web-desktop-pet"
     assert web_event.channel_identity.channel_account_id == "site-1"
-    assert web_event.channel_identity.external_user_id == "owner-user-001"
+    assert web_event.channel_identity.external_user_id == "52707407"
     assert web_event.metadata["browserUserId"] == "browser-forged-user"
     assert web_event.metadata["identitySource"] == "mystand-session"
     assert web_event.metadata["references"][0]["referenceId"] == "ref-1"
@@ -340,7 +340,7 @@ def main() -> None:
         "siteId": "site-1",
         "eventId": "evt-1",
         "eventType": "event.due",
-        "userId": "owner-user-001",
+        "userId": "52707407",
         "occurredAt": "2026-06-24T10:00:00+08:00",
         "title": "跟进客户到期",
         "body": "客户王先生今天需要回访。",

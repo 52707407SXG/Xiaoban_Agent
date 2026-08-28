@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any
@@ -39,10 +40,12 @@ from xiaoban.trusted_runtime.protocol_contract import (
 )
 from xiaoban.trusted_runtime.true_moa_contracts import (
     TRUE_MOA_ADVISOR_INPUT_MAX_BYTES,
+    TRUE_MOA_ADVISOR_RESERVATION_INPUT_MAX_TOKENS,
     TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS,
     TRUE_MOA_ALL_SLOTS,
     TRUE_MOA_FINAL_CALL_LIMIT,
     TRUE_MOA_FINAL_INPUT_MAX_BYTES,
+    TRUE_MOA_FINAL_RESERVATION_INPUT_MAX_TOKENS,
     TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS,
     TRUE_MOA_MODE,
     TRUE_MOA_PRESET_ID,
@@ -118,6 +121,18 @@ def assert_unique_contract_revision(
 
 
 def _check_revision_history() -> None:
+    if not (REPO_ROOT / ".git").exists():
+        build_sha_path = REPO_ROOT / ".xiaoban_build_sha"
+        build_sha = (
+            build_sha_path.read_text(encoding="utf-8").strip()
+            if build_sha_path.is_file()
+            else ""
+        )
+        if re.fullmatch(r"[0-9a-f]{40}", build_sha) is None:
+            raise SystemExit(
+                "immutable Xiaoban release build SHA is missing or invalid"
+            )
+        return
     relative = TRUSTED_RUNTIME_CONTRACT_PATH.relative_to(REPO_ROOT)
     history = subprocess.run(
         [
@@ -206,8 +221,18 @@ def check_local() -> None:
     _expect("true MoA total calls", TRUE_MOA_TOTAL_CALL_LIMIT, usage["trueMoaTotalCallLimit"])
     _expect("true MoA final calls", TRUE_MOA_FINAL_CALL_LIMIT, usage["trueMoaFinalCallLimit"])
     _expect("advisor input cap", TRUE_MOA_ADVISOR_INPUT_MAX_BYTES, true_moa["advisorInputMaxBytes"])
+    _expect(
+        "advisor input reservation",
+        TRUE_MOA_ADVISOR_RESERVATION_INPUT_MAX_TOKENS,
+        true_moa["advisorReservationInputMaxTokens"],
+    )
     _expect("advisor output cap", TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS, true_moa["advisorOutputMaxTokens"])
     _expect("final input cap", TRUE_MOA_FINAL_INPUT_MAX_BYTES, true_moa["finalInputMaxBytes"])
+    _expect(
+        "final input reservation",
+        TRUE_MOA_FINAL_RESERVATION_INPUT_MAX_TOKENS,
+        true_moa["finalReservationInputMaxTokens"],
+    )
     _expect("final output cap", TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS, true_moa["finalOutputMaxTokens"])
     _expect(
         "true MoA slots",

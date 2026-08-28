@@ -98,6 +98,27 @@ def _budget_for_agent(agent) -> BudgetConfig:
 _MAX_TOOL_WORKERS = 8
 
 
+def _mystand_plan_mode_block(function_name: str, function_args: dict) -> str | None:
+    """Keep Plan read-only at the My Stand tool boundary."""
+    try:
+        from gateway.session_context import get_session_env
+
+        if get_session_env("XIAOBAN_SESSION_SOURCE", "") != "mystand":
+            return None
+        if get_session_env("XIAOBAN_SESSION_WORK_MODE", "") != "plan":
+            return None
+    except Exception:
+        return None
+    normalized_name = str(function_name or "").strip().lower()
+    if normalized_name == "mystand_authorization_write":
+        return "Plan 模式只做分析和规划，不能执行站内增删改。请切换到 Build 后再继续。"
+    if normalized_name == "mystand_skill_manage":
+        operation = str((function_args or {}).get("operation", "")).strip().lower()
+        if operation not in {"list", "read", "view", "inspect"}:
+            return "Plan 模式可以查看 Skill，但不能创建、更新、注册或删除。请切换到 Build 后再继续。"
+    return None
+
+
 def _ra():
     """Lazy reference to ``run_agent`` so patches like ``run_agent._set_interrupt`` work."""
     import run_agent
@@ -282,7 +303,7 @@ def _append_canonical_tool_result(
         name == "mystand_authorization_write"
         and dispatch_state == "dispatched"
         and isinstance(function_args, dict)
-        and function_args.get("operation") == "preview_and_apply"
+        and function_args.get("operation") == "commit_write"
     ):
         receipt_source = (
             callback_result
@@ -301,17 +322,18 @@ def _append_canonical_tool_result(
             )
         except (TypeError, ValueError):
             parsed_receipt = None
+        from tools.mystand_authorization_tool import _current_session
         from tools.mystand_authorization_write_tool import (
-            _verified_tool_result_receipt,
+            _verified_commit_receipt,
         )
 
-        verified_receipt = _verified_tool_result_receipt(
+        if _verified_commit_receipt(
             parsed_receipt,
-            function_args=function_args,
-        )
-        if verified_receipt is not None:
+            commit_args=function_args,
+            session=_current_session(),
+        ):
             effective_trusted_fields["verifiedWriteReceipt"] = (
-                verified_receipt
+                parsed_receipt
             )
     canonical = normalize_tool_result(
         request_id=str(getattr(agent, "_current_request_id", "") or ""),
@@ -722,6 +744,20 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 status="blocked",
                 error_type="tool_scope_block",
                 error_message=_ts_scope_block,
+                middleware_trace=list(middleware_trace),
+            )
+        elif (plan_mode_block := _mystand_plan_mode_block(function_name, function_args)) is not None:
+            block_result = json.dumps({"error": plan_mode_block}, ensure_ascii=False)
+            _emit_terminal_post_tool_call(
+                agent,
+                function_name=function_name,
+                function_args=function_args,
+                result=block_result,
+                effective_task_id=effective_task_id,
+                tool_call_id=getattr(tool_call, "id", "") or "",
+                status="blocked",
+                error_type="plan_mode_read_only",
+                error_message=plan_mode_block,
                 middleware_trace=list(middleware_trace),
             )
         else:
@@ -1503,6 +1539,9 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         elif _ts_scope_block is not None:
             _block_msg = _ts_scope_block
             _block_error_type = "tool_scope_block"
+        elif (plan_mode_block := _mystand_plan_mode_block(function_name, function_args)) is not None:
+            _block_msg = plan_mode_block
+            _block_error_type = "plan_mode_read_only"
         elif not _strict_tool_mode(agent):
             try:
                 from xiaoban_cli.plugins import get_pre_tool_call_block_message

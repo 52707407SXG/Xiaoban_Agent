@@ -16,8 +16,8 @@ from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from xiaoban.trusted_runtime.true_moa import (
-    DEEPSEEK_FLASH_ADVISOR_SLOT,
-    GPT55_ADVISOR_SLOT,
+    DEEPSEEK_PRO_ADVISOR_SLOT,
+    GPT56_SOL_ADVISOR_SLOT,
     TRUE_MOA_ADVISOR_SLOTS,
     TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS,
     AdvisorMessage,
@@ -42,7 +42,7 @@ _DEEPSEEK_ADVISOR_PROMPT = (
     f"{_ADVISOR_BASE_PROMPT} Focus on viable strategies, value, timing, cost, "
     "and practical execution. State the best option and a usable fallback."
 )
-_GPT55_ADVISOR_PROMPT = (
+_GPT56_SOL_ADVISOR_PROMPT = (
     f"{_ADVISOR_BASE_PROMPT} Act as a skeptical independent reviewer. Find "
     "hidden assumptions, omissions, failure modes, and decision-changing "
     "risks, then recommend the strongest correction."
@@ -143,7 +143,7 @@ def strict_advisor_call(
     frozen_messages = tuple(messages)
     if slot not in TRUE_MOA_ADVISOR_SLOTS:
         raise StrictAdvisorProviderError("advisor_slot_not_in_fixed_preset")
-    if slot == DEEPSEEK_FLASH_ADVISOR_SLOT:
+    if slot == DEEPSEEK_PRO_ADVISOR_SLOT:
         return _call_deepseek(
             slot,
             frozen_messages,
@@ -152,7 +152,7 @@ def strict_advisor_call(
             reservation_callback=reservation_callback,
             dispatch_callback=dispatch_callback,
         )
-    if slot == GPT55_ADVISOR_SLOT:
+    if slot == GPT56_SOL_ADVISOR_SLOT:
         return _call_openai_codex(
             slot,
             frozen_messages,
@@ -257,7 +257,7 @@ def _call_openai_codex(
     request_kwargs = {
         "model": slot.model,
         "messages": [
-            {"role": "system", "content": _GPT55_ADVISOR_PROMPT},
+            {"role": "system", "content": _GPT56_SOL_ADVISOR_PROMPT},
             *[
                 {"role": message.role, "content": message.content}
                 for message in messages
@@ -265,7 +265,7 @@ def _call_openai_codex(
         ],
         "tools": [],
         "max_tokens": TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS,
-        "extra_body": {"reasoning": {"effort": "medium"}},
+        "extra_body": {"reasoning": {"effort": "max"}},
     }
     enforce_true_moa_dispatch_budget(
         role="advisor",

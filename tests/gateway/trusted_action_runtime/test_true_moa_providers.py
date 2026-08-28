@@ -8,11 +8,9 @@ from types import SimpleNamespace
 import pytest
 
 from xiaoban.trusted_runtime.true_moa import (
-    DEEPSEEK_FLASH_ADVISOR_SLOT,
-    GPT55_ADVISOR_SLOT,
-    TRUE_MOA_ADVISOR_INPUT_MAX_BYTES,
+    DEEPSEEK_PRO_ADVISOR_SLOT,
+    GPT56_SOL_ADVISOR_SLOT,
     TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS,
-    TRUE_MOA_FINAL_INPUT_MAX_BYTES,
     TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS,
     AdvisorMessage,
     TrueMoACostCapError,
@@ -73,7 +71,7 @@ def test_deepseek_advisor_is_one_fixed_toolless_no_retry_call(monkeypatch):
     monkeypatch.setattr("openai.OpenAI", _Client)
 
     result = providers.strict_advisor_call(
-        slot=DEEPSEEK_FLASH_ADVISOR_SLOT,
+        slot=DEEPSEEK_PRO_ADVISOR_SLOT,
         messages=_messages(),
         tools=(),
         timeout_seconds=9,
@@ -87,7 +85,7 @@ def test_deepseek_advisor_is_one_fixed_toolless_no_retry_call(monkeypatch):
 
     assert captured["client"]["max_retries"] == 0
     assert captured["client"]["timeout"] == 9
-    assert captured["request"]["model"] == "deepseek-v4-flash"
+    assert captured["request"]["model"] == "deepseek-v4-pro"
     assert captured["request"]["tools"] == []
     assert captured["request"]["stream"] is False
     assert (
@@ -101,7 +99,7 @@ def test_deepseek_advisor_is_one_fixed_toolless_no_retry_call(monkeypatch):
     assert result.usage["prompt_cache_hit_tokens"] == 4
 
 
-def test_gpt55_advisor_is_one_fixed_toolless_codex_call(monkeypatch):
+def test_gpt56_sol_advisor_is_one_fixed_toolless_codex_call(monkeypatch):
     captured = {"create_calls": 0, "dispatches": 0}
 
     class _Completions:
@@ -112,7 +110,7 @@ def test_gpt55_advisor_is_one_fixed_toolless_codex_call(monkeypatch):
                 choices=[
                     SimpleNamespace(
                         message=SimpleNamespace(
-                            content="GPT-5.5 反方建议",
+                            content="GPT-5.6 Sol Max 反方建议",
                             tool_calls=None,
                         )
                     )
@@ -141,7 +139,7 @@ def test_gpt55_advisor_is_one_fixed_toolless_codex_call(monkeypatch):
     )
 
     result = providers.strict_advisor_call(
-        slot=GPT55_ADVISOR_SLOT,
+        slot=GPT56_SOL_ADVISOR_SLOT,
         messages=_messages(),
         tools=(),
         timeout_seconds=8,
@@ -153,11 +151,11 @@ def test_gpt55_advisor_is_one_fixed_toolless_codex_call(monkeypatch):
         ),
     )
 
-    assert captured["request"]["model"] == "gpt-5.5"
+    assert captured["request"]["model"] == "gpt-5.6-sol"
     assert captured["request"]["tools"] == []
     assert captured["request"]["timeout"] == 8
     assert captured["request"]["extra_body"] == {
-        "reasoning": {"effort": "medium"}
+        "reasoning": {"effort": "max"}
     }
     assert (
         captured["request"]["max_tokens"]
@@ -165,13 +163,13 @@ def test_gpt55_advisor_is_one_fixed_toolless_codex_call(monkeypatch):
     )
     assert captured["create_calls"] == 1
     assert captured["dispatches"] == 1
-    assert result.content == "GPT-5.5 反方建议"
+    assert result.content == "GPT-5.6 Sol Max 反方建议"
     assert result.usage["total_tokens"] == 23
     assert result.usage["cached_input_tokens"] == 0
     assert captured["closed"] is True
 
 
-def test_gpt55_stop_drains_final_usage_without_reading_late_text(monkeypatch):
+def test_gpt56_sol_stop_drains_final_usage_without_reading_late_text(monkeypatch):
     request_started = threading.Event()
     release_response = threading.Event()
     controller = TrueMoACancelController()
@@ -192,7 +190,7 @@ def test_gpt55_stop_drains_final_usage_without_reading_late_text(monkeypatch):
         @property
         def content(self):
             captured["content_reads"] += 1
-            raise AssertionError("late GPT-5.5 text must not be read after stop")
+            raise AssertionError("late GPT-5.6 Sol Max text must not be read after stop")
 
     class _Completions:
         def create(self, **_kwargs):
@@ -218,7 +216,7 @@ def test_gpt55_stop_drains_final_usage_without_reading_late_text(monkeypatch):
     def _call():
         try:
             providers.strict_advisor_call(
-                slot=GPT55_ADVISOR_SLOT,
+                slot=GPT56_SOL_ADVISOR_SLOT,
                 messages=_messages(),
                 tools=(),
                 timeout_seconds=1,
@@ -328,7 +326,7 @@ def test_running_cancel_fences_output_but_waits_for_usage_receipt(monkeypatch):
     def _call():
         try:
             providers.strict_advisor_call(
-                slot=DEEPSEEK_FLASH_ADVISOR_SLOT,
+                slot=DEEPSEEK_PRO_ADVISOR_SLOT,
                 messages=_messages(),
                 tools=(),
                 timeout_seconds=1,
@@ -409,7 +407,7 @@ def test_cancel_winning_atomic_dispatch_gate_means_zero_provider_calls(
         match="advisor_cancelled_before_dispatch",
     ):
         providers.strict_advisor_call(
-            slot=DEEPSEEK_FLASH_ADVISOR_SLOT,
+            slot=DEEPSEEK_PRO_ADVISOR_SLOT,
             messages=_messages(),
             tools=(),
             timeout_seconds=1,
@@ -460,7 +458,7 @@ def test_cancel_during_durable_reservation_never_reaches_provider(
     def _call():
         try:
             providers.strict_advisor_call(
-                slot=DEEPSEEK_FLASH_ADVISOR_SLOT,
+                slot=DEEPSEEK_PRO_ADVISOR_SLOT,
                 messages=_messages(),
                 tools=(),
                 timeout_seconds=1,
@@ -486,87 +484,30 @@ def test_cancel_during_durable_reservation_never_reaches_provider(
 
 
 @pytest.mark.parametrize(
-    "slot",
-    [DEEPSEEK_FLASH_ADVISOR_SLOT, GPT55_ADVISOR_SLOT],
-)
-def test_advisor_input_cap_rejects_before_credentials_or_dispatch(
-    monkeypatch,
-    slot,
-):
-    credentials = []
-    dispatches = []
-    monkeypatch.setattr(
-        providers,
-        "_fixed_credentials",
-        lambda *_args, **_kwargs: credentials.append("resolved"),
-    )
-    oversized = (
-        AdvisorMessage(
-            role="user",
-            content="界" * TRUE_MOA_ADVISOR_INPUT_MAX_BYTES,
-        ),
-    )
-
-    with pytest.raises(
-        TrueMoACostCapError,
-        match="true_moa_input_byte_cap_exceeded",
-    ):
-        providers.strict_advisor_call(
-            slot=slot,
-            messages=oversized,
-            tools=(),
-            timeout_seconds=1,
-            cancel_controller=TrueMoACancelController(),
-            reservation_callback=lambda: None,
-            dispatch_callback=lambda: dispatches.append("dispatched"),
-        )
-
-    assert credentials == []
-    assert dispatches == []
-
-
-@pytest.mark.parametrize(
-    ("role", "input_limit", "output_limit"),
+    ("role", "output_limit"),
     [
         (
             "advisor",
-            TRUE_MOA_ADVISOR_INPUT_MAX_BYTES,
             TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS,
         ),
         (
             "final_executor",
-            TRUE_MOA_FINAL_INPUT_MAX_BYTES,
             TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS,
         ),
     ],
 )
-def test_fixed_cost_cap_accepts_exact_byte_boundary_and_rejects_next_byte(
+def test_fixed_cost_policy_accepts_large_input_payload(
     role,
-    input_limit,
     output_limit,
 ):
     payload = {
         "max_tokens": output_limit,
-        "messages": [{"role": "user", "content": ""}],
+        "messages": [{"role": "user", "content": "x" * 400_000}],
     }
-    base_size = enforce_true_moa_dispatch_budget(
-        role=role,
-        payload=payload,
-    )
-    payload["messages"][0]["content"] = "x" * (input_limit - base_size)
     assert enforce_true_moa_dispatch_budget(
         role=role,
         payload=payload,
-    ) == input_limit
-    payload["messages"][0]["content"] += "x"
-    with pytest.raises(
-        TrueMoACostCapError,
-        match="true_moa_input_byte_cap_exceeded",
-    ):
-        enforce_true_moa_dispatch_budget(
-            role=role,
-            payload=payload,
-        )
+    ) > 400_000
 
 
 @pytest.mark.parametrize(

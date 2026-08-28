@@ -70,51 +70,6 @@ def _mock_response(content="Hello", finish_reason="stop", tool_calls=None, usage
     return resp
 
 
-def _mock_codex_response(
-    content="Hello",
-    finish_reason="stop",
-    tool_calls=None,
-    usage=None,
-):
-    output = []
-    for tool_call in tool_calls or []:
-        output.append(
-            SimpleNamespace(
-                type="function_call",
-                id=f"fc_{tool_call.id}",
-                call_id=tool_call.id,
-                name=tool_call.function.name,
-                arguments=tool_call.function.arguments,
-                status="completed",
-            )
-        )
-    if not output:
-        item_status = "completed" if finish_reason == "stop" else "incomplete"
-        output.append(
-            SimpleNamespace(
-                type="message",
-                status=item_status,
-                content=[SimpleNamespace(type="output_text", text=content)],
-            )
-        )
-    normalized_usage = None
-    if usage:
-        normalized_usage = SimpleNamespace(
-            input_tokens=usage.get("input_tokens", usage.get("prompt_tokens", 0)),
-            output_tokens=usage.get(
-                "output_tokens",
-                usage.get("completion_tokens", 0),
-            ),
-            total_tokens=usage.get("total_tokens", 0),
-        )
-    return SimpleNamespace(
-        output=output,
-        usage=normalized_usage,
-        status="completed" if finish_reason == "stop" else "incomplete",
-        model="gpt-5.6-luna",
-    )
-
-
 def _make_413_error(*, use_status_code=True, message="Request entity too large"):
     """Create an exception that mimics a 413 HTTP error."""
     err = Exception(message)
@@ -1035,16 +990,14 @@ class TestOverflowWithCompactionDisabled:
 def _bind_signed_normal(agent):
     from xiaoban.trusted_runtime.agent_call_usage import AgentCallUsageLedger
     from xiaoban.trusted_runtime.paid_call_policy import (
-        SIGNED_MYSTAND_AGENT_POLICY,
         SIGNED_MYSTAND_AGENT_POLICY_REVISION,
     )
     from xiaoban.trusted_runtime.true_moa_cancel import TrueMoACancelController
 
-    agent.provider = SIGNED_MYSTAND_AGENT_POLICY.provider
-    agent.model = SIGNED_MYSTAND_AGENT_POLICY.model
-    agent.api_mode = "codex_responses"
-    agent.max_tokens = None
-    agent.max_iterations = SIGNED_MYSTAND_AGENT_POLICY.call_limit
+    agent.provider = "deepseek"
+    agent.model = "deepseek-v4-pro"
+    agent.max_tokens = 4096
+    agent.max_iterations = 8
     agent._strict_no_automatic_paid_retry = True
     agent._disable_streaming = True
     agent._api_max_retries = 1
@@ -1107,7 +1060,7 @@ def test_signed_normal_compaction_uses_projected_tool_result(agent):
 
     def provider(payload):
         captured.update(payload)
-        return _mock_codex_response(
+        return _mock_response(
             content="已保留拒绝结果，后续不得宣称读取成功。",
             finish_reason="stop",
             usage={
@@ -1122,7 +1075,7 @@ def test_signed_normal_compaction_uses_projected_tool_result(agent):
 
     serialized = json.dumps(captured, ensure_ascii=False, default=str)
     assert private_canary not in serialized
-    assert '"outcome": "denied"' in captured["input"][-1]["content"]
+    assert '"outcome": "denied"' in captured["messages"][-1]["content"]
     assert summary.startswith(SUMMARY_PREFIX)
     assert agent._strict_compaction_call_count == 1
     assert len(agent._paid_call_usage_ledger.to_dict()["calls"]) == 1
@@ -1138,7 +1091,7 @@ def test_signed_normal_compaction_requires_complete_finish_reason(
     )
 
     _bind_signed_normal(agent)
-    response = _mock_codex_response(
+    response = _mock_response(
         content="incomplete checkpoint",
         finish_reason=finish_reason,
         usage={
@@ -1171,11 +1124,11 @@ def test_signed_normal_compaction_error_usage_is_aggregated(agent):
 
     _bind_signed_normal(agent)
     provider_error = RuntimeError("provider failed after usage")
-    provider_error.usage = SimpleNamespace(
-        input_tokens=10,
-        output_tokens=2,
-        total_tokens=12,
-    )
+    provider_error.usage = {
+        "prompt_tokens": 10,
+        "completion_tokens": 2,
+        "total_tokens": 12,
+    }
 
     with patch.object(
         agent,
@@ -1203,7 +1156,7 @@ def test_signed_normal_compaction_cancel_race_counts_usage_once(agent):
     )
 
     _bind_signed_normal(agent)
-    response = _mock_codex_response(
+    response = _mock_response(
         content="unused compact summary",
         finish_reason="stop",
         usage={
@@ -1242,39 +1195,37 @@ def test_runtime_checkpoint_preserves_unknown_and_verified_write(agent):
         RUNTIME_CHECKPOINT_INTERNAL_KEY,
         _verified_write_receipt_digest,
     )
-    from tools.mystand_authorization_write_tool import _preview_token_hash
+    from tools.mystand_authorization_write_tool import (
+        _confirmation_id,
+        _preview_token_hash,
+    )
 
     _bind_signed_normal(agent)
-    write_args = {
-        "operation": "preview_and_apply",
-        "resource": {"name": "测试知识图谱", "type_hint": "knowledge-graph"},
-        "action": "knowledge-graph.add-node",
-        "payload": {"node": {"label": "测试节点", "type": "skill"}},
+    commit_args = {
+        "operation": "commit_write",
+        "preview_token": "preview-token-checkpoint",
         "idempotency_key": "checkpoint-idempotency-key",
     }
-    confirmation_id = "approval_" + "c" * 32
-    preview_token = "preview-token-checkpoint"
+    trusted_session = {
+        "user_id": "ZYJ005",
+        "session_id": "checkpoint-session",
+        "message_id": "checkpoint-message",
+    }
     verified_receipt = {
         "ok": True,
         "status": 200,
         "receiptVersion": "authorization-write-receipt-v2",
         "verified": True,
         "audit": {"recorded": True, "auditId": "audit-checkpoint"},
-        "recovery": {
-            "recoveryId": "auth-recovery-" + "d" * 32,
-            "retentionDays": 7,
-            "expiresAt": "2026-09-01T00:00:00.000Z",
-        },
-        "confirmationId": confirmation_id,
-        "confirmationMode": "separate-user-confirmation",
+        "confirmationId": _confirmation_id(trusted_session),
         "action": "knowledge-graph.add-node",
         "target": {"graphId": "graph-1", "nodeId": "node-1"},
         "expectedVersion": "version-1",
         "nextVersion": "version-2",
-        "idempotencyKey": write_args["idempotency_key"],
+        "idempotencyKey": commit_args["idempotency_key"],
         "requestFingerprint": "a" * 64,
         "previewTokenHash": _preview_token_hash(
-            preview_token
+            commit_args["preview_token"]
         ),
         "changeDigest": "b" * 64,
         "committedAt": "2026-08-06T00:00:00.000Z",
@@ -1297,7 +1248,7 @@ def test_runtime_checkpoint_preserves_unknown_and_verified_write(agent):
                     "type": "function",
                     "function": {
                         "name": "mystand_authorization_write",
-                        "arguments": json.dumps(write_args),
+                        "arguments": json.dumps(commit_args),
                     },
                 },
             ],
@@ -1346,7 +1297,7 @@ def test_runtime_checkpoint_preserves_unknown_and_verified_write(agent):
     assert "unknown-call" in checkpoint
     assert "PRIVATE_UNKNOWN_BODY_781" not in checkpoint
     assert "authorization-write-receipt-v2" in checkpoint
-    assert confirmation_id in checkpoint
+    assert _confirmation_id(trusted_session) in checkpoint
     assert "只读核对，不要执行写入" in checkpoint
 
     payload = json.loads(checkpoint.split("XIAOBAN_RUNTIME_CHECKPOINT_JSON:", 1)[1])
@@ -1357,7 +1308,7 @@ def test_runtime_checkpoint_preserves_unknown_and_verified_write(agent):
         RUNTIME_CHECKPOINT_INTERNAL_KEY: payload,
     }])
     assert "unknown-call" in recomputed
-    assert confirmation_id in recomputed
+    assert _confirmation_id(trusted_session) in recomputed
     assert "只读核对，不要执行写入" in recomputed
 
 
@@ -1519,7 +1470,7 @@ def test_signed_normal_context_error_without_usage_does_not_retry(agent):
     error = _make_413_error()
     responses = [
         error,
-        _mock_codex_response(content="must not run", finish_reason="stop"),
+        _mock_response(content="must not run", finish_reason="stop"),
     ]
 
     with (
@@ -1549,11 +1500,11 @@ def test_signed_normal_context_retry_uses_fresh_request_id(agent):
     agent.compression_enabled = True
     error = _make_413_error()
     error.usage = SimpleNamespace(
-        input_tokens=20,
-        output_tokens=0,
+        prompt_tokens=20,
+        completion_tokens=0,
         total_tokens=20,
     )
-    recovered = _mock_codex_response(
+    recovered = _mock_response(
         content="recovered",
         finish_reason="stop",
         usage={
@@ -1711,7 +1662,7 @@ def test_signed_normal_post_tool_compaction_failure_is_typed(agent):
         type="function",
         function=SimpleNamespace(name="web_search", arguments="{}"),
     )
-    response = _mock_codex_response(
+    response = _mock_response(
         content="checking",
         finish_reason="tool_calls",
         tool_calls=[tool_call],
@@ -1759,58 +1710,70 @@ def test_signed_normal_post_tool_compaction_failure_is_typed(agent):
     assert result["failure"]["code"] == "context_compaction_failed"
 
 
-def test_true_moa_local_compaction_summarizes_projected_results(agent):
-    from agent.true_moa_conversation_policy import compact_true_moa_paid_history
-
-    private_canary = "PRIVATE_TRUE_MOA_TOOL_BODY_781"
-    captured = []
-
-    def build_summary(turns, *, reason):
-        captured.extend(turns)
-        return "safe summary"
-
-    agent.context_compressor._build_static_fallback_summary = build_summary
-    messages = [
-        {
-            "role": "assistant",
-            "content": "checking",
-            "tool_calls": [{
-                "id": "true-moa-denied",
-                "type": "function",
-                "function": {"name": "web_search", "arguments": "{}"},
-            }],
-        },
-        {
-            "role": "tool",
-            "name": "web_search",
-            "tool_call_id": "true-moa-denied",
-            "content": private_canary,
-            "_xiaoban_tool_result": {
-                "schema": "xiaoban.tool-result.v1",
-                "requestId": "request",
-                "turnId": "turn",
-                "callId": "true-moa-denied",
-                "toolName": "web_search",
-                "dispatchState": "not_dispatched",
-                "outcome": "denied",
-                "retrySafe": False,
-            },
-        },
-        {"role": "user", "content": "current task"},
-    ]
-
-    compacted, user_index, changed = compact_true_moa_paid_history(
-        agent,
-        messages,
-        2,
+def test_true_moa_compaction_uses_same_model_and_usage_ledger(agent):
+    from agent.true_moa_conversation_policy import (
+        summarize_signed_normal_context,
+    )
+    from xiaoban.trusted_runtime.true_moa import (
+        TRUE_MOA_MODE,
+        TRUE_MOA_PRESET_ID,
+        TRUE_MOA_PRESET_REVISION,
+        TrueMoASnapshot,
+        TrueMoAUsageLedger,
     )
 
-    assert changed is True
-    assert user_index == 1
-    assert compacted[-1] == messages[-1]
-    serialized = json.dumps(captured, ensure_ascii=False)
-    assert private_canary not in serialized
-    assert '"outcome": "denied"' in captured[-1]["content"]
+    agent.provider = "openai-codex"
+    agent.model = "gpt-5.6-luna"
+    agent.api_mode = "chat_completions"
+    agent.max_tokens = 128_000
+    agent.max_iterations = 90
+    agent._strict_no_automatic_paid_retry = True
+    agent._disable_streaming = True
+    agent._api_max_retries = 1
+    agent._fallback_chain = []
+    agent._fallback_index = 0
+    agent._paid_call_usage_ledger = None
+    agent._true_moa_usage_ledger = TrueMoAUsageLedger(
+        TrueMoASnapshot(
+            mode=TRUE_MOA_MODE,
+            mode_epoch="true-moa-compaction",
+            preset_id=TRUE_MOA_PRESET_ID,
+            preset_revision=TRUE_MOA_PRESET_REVISION,
+        ),
+        wave_id="true-moa-compaction-wave",
+    )
+    agent._api_call_count = 1
+    agent._strict_compaction_call_count = 0
+    response = _mock_response(
+        content="保留当前目标与已验证事实，丢弃冗长原文。",
+        finish_reason="stop",
+        usage={
+            "prompt_tokens": 120,
+            "completion_tokens": 20,
+            "total_tokens": 140,
+        },
+    )
+
+    with patch.object(
+        agent,
+        "_interruptible_api_call",
+        return_value=response,
+    ) as provider_call:
+        summary = summarize_signed_normal_context(
+            agent,
+            [
+                {"role": "user", "content": "查天气并继续当前任务"},
+                {"role": "assistant", "content": "已经取得公开天气资料"},
+            ],
+        )
+
+    assert summary.startswith(SUMMARY_PREFIX)
+    assert provider_call.call_count == 1
+    assert provider_call.call_args.args[0]["model"] == "gpt-5.6-luna"
+    assert agent._strict_compaction_call_count == 1
+    calls = agent._true_moa_usage_ledger.to_dict()["calls"]
+    assert len(calls) == 1
+    assert calls[0]["totalTokens"] == 140
 
 
 def test_signed_normal_compaction_preserves_multimodal_user_and_checkpoint(

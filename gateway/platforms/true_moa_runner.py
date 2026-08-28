@@ -79,6 +79,8 @@ class TrueMoARunnerMixin:
         true_moa_snapshot: Any = None,
         paid_call_usage_callback=None,
         final_commit_guard=None,
+        requested_model: str = "",
+        reasoning_effort: str = "",
     ) -> tuple:
         """Create an Agent and run one thread-isolated conversation."""
 
@@ -252,6 +254,8 @@ class TrueMoARunnerMixin:
             memory_identity=memory_identity,
             metadata_trace=metadata_trace,
             trace_state=trace_state,
+            requested_model=str(requested_model or "").strip(),
+            reasoning_effort=str(reasoning_effort or "").strip().lower(),
         )
         self._inflight_agent_runs += 1
         try:

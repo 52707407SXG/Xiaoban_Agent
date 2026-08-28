@@ -6,14 +6,14 @@
     "mode": "moa",
     "modeEpoch": "1",
     "presetId": "mystand-true-moa-v1",
-    "presetRevision": "2026-08-21.3",
+    "presetRevision": "2026-08-27.1",
     "status": "completed",
     "slots": [
       {
-        "slotId": "advisor-deepseek-v4-flash",
-        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-deepseek-v4-flash",
+        "slotId": "advisor-deepseek-v4-pro",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-deepseek-v4-pro",
         "provider": "deepseek",
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-v4-pro",
         "role": "advisor",
         "startedAtMs": 100,
         "endedAtMs": 110,
@@ -28,10 +28,10 @@
         "costSource": "fake-provider"
       },
       {
-        "slotId": "advisor-openai-codex-gpt-5.5",
-        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-openai-codex-gpt-5.5",
+        "slotId": "advisor-openai-codex-gpt-5.6-sol",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-openai-codex-gpt-5.6-sol",
         "provider": "openai-codex",
-        "model": "gpt-5.5",
+        "model": "gpt-5.6-sol",
         "role": "advisor",
         "startedAtMs": 120,
         "endedAtMs": 130,
@@ -63,10 +63,10 @@
     ],
     "calls": [
       {
-        "slotId": "advisor-deepseek-v4-flash",
-        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-deepseek-v4-flash",
+        "slotId": "advisor-deepseek-v4-pro",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-deepseek-v4-pro",
         "provider": "deepseek",
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-v4-pro",
         "role": "advisor",
         "startedAtMs": 200,
         "endedAtMs": 210,
@@ -81,10 +81,10 @@
         "costSource": "fake-provider"
       },
       {
-        "slotId": "advisor-openai-codex-gpt-5.5",
-        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-openai-codex-gpt-5.5",
+        "slotId": "advisor-openai-codex-gpt-5.6-sol",
+        "callId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:advisor-openai-codex-gpt-5.6-sol",
         "provider": "openai-codex",
-        "model": "gpt-5.5",
+        "model": "gpt-5.6-sol",
         "role": "advisor",
         "startedAtMs": 220,
         "endedAtMs": 230,
@@ -171,11 +171,11 @@
       "operation": "project",
       "mutations": [
         {"action": "set", "path": ["waveId"], "value": "LEGACY_WAVE"},
-        {"action": "set", "path": ["slots", 0, "callId"], "value": "LEGACY_WAVE:advisor-deepseek-v4-flash"},
-        {"action": "set", "path": ["slots", 1, "callId"], "value": "LEGACY_WAVE:advisor-openai-codex-gpt-5.5"},
+        {"action": "set", "path": ["slots", 0, "callId"], "value": "LEGACY_WAVE:advisor-deepseek-v4-pro"},
+        {"action": "set", "path": ["slots", 1, "callId"], "value": "LEGACY_WAVE:advisor-openai-codex-gpt-5.6-sol"},
         {"action": "set", "path": ["slots", 2, "callId"], "value": "LEGACY_WAVE:final-openai-codex-gpt-5.6-luna"},
-        {"action": "set", "path": ["calls", 0, "callId"], "value": "LEGACY_WAVE:advisor-deepseek-v4-flash"},
-        {"action": "set", "path": ["calls", 1, "callId"], "value": "LEGACY_WAVE:advisor-openai-codex-gpt-5.5"},
+        {"action": "set", "path": ["calls", 0, "callId"], "value": "LEGACY_WAVE:advisor-deepseek-v4-pro"},
+        {"action": "set", "path": ["calls", 1, "callId"], "value": "LEGACY_WAVE:advisor-openai-codex-gpt-5.6-sol"},
         {"action": "set", "path": ["calls", 2, "callId"], "value": "LEGACY_WAVE:final-openai-codex-gpt-5.6-luna:000001"}
       ],
       "expected": "invalid"

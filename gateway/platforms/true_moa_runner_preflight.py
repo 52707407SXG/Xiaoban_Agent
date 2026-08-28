@@ -279,8 +279,26 @@ class TrueMoARunnerPreflightMixin:
         agent._true_moa_cancel_controller = controller
         agent._true_moa_usage_ledger = self.true_moa_ledger
         agent._defer_true_moa_final_commit = True
-        agent.compression_enabled = False
         agent.max_tokens = final_output_max_tokens
+        # True MoA uses the same provider-aware token compaction path as the
+        # normal Xiaoban loop.  The former byte-cap fence disabled this and
+        # could terminate a healthy task after a large tool result.
+        agent.compression_enabled = True
+        compressor = getattr(agent, "context_compressor", None)
+        if compressor is not None:
+            compressor.update_model(
+                model=agent.model,
+                context_length=compressor.context_length,
+                base_url=agent.base_url,
+                api_key=getattr(agent, "api_key", ""),
+                provider=agent.provider,
+                api_mode=agent.api_mode,
+                max_tokens=final_output_max_tokens,
+            )
+            compressor.protect_last_n = min(
+                int(getattr(compressor, "protect_last_n", 8) or 8),
+                8,
+            )
         if request.agent_ref is not None:
             request.agent_ref[0] = agent
             if request.agent_ref[1]:

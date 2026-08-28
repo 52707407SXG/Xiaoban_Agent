@@ -140,14 +140,24 @@ MYSTAND_TRUE_MOA_MODE = str(_TRUE_MOA_BILLING["mode"])
 MYSTAND_TRUE_MOA_AUTHORIZATION_SOURCE = str(
     _TRUE_MOA_BILLING["authorizationSource"]
 )
-MYSTAND_TRUE_MOA_ADVISOR_INPUT_MAX_BYTES = int(
-    _TRUE_MOA_BILLING["advisorInputMaxBytes"]
+MYSTAND_TRUE_MOA_ADVISOR_INPUT_MAX_BYTES = (
+    int(_TRUE_MOA_BILLING["advisorInputMaxBytes"])
+    if _TRUE_MOA_BILLING.get("advisorInputMaxBytes") is not None
+    else None
+)
+MYSTAND_TRUE_MOA_ADVISOR_RESERVATION_INPUT_MAX_TOKENS = int(
+    _TRUE_MOA_BILLING["advisorReservationInputMaxTokens"]
 )
 MYSTAND_TRUE_MOA_ADVISOR_OUTPUT_MAX_TOKENS = int(
     _TRUE_MOA_BILLING["advisorOutputMaxTokens"]
 )
-MYSTAND_TRUE_MOA_FINAL_INPUT_MAX_BYTES = int(
-    _TRUE_MOA_BILLING["finalInputMaxBytes"]
+MYSTAND_TRUE_MOA_FINAL_INPUT_MAX_BYTES = (
+    int(_TRUE_MOA_BILLING["finalInputMaxBytes"])
+    if _TRUE_MOA_BILLING.get("finalInputMaxBytes") is not None
+    else None
+)
+MYSTAND_TRUE_MOA_FINAL_RESERVATION_INPUT_MAX_TOKENS = int(
+    _TRUE_MOA_BILLING["finalReservationInputMaxTokens"]
 )
 MYSTAND_TRUE_MOA_FINAL_OUTPUT_MAX_TOKENS = int(
     _TRUE_MOA_BILLING["finalOutputMaxTokens"]

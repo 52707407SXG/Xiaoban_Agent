@@ -958,6 +958,88 @@ class TestAgentExecution:
         )
 
     @pytest.mark.asyncio
+    async def test_mystand_authorized_memory_refs_bind_to_current_agent_turn(
+        self,
+        auth_adapter,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.setenv(
+            "XIAOBAN_MYSTAND_MEMORY_SCOPE_SECRET",
+            "stable-memory-scope-secret-for-authorized-ref-test",
+        )
+        monkeypatch.setenv("XIAOBAN_HOME", str(tmp_path))
+        reference_id = "AUTH-AAAAAAAA-BBBBBBBB-CCCCCCCC-DDDDDDDD"
+        headers = _mystand_idempotent_headers("memory-ref-bind", user="alice")
+        headers.update({
+            "X-Xiaoban-Memory-Mode": "user",
+            "X-Xiaoban-Memory-Tier": "notebook",
+            "X-Xiaoban-Memory-Resource-Refs": json.dumps([{
+                "referenceId": reference_id,
+                "sourceType": "business-archive",
+            }]),
+        })
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {
+            "final_response": "ok",
+            "messages": [],
+        }
+        mock_agent.session_prompt_tokens = 1
+        mock_agent.session_completion_tokens = 2
+        mock_agent.session_total_tokens = 3
+
+        with (
+            patch.object(auth_adapter, "_create_agent", return_value=mock_agent),
+            patch.object(
+                auth_adapter,
+                "_bind_api_server_session",
+                return_value=[],
+            ) as bind_session,
+        ):
+            await auth_adapter._run_agent(
+                user_message="读取已授权资料",
+                conversation_history=[],
+                session_id="session-memory-ref-bind",
+                request_headers=headers,
+            )
+
+        assert bind_session.call_args.kwargs["memory_resource_refs"] == (
+            (reference_id, "business-archive"),
+        )
+
+    def test_mystand_memory_refs_are_bound_to_idempotency_fingerprint(
+        self,
+        auth_adapter,
+    ):
+        body = {
+            "model": "test",
+            "messages": [{"role": "user", "content": "记住这项结论"}],
+            "stream": True,
+        }
+        first_headers = _mystand_idempotent_headers("memory-ref-fingerprint")
+        first_headers.update({
+            "X-Xiaoban-Memory-Mode": "user",
+            "X-Xiaoban-Memory-Tier": "notebook",
+            "X-Xiaoban-Memory-Resource-Refs": json.dumps([{
+                "referenceId": "AUTH-AAAAAAAA-BBBBBBBB-CCCCCCCC-DDDDDDDD",
+                "sourceType": "business-archive",
+            }]),
+        })
+        second_headers = dict(first_headers)
+        second_headers["X-Xiaoban-Memory-Resource-Refs"] = json.dumps([{
+            "referenceId": "AUTH-11111111-22222222-33333333-44444444",
+            "sourceType": "business-archive",
+        }])
+
+        assert auth_adapter._chat_idempotency_fingerprint(
+            body,
+            first_headers,
+        ) != auth_adapter._chat_idempotency_fingerprint(
+            body,
+            second_headers,
+        )
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("agent_result", "expected_error_code"),
         [
@@ -1594,6 +1676,10 @@ class TestChatCompletionsEndpoint:
             **_mystand_idempotent_headers("memory-alice", user="alice"),
             "X-Xiaoban-Memory-Mode": "user",
             "X-Xiaoban-Memory-Tier": "notebook",
+            "X-Xiaoban-Memory-Resource-Refs": json.dumps([{
+                "referenceId": "AUTH-AAAAAAAA-BBBBBBBB-CCCCCCCC-DDDDDDDD",
+                "sourceType": "business-archive",
+            }]),
         }
         bob_headers = {
             **_mystand_idempotent_headers("memory-bob", user="bob"),
@@ -1606,12 +1692,14 @@ class TestChatCompletionsEndpoint:
                 "/v1/mystand/memory",
                 headers=alice_headers,
                 json={
-                    "action": "record_turn",
-                    "turnId": "delivery-memory-alice-0001",
-                    "userMessage": "请帮我整理今天的带看事项",
-                    "assistantMessage": "已整理今天的带看事项。",
+                    "action": "upsert",
+                    "target": "notebook",
+                    "summary": "每周整理一次带看事项",
                     "accountLabel": "张三",
-                    "occurredAt": "2026-08-21T08:00:00Z",
+                    "resourceRefs": [{
+                        "referenceId": "AUTH-AAAAAAAA-BBBBBBBB-CCCCCCCC-DDDDDDDD",
+                        "sourceType": "business-archive",
+                    }],
                 },
             )
             recorded_data = await recorded.json()
@@ -1619,7 +1707,7 @@ class TestChatCompletionsEndpoint:
             alice_data = await alice.json()
             bob = await cli.get("/v1/mystand/memory", headers=bob_headers)
             bob_data = await bob.json()
-            fact_id = recorded_data["factIds"][0]
+            fact_id = recorded_data["factId"]
             forged_update = await cli.post(
                 "/v1/mystand/memory",
                 headers=bob_headers,
@@ -1636,20 +1724,35 @@ class TestChatCompletionsEndpoint:
                 headers=alice_headers,
                 json={"action": "delete", "factId": fact_id},
             )
+            forged_reference = await cli.post(
+                "/v1/mystand/memory",
+                headers=alice_headers,
+                json={
+                    "action": "upsert",
+                    "target": "notebook",
+                    "summary": "伪造引用不得保存",
+                    "resourceRefs": [{
+                        "referenceId": "AUTH-11111111-22222222-33333333-44444444",
+                        "sourceType": "business-archive",
+                    }],
+                },
+            )
 
         assert recorded.status == 200
-        assert recorded_data["documents"] == 1
+        assert len(recorded_data["documents"]) == 1
         assert alice.status == 200
         assert alice_data["tier"] == "notebook"
         assert len(alice_data["facts"]) == 1
         assert "服务小本（张三）" in alice_data["facts"][0]["content"]
         assert "带看事项" in alice_data["facts"][0]["content"]
+        assert "AUTH-AAAAAAAA-BBBBBBBB-CCCCCCCC-DDDDDDDD" in alice_data["facts"][0]["content"]
         assert bob.status == 200
         assert bob_data["facts"] == []
         assert forged_update.status == 404
         assert active_add.status == 400
         assert active_add_data["error"] == "invalid_action"
         assert active_delete.status == 400
+        assert forged_reference.status == 400
 
     @pytest.mark.asyncio
     async def test_mystand_account_memory_reaches_only_current_account_prompt(
@@ -1683,24 +1786,20 @@ class TestChatCompletionsEndpoint:
                 "/v1/mystand/memory",
                 headers=alice_headers,
                 json={
-                    "action": "record_turn",
-                    "turnId": "delivery-memory-prompt-alice-0001",
-                    "userMessage": "以后带看前先确认门禁时间",
-                    "assistantMessage": "已记下带看前确认门禁时间。",
+                    "action": "upsert",
+                    "target": "notebook",
+                    "summary": "带看前先确认门禁时间",
                     "accountLabel": "张三",
-                    "occurredAt": "2026-08-21T09:00:00Z",
                 },
             )
             bob_record = await cli.post(
                 "/v1/mystand/memory",
                 headers=bob_headers,
                 json={
-                    "action": "record_turn",
-                    "turnId": "delivery-memory-prompt-bob-0001",
-                    "userMessage": "内部代号是仅 Bob 可见",
-                    "assistantMessage": "已记下。",
+                    "action": "upsert",
+                    "target": "notebook",
+                    "summary": "内部代号是仅 Bob 可见",
                     "accountLabel": "李四",
-                    "occurredAt": "2026-08-21T09:01:00Z",
                 },
             )
             with patch.object(

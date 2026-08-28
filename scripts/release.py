@@ -1788,38 +1788,6 @@ def update_version_files(semver: str, calver_date: str):
         )
         desktop_pkg.write_text(pkg_text, encoding="utf-8")
 
-    # npm workspaces also record the desktop package version in the root
-    # package-lock. A package.json-only bump leaves npm metadata stale even
-    # when dependency resolution itself is unchanged.
-    package_lock = REPO_ROOT / "package-lock.json"
-    if package_lock.exists():
-        package_lock_text = package_lock.read_text(encoding="utf-8")
-        package_lock_text, replacements = re.subn(
-            r'("apps/desktop": \{\n\s+"name": "xiaoban",\n\s+"version": ")[^"]+("[,\n])',
-            rf'\g<1>{semver}\g<2>',
-            package_lock_text,
-            count=1,
-        )
-        if replacements != 1:
-            raise RuntimeError("package-lock.json is missing the desktop workspace entry")
-        package_lock.write_text(package_lock_text, encoding="utf-8")
-
-    # The editable root package is recorded in uv.lock with its own version.
-    # Keep that entry synchronized without re-resolving third-party packages
-    # during a release cut.
-    uv_lock = REPO_ROOT / "uv.lock"
-    if uv_lock.exists():
-        lock_text = uv_lock.read_text(encoding="utf-8")
-        lock_text, replacements = re.subn(
-            r'(\[\[package\]\]\nname = "xiaoban-agent"\nversion = ")[^"]+("\n)',
-            rf'\g<1>{semver}\g<2>',
-            lock_text,
-            count=1,
-        )
-        if replacements != 1:
-            raise RuntimeError("uv.lock is missing the Xiaoban root package entry")
-        uv_lock.write_text(lock_text, encoding="utf-8")
-
     # Update ACP Registry manifest + npm launcher (must stay version-locked
     # with pyproject — enforced by tests/acp/test_registry_manifest.py).
     _update_acp_registry_versions(semver)
@@ -2223,14 +2191,8 @@ def main():
 
             # Commit version bump
             add_files = [str(VERSION_FILE), str(PYPROJECT_FILE)]
-            for release_metadata_file in (
-                ACP_REGISTRY_MANIFEST,
-                REPO_ROOT / "apps" / "desktop" / "package.json",
-                REPO_ROOT / "package-lock.json",
-                REPO_ROOT / "uv.lock",
-            ):
-                if release_metadata_file.exists():
-                    add_files.append(str(release_metadata_file))
+            if ACP_REGISTRY_MANIFEST.exists():
+                add_files.append(str(ACP_REGISTRY_MANIFEST))
             add_result = git_result("add", *add_files)
             if add_result.returncode != 0:
                 print(f"  ✗ Failed to stage version files: {add_result.stderr.strip()}")

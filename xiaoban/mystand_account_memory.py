@@ -8,14 +8,14 @@ transcript and never invokes a model.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime
 from functools import wraps
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import fcntl
 
@@ -27,23 +27,27 @@ MEMORY_TIERS = frozenset({OWNER_MEMORY_TIER, NOTEBOOK_MEMORY_TIER})
 OWNER_PROFILE_CATEGORY = "mystand_owner_profile"
 OWNER_JOURNAL_CATEGORY = "mystand_owner_memory"
 SERVICE_NOTEBOOK_CATEGORY = "mystand_service_notebook"
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
-_SKIP_TURNS = re.compile(
-    r"^(?:你好|您好|在吗|谢谢|谢了|好的?|好呀|嗯+|哦+|收到|知道了|再见)[。！!,.，\s]*$",
-    re.IGNORECASE,
-)
 _SENSITIVE_FIELD_VALUE = re.compile(
     r"(?P<label>密码|口令|验证码|token|api[\s_-]*key|secret|私钥|助记词|"
-    r"身份证(?:号)?|银行卡(?:号)?|信用卡(?:号)?|密码本|客户电话|手机号码|手机号|"
-    r"联系电话|详细住址|门牌号|access[\s_-]*key|oauth(?:[\s_-]*token)?)"
+    r"身份证(?:号)?|证件(?:号)?|银行卡(?:号)?|信用卡(?:号)?|密码本|客户电话|"
+    r"手机号码|手机号|联系电话|详细住址|门牌号|账号|账户|"
+    r"access[\s_-]*key|oauth(?:[\s_-]*token)?)"
     r"(?P<separator>\s*(?:是|为|[:：=])\s*|\s+)"
     r"(?P<value>[^，,。；;！!？?\n]+)",
     re.IGNORECASE,
 )
-_PROFILE_CUE = re.compile(
-    r"(?:我叫|叫我|我是|我的(?:习惯|偏好|目标|工作|角色)|"
-    r"我(?:喜欢|不喜欢|习惯|希望|要求|更喜欢|正在负责)|"
-    r"以后(?:请|要|不要)|请记住|记住|长期|一直|默认|不要|必须)",
+_PRIVATE_PERSON_VALUE = re.compile(
+    r"(?P<label>客户姓名|业主姓名|房东姓名|买方姓名|卖方姓名|联系人姓名)"
+    r"(?P<separator>\s*(?:是|为|叫|[:：=])\s*|\s+)"
+    r"(?P<value>[\u3400-\u9fff·]{2,12})",
+    re.IGNORECASE,
+)
+_PRIVATE_FINANCE_VALUE = re.compile(
+    r"(?P<label>佣金|提成|返佣|中介费)"
+    r"(?P<separator>\s*(?:是|为|[:：=])\s*|\s*)"
+    r"(?P<value>[¥￥$]?[\d,.]+(?:万|元|%|％)?)",
     re.IGNORECASE,
 )
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
@@ -51,6 +55,38 @@ _EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _LONG_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])\d{7,}(?![A-Za-z0-9])")
 _SITE_ID_RE = re.compile(r"\b(?:AUTH|OUT|KGREF)-[A-Za-z0-9-]{6,}\b", re.IGNORECASE)
 _MARKDOWN_RE = re.compile(r"[`*_>#]+")
+_EXPIRY_SUFFIX_RE = re.compile(r"\s*〔有效至\s*(\d{4}-\d{2}-\d{2})〕\s*$")
+_RESOURCE_REFERENCE_RE = re.compile(
+    r"^(?:AUTH-[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{8}){3}|"
+    r"OUT-[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{8}){5}|"
+    r"KGREF-[A-Za-z0-9_-]{3,120}|ref_[A-Za-z0-9_-]{6,120}|"
+    r"knowledge:[A-Za-z0-9:_-]{3,120})$",
+    re.IGNORECASE,
+)
+_RESOURCE_SOURCE_RE = re.compile(r"[A-Za-z0-9._:-]{1,80}\Z")
+
+
+def resolve_memory_scope_secret() -> str:
+    """Read the stable account-scope key from the Xiaoban private home."""
+
+    value = str(os.getenv("XIAOBAN_MYSTAND_MEMORY_SCOPE_SECRET", "") or "").strip()
+    secret_file = str(
+        os.getenv("XIAOBAN_MYSTAND_MEMORY_SCOPE_SECRET_FILE", "") or ""
+    ).strip()
+    if not value and secret_file:
+        try:
+            from xiaoban_constants import get_xiaoban_home
+
+            home = Path(get_xiaoban_home()).resolve()
+            path = Path(secret_file).expanduser().resolve()
+            path.relative_to(home)
+            if path.is_file() and path.stat().st_mode & 0o077 == 0:
+                value = path.read_text(encoding="utf-8").strip()
+        except (OSError, RuntimeError, ValueError):
+            value = ""
+    if len(value) < 32 or len(value) > 256 or re.search(r"[\r\n\x00]", value):
+        return ""
+    return value
 
 
 @contextmanager
@@ -101,6 +137,14 @@ def _safe_excerpt(value: Any, limit: int) -> str:
         lambda match: f"{match.group('label')}：[敏感字段已脱敏]",
         text,
     )
+    text = _PRIVATE_PERSON_VALUE.sub(
+        lambda match: f"{match.group('label')}：[客户身份已省略]",
+        text,
+    )
+    text = _PRIVATE_FINANCE_VALUE.sub(
+        lambda match: f"{match.group('label')}：[业务金额已省略]",
+        text,
+    )
     text = _URL_RE.sub("[链接已省略]", text)
     text = _EMAIL_RE.sub("[邮箱已省略]", text)
     text = _LONG_NUMBER_RE.sub("[长号码已省略]", text)
@@ -109,31 +153,20 @@ def _safe_excerpt(value: Any, limit: int) -> str:
     return text[:limit]
 
 
-def _first_clause(value: Any, limit: int) -> str:
-    text = _clean_text(value, max(limit * 3, 600))
-    if not text:
-        return ""
-    parts = [part.strip() for part in re.split(r"[。！？!?\n]+", text) if part.strip()]
-    return _safe_excerpt(parts[0] if parts else text, limit)
-
-
 def _date_label(value: Any) -> str:
     raw = str(value or "").strip()
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00")) if raw else None
     except ValueError:
         parsed = None
-    current = parsed or datetime.now(timezone.utc)
+    current = parsed or datetime.now(SHANGHAI_TZ)
     if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
-    return current.astimezone(timezone.utc).strftime("%Y-%m-%d")
+        current = current.replace(tzinfo=SHANGHAI_TZ)
+    return current.astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d")
 
 
-def _turn_digest(turn_id: Any) -> str:
-    value = str(turn_id or "").strip()
-    if not re.fullmatch(r"[A-Za-z0-9._:@-]{8,200}", value):
-        raise ValueError("invalid memory turn identity")
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+def _shanghai_today() -> date:
+    return datetime.now(SHANGHAI_TZ).date()
 
 
 def _safe_account_label(value: Any) -> str:
@@ -148,37 +181,145 @@ def _find_document(store: Any, category: str) -> dict[str, Any] | None:
     return facts[0] if facts else None
 
 
-def _bounded_lines(header: str, lines: list[str], *, max_lines: int, max_chars: int) -> str:
-    kept = [line for line in lines if line.strip()][-max_lines:]
-    while kept and len("\n".join([header, *kept])) > max_chars:
-        kept.pop(0)
-    return "\n".join([header, *kept]).strip()
+def _category_config(tier: str, target: str) -> tuple[str, str, int, int]:
+    normalized_target = str(target or "").strip().lower()
+    if tier == NOTEBOOK_MEMORY_TIER:
+        if normalized_target not in {"", "notebook", "service"}:
+            raise ValueError("service notebooks cannot manage owner profile or journal")
+        return SERVICE_NOTEBOOK_CATEGORY, "服务小本", 16, 5200
+    # The owner has one profile surface. Treat a model's generic notebook label
+    # as that profile instead of failing and forcing a retry.
+    if normalized_target in {"", "profile", "notebook", "service"}:
+        return OWNER_PROFILE_CATEGORY, "主账号画像", 24, 3600
+    if normalized_target in {"journal", "work"}:
+        return OWNER_JOURNAL_CATEGORY, "主账号长期事项", 24, 7600
+    raise ValueError("invalid owner memory target")
 
 
-def _append_turn_document(
+def _entry_expired(entry: str, *, today: date | None = None) -> bool:
+    match = _EXPIRY_SUFFIX_RE.search(entry)
+    if not match:
+        return False
+    try:
+        expires_on = date.fromisoformat(match.group(1))
+    except ValueError:
+        return False
+    return expires_on < (today or _shanghai_today())
+
+
+def _document_entries(document: dict[str, Any] | None, *, include_expired: bool = False) -> list[str]:
+    entries = [
+        line.lstrip()[1:].strip()
+        for line in str(document.get("content", "") if document else "").splitlines()
+        if line.lstrip().startswith("-") and line.lstrip()[1:].strip()
+    ]
+    return entries if include_expired else [entry for entry in entries if not _entry_expired(entry)]
+
+
+def normalize_memory_resource_refs(value: Any) -> list[dict[str, str]]:
+    """Validate and normalize resource identities without reading their content."""
+
+    if value in (None, []):
+        return []
+    if not isinstance(value, list) or len(value) > 6:
+        raise ValueError("invalid memory resource references")
+    references: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) - {"referenceId", "sourceType"}:
+            raise ValueError("invalid memory resource reference")
+        reference_id = str(item.get("referenceId", "") or "").strip()
+        source_type = str(item.get("sourceType", "") or "").strip()
+        if not _RESOURCE_REFERENCE_RE.fullmatch(reference_id):
+            raise ValueError("invalid memory resource reference")
+        if source_type and not _RESOURCE_SOURCE_RE.fullmatch(source_type):
+            raise ValueError("invalid memory resource reference")
+        normalized_key = reference_id.lower()
+        if normalized_key not in seen:
+            seen.add(normalized_key)
+            references.append({
+                "referenceId": reference_id,
+                "sourceType": source_type,
+            })
+    return references
+
+
+def validate_authorized_memory_resource_refs(
+    value: Any,
+    *,
+    authorized_refs: Any,
+) -> list[dict[str, str]]:
+    """Require every stored reference to be authorized for the current turn."""
+
+    requested = normalize_memory_resource_refs(value)
+    if not requested:
+        return []
+    authorized = normalize_memory_resource_refs(authorized_refs)
+    allowed = {
+        item["referenceId"].lower(): item["sourceType"].lower()
+        for item in authorized
+    }
+    for item in requested:
+        reference_id = item["referenceId"].lower()
+        requested_type = item["sourceType"].lower()
+        if reference_id not in allowed:
+            raise ValueError("memory resource reference is not authorized for this turn")
+        if requested_type and requested_type != allowed[reference_id]:
+            raise ValueError("memory resource reference source does not match")
+    return requested
+
+
+def _memory_entry(
+    content: Any,
+    expires_at: Any = "",
+    resource_refs: Any = None,
+) -> str:
+    entry = _safe_excerpt(content, 360)
+    if not entry:
+        raise ValueError("memory content must not be empty")
+    references = normalize_memory_resource_refs(resource_refs)
+    if references:
+        entry = f"{entry}〔资料引用：{'、'.join(item['referenceId'] for item in references)}〕"
+    raw_expiry = str(expires_at or "").strip()
+    if not raw_expiry:
+        return _EXPIRY_SUFFIX_RE.sub("", entry).strip()
+    try:
+        expires_on = date.fromisoformat(raw_expiry)
+    except ValueError as exc:
+        raise ValueError("expiresAt must be YYYY-MM-DD") from exc
+    if expires_on < _shanghai_today():
+        raise ValueError("expiresAt cannot be in the past")
+    return f"{_EXPIRY_SUFFIX_RE.sub('', entry).strip()}〔有效至 {expires_on.isoformat()}〕"
+
+
+def _write_entries(
     store: Any,
     *,
+    current: dict[str, Any] | None,
     category: str,
     header: str,
-    entry: str,
-    turn_digest: str,
+    entries: list[str],
     max_lines: int,
     max_chars: int,
-) -> tuple[int, bool]:
-    current = _find_document(store, category)
-    marker = f"turn:{turn_digest}"
-    current_tags = [item for item in str(current.get("tags", "") if current else "").split(",") if item]
-    if marker in current_tags:
-        return int(current["fact_id"]), False
-    previous_lines = str(current.get("content", "") if current else "").splitlines()
-    body_lines = [line for line in previous_lines if line.lstrip().startswith("-")]
+    model_managed: bool = False,
+) -> int | None:
+    clean_entries = list(dict.fromkeys(entry.strip() for entry in entries if entry.strip()))
+    if not clean_entries:
+        if current:
+            store.remove_fact(int(current["fact_id"]))
+        return None
     content = _bounded_lines(
         header,
-        [*body_lines, entry],
+        [f"- {entry}" for entry in clean_entries],
         max_lines=max_lines,
         max_chars=max_chars,
     )
-    tags = ",".join([*current_tags, marker][-max_lines:])
+    existing_tags = [
+        value for value in str(current.get("tags", "") if current else "").split(",") if value
+    ]
+    if model_managed and "harness-managed:v1" not in existing_tags:
+        existing_tags.append("harness-managed:v1")
+    tags = ",".join(existing_tags)
     if current:
         store.update_fact(
             int(current["fact_id"]),
@@ -186,114 +327,153 @@ def _append_turn_document(
             category=category,
             tags=tags,
         )
-        return int(current["fact_id"]), True
-    return int(store.add_fact(content, category=category, tags=tags)), True
+        return int(current["fact_id"])
+    return int(store.add_fact(content, category=category, tags=tags))
 
 
-def _profile_candidates(user_message: Any) -> list[str]:
-    raw = _clean_text(user_message, 2400)
-    if not raw:
-        return []
-    candidates: list[str] = []
-    for sentence in re.split(r"[。！？!?；;\n]+", raw):
-        if not _PROFILE_CUE.search(sentence):
+def _prune_expired_documents(store: Any, *, tier: str, account_label: str) -> int:
+    targets = ("profile", "journal") if tier == OWNER_MEMORY_TIER else ("notebook",)
+    removed = 0
+    for target in targets:
+        category, base_header, max_lines, max_chars = _category_config(tier, target)
+        current = _find_document(store, category)
+        if not current:
             continue
-        item = _safe_excerpt(sentence, 180)
-        if item and item not in candidates:
-            candidates.append(item)
-        if len(candidates) >= 4:
-            break
-    return candidates
+        all_entries = _document_entries(current, include_expired=True)
+        active_entries = [entry for entry in all_entries if not _entry_expired(entry)]
+        removed += len(all_entries) - len(active_entries)
+        if active_entries != all_entries:
+            _write_entries(
+                store,
+                current=current,
+                category=category,
+                header=f"{base_header}（{account_label}）",
+                entries=active_entries,
+                max_lines=max_lines,
+                max_chars=max_chars,
+            )
+    return removed
 
 
-def _update_owner_profile(store: Any, *, account_label: str, user_message: Any) -> tuple[int, bool]:
-    category = OWNER_PROFILE_CATEGORY
-    header = f"主账号画像（{account_label}）"
-    current = _find_document(store, category)
-    existing = [
-        line[1:].strip()
-        for line in str(current.get("content", "") if current else "").splitlines()
-        if line.lstrip().startswith("-") and line[1:].strip()
-    ]
-    merged = list(existing)
-    for item in _profile_candidates(user_message):
-        if item not in merged:
-            merged.append(item)
-    content = _bounded_lines(
-        header,
-        [f"- {item}" for item in merged],
-        max_lines=24,
-        max_chars=3600,
-    )
-    if current and content == str(current.get("content", "")):
-        return int(current["fact_id"]), False
-    if current:
-        store.update_fact(int(current["fact_id"]), content=content, category=category)
-        return int(current["fact_id"]), True
-    return int(store.add_fact(content, category=category, tags="profile:v1")), True
+def _bounded_lines(header: str, lines: list[str], *, max_lines: int, max_chars: int) -> str:
+    kept = [line for line in lines if line.strip()][-max_lines:]
+    while kept and len("\n".join([header, *kept])) > max_chars:
+        kept.pop(0)
+    return "\n".join([header, *kept]).strip()
 
 
 @_serialized_write
-def record_account_turn(
+def manage_account_memory(
     store: Any,
     *,
     tier: Any,
-    turn_id: Any,
-    user_message: Any,
-    assistant_message: Any,
+    action: Any,
+    target: Any = "",
+    content: Any = "",
+    old_text: Any = "",
+    expires_at: Any = "",
+    resource_refs: Any = None,
     account_label: Any = "",
-    occurred_at: Any = "",
 ) -> dict[str, Any]:
-    """Record one successful meaningful turn without retaining a transcript."""
+    """Apply one structured Harness decision to account-scoped memory."""
 
     normalized_tier = normalize_memory_tier(tier)
-    clean_user = _clean_text(user_message, 1200)
-    if len(clean_user) < 2 or _SKIP_TURNS.fullmatch(clean_user):
-        return {"ok": True, "recorded": False, "tier": normalized_tier}
-    digest = _turn_digest(turn_id)
+    normalized_action = str(action or "").strip().lower()
+    if normalized_action not in {"skip", "upsert", "correct", "forget"}:
+        raise ValueError("invalid memory action")
     label = _safe_account_label(account_label)
-    intent = _first_clause(user_message, 220) or "本轮事项已省略"
-    outcome = _first_clause(assistant_message, 260) or "小伴已完成回复"
-    entry = f"- {_date_label(occurred_at)}｜事项：{intent}｜结果：{outcome}"
-
-    if normalized_tier == NOTEBOOK_MEMORY_TIER:
-        fact_id, changed = _append_turn_document(
-            store,
-            category=SERVICE_NOTEBOOK_CATEGORY,
-            header=f"服务小本（{label}）",
-            entry=entry,
-            turn_digest=digest,
-            max_lines=16,
-            max_chars=5200,
-        )
+    removed_expired = _prune_expired_documents(
+        store,
+        tier=normalized_tier,
+        account_label=label,
+    )
+    if normalized_action == "skip":
+        documents = list_account_documents(store, tier=normalized_tier)
         return {
             "ok": True,
-            "recorded": changed,
+            "action": normalized_action,
+            "recorded": False,
             "tier": normalized_tier,
-            "documents": 1,
-            "factIds": [fact_id],
+            "removedExpired": removed_expired,
+            "documents": documents,
         }
 
-    profile_id, profile_changed = _update_owner_profile(
-        store,
-        account_label=label,
-        user_message=user_message,
+    category, base_header, max_lines, max_chars = _category_config(
+        normalized_tier,
+        str(target or ""),
     )
-    journal_id, journal_changed = _append_turn_document(
-        store,
-        category=OWNER_JOURNAL_CATEGORY,
-        header=f"主账号长期事项（{label}）",
-        entry=entry,
-        turn_digest=digest,
-        max_lines=24,
-        max_chars=7600,
+    effective_target = (
+        "notebook"
+        if normalized_tier == NOTEBOOK_MEMORY_TIER
+        else "journal" if category == OWNER_JOURNAL_CATEGORY else "profile"
     )
+    current = _find_document(store, category)
+    current_entries = _document_entries(current)
+    next_entries = list(current_entries)
+
+    if normalized_action == "upsert":
+        new_entry = _memory_entry(content, expires_at, resource_refs)
+        plain_new = _EXPIRY_SUFFIX_RE.sub("", new_entry).strip()
+        needle = _safe_excerpt(old_text, 180)
+        if needle:
+            matches = [
+                index for index, entry in enumerate(next_entries) if needle in entry
+            ]
+            if len(matches) > 1:
+                raise ValueError("oldText must identify at most one memory entry")
+            if matches:
+                next_entries[matches[0]] = new_entry
+            else:
+                next_entries.append(new_entry)
+        else:
+            existing_index = next(
+                (
+                    index
+                    for index, entry in enumerate(next_entries)
+                    if _EXPIRY_SUFFIX_RE.sub("", entry).strip() == plain_new
+                ),
+                None,
+            )
+            if existing_index is None:
+                next_entries.append(new_entry)
+            else:
+                next_entries[existing_index] = new_entry
+    elif normalized_action in {"correct", "forget"}:
+        needle = _safe_excerpt(old_text, 180)
+        if not needle:
+            raise ValueError("oldText is required")
+        matches = [index for index, entry in enumerate(next_entries) if needle in entry]
+        if len(matches) != 1:
+            raise ValueError("oldText must identify exactly one memory entry")
+        index = matches[0]
+        if normalized_action == "forget":
+            next_entries.pop(index)
+        else:
+            next_entries[index] = _memory_entry(content, expires_at, resource_refs)
+
+    changed = next_entries != current_entries
+    fact_id = int(current["fact_id"]) if current else None
+    if changed:
+        fact_id = _write_entries(
+            store,
+            current=current,
+            category=category,
+            header=f"{base_header}（{label}）",
+            entries=next_entries,
+            max_lines=max_lines,
+            max_chars=max_chars,
+            model_managed=True,
+        )
+    documents = list_account_documents(store, tier=normalized_tier)
     return {
         "ok": True,
-        "recorded": profile_changed or journal_changed,
+        "action": normalized_action,
+        "recorded": changed,
         "tier": normalized_tier,
-        "documents": 2,
-        "factIds": [profile_id, journal_id],
+        "target": effective_target,
+        "factId": fact_id,
+        "removedExpired": removed_expired,
+        "documents": documents,
     }
 
 
@@ -309,10 +489,15 @@ def list_account_documents(store: Any, *, tier: Any) -> list[dict[str, Any]]:
         fact = _find_document(store, category)
         if not fact:
             continue
+        entries = _document_entries(fact)
+        if not entries:
+            continue
+        header = str(fact.get("content", "")).splitlines()[0]
+        visible_content = "\n".join([header, *[f"- {entry}" for entry in entries]])
         documents.append(
             {
                 "fact_id": int(fact["fact_id"]),
-                "content": str(fact.get("content", "")),
+                "content": visible_content,
                 "category": category,
                 "updated_at": str(fact.get("updated_at", "")),
             }

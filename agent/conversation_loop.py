@@ -60,7 +60,6 @@ from agent.trajectory import has_incomplete_scratchpad
 from agent.true_moa_conversation_policy import (
     claim_public_result as _claim_true_moa_public_result,
     claim_response_consumption as _claim_true_moa_response_consumption,
-    compact_true_moa_paid_history as _compact_true_moa_paid_history,
     emit_post_api_request as _emit_post_api_request,
     enforce_strict_paid_request as _enforce_strict_paid_request,
     execute_llm_request as _execute_llm_request,
@@ -642,7 +641,6 @@ def run_conversation(
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
-    true_moa_payload_compaction_attempts = 0
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
 
     # Optional opt-in runtime: if api_mode == codex_app_server, hand the
@@ -1150,33 +1148,6 @@ def run_conversation(
                     try:
                         _enforce_strict_paid_request(agent, api_kwargs)
                     except Exception as _strict_preflight_error:
-                        _strict_preflight_code = str(
-                            getattr(_strict_preflight_error, "code", "") or ""
-                        )
-                        if (
-                            getattr(agent, "_true_moa_usage_ledger", None)
-                            is not None
-                            and _strict_preflight_code.endswith(
-                                "_input_byte_cap_exceeded"
-                            )
-                            and true_moa_payload_compaction_attempts < 1
-                        ):
-                            (
-                                compacted_messages,
-                                compacted_user_idx,
-                                compacted,
-                            ) = _compact_true_moa_paid_history(
-                                agent,
-                                messages,
-                                current_turn_user_idx,
-                            )
-                            if compacted:
-                                messages = compacted_messages
-                                current_turn_user_idx = compacted_user_idx
-                                conversation_history = None
-                                true_moa_payload_compaction_attempts += 1
-                                _retry.restart_with_compressed_messages = True
-                                break
                         return _strict_exception_failure_result(
                             agent,
                             messages,
@@ -1669,7 +1640,11 @@ def run_conversation(
                     if agent.thinking_callback:
                         agent.thinking_callback("")
 
-                    if _signed_normal_loop:
+                    if (
+                        _signed_normal_loop
+                        or getattr(agent, "_true_moa_usage_ledger", None)
+                        is not None
+                    ):
                         _record_strict_terminal_usage(agent, response)
                         return _strict_failure_result(
                             agent,
@@ -2277,7 +2252,11 @@ def run_conversation(
                     agent.thinking_callback("")
 
                 if _strict_true_moa_mode(agent):
-                    if _signed_normal_loop:
+                    if (
+                        _signed_normal_loop
+                        or getattr(agent, "_true_moa_usage_ledger", None)
+                        is not None
+                    ):
                         if getattr(api_error, "usage", None) is not None:
                             _record_strict_terminal_usage(agent, api_error)
                         _compressor = getattr(
@@ -2300,8 +2279,12 @@ def run_conversation(
                                 len(api_messages) if api_messages else 0
                             ),
                         )
+                        _strict_usage_ledger = (
+                            getattr(agent, "_paid_call_usage_ledger", None)
+                            or getattr(agent, "_true_moa_usage_ledger", None)
+                        )
                         _normal_usage_calls = (
-                            agent._paid_call_usage_ledger.to_dict().get(
+                            _strict_usage_ledger.to_dict().get(
                                 "calls",
                                 [],
                             )
@@ -4872,7 +4855,11 @@ def run_conversation(
                 # a session can grow unbounded after disconnects because
                 # should_compress(0) never fires.  (#2153)
                 _compressor = agent.context_compressor
-                if _signed_normal_loop:
+                if (
+                    _signed_normal_loop
+                    or getattr(agent, "_true_moa_usage_ledger", None)
+                    is not None
+                ):
                     # Match Codex's post-sampling accounting: Provider prompt
                     # usage does not include the ToolResult items just appended
                     # locally, so include a token estimate of the next request.

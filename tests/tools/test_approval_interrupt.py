@@ -83,14 +83,12 @@ class TestApprovalInterrupt:
         }
 
         result_holder = {}
-        notified_data = {}
         notified = threading.Event()
 
-        def _notify_cb(data):
+        def _notify_cb(_data):
             # Mimic the gateway: a callback is registered and invoked once the
             # approval is enqueued.  We just record that the user *would* have
             # been prompted.
-            notified_data.update(data)
             notified.set()
 
         def _worker():
@@ -115,11 +113,7 @@ class TestApprovalInterrupt:
         elapsed = time.monotonic() - start
 
         assert not t.is_alive(), "approval wait did not return after interrupt"
-        assert result_holder["result"] == {
-            "resolved": True,
-            "choice": "deny",
-            "approval_id": notified_data["approvalId"],
-        }
+        assert result_holder["result"] == {"resolved": True, "choice": "deny"}
         # Must be far below the 300s timeout — the interrupt, not the deadline,
         # is what released the wait.
         assert elapsed < 10, f"interrupt path too slow ({elapsed:.1f}s)"
@@ -143,11 +137,9 @@ class TestApprovalInterrupt:
             "pattern_keys": ["rm_rf"],
         }
         result_holder = {}
-        notified_data = {}
         notified = threading.Event()
 
-        def _notify_cb(data):
-            notified_data.update(data)
+        def _notify_cb(_data):
             notified.set()
 
         def _worker():
@@ -165,8 +157,4 @@ class TestApprovalInterrupt:
         t.join(timeout=10)
         assert not t.is_alive()
         # Timed out (no resolution) because the foreign interrupt was ignored.
-        assert result_holder["result"] == {
-            "resolved": False,
-            "choice": None,
-            "approval_id": notified_data["approvalId"],
-        }
+        assert result_holder["result"] == {"resolved": False, "choice": None}

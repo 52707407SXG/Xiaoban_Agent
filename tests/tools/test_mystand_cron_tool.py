@@ -7,11 +7,11 @@ from tools import mystand_cron_tool as bridge
 def _session_value(key, default=""):
     return {
         "XIAOBAN_SESSION_PLATFORM": "api_server",
-        "XIAOBAN_SESSION_USER_ID": "owner-user-001",
+        "XIAOBAN_SESSION_USER_ID": "52707407",
     }.get(key, default)
 
 
-def _job(job_id="job-own", user_id="owner-user-001"):
+def _job(job_id="job-own", user_id="52707407"):
     return {
         "id": job_id,
         "name": "早报",

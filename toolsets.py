@@ -250,6 +250,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "mystand_memory": {
+        "description": "Account-bound My Stand memory self-curation",
+        "tools": ["mystand_memory"],
+        "includes": []
+    },
+
     "mystand_cron": {
         "description": "Approval-bound, owner-scoped safe scheduled tasks for My Stand chat",
         "tools": ["mystand_cron"],

@@ -2,7 +2,7 @@ from gateway.config import PlatformConfig
 from gateway.platforms.api_server import APIServerAdapter
 
 
-SESSION_ID = "web:w-0123456789abcdef:owner-user-001:c-0123456789abcdef0123456789abcdef01234567"
+SESSION_ID = "web:w-0123456789abcdef:52707407:c-0123456789abcdef0123456789abcdef01234567"
 
 
 def test_mystand_async_event_survives_adapter_restart(tmp_path, monkeypatch):

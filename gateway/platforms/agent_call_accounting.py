@@ -87,6 +87,40 @@ def initialize_normal_call_ledger(workflow: Any) -> tuple | None:
         )
     workflow.agent_call_policy_revision = revision
     workflow.agent_call_policy = policy
+    try:
+        enforce_fixed_paid_call_route(
+            policy,
+            provider=policy.provider,
+            model=getattr(workflow.request, "requested_model", "") or policy.model,
+            error_code="signed_mystand_requested_route_mismatch",
+        )
+    except BaseException:
+        return failed_normal_result(
+            workflow,
+            interrupted=False,
+            error="requested model does not match billing policy",
+        )
+    if policy.provider == "zai":
+        allowed_efforts = {"none"}
+        default_effort = "none"
+    elif policy.provider == "deepseek":
+        # Current DeepSeek profiles expose no selectable reasoning level.
+        # Keep "high" accepted only for already-issued legacy requests.
+        allowed_efforts = {"none", "high"}
+        default_effort = "high"
+    else:
+        allowed_efforts = {"low", "medium", "high", "max"}
+        default_effort = "max"
+    observed_effort = str(
+        getattr(workflow.request, "reasoning_effort", "")
+        or default_effort
+    ).strip().lower()
+    if observed_effort not in allowed_efforts:
+        return failed_normal_result(
+            workflow,
+            interrupted=False,
+            error="reasoning effort does not match selected model",
+        )
     if (
         controller.state == "cancelled"
         or (
